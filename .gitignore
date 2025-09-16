@@ -44,9 +44,19 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
-# Environment files
+# Environment and configuration files
 .env*
 .env.local
+*.env
 lib/firebase_options.dart
+lib/env.dart
+lib/env.g.dart
 /ios/Runner/GoogleService-Info.plist
+/ios/Firebase/
+/macos/Runner/GoogleService-Info.plist
+/macos/Firebase/
 /android/app/google-services.json
+google-services.json
+GoogleService-Info.plist
+firebase_options.dart
+firebase_app_id_file.json
