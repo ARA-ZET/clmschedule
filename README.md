@@ -15,6 +15,7 @@ A Flutter application for managing team scheduling and job assignments. This app
 ## Prerequisites
 
 Before you begin, ensure you have the following installed:
+
 - Flutter SDK (3.8.0 or later)
 - Dart SDK (3.8.0 or later)
 - Git
@@ -24,17 +25,20 @@ Before you begin, ensure you have the following installed:
 ## Setup Instructions
 
 1. **Clone the Repository**
+
    ```bash
    git clone https://github.com/ARA-ZET/clmschedule.git
    cd clmschedule
    ```
 
 2. **Install Dependencies**
+
    ```bash
    flutter pub get
    ```
 
 3. **Firebase Configuration**
+
    - Create a new project in the [Firebase Console](https://console.firebase.google.com/)
    - Enable Firestore Database in your Firebase project
    - Download the configuration files:
@@ -43,10 +47,12 @@ Before you begin, ensure you have the following installed:
      - For macOS: Download `GoogleService-Info.plist` and place it in `macos/Runner/`
 
 4. **Environment Setup**
+
    ```bash
    # Copy the environment template
    cp .env.template .env
    ```
+
    - Open the `.env` file and fill in your Firebase configuration:
      ```
      FIREBASE_API_KEY=your_api_key_here
@@ -60,6 +66,7 @@ Before you begin, ensure you have the following installed:
      ```
 
 5. **Generate Configuration Files**
+
    ```bash
    flutter pub run build_runner build --delete-conflicting-outputs
    ```
@@ -83,12 +90,14 @@ lib/
 ## Development Workflow
 
 1. **Adding New Features**
+
    - Create a new branch for your feature
    - Implement the feature
    - Test thoroughly
    - Create a pull request
 
 2. **Running Tests**
+
    ```bash
    flutter test
    ```
@@ -108,6 +117,7 @@ lib/
 The app uses the following Firestore collections:
 
 - `/distributors/{id}` - Contains distributor information
+
   - Fields: name
 
 - `/jobs/{id}` - Contains job information
@@ -124,6 +134,7 @@ The app uses the following Firestore collections:
 ## Troubleshooting
 
 1. **Build Errors**
+
    - Run `flutter clean`
    - Delete the `build` folder
    - Run `flutter pub get`
@@ -137,6 +148,7 @@ The app uses the following Firestore collections:
 ## Security Note
 
 Never commit the following files to version control:
+
 - `.env` file
 - `google-services.json`
 - `GoogleService-Info.plist`
