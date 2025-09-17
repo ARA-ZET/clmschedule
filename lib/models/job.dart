@@ -1,10 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
 
-enum JobStatus {
-  scheduled,
-  inProgress,
-  completed,
-}
+enum JobStatus { standby, scheduled, done, urgent }
 
 class Job {
   final String id;
@@ -13,8 +10,6 @@ class Job {
   final String mapLink;
   final String distributorId;
   final DateTime date;
-  final DateTime startTime;
-  final DateTime endTime;
   final JobStatus status;
 
   Job({
@@ -24,8 +19,6 @@ class Job {
     required this.mapLink,
     required this.distributorId,
     required this.date,
-    required this.startTime,
-    required this.endTime,
     required this.status,
   });
 
@@ -38,8 +31,6 @@ class Job {
       mapLink: data['mapLink'] as String,
       distributorId: data['distributorId'] as String,
       date: (data['date'] as Timestamp).toDate(),
-      startTime: (data['startTime'] as Timestamp).toDate(),
-      endTime: (data['endTime'] as Timestamp).toDate(),
       status: JobStatus.values.firstWhere(
         (e) => e.toString() == 'JobStatus.${data['status']}',
         orElse: () => JobStatus.scheduled,
@@ -55,8 +46,7 @@ class Job {
       'mapLink': mapLink,
       'distributorId': distributorId,
       'date': Timestamp.fromDate(date),
-      'startTime': Timestamp.fromDate(startTime),
-      'endTime': Timestamp.fromDate(endTime),
+
       'status': status.toString().split('.').last,
     };
   }
@@ -68,8 +58,7 @@ class Job {
     String? mapLink,
     String? distributorId,
     DateTime? date,
-    DateTime? startTime,
-    DateTime? endTime,
+
     JobStatus? status,
   }) {
     return Job(
@@ -79,10 +68,23 @@ class Job {
       mapLink: mapLink ?? this.mapLink,
       distributorId: distributorId ?? this.distributorId,
       date: date ?? this.date,
-      startTime: startTime ?? this.startTime,
-      endTime: endTime ?? this.endTime,
+
       status: status ?? this.status,
     );
+  }
+
+  // Get card color based on status
+  Color getStatusColor() {
+    switch (status) {
+      case JobStatus.standby:
+        return Colors.grey;
+      case JobStatus.scheduled:
+        return Colors.orange;
+      case JobStatus.done:
+        return Colors.green;
+      case JobStatus.urgent:
+        return Colors.red;
+    }
   }
 
   @override

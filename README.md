@@ -50,12 +50,13 @@ Before you begin, ensure you have the following installed:
 
    ```bash
    # Copy the environment template
-   cp .env.template .env
+   cp .env.example .env
    ```
 
-   - Open the `.env` file and fill in your Firebase configuration:
+   - Open the `.env` file and fill in your configuration:
      ```
-     FIREBASE_API_KEY=your_api_key_here
+     # Firebase Configuration
+     FIREBASE_API_KEY=your_firebase_api_key_here
      FIREBASE_APP_ID=your_app_id_here
      FIREBASE_MESSAGING_SENDER_ID=your_messaging_sender_id_here
      FIREBASE_PROJECT_ID=your_project_id_here
@@ -63,6 +64,24 @@ Before you begin, ensure you have the following installed:
      FIREBASE_AUTH_DOMAIN=your_auth_domain_here
      FIREBASE_IOS_CLIENT_ID=your_ios_client_id_here
      FIREBASE_IOS_BUNDLE_ID=your_ios_bundle_id_here
+
+     # Google Maps Configuration
+     GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
+     ```
+
+5. **Google Maps Setup**
+
+   - Go to [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a new project or select an existing one
+   - Enable the following APIs:
+     - Maps JavaScript API
+     - Maps SDK for Android
+     - Maps SDK for iOS
+   - Create an API key with appropriate restrictions
+   - Add the API key to your `.env` file
+   - For web deployment, run:
+     ```bash
+     dart run tools/replace_maps_key.dart
      ```
 
 5. **Generate Configuration Files**
@@ -155,5 +174,6 @@ Never commit the following files to version control:
 - `lib/firebase_options.dart`
 - `lib/env.dart`
 - `lib/env.g.dart`
+- `web/maps_config.js`
 
-These files contain sensitive information and are already in `.gitignore`.
+These files contain sensitive information and are already in `.gitignore`. The `maps_config.js` file is automatically generated during build using the GOOGLE_MAPS_API_KEY from your .env file.

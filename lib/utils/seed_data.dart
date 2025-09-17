@@ -2,7 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 Future<void> seedData() async {
   final FirebaseFirestore firestore = FirebaseFirestore.instance;
-  
+
   // Sample distributors
   final List<Map<String, dynamic>> distributors = [
     {'name': 'John Smith'},
@@ -28,7 +28,7 @@ Future<void> seedData() async {
       'date': DateTime(now.year, now.month, now.day),
       'startTime': DateTime(now.year, now.month, now.day, 9),
       'endTime': DateTime(now.year, now.month, now.day, 11),
-      'status': 'scheduled'
+      'status': 'scheduled',
     },
     {
       'client': 'XYZ Corp',
@@ -38,7 +38,7 @@ Future<void> seedData() async {
       'date': DateTime(now.year, now.month, now.day),
       'startTime': DateTime(now.year, now.month, now.day, 10),
       'endTime': DateTime(now.year, now.month, now.day, 12),
-      'status': 'inProgress'
+      'status': 'inProgress',
     },
     {
       'client': '123 Industries',
@@ -48,7 +48,7 @@ Future<void> seedData() async {
       'date': DateTime(now.year, now.month, now.day),
       'startTime': DateTime(now.year, now.month, now.day, 13),
       'endTime': DateTime(now.year, now.month, now.day, 15),
-      'status': 'completed'
+      'status': 'completed',
     },
     {
       'client': 'Global Solutions',
@@ -58,7 +58,7 @@ Future<void> seedData() async {
       'date': DateTime(now.year, now.month, now.day + 1),
       'startTime': DateTime(now.year, now.month, now.day + 1, 9),
       'endTime': DateTime(now.year, now.month, now.day + 1, 11),
-      'status': 'scheduled'
+      'status': 'scheduled',
     },
     {
       'client': 'Local Store',
@@ -68,7 +68,7 @@ Future<void> seedData() async {
       'date': DateTime(now.year, now.month, now.day + 1),
       'startTime': DateTime(now.year, now.month, now.day + 1, 14),
       'endTime': DateTime(now.year, now.month, now.day + 1, 16),
-      'status': 'scheduled'
+      'status': 'scheduled',
     },
   ];
 
@@ -78,7 +78,7 @@ Future<void> seedData() async {
     job['date'] = Timestamp.fromDate(job['date'] as DateTime);
     job['startTime'] = Timestamp.fromDate(job['startTime'] as DateTime);
     job['endTime'] = Timestamp.fromDate(job['endTime'] as DateTime);
-    
+
     await firestore.collection('jobs').add(job);
   }
 }

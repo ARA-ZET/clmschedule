@@ -62,6 +62,13 @@ class ScheduleProvider extends ChangeNotifier {
   }
 
   Future<void> updateJob(Job job) async {
+    // Update local state first
+    final jobIndex = _jobs.indexWhere((j) => j.id == job.id);
+    if (jobIndex != -1) {
+      _jobs[jobIndex] = job;
+      notifyListeners();
+    }
+    // Then update Firestore
     await _firestoreService.updateJob(job);
   }
 

@@ -6,7 +6,8 @@ class FirestoreService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   // Collection references
-  CollectionReference get _distributors => _firestore.collection('distributors');
+  CollectionReference get _distributors =>
+      _firestore.collection('distributors');
   CollectionReference get _jobs => _firestore.collection('jobs');
 
   // DISTRIBUTOR OPERATIONS
@@ -69,10 +70,10 @@ class FirestoreService {
         .where('distributorId', isEqualTo: distributorId)
         .snapshots()
         .map((snapshot) {
-      return snapshot.docs.map((doc) {
-        return Job.fromMap(doc.id, doc.data() as Map<String, dynamic>);
-      }).toList();
-    });
+          return snapshot.docs.map((doc) {
+            return Job.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+          }).toList();
+        });
   }
 
   // Stream jobs for a specific date range
@@ -82,9 +83,9 @@ class FirestoreService {
         .where('date', isLessThanOrEqualTo: Timestamp.fromDate(end))
         .snapshots()
         .map((snapshot) {
-      return snapshot.docs.map((doc) {
-        return Job.fromMap(doc.id, doc.data() as Map<String, dynamic>);
-      }).toList();
-    });
+          return snapshot.docs.map((doc) {
+            return Job.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+          }).toList();
+        });
   }
 }

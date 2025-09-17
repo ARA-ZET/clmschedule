@@ -56,12 +56,17 @@ class _EditableTextFieldState extends State<EditableTextField> {
         controller: _controller,
         autofocus: true,
         maxLines: widget.multiline ? null : 1,
+        style: const TextStyle(
+          fontSize: 12,
+          color: Colors.white,
+        ), // Smaller font size
         decoration: InputDecoration(
           hintText: widget.hintText,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 8,
             vertical: 4,
           ),
+          isDense: true, // Makes the input field more compact
         ),
         onSubmitted: (_) => _finishEditing(),
         onEditingComplete: _finishEditing,
@@ -71,13 +76,14 @@ class _EditableTextFieldState extends State<EditableTextField> {
     return GestureDetector(
       onTap: _startEditing,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
         child: Text(
           widget.initialValue.isEmpty
               ? (widget.hintText ?? '')
               : widget.initialValue,
           style: TextStyle(
-            color: widget.initialValue.isEmpty ? Colors.grey : Colors.black,
+            fontSize: 12,
+            color: widget.initialValue.isEmpty ? Colors.white70 : Colors.white,
           ),
         ),
       ),

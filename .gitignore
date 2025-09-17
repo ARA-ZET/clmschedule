@@ -45,9 +45,12 @@ app.*.map.json
 /android/app/release
 
 # Environment and configuration files
-.env*
+.env
 .env.local
-*.env
+.env.development
+.env.production
+!.env.example
+web/maps_config.js
 lib/firebase_options.dart
 lib/env.dart
 lib/env.g.dart
