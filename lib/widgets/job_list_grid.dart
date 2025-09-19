@@ -100,6 +100,74 @@ class _JobListGridState extends State<JobListGrid> {
                     ),
                   ),
                   const SizedBox(width: 16),
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      initialValue: jobListProvider.sortField,
+                      decoration: InputDecoration(
+                        labelText: 'Sort by',
+                        border: const OutlineInputBorder(),
+                        contentPadding: const EdgeInsets.symmetric(
+                            vertical: 8, horizontal: 12),
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            jobListProvider.sortAscending
+                                ? Icons.arrow_upward
+                                : Icons.arrow_downward,
+                            size: 20,
+                          ),
+                          onPressed: () {
+                            jobListProvider.setSorting(
+                              jobListProvider.sortField,
+                              !jobListProvider.sortAscending,
+                            );
+                          },
+                          tooltip: jobListProvider.sortAscending
+                              ? 'Ascending'
+                              : 'Descending',
+                        ),
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'date',
+                          child: Text('Date'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'collectionDate',
+                          child: Text('Collection Date'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'client',
+                          child: Text('Client'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'invoice',
+                          child: Text('Invoice'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'amount',
+                          child: Text('Amount'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'area',
+                          child: Text('Area'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'quantity',
+                          child: Text('Quantity'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'manDays',
+                          child: Text('Man-Days'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          jobListProvider.setSortField(value);
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 16),
                   ElevatedButton.icon(
                     onPressed: () {
                       _searchController.clear();
@@ -226,6 +294,7 @@ class _JobListGridState extends State<JobListGrid> {
                                 DataColumn(label: Text('Job Type')),
                                 DataColumn(label: Text('Area')),
                                 DataColumn(label: Text('Quantity')),
+                                DataColumn(label: Text('Man-Days')),
                                 DataColumn(label: Text('Date')),
                                 DataColumn(label: Text('Collection Address')),
                                 DataColumn(label: Text('Collection Date')),
@@ -393,6 +462,25 @@ class _JobListGridState extends State<JobListGrid> {
                                       ),
                                     ),
                                     DataCell(
+                                      EditableTableCell(
+                                        value: item.manDays.toString(),
+                                        onSave: (value) {
+                                          final manDays =
+                                              double.tryParse(value) ??
+                                                  item.manDays;
+                                          _updateJobField(
+                                              item, 'manDays', manDays);
+                                        },
+                                        keyboardType: const TextInputType
+                                            .numberWithOptions(decimal: true),
+                                        inputFormatters: [
+                                          FilteringTextInputFormatter.allow(
+                                            RegExp(r'^\d+\.?\d{0,2}'),
+                                          )
+                                        ],
+                                      ),
+                                    ),
+                                    DataCell(
                                       EditableDateCell(
                                         value: item.date,
                                         onSave: (date) =>
@@ -527,6 +615,9 @@ class _JobListGridState extends State<JobListGrid> {
           break;
         case 'quantity':
           updatedItem = item.copyWith(quantity: value as int);
+          break;
+        case 'manDays':
+          updatedItem = item.copyWith(manDays: value as double);
           break;
         case 'date':
           updatedItem = item.copyWith(date: value as DateTime);

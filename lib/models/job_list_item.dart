@@ -45,6 +45,7 @@ class JobListItem {
   final JobType jobType;
   final String area;
   final int quantity;
+  final double manDays;
   final DateTime date;
   final String collectionAddress;
   final DateTime collectionDate;
@@ -63,6 +64,7 @@ class JobListItem {
     required this.jobType,
     required this.area,
     required this.quantity,
+    required this.manDays,
     required this.date,
     required this.collectionAddress,
     required this.collectionDate,
@@ -90,6 +92,7 @@ class JobListItem {
       ),
       area: data['area'] as String? ?? '',
       quantity: data['quantity'] as int? ?? 0,
+      manDays: (data['manDays'] as num?)?.toDouble() ?? 0.0,
       date: data['date'] != null
           ? (data['date'] as Timestamp).toDate()
           : DateTime.now(),
@@ -115,6 +118,7 @@ class JobListItem {
       'jobType': jobType.name,
       'area': area,
       'quantity': quantity,
+      'manDays': manDays,
       'date': Timestamp.fromDate(date),
       'collectionAddress': collectionAddress,
       'collectionDate': Timestamp.fromDate(collectionDate),
@@ -135,6 +139,7 @@ class JobListItem {
     JobType? jobType,
     String? area,
     int? quantity,
+    double? manDays,
     DateTime? date,
     String? collectionAddress,
     DateTime? collectionDate,
@@ -153,6 +158,7 @@ class JobListItem {
       jobType: jobType ?? this.jobType,
       area: area ?? this.area,
       quantity: quantity ?? this.quantity,
+      manDays: manDays ?? this.manDays,
       date: date ?? this.date,
       collectionAddress: collectionAddress ?? this.collectionAddress,
       collectionDate: collectionDate ?? this.collectionDate,

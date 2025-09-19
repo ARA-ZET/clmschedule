@@ -22,6 +22,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   late final TextEditingController _clientController;
   late final TextEditingController _areaController;
   late final TextEditingController _quantityController;
+  late final TextEditingController _manDaysController;
   late final TextEditingController _collectionAddressController;
   late final TextEditingController _specialInstructionsController;
   late final TextEditingController _quantityDistributedController;
@@ -51,6 +52,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     _areaController = TextEditingController(text: job?.area ?? '');
     _quantityController =
         TextEditingController(text: job?.quantity.toString() ?? '0');
+    _manDaysController =
+        TextEditingController(text: job?.manDays.toStringAsFixed(1) ?? '0.0');
     _collectionAddressController =
         TextEditingController(text: job?.collectionAddress ?? '');
     _specialInstructionsController =
@@ -81,6 +84,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     _clientController.dispose();
     _areaController.dispose();
     _quantityController.dispose();
+    _manDaysController.dispose();
     _collectionAddressController.dispose();
     _specialInstructionsController.dispose();
     _quantityDistributedController.dispose();
@@ -278,6 +282,38 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                           ],
                         ),
                         const SizedBox(height: 16),
+                        // Man-Days field
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextFormField(
+                                controller: _manDaysController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Man-Days',
+                                  border: OutlineInputBorder(),
+                                ),
+                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                inputFormatters: [
+                                  FilteringTextInputFormatter.allow(
+                                    RegExp(r'^\d+\.?\d{0,2}'),
+                                  )
+                                ],
+                                validator: (value) {
+                                  if (value == null || value.isEmpty) {
+                                    return 'Please enter man-days';
+                                  }
+                                  if (double.tryParse(value) == null) {
+                                    return 'Please enter a valid number';
+                                  }
+                                  return null;
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            const Expanded(child: SizedBox()), // Empty space for alignment
+                          ],
+                        ),
+                        const SizedBox(height: 16),
 
                         // Row 4: Date, Collection Date
                         Row(
@@ -454,6 +490,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         jobType: _selectedJobType,
         area: _areaController.text.trim(),
         quantity: int.tryParse(_quantityController.text) ?? 0,
+        manDays: double.tryParse(_manDaysController.text) ?? 0.0,
         date: _selectedDate,
         collectionAddress: _collectionAddressController.text.trim(),
         collectionDate: _selectedCollectionDate,

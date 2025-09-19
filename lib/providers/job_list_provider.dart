@@ -11,6 +11,10 @@ class JobListProvider extends ChangeNotifier {
   String _searchQuery = '';
   Set<JobListStatus> _statusFilters = {};
 
+  // Sorting functionality
+  String _sortField = 'date'; // Default sort by date
+  bool _sortAscending = true; // Default ascending order
+
   // Debounced batch update system
   Timer? _debounceTimer;
   final Map<String, JobListItem> _pendingUpdates = {};
@@ -27,6 +31,8 @@ class JobListProvider extends ChangeNotifier {
   String? get error => _error;
   String get searchQuery => _searchQuery;
   Set<JobListStatus> get statusFilters => _statusFilters;
+  String get sortField => _sortField;
+  bool get sortAscending => _sortAscending;
 
   // Get merged data (database + pending local changes)
   List<JobListItem> _getMergedJobListItems() {
@@ -55,6 +61,43 @@ class JobListProvider extends ChangeNotifier {
           .where((item) => _statusFilters.contains(item.jobStatus))
           .toList();
     }
+
+    // Apply sorting
+    filtered.sort((a, b) {
+      int comparison = 0;
+
+      switch (_sortField) {
+        case 'date':
+          comparison = a.date.compareTo(b.date);
+          break;
+        case 'collectionDate':
+          comparison = a.collectionDate.compareTo(b.collectionDate);
+          break;
+        case 'client':
+          comparison = a.client.toLowerCase().compareTo(b.client.toLowerCase());
+          break;
+        case 'invoice':
+          comparison =
+              a.invoice.toLowerCase().compareTo(b.invoice.toLowerCase());
+          break;
+        case 'amount':
+          comparison = a.amount.compareTo(b.amount);
+          break;
+        case 'area':
+          comparison = a.area.toLowerCase().compareTo(b.area.toLowerCase());
+          break;
+        case 'quantity':
+          comparison = a.quantity.compareTo(b.quantity);
+          break;
+        case 'manDays':
+          comparison = a.manDays.compareTo(b.manDays);
+          break;
+        default:
+          comparison = a.date.compareTo(b.date);
+      }
+
+      return _sortAscending ? comparison : -comparison;
+    });
 
     return filtered;
   }
@@ -242,6 +285,25 @@ class JobListProvider extends ChangeNotifier {
   void clearFilters() {
     _searchQuery = '';
     _statusFilters.clear();
+    notifyListeners();
+  }
+
+  // Sorting methods
+  void setSortField(String field) {
+    if (_sortField == field) {
+      // If same field, toggle ascending/descending
+      _sortAscending = !_sortAscending;
+    } else {
+      // If new field, set ascending and change field
+      _sortField = field;
+      _sortAscending = true;
+    }
+    notifyListeners();
+  }
+
+  void setSorting(String field, bool ascending) {
+    _sortField = field;
+    _sortAscending = ascending;
     notifyListeners();
   }
 
