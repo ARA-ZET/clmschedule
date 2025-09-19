@@ -19,6 +19,17 @@ class _ScheduleGridState extends State<ScheduleGrid> {
   int _viewOffset = 0; // Offset for the 5-week view in the top bar
   int _dayOffset = 0; // Day-based navigation offset
 
+  // Scroll controllers for horizontal and vertical scrolling
+  final ScrollController _horizontalScrollController = ScrollController();
+  final ScrollController _verticalScrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _horizontalScrollController.dispose();
+    _verticalScrollController.dispose();
+    super.dispose();
+  }
+
   // Helper method to convert month number to abbreviation
   String _getMonthAbbreviation(int month) {
     const months = [
@@ -186,257 +197,305 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                 ],
               ),
             ),
+            // Table scroll hint
+            // Container(
+            //   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            //   child: Row(
+            //     children: [
+            //       Icon(Icons.swipe_left, size: 16, color: Colors.grey[600]),
+            //       const SizedBox(width: 4),
+            //       Text(
+            //         'Scroll horizontally and vertically to view all schedule data',
+            //         style: TextStyle(
+            //           fontSize: 12,
+            //           color: Colors.grey[600],
+            //           fontStyle: FontStyle.italic,
+            //         ),
+            //       ),
+            //       const Spacer(),
+            //       Icon(Icons.swipe_right, size: 16, color: Colors.grey[600]),
+            //       const SizedBox(width: 8),
+            //       Icon(Icons.swipe_up, size: 16, color: Colors.grey[600]),
+            //       Icon(Icons.swipe_down, size: 16, color: Colors.grey[600]),
+            //     ],
+            //   ),
+            // ),
             // Grid
             Expanded(
-              child: TableView.builder(
-                pinnedRowCount: 1,
-                pinnedColumnCount: 1,
-                columnCount: 13, // 12 days + 1 for distributor names column
-                rowCount: distributors.length + 1, // +1 for date headers row
-                columnBuilder: (int column) {
-                  return TableSpan(
-                    extent: FixedTableSpanExtent(column == 0 ? 150 : cellWidth),
-                  );
-                },
-                rowBuilder: (int row) {
-                  return TableSpan(
-                    extent: FixedTableSpanExtent(
-                      row == 0 ? headerHeight : rowHeight,
+              child: Scrollbar(
+                controller: _horizontalScrollController,
+                thumbVisibility: true,
+                trackVisibility: true,
+                thickness: 12,
+                radius: const Radius.circular(6),
+                child: Scrollbar(
+                  controller: _verticalScrollController,
+                  thumbVisibility: true,
+                  trackVisibility: true,
+                  thickness: 12,
+                  radius: const Radius.circular(6),
+                  child: TableView.builder(
+                    horizontalDetails: ScrollableDetails.horizontal(
+                      controller: _horizontalScrollController,
                     ),
-                  );
-                },
+                    verticalDetails: ScrollableDetails.vertical(
+                      controller: _verticalScrollController,
+                    ),
+                    pinnedRowCount: 1,
+                    pinnedColumnCount: 1,
+                    columnCount: 13, // 12 days + 1 for distributor names column
+                    rowCount:
+                        distributors.length + 1, // +1 for date headers row
+                    columnBuilder: (int column) {
+                      return TableSpan(
+                        extent:
+                            FixedTableSpanExtent(column == 0 ? 150 : cellWidth),
+                      );
+                    },
+                    rowBuilder: (int row) {
+                      return TableSpan(
+                        extent: FixedTableSpanExtent(
+                          row == 0 ? headerHeight : rowHeight,
+                        ),
+                      );
+                    },
 
-                cellBuilder: (context, vicinity) {
-                  if (vicinity.row == 0) {
-                    // Header row
-                    if (vicinity.column == 0) {
-                      // Top-left corner cell
-                      return TableViewCell(
-                        child: Card(
-                          child: IconButton(
-                            icon: const Icon(Icons.person_add),
-                            onPressed: () {
-                              // Show dialog to add new distributor
-                              showDialog(
-                                context: context,
-                                builder: (context) {
-                                  final nameController =
-                                      TextEditingController();
-                                  return AlertDialog(
-                                    title: const Text('Add Distributor'),
-                                    content: TextField(
-                                      controller: nameController,
-                                      decoration: const InputDecoration(
-                                        labelText: 'Distributor Name',
-                                      ),
-                                      autofocus: true,
-                                    ),
-                                    actions: [
-                                      TextButton(
-                                        onPressed: () {
-                                          Navigator.of(context).pop();
-                                        },
-                                        child: const Text('Cancel'),
-                                      ),
-                                      TextButton(
-                                        onPressed: () {
-                                          if (nameController.text.isNotEmpty) {
-                                            scheduleProvider.addDistributor(
-                                              nameController.text,
-                                            );
-                                            Navigator.of(context).pop();
-                                          }
-                                        },
-                                        child: const Text('Add'),
-                                      ),
-                                    ],
+                    cellBuilder: (context, vicinity) {
+                      if (vicinity.row == 0) {
+                        // Header row
+                        if (vicinity.column == 0) {
+                          // Top-left corner cell
+                          return TableViewCell(
+                            child: Card(
+                              child: IconButton(
+                                icon: const Icon(Icons.person_add),
+                                onPressed: () {
+                                  // Show dialog to add new distributor
+                                  showDialog(
+                                    context: context,
+                                    builder: (context) {
+                                      final nameController =
+                                          TextEditingController();
+                                      return AlertDialog(
+                                        title: const Text('Add Distributor'),
+                                        content: TextField(
+                                          controller: nameController,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Distributor Name',
+                                          ),
+                                          autofocus: true,
+                                        ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () {
+                                              Navigator.of(context).pop();
+                                            },
+                                            child: const Text('Cancel'),
+                                          ),
+                                          TextButton(
+                                            onPressed: () {
+                                              if (nameController
+                                                  .text.isNotEmpty) {
+                                                scheduleProvider.addDistributor(
+                                                  nameController.text,
+                                                );
+                                                Navigator.of(context).pop();
+                                              }
+                                            },
+                                            child: const Text('Add'),
+                                          ),
+                                        ],
+                                      );
+                                    },
                                   );
                                 },
-                              );
-                            },
-                          ),
-                        ),
-                      );
-                    } else {
-                      // Date headers
-                      final date = dates[vicinity.column - 1];
-                      final isFirstColumn = vicinity.column == 1;
-                      final isLastColumn = vicinity.column == dates.length;
-
-                      return TableViewCell(
-                        child: Card(
-                          child: LayoutBuilder(
-                            builder: (context, constraints) {
-                              final dateText =
-                                  '${date.day} ${_getMonthAbbreviation(date.month)}';
-
-                              return Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  if (isFirstColumn)
-                                    IconButton(
-                                      icon: const Icon(Icons.arrow_left),
-                                      onPressed: _previousDays,
-                                      padding: EdgeInsets.zero,
-                                      constraints: const BoxConstraints(),
-                                      iconSize: 16,
-                                    ),
-                                  Expanded(
-                                    child: Center(
-                                      child: FittedBox(
-                                        fit: BoxFit.scaleDown,
-                                        child: Text(
-                                          dateText,
-                                          style: Theme.of(
-                                            context,
-                                          ).textTheme.titleMedium,
-                                          textAlign: TextAlign.center,
-                                          maxLines: 2,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  if (isLastColumn)
-                                    IconButton(
-                                      icon: const Icon(Icons.arrow_right),
-                                      onPressed: _nextDays,
-                                      padding: EdgeInsets.zero,
-                                      constraints: const BoxConstraints(),
-                                      iconSize: 16,
-                                    ),
-                                ],
-                              );
-                            },
-                          ),
-                        ),
-                      );
-                    }
-                  } else {
-                    final distributor = distributors[vicinity.row - 1];
-                    if (vicinity.column == 0) {
-                      // Distributor names column
-                      return TableViewCell(
-                        child: Card(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                            child: Row(
-                              children: [
-                                Text(
-                                  '${vicinity.row}.', // Index number
-                                  style: Theme.of(
-                                    context,
-                                  ).textTheme.titleMedium,
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    distributor.name,
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.titleMedium,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
+                              ),
                             ),
-                          ),
-                        ),
-                      );
-                    } else {
-                      // Job cells
-                      final date = dates[vicinity.column - 1];
-                      final jobs = scheduleProvider
-                          .getJobsForDistributorAndDate(distributor.id, date);
+                          );
+                        } else {
+                          // Date headers
+                          final date = dates[vicinity.column - 1];
+                          final isFirstColumn = vicinity.column == 1;
+                          final isLastColumn = vicinity.column == dates.length;
 
-                      return TableViewCell(
-                        child: DragTarget<Job>(
-                          onAcceptWithDetails: (jobDetails) {
-                            // Get the dragged job
-                            final draggedJob = jobDetails.data;
+                          return TableViewCell(
+                            child: Card(
+                              child: LayoutBuilder(
+                                builder: (context, constraints) {
+                                  final dateText =
+                                      '${date.day} ${_getMonthAbbreviation(date.month)}';
 
-                            // If there's already a job in the target cell
-                            if (jobs.isNotEmpty) {
-                              final targetJob = jobs.first;
-
-                              // Swap the jobs by updating both
-                              scheduleProvider.updateJob(
-                                draggedJob.copyWith(
-                                  distributorId: distributor.id,
-                                  date: date,
-                                ),
-                              );
-
-                              scheduleProvider.updateJob(
-                                targetJob.copyWith(
-                                  distributorId: draggedJob.distributorId,
-                                  date: draggedJob.date,
-                                ),
-                              );
-                            } else {
-                              // If target cell is empty, just move the dragged job
-                              scheduleProvider.updateJob(
-                                draggedJob.copyWith(
-                                  distributorId: distributor.id,
-                                  date: date,
-                                ),
-                              );
-                            }
-                          },
-                          onWillAcceptWithDetails: (job) => true,
-                          builder: (context, candidateData, rejectedData) {
-                            return Card(
-                              color: candidateData.isNotEmpty
-                                  ? Theme.of(
-                                      context,
-                                    ).primaryColor.withOpacity(0.1)
-                                  : null,
-                              child: jobs.isEmpty
-                                  ? Center(
-                                      child: IconButton(
-                                        icon: const Icon(Icons.add),
-                                        onPressed: () {
-                                          final newJob = Job(
-                                            id: '', // Will be set by Firestore
-                                            client: '',
-                                            workAreaId:
-                                                '', // Empty ID to be selected later
-                                            workingArea:
-                                                '', // Empty name to be selected later
-                                            distributorId: distributor.id,
-                                            date: date,
-                                            status: JobStatus.scheduled,
-                                          );
-                                          scheduleProvider.addJob(newJob);
-                                        },
-                                      ),
-                                    )
-                                  : Draggable<Job>(
-                                      data: jobs.first,
-                                      feedback: Material(
-                                        elevation: 8.0,
-                                        color: Colors.transparent,
-                                        child: SizedBox(
-                                          width: cellWidth - 8,
-                                          height: rowHeight - 8,
-                                          child: Opacity(
-                                            opacity: 0.7,
-                                            child: JobCard(job: jobs.first),
+                                  return Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      if (isFirstColumn)
+                                        IconButton(
+                                          icon: const Icon(Icons.arrow_left),
+                                          onPressed: _previousDays,
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(),
+                                          iconSize: 16,
+                                        ),
+                                      Expanded(
+                                        child: Center(
+                                          child: FittedBox(
+                                            fit: BoxFit.scaleDown,
+                                            child: Text(
+                                              dateText,
+                                              style: Theme.of(
+                                                context,
+                                              ).textTheme.titleMedium,
+                                              textAlign: TextAlign.center,
+                                              maxLines: 2,
+                                            ),
                                           ),
                                         ),
                                       ),
-                                      childWhenDragging: Opacity(
-                                        opacity: 0.2,
-                                        child: JobCard(job: jobs.first),
-                                      ),
-                                      child: JobCard(job: jobs.first),
+                                      if (isLastColumn)
+                                        IconButton(
+                                          icon: const Icon(Icons.arrow_right),
+                                          onPressed: _nextDays,
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(),
+                                          iconSize: 16,
+                                        ),
+                                    ],
+                                  );
+                                },
+                              ),
+                            ),
+                          );
+                        }
+                      } else {
+                        final distributor = distributors[vicinity.row - 1];
+                        if (vicinity.column == 0) {
+                          // Distributor names column
+                          return TableViewCell(
+                            child: Card(
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 8),
+                                child: Row(
+                                  children: [
+                                    Text(
+                                      '${vicinity.row}.', // Index number
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.titleMedium,
                                     ),
-                            );
-                          },
-                        ),
-                      );
-                    }
-                  }
-                },
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        distributor.name,
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.titleMedium,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        } else {
+                          // Job cells
+                          final date = dates[vicinity.column - 1];
+                          final jobs =
+                              scheduleProvider.getJobsForDistributorAndDate(
+                                  distributor.id, date);
+
+                          return TableViewCell(
+                            child: DragTarget<Job>(
+                              onAcceptWithDetails: (jobDetails) {
+                                // Get the dragged job
+                                final draggedJob = jobDetails.data;
+
+                                // If there's already a job in the target cell
+                                if (jobs.isNotEmpty) {
+                                  final targetJob = jobs.first;
+
+                                  // Swap the jobs by updating both
+                                  scheduleProvider.updateJob(
+                                    draggedJob.copyWith(
+                                      distributorId: distributor.id,
+                                      date: date,
+                                    ),
+                                  );
+
+                                  scheduleProvider.updateJob(
+                                    targetJob.copyWith(
+                                      distributorId: draggedJob.distributorId,
+                                      date: draggedJob.date,
+                                    ),
+                                  );
+                                } else {
+                                  // If target cell is empty, just move the dragged job
+                                  scheduleProvider.updateJob(
+                                    draggedJob.copyWith(
+                                      distributorId: distributor.id,
+                                      date: date,
+                                    ),
+                                  );
+                                }
+                              },
+                              onWillAcceptWithDetails: (job) => true,
+                              builder: (context, candidateData, rejectedData) {
+                                return Card(
+                                  color: candidateData.isNotEmpty
+                                      ? Theme.of(
+                                          context,
+                                        ).primaryColor.withOpacity(0.1)
+                                      : null,
+                                  child: jobs.isEmpty
+                                      ? Center(
+                                          child: IconButton(
+                                            icon: const Icon(Icons.add),
+                                            onPressed: () {
+                                              final newJob = Job(
+                                                id: '', // Will be set by Firestore
+                                                client: '',
+                                                workAreaId:
+                                                    '', // Empty ID to be selected later
+                                                workingArea:
+                                                    '', // Empty name to be selected later
+                                                distributorId: distributor.id,
+                                                date: date,
+                                                status: JobStatus.scheduled,
+                                              );
+                                              scheduleProvider.addJob(newJob);
+                                            },
+                                          ),
+                                        )
+                                      : Draggable<Job>(
+                                          data: jobs.first,
+                                          feedback: Material(
+                                            elevation: 8.0,
+                                            color: Colors.transparent,
+                                            child: SizedBox(
+                                              width: cellWidth - 8,
+                                              height: rowHeight - 8,
+                                              child: Opacity(
+                                                opacity: 0.7,
+                                                child: JobCard(job: jobs.first),
+                                              ),
+                                            ),
+                                          ),
+                                          childWhenDragging: Opacity(
+                                            opacity: 0.2,
+                                            child: JobCard(job: jobs.first),
+                                          ),
+                                          child: JobCard(job: jobs.first),
+                                        ),
+                                );
+                              },
+                            ),
+                          );
+                        }
+                      }
+                    },
+                  ),
+                ),
               ),
             ),
           ],

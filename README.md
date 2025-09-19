@@ -181,15 +181,18 @@ The app uses the following Firestore collections:
 - `lib/env.dart` & `lib/env.g.dart` (generated environment files)
 - `web/maps_config.js` (auto-generated with API keys)
 
-These files contain sensitive information and are already in `.gitignore`. 
+These files contain sensitive information and are already in `.gitignore`.
 
 ### For Web Deployment:
+
 The `web/maps_config.js` file is automatically generated during build using the `GOOGLE_MAPS_API_KEY` from your `.env` file. Before building for web, run:
+
 ```bash
 dart run tools/replace_maps_key.dart
 ```
 
 ### Environment Setup Checklist:
+
 1. ✅ Copy `.env.example` to `.env`
 2. ✅ Fill in all required API keys and configuration
 3. ✅ Verify `.env` is in `.gitignore`
