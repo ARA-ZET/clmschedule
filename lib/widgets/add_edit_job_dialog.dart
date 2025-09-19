@@ -562,17 +562,18 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     try {
       // Get the schedule provider
       final scheduleProvider = context.read<ScheduleProvider>();
-      
+
       // Create the assignment service
       final assignmentService = JobAssignmentService(scheduleProvider);
-      
+
       // Calculate the job assignments
       final assignments = assignmentService.calculateJobAssignments(
         client: jobListItem.client,
         manDays: jobListItem.manDays,
         startDate: jobListItem.date,
         workAreaId: '', // Default - can be edited later on schedule
-        workingArea: 'To be assigned', // Default - can be edited later on schedule
+        workingArea:
+            'To be assigned', // Default - can be edited later on schedule
       );
 
       if (assignments.isEmpty) {
@@ -580,7 +581,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Unable to assign jobs - no available distributors found.'),
+              content: Text(
+                  'Unable to assign jobs - no available distributors found.'),
               backgroundColor: Colors.red,
             ),
           );
@@ -602,7 +604,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         if (confirmed == true && mounted) {
           // User confirmed - create the jobs on the schedule
           await _createScheduleJobs(assignmentService, assignments);
-          
+
           // Return the original job list item
           if (mounted) {
             Navigator.of(context).pop(jobListItem);
@@ -621,22 +623,24 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     }
   }
 
-  Future<void> _createScheduleJobs(JobAssignmentService assignmentService, List<JobAssignment> assignments) async {
+  Future<void> _createScheduleJobs(JobAssignmentService assignmentService,
+      List<JobAssignment> assignments) async {
     try {
       final scheduleProvider = context.read<ScheduleProvider>();
-      
+
       // Convert assignments to Job objects
       final jobs = assignmentService.createJobsFromAssignments(assignments);
-      
+
       // Add each job to the schedule
       for (final job in jobs) {
         await scheduleProvider.addJob(job);
       }
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Successfully assigned ${jobs.length} jobs to distributors!'),
+            content: Text(
+                'Successfully assigned ${jobs.length} jobs to distributors!'),
             backgroundColor: Colors.green,
           ),
         );

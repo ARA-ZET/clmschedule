@@ -19,7 +19,8 @@ class JobAssignmentPreviewDialog extends StatelessWidget {
     // Group assignments by date for better display
     final Map<DateTime, List<JobAssignment>> groupedAssignments = {};
     for (final assignment in assignments) {
-      final dateKey = DateTime(assignment.date.year, assignment.date.month, assignment.date.day);
+      final dateKey = DateTime(
+          assignment.date.year, assignment.date.month, assignment.date.day);
       groupedAssignments.putIfAbsent(dateKey, () => []).add(assignment);
     }
 
@@ -80,7 +81,8 @@ class JobAssignmentPreviewDialog extends StatelessWidget {
                         child: Text('Days Span: ${sortedDates.length}'),
                       ),
                       Expanded(
-                        child: Text('Client: ${assignments.isNotEmpty ? assignments.first.client : "N/A"}'),
+                        child: Text(
+                            'Client: ${assignments.isNotEmpty ? assignments.first.client : "N/A"}'),
                       ),
                     ],
                   ),
@@ -102,7 +104,8 @@ class JobAssignmentPreviewDialog extends StatelessWidget {
                           ),
                     ),
                     const SizedBox(height: 12),
-                    ...sortedDates.map((date) => _buildDateSection(context, date, groupedAssignments[date]!)),
+                    ...sortedDates.map((date) => _buildDateSection(
+                        context, date, groupedAssignments[date]!)),
                   ],
                 ),
               ),
@@ -136,7 +139,8 @@ class JobAssignmentPreviewDialog extends StatelessWidget {
     );
   }
 
-  Widget _buildDateSection(BuildContext context, DateTime date, List<JobAssignment> assignmentsForDate) {
+  Widget _buildDateSection(BuildContext context, DateTime date,
+      List<JobAssignment> assignmentsForDate) {
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(16),
@@ -187,21 +191,26 @@ class JobAssignmentPreviewDialog extends StatelessWidget {
                         children: [
                           Text(
                             assignment.distributorName,
-                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodyMedium
+                                ?.copyWith(
                                   fontWeight: FontWeight.bold,
                                 ),
                           ),
                           Text(
                             'Work Area: ${assignment.workingArea}',
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                  color: Colors.grey.shade600,
-                                ),
+                            style:
+                                Theme.of(context).textTheme.bodySmall?.copyWith(
+                                      color: Colors.grey.shade600,
+                                    ),
                           ),
                         ],
                       ),
                     ),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
                         color: Colors.green.shade100,
                         borderRadius: BorderRadius.circular(12),
