@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/schedule.dart';
+import '../models/work_area.dart';
 import '../services/firestore_service.dart';
 
 class ScheduleProvider extends ChangeNotifier {
@@ -10,14 +11,17 @@ class ScheduleProvider extends ChangeNotifier {
 
   List<Distributor> _distributors = [];
   List<Job> _jobs = [];
+  List<WorkArea> _workAreas = [];
 
   // Streams subscriptions
   StreamSubscription<List<Distributor>>? _distributorsSubscription;
   StreamSubscription<List<Job>>? _jobsSubscription;
+  StreamSubscription<List<WorkArea>>? _workAreasSubscription;
 
   // Getters
   List<Distributor> get distributors => _distributors;
   List<Job> get jobs => _jobs;
+  List<WorkArea> get workAreas => _workAreas;
   Schedule get schedule => Schedule(distributors: _distributors, jobs: _jobs);
 
   ScheduleProvider({FirestoreService? firestoreService})
@@ -37,6 +41,14 @@ class ScheduleProvider extends ChangeNotifier {
     // Listen to jobs stream
     _jobsSubscription = _firestoreService.streamJobs().listen((jobs) {
       _jobs = jobs;
+      notifyListeners();
+    });
+
+    // Listen to work areas stream
+    _workAreasSubscription = _firestoreService.streamWorkAreas().listen((
+      workAreas,
+    ) {
+      _workAreas = workAreas;
       notifyListeners();
     });
   }
@@ -94,6 +106,7 @@ class ScheduleProvider extends ChangeNotifier {
   void dispose() {
     _distributorsSubscription?.cancel();
     _jobsSubscription?.cancel();
+    _workAreasSubscription?.cancel();
     super.dispose();
   }
 }

@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'providers/schedule_provider.dart';
 import 'widgets/schedule_grid.dart';
 import 'utils/seed_data.dart';
+import 'services/work_area_service.dart';
 import 'firebase_options.dart';
 
 void main() async {
@@ -25,8 +26,13 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (context) => ScheduleProvider(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (context) => ScheduleProvider()),
+        Provider(
+          create: (context) => WorkAreaService(FirebaseFirestore.instance),
+        ),
+      ],
       child: MaterialApp(
         title: 'CLM Schedule',
         debugShowCheckedModeBanner: false,
@@ -46,6 +52,7 @@ class ScheduleScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color.fromARGB(255, 222, 222, 222),
       appBar: AppBar(
         title: const Text('CLM Schedule'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
@@ -71,6 +78,33 @@ class ScheduleScreen extends StatelessWidget {
               }
             },
             tooltip: 'Add sample data',
+          ),
+          IconButton(
+            icon: const Icon(Icons.map),
+            onPressed: () async {
+              final workAreaService = context.read<WorkAreaService>();
+              try {
+                final workAreas = await workAreaService.createFromKml(
+                  'maps.kml',
+                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'Imported ${workAreas.length} work areas from KML file',
+                      ),
+                    ),
+                  );
+                }
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Error importing KML data: $e')),
+                  );
+                }
+              }
+            },
+            tooltip: 'Import KML data',
           ),
         ],
       ),

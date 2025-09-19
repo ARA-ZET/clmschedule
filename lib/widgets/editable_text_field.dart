@@ -52,38 +52,39 @@ class _EditableTextFieldState extends State<EditableTextField> {
   @override
   Widget build(BuildContext context) {
     if (_isEditing) {
-      return TextField(
-        controller: _controller,
-        autofocus: true,
-        maxLines: widget.multiline ? null : 1,
-        style: const TextStyle(
-          fontSize: 12,
-          color: Colors.white,
-        ), // Smaller font size
-        decoration: InputDecoration(
-          hintText: widget.hintText,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 8,
-            vertical: 4,
-          ),
-          isDense: true, // Makes the input field more compact
+      return Focus(
+        onFocusChange: (hasFocus) {
+          if (!hasFocus) {
+            _finishEditing();
+          }
+        },
+        child: TextField(
+          controller: _controller,
+          autofocus: true,
+          maxLines: widget.multiline ? null : 1,
+          style: const TextStyle(
+            fontSize: 12,
+            color: Colors.white,
+          ), // Smaller font size
+          decoration: InputDecoration.collapsed(hintText: widget.hintText),
+          onSubmitted: (_) => _finishEditing(),
+          onEditingComplete: _finishEditing,
         ),
-        onSubmitted: (_) => _finishEditing(),
-        onEditingComplete: _finishEditing,
       );
     }
 
     return GestureDetector(
       onTap: _startEditing,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 2),
         child: Text(
           widget.initialValue.isEmpty
               ? (widget.hintText ?? '')
               : widget.initialValue,
           style: TextStyle(
-            fontSize: 12,
+            fontSize: 14,
             color: widget.initialValue.isEmpty ? Colors.white70 : Colors.white,
+            fontWeight: FontWeight.bold,
           ),
         ),
       ),

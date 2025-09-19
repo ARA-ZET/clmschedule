@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/distributor.dart';
 import '../models/job.dart';
+import '../models/work_area.dart';
 
 class FirestoreService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -9,6 +10,7 @@ class FirestoreService {
   CollectionReference get _distributors =>
       _firestore.collection('distributors');
   CollectionReference get _jobs => _firestore.collection('jobs');
+  CollectionReference get _workAreas => _firestore.collection('workAreas');
 
   // DISTRIBUTOR OPERATIONS
 
@@ -87,5 +89,30 @@ class FirestoreService {
             return Job.fromMap(doc.id, doc.data() as Map<String, dynamic>);
           }).toList();
         });
+  }
+
+  // WORK AREA OPERATIONS
+
+  // Stream of all work areas
+  Stream<List<WorkArea>> streamWorkAreas() {
+    return _workAreas.snapshots().map((snapshot) {
+      return snapshot.docs.map((doc) {
+        return WorkArea.fromFirestore(doc);
+      }).toList();
+    });
+  }
+
+  // Get a work area by ID
+  Future<WorkArea?> getWorkArea(String id) async {
+    final doc = await _workAreas.doc(id).get();
+    if (!doc.exists) return null;
+    return WorkArea.fromFirestore(
+      doc as DocumentSnapshot<Map<String, dynamic>>,
+    );
+  }
+
+  // Update a work area
+  Future<void> updateWorkArea(WorkArea workArea) {
+    return _workAreas.doc(workArea.id).update(workArea.toFirestore());
   }
 }

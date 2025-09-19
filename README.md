@@ -1,6 +1,8 @@
 <<<<<<< HEAD
+
 ````markdown
 =======
+
 # CLM Schedule
 
 A Flutter application for managing team scheduling and job assignments. This app provides a drag-and-drop interface for managing jobs and distributors, with real-time updates and offline support using Firebase.
@@ -57,6 +59,7 @@ Before you begin, ensure you have the following installed:
    ```
 
    - Open the `.env` file and fill in your configuration:
+
      ```
      # Firebase Configuration
      FIREBASE_API_KEY=your_firebase_api_key_here
@@ -87,13 +90,13 @@ Before you begin, ensure you have the following installed:
      dart run tools/replace_maps_key.dart
      ```
 
-5. **Generate Configuration Files**
+6. **Generate Configuration Files**
 
    ```bash
    flutter pub run build_runner build --delete-conflicting-outputs
    ```
 
-6. **Run the App**
+7. **Run the App**
    ```bash
    flutter run
    ```
@@ -169,15 +172,27 @@ The app uses the following Firestore collections:
 
 ## Security Note
 
-Never commit the following files to version control:
+⚠️ **Important: Never commit the following files to version control:**
 
-- `.env` file
-- `google-services.json`
-- `GoogleService-Info.plist`
-- `lib/firebase_options.dart`
-- `lib/env.dart`
-- `lib/env.g.dart`
-- `web/maps_config.js`
+- `.env` file (contains all API keys and secrets)
+- `google-services.json` (Firebase Android config)
+- `GoogleService-Info.plist` (Firebase iOS/macOS config)
+- `lib/firebase_options.dart` (generated Firebase config)
+- `lib/env.dart` & `lib/env.g.dart` (generated environment files)
+- `web/maps_config.js` (auto-generated with API keys)
 
-These files contain sensitive information and are already in `.gitignore`. The `maps_config.js` file is automatically generated during build using the GOOGLE_MAPS_API_KEY from your .env file.
+These files contain sensitive information and are already in `.gitignore`. 
+
+### For Web Deployment:
+The `web/maps_config.js` file is automatically generated during build using the `GOOGLE_MAPS_API_KEY` from your `.env` file. Before building for web, run:
+```bash
+dart run tools/replace_maps_key.dart
+```
+
+### Environment Setup Checklist:
+1. ✅ Copy `.env.example` to `.env`
+2. ✅ Fill in all required API keys and configuration
+3. ✅ Verify `.env` is in `.gitignore`
+4. ✅ Run build_runner to generate config files
+5. ✅ Never commit real API keys to version control
 ````

@@ -1,21 +1,24 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:url_launcher/url_launcher.dart';
-import '../env.dart';
+import 'package:provider/provider.dart';
+import 'dart:math' show min, max;
+import '../services/work_area_service.dart';
+import '../models/work_area.dart';
 
 class MapView extends StatefulWidget {
-  final String? initialLocation;
-  final List<LatLng>? polygonPoints;
-  final Color polygonColor;
+  final String? jobId;
+  final String? workAreaId;
+  final WorkArea? customWorkArea;
   final String? title;
+  final bool isEditable;
 
   const MapView({
     super.key,
-    this.initialLocation,
-    this.polygonPoints,
+    this.jobId,
+    this.workAreaId,
+    this.customWorkArea,
     this.title,
-    this.polygonColor = const Color(0x40FF0000), // Semi-transparent red
+    this.isEditable = false,
   });
 
   @override
@@ -24,8 +27,13 @@ class MapView extends StatefulWidget {
 
 class _MapViewState extends State<MapView> {
   GoogleMapController? _controller;
-  Set<Polygon> _polygons = {};
-  LatLng _center = const LatLng(0, 0); // Will be updated when map is created
+  final Set<Polygon> _polygons = {};
+  LatLng _center = const LatLng(-33.925, 18.425); // Cape Town city center
+  bool _isLoading = true;
+  List<WorkArea> _workAreas = [];
+  WorkArea? _selectedWorkArea;
+  List<LatLng> _editingPoints = [];
+  bool _isEditing = false;
 
   @override
   void initState() {
@@ -34,88 +42,204 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _initializeMap() async {
-    if (widget.polygonPoints != null && widget.polygonPoints!.isNotEmpty) {
-      // If polygon points are provided, center the map on the polygon's center
-      double lat = 0;
-      double lng = 0;
-      for (var point in widget.polygonPoints!) {
-        lat += point.latitude;
-        lng += point.longitude;
-      }
-      _center = LatLng(
-        lat / widget.polygonPoints!.length,
-        lng / widget.polygonPoints!.length,
-      );
+    try {
+      // Load all work areas first
+      final workAreaService = context.read<WorkAreaService>();
+      _workAreas = await workAreaService.getWorkAreas().first;
 
-      // Create the polygon
+      // Find selected work area
+      if (widget.workAreaId != null && widget.workAreaId!.isNotEmpty) {
+        try {
+          _selectedWorkArea = _workAreas.firstWhere(
+            (area) => area.id == widget.workAreaId,
+          );
+        } catch (e) {
+          _selectedWorkArea = widget.customWorkArea;
+        }
+      } else if (widget.customWorkArea != null) {
+        _selectedWorkArea = widget.customWorkArea;
+      }
+
+      // Initialize editing points if editing is enabled and we have a selected area
+      if (widget.isEditable && _selectedWorkArea != null) {
+        _editingPoints = List.from(_selectedWorkArea!.polygonPoints);
+        _isEditing = true;
+      }
+
+      _updateMapView();
+    } catch (e) {
+      print('Error initializing map: $e');
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  void _updateMapView() {
+    _polygons.clear();
+
+    // Add only the selected work area
+    if (_selectedWorkArea != null) {
       _polygons.add(
         Polygon(
-          polygonId: const PolygonId('workArea'),
-          points: widget.polygonPoints!,
-          fillColor: widget.polygonColor,
-          strokeColor: widget.polygonColor.withOpacity(1.0),
-          strokeWidth: 2,
+          polygonId: PolygonId(_selectedWorkArea?.id ?? 'selected'),
+          points:
+              _isEditing ? _editingPoints : _selectedWorkArea!.polygonPoints,
+          fillColor: Colors.red.withOpacity(0.0), // Transparent fill
+          strokeColor: Colors.red,
+          strokeWidth: 5,
         ),
       );
-    } else if (widget.initialLocation != null) {
-      // TODO: Implement geocoding to convert address to coordinates
-      // For now, we'll use a default location
-      _center = const LatLng(0, 0);
+
+      // Add markers for editing if in edit mode
+      if (_isEditing) {
+        // Add markers for each point...
+        // This will be handled in the build method
+      }
     }
 
-    setState(() {});
+    // Center map on selected area or all areas
+    _updateMapCenter();
+  }
+
+  void _updateMapCenter() {
+    List<LatLng> points = [];
+
+    if (_selectedWorkArea != null) {
+      points = _isEditing ? _editingPoints : _selectedWorkArea!.polygonPoints;
+    }
+
+    if (points.isNotEmpty) {
+      double minLat = 90;
+      double maxLat = -90;
+      double minLng = 180;
+      double maxLng = -180;
+
+      for (final point in points) {
+        minLat = min(minLat, point.latitude);
+        maxLat = max(maxLat, point.latitude);
+        minLng = min(minLng, point.longitude);
+        maxLng = max(maxLng, point.longitude);
+      }
+
+      _center = LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
+      _controller?.animateCamera(
+        CameraUpdate.newLatLngBounds(
+          LatLngBounds(
+            southwest: LatLng(minLat, minLng),
+            northeast: LatLng(maxLat, maxLng),
+          ),
+          50, // padding
+        ),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: widget.title != null ? AppBar(title: Text(widget.title!)) : null,
-      body: Builder(
-        builder: (context) {
-          // // Check if we're on desktop (macOS/Linux/Windows)
-          // if (defaultTargetPlatform == TargetPlatform.macOS ||
-          //     defaultTargetPlatform == TargetPlatform.linux ||
-          //     defaultTargetPlatform == TargetPlatform.windows) {
-          //   return Center(
-          //     child: Column(
-          //       mainAxisAlignment: MainAxisAlignment.center,
-          //       children: [
-          //         const Icon(Icons.map_outlined, size: 48, color: Colors.grey),
-          //         const SizedBox(height: 16),
-          //         Text(
-          //           'Maps are not supported on ${defaultTargetPlatform.name}',
-          //           style: Theme.of(context).textTheme.titleMedium,
-          //         ),
-          //         const SizedBox(height: 8),
-          //         if (widget.initialLocation != null)
-          //           TextButton(
-          //             onPressed: () async {
-          //               final url = Uri.parse(widget.initialLocation!);
-          //               if (await canLaunchUrl(url)) {
-          //                 await launchUrl(url);
-          //               }
-          //             },
-          //             child: const Text('Open in Browser'),
-          //           ),
-          //       ],
-          //     ),
-          //   );
-          // }
-
-          // For mobile platforms, show the Google Map
-          return GoogleMap(
+      appBar: AppBar(
+        leading: CloseButton(onPressed: () => Navigator.of(context).pop()),
+        title: Text(widget.title ?? 'Map View'),
+        actions: widget.isEditable && _selectedWorkArea != null
+            ? [
+                IconButton(
+                  icon: Icon(_isEditing ? Icons.check : Icons.edit),
+                  onPressed: () {
+                    if (_isEditing) {
+                      Navigator.of(context).pop(_editingPoints);
+                    } else {
+                      setState(() {
+                        _isEditing = true;
+                        _editingPoints = List.from(
+                          _selectedWorkArea!.polygonPoints,
+                        );
+                      });
+                    }
+                  },
+                ),
+              ]
+            : null,
+      ),
+      body: Stack(
+        children: [
+          GoogleMap(
             onMapCreated: (controller) {
               _controller = controller;
             },
-            initialCameraPosition: CameraPosition(target: _center, zoom: 15),
+            initialCameraPosition: CameraPosition(target: _center, zoom: 12),
             polygons: _polygons,
+            markers: _isEditing
+                ? _editingPoints
+                    .asMap()
+                    .map(
+                      (index, point) => MapEntry(
+                        index,
+                        Marker(
+                          markerId: MarkerId('point_$index'),
+                          position: point,
+                          draggable: true,
+                          onDragEnd: (newPosition) {
+                            setState(() {
+                              _editingPoints[index] = newPosition;
+                              _updateMapView();
+                            });
+                          },
+                        ),
+                      ),
+                    )
+                    .values
+                    .toSet()
+                : {},
             mapType: MapType.normal,
             myLocationEnabled: true,
             myLocationButtonEnabled: true,
             zoomControlsEnabled: true,
             zoomGesturesEnabled: true,
-          );
-        },
+            onTap: _isEditing
+                ? (latLng) {
+                    setState(() {
+                      _editingPoints.add(latLng);
+                      _updateMapView();
+                    });
+                  }
+                : null,
+          ),
+          if (_isLoading)
+            Container(
+              color: Colors.black45,
+              child: const Center(child: CircularProgressIndicator()),
+            ),
+          if (_isEditing)
+            Positioned(
+              bottom: 16,
+              right: 16,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_editingPoints.isNotEmpty)
+                    FloatingActionButton(
+                      heroTag: 'undo',
+                      onPressed: () {
+                        setState(() {
+                          _editingPoints.removeLast();
+                          _updateMapView();
+                        });
+                      },
+                      child: const Icon(Icons.undo),
+                    ),
+                  const SizedBox(height: 8),
+                  if (_editingPoints.length >= 3)
+                    FloatingActionButton(
+                      heroTag: 'save',
+                      onPressed: () {
+                        Navigator.of(context).pop(_editingPoints);
+                      },
+                      child: const Icon(Icons.save),
+                    ),
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }

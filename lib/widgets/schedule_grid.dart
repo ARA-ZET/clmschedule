@@ -114,9 +114,9 @@ class _ScheduleGridState extends State<ScheduleGrid> {
     });
   }
 
-  static const double cellWidth = 160.0;
+  static const double cellWidth = 200.0;
   static const double headerHeight = 40.0;
-  static const double rowHeight = 80.0; // Adjusted to match card height
+  static const double rowHeight = 90.0; // Adjusted to match card height
 
   @override
   Widget build(BuildContext context) {
@@ -268,7 +268,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                           child: LayoutBuilder(
                             builder: (context, constraints) {
                               final dateText =
-                                  '${date.day}\n${_getMonthAbbreviation(date.month)}';
+                                  '${date.day} ${_getMonthAbbreviation(date.month)}';
 
                               return Row(
                                 mainAxisAlignment: MainAxisAlignment.center,
@@ -382,8 +382,14 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                               );
                             }
                           },
+                          onWillAcceptWithDetails: (job) => true,
                           builder: (context, candidateData, rejectedData) {
                             return Card(
+                              color: candidateData.isNotEmpty
+                                  ? Theme.of(
+                                      context,
+                                    ).primaryColor.withOpacity(0.1)
+                                  : null,
                               child: jobs.isEmpty
                                   ? Center(
                                       child: IconButton(
@@ -392,8 +398,10 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                           final newJob = Job(
                                             id: '', // Will be set by Firestore
                                             client: '',
-                                            workingArea: '',
-                                            mapLink: '',
+                                            workAreaId:
+                                                '', // Empty ID to be selected later
+                                            workingArea:
+                                                '', // Empty name to be selected later
                                             distributorId: distributor.id,
                                             date: date,
                                             status: JobStatus.scheduled,
@@ -404,16 +412,22 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                     )
                                   : Draggable<Job>(
                                       data: jobs.first,
-                                      feedback: SizedBox(
-                                        width:
-                                            cellWidth -
-                                            8, // Account for card margin
-                                        child: Opacity(
-                                          opacity: 0.7,
-                                          child: JobCard(job: jobs.first),
+                                      feedback: Material(
+                                        elevation: 8.0,
+                                        color: Colors.transparent,
+                                        child: SizedBox(
+                                          width: cellWidth - 8,
+                                          height: rowHeight - 8,
+                                          child: Opacity(
+                                            opacity: 0.7,
+                                            child: JobCard(job: jobs.first),
+                                          ),
                                         ),
                                       ),
-                                      childWhenDragging: const SizedBox(),
+                                      childWhenDragging: Opacity(
+                                        opacity: 0.2,
+                                        child: JobCard(job: jobs.first),
+                                      ),
                                       child: JobCard(job: jobs.first),
                                     ),
                             );
