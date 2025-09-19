@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
 import '../models/job_list_item.dart';
+import '../providers/schedule_provider.dart';
+import '../services/job_assignment_service.dart';
+import 'job_assignment_preview_dialog.dart';
 
 class AddEditJobDialog extends StatefulWidget {
   final JobListItem? jobToEdit;
@@ -35,8 +39,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   late JobType _selectedJobType;
 
   // Date values
-  late DateTime _selectedDate;
-  late DateTime _selectedCollectionDate;
+  DateTime? _selectedDate;
+  DateTime? _selectedCollectionDate;
 
   @override
   void initState() {
@@ -71,9 +75,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     _selectedJobStatus = job?.jobStatus ?? JobListStatus.standby;
     _selectedJobType = job?.jobType ?? JobType.flyersPrintingOnly;
 
-    // Initialize dates
-    _selectedDate = job?.date ?? DateTime.now();
-    _selectedCollectionDate = job?.collectionDate ?? DateTime.now();
+    // Initialize dates - null for new jobs, existing values for editing
+    _selectedDate = job?.date;
+    _selectedCollectionDate = job?.collectionDate;
   }
 
   @override
@@ -141,15 +145,15 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                               child: TextFormField(
                                 controller: _invoiceController,
                                 decoration: const InputDecoration(
-                                  labelText: 'Invoice *',
+                                  labelText: 'Invoice',
                                   border: OutlineInputBorder(),
                                 ),
-                                validator: (value) {
-                                  if (value == null || value.isEmpty) {
-                                    return 'Invoice is required';
-                                  }
-                                  return null;
-                                },
+                                // validator: (value) {
+                                //   if (value == null || value.isEmpty) {
+                                //     return 'Invoice is required';
+                                //   }
+                                //   return null;
+                                // },
                               ),
                             ),
                             const SizedBox(width: 16),
@@ -161,8 +165,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                   border: OutlineInputBorder(),
                                   prefixText: 'R ',
                                 ),
-                                keyboardType: const TextInputType.numberWithOptions(
-                                    decimal: true),
+                                keyboardType:
+                                    const TextInputType.numberWithOptions(
+                                        decimal: true),
                                 inputFormatters: [
                                   FilteringTextInputFormatter.allow(
                                       RegExp(r'^\d+\.?\d{0,2}')),
@@ -289,10 +294,12 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                               child: TextFormField(
                                 controller: _manDaysController,
                                 decoration: const InputDecoration(
-                                  labelText: 'Man-Days',
+                                  labelText: 'Man-Days *',
                                   border: OutlineInputBorder(),
                                 ),
-                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                keyboardType:
+                                    const TextInputType.numberWithOptions(
+                                        decimal: true),
                                 inputFormatters: [
                                   FilteringTextInputFormatter.allow(
                                     RegExp(r'^\d+\.?\d{0,2}'),
@@ -300,17 +307,22 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                 ],
                                 validator: (value) {
                                   if (value == null || value.isEmpty) {
-                                    return 'Please enter man-days';
+                                    return 'Man-Days is required';
                                   }
-                                  if (double.tryParse(value) == null) {
+                                  final doubleValue = double.tryParse(value);
+                                  if (doubleValue == null) {
                                     return 'Please enter a valid number';
+                                  }
+                                  if (doubleValue <= 0) {
+                                    return 'Man-Days must be greater than 0';
                                   }
                                   return null;
                                 },
                               ),
                             ),
                             const SizedBox(width: 16),
-                            const Expanded(child: SizedBox()), // Empty space for alignment
+                            const Expanded(
+                                child: SizedBox()), // Empty space for alignment
                           ],
                         ),
                         const SizedBox(height: 16),
@@ -319,56 +331,89 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                         Row(
                           children: [
                             Expanded(
-                              child: InkWell(
-                                onTap: () async {
-                                  final date = await showDatePicker(
-                                    context: context,
-                                    initialDate: _selectedDate,
-                                    firstDate: DateTime(2020),
-                                    lastDate: DateTime(2030),
-                                  );
-                                  if (date != null) {
-                                    setState(() {
-                                      _selectedDate = date;
-                                    });
+                              child: FormField<DateTime>(
+                                initialValue: _selectedDate,
+                                validator: (value) {
+                                  if (value == null) {
+                                    return 'Distribution Date is required';
                                   }
+                                  return null;
                                 },
-                                child: InputDecorator(
-                                  decoration: const InputDecoration(
-                                    labelText: 'Date',
-                                    border: OutlineInputBorder(),
-                                    suffixIcon: Icon(Icons.calendar_today),
-                                  ),
-                                  child: Text(DateFormat('dd MMM yyyy')
-                                      .format(_selectedDate)),
-                                ),
+                                builder: (FormFieldState<DateTime> state) {
+                                  return InkWell(
+                                    onTap: () async {
+                                      final date = await showDatePicker(
+                                        context: context,
+                                        initialDate:
+                                            _selectedDate ?? DateTime.now(),
+                                        firstDate: DateTime(2020),
+                                        lastDate: DateTime(2030),
+                                      );
+                                      if (date != null) {
+                                        setState(() {
+                                          _selectedDate = date;
+                                        });
+                                        state.didChange(date);
+                                      }
+                                    },
+                                    child: InputDecorator(
+                                      decoration: InputDecoration(
+                                        labelText: 'Distribution Date *',
+                                        border: const OutlineInputBorder(),
+                                        suffixIcon:
+                                            const Icon(Icons.calendar_today),
+                                        errorText: state.errorText,
+                                      ),
+                                      child: Text(_selectedDate != null
+                                          ? DateFormat('dd MMM yyyy')
+                                              .format(_selectedDate!)
+                                          : 'Select Distribution Date'),
+                                    ),
+                                  );
+                                },
                               ),
                             ),
                             const SizedBox(width: 16),
                             Expanded(
-                              child: InkWell(
-                                onTap: () async {
-                                  final date = await showDatePicker(
-                                    context: context,
-                                    initialDate: _selectedCollectionDate,
-                                    firstDate: DateTime(2020),
-                                    lastDate: DateTime(2030),
-                                  );
-                                  if (date != null) {
-                                    setState(() {
-                                      _selectedCollectionDate = date;
-                                    });
-                                  }
+                              child: FormField<DateTime>(
+                                initialValue: _selectedCollectionDate,
+                                validator: (value) {
+                                  // Collection Date is not required
+                                  return null;
                                 },
-                                child: InputDecorator(
-                                  decoration: const InputDecoration(
-                                    labelText: 'Collection Date',
-                                    border: OutlineInputBorder(),
-                                    suffixIcon: Icon(Icons.calendar_today),
-                                  ),
-                                  child: Text(DateFormat('dd MMM yyyy')
-                                      .format(_selectedCollectionDate)),
-                                ),
+                                builder: (FormFieldState<DateTime> state) {
+                                  return InkWell(
+                                    onTap: () async {
+                                      final date = await showDatePicker(
+                                        context: context,
+                                        initialDate: _selectedCollectionDate ??
+                                            DateTime.now(),
+                                        firstDate: DateTime(2020),
+                                        lastDate: DateTime(2030),
+                                      );
+                                      if (date != null) {
+                                        setState(() {
+                                          _selectedCollectionDate = date;
+                                        });
+                                        state.didChange(date);
+                                      }
+                                    },
+                                    child: InputDecorator(
+                                      decoration: InputDecoration(
+                                        labelText: 'Collection Date',
+                                        border: const OutlineInputBorder(),
+                                        suffixIcon:
+                                            const Icon(Icons.calendar_today),
+                                        errorText: state.errorText,
+                                      ),
+                                      child: Text(_selectedCollectionDate !=
+                                              null
+                                          ? DateFormat('dd MMM yyyy')
+                                              .format(_selectedCollectionDate!)
+                                          : 'Select Collection Date'),
+                                    ),
+                                  );
+                                },
                               ),
                             ),
                           ],
@@ -491,9 +536,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         area: _areaController.text.trim(),
         quantity: int.tryParse(_quantityController.text) ?? 0,
         manDays: double.tryParse(_manDaysController.text) ?? 0.0,
-        date: _selectedDate,
+        date: _selectedDate ?? DateTime.now(),
         collectionAddress: _collectionAddressController.text.trim(),
-        collectionDate: _selectedCollectionDate,
+        collectionDate: _selectedCollectionDate ?? DateTime.now(),
         specialInstructions: _specialInstructionsController.text.trim(),
         quantityDistributed:
             int.tryParse(_quantityDistributedController.text) ?? 0,
@@ -502,7 +547,110 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         whoToInvoice: _whoToInvoiceController.text.trim(),
       );
 
-      Navigator.of(context).pop(jobListItem);
+      // If editing existing job, just return it (no assignment needed)
+      if (widget.jobToEdit != null) {
+        Navigator.of(context).pop(jobListItem);
+        return;
+      }
+
+      // For new jobs, show assignment preview
+      _showJobAssignmentPreview(jobListItem);
+    }
+  }
+
+  void _showJobAssignmentPreview(JobListItem jobListItem) async {
+    try {
+      // Get the schedule provider
+      final scheduleProvider = context.read<ScheduleProvider>();
+      
+      // Create the assignment service
+      final assignmentService = JobAssignmentService(scheduleProvider);
+      
+      // Calculate the job assignments
+      final assignments = assignmentService.calculateJobAssignments(
+        client: jobListItem.client,
+        manDays: jobListItem.manDays,
+        startDate: jobListItem.date,
+        workAreaId: '', // Default - can be edited later on schedule
+        workingArea: 'To be assigned', // Default - can be edited later on schedule
+      );
+
+      if (assignments.isEmpty) {
+        // Show error if no assignments could be made
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Unable to assign jobs - no available distributors found.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      // Show the assignment preview dialog
+      if (mounted) {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => JobAssignmentPreviewDialog(
+            assignments: assignments,
+            onConfirm: () => Navigator.of(context).pop(true),
+            onCancel: () => Navigator.of(context).pop(false),
+          ),
+        );
+
+        if (confirmed == true && mounted) {
+          // User confirmed - create the jobs on the schedule
+          await _createScheduleJobs(assignmentService, assignments);
+          
+          // Return the original job list item
+          if (mounted) {
+            Navigator.of(context).pop(jobListItem);
+          }
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error creating job assignments: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _createScheduleJobs(JobAssignmentService assignmentService, List<JobAssignment> assignments) async {
+    try {
+      final scheduleProvider = context.read<ScheduleProvider>();
+      
+      // Convert assignments to Job objects
+      final jobs = assignmentService.createJobsFromAssignments(assignments);
+      
+      // Add each job to the schedule
+      for (final job in jobs) {
+        await scheduleProvider.addJob(job);
+      }
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Successfully assigned ${jobs.length} jobs to distributors!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error adding jobs to schedule: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      rethrow; // Re-throw so the calling method can handle it
     }
   }
 }

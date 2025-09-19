@@ -7,6 +7,7 @@ import 'providers/schedule_provider.dart';
 import 'providers/job_list_provider.dart';
 import 'widgets/schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
+import 'widgets/distributor_management_dialog.dart';
 import 'utils/seed_data.dart';
 import 'utils/seed_job_list_data.dart';
 import 'services/work_area_service.dart';
@@ -124,6 +125,16 @@ class _DashboardScreenState extends State<DashboardScreen>
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.people),
+            onPressed: () {
+              showDialog(
+                context: context,
+                builder: (context) => const DistributorManagementDialog(),
+              );
+            },
+            tooltip: 'Manage Distributors',
+          ),
           IconButton(
             icon: const Icon(Icons.data_array),
             onPressed: () async {
@@ -294,7 +305,9 @@ class ScheduleScreen extends StatelessWidget {
         ),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Row(
-          children: [TextButton(onPressed: () {}, child: const Text("Job List"))],
+          children: [
+            TextButton(onPressed: () {}, child: const Text("Job List"))
+          ],
         ),
         actions: [
           IconButton(

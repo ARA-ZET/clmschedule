@@ -10,6 +10,10 @@ class JobListProvider extends ChangeNotifier {
   String? _error;
   String _searchQuery = '';
   Set<JobListStatus> _statusFilters = {};
+  DateTime _currentMonth = DateTime.now();
+
+  // Subscription for job list items stream
+  StreamSubscription<List<JobListItem>>? _jobListSubscription;
 
   // Sorting functionality
   String _sortField = 'date'; // Default sort by date
@@ -33,6 +37,9 @@ class JobListProvider extends ChangeNotifier {
   Set<JobListStatus> get statusFilters => _statusFilters;
   String get sortField => _sortField;
   bool get sortAscending => _sortAscending;
+  DateTime get currentMonth => _currentMonth;
+  String get currentMonthDisplay =>
+      _jobListService.getMonthlyDocumentId(_currentMonth);
 
   // Get merged data (database + pending local changes)
   List<JobListItem> _getMergedJobListItems() {
@@ -102,25 +109,104 @@ class JobListProvider extends ChangeNotifier {
     return filtered;
   }
 
-  // Load job list items
+  // Load job list items for current month
   void _loadJobListItems() {
     _isLoading = true;
     _error = null;
     notifyListeners();
 
-    _jobListService.getJobListItems().listen(
+    // Debug logging
+    print(
+        'JobListProvider: Loading data for month: ${_jobListService.getMonthlyDocumentId(_currentMonth)}');
+    print('JobListProvider: Current month date: $_currentMonth');
+
+    // Cancel existing subscription
+    _jobListSubscription?.cancel();
+
+    _jobListSubscription =
+        _jobListService.getJobListItems(_currentMonth).listen(
       (jobListItems) {
+        print('JobListProvider: Loaded ${jobListItems.length} job list items');
         _jobListItems = jobListItems;
         _isLoading = false;
         _error = null;
         notifyListeners();
       },
       onError: (error) {
+        print('JobListProvider: Error loading job list items: $error');
         _error = error.toString();
         _isLoading = false;
         notifyListeners();
       },
     );
+  }
+
+  // Change current month
+  void setCurrentMonth(DateTime month) {
+    if (_currentMonth != month) {
+      _currentMonth = month;
+      _loadJobListItems();
+      notifyListeners();
+    }
+  }
+
+  // Go to next month
+  void goToNextMonth() {
+    final nextMonth = DateTime(_currentMonth.year, _currentMonth.month + 1);
+    setCurrentMonth(nextMonth);
+  }
+
+  // Go to previous month
+  void goToPreviousMonth() {
+    final previousMonth = DateTime(_currentMonth.year, _currentMonth.month - 1);
+    setCurrentMonth(previousMonth);
+  }
+
+  // Go to current month
+  void goToCurrentMonth() {
+    setCurrentMonth(DateTime.now());
+  }
+
+  // Go to specific month by month string (e.g., "Sep 2025")
+  void goToMonth(String monthString) {
+    final DateTime? month = _parseMonthString(monthString);
+    if (month != null) {
+      setCurrentMonth(month);
+    }
+  }
+
+  // Helper method to parse month string back to DateTime
+  DateTime? _parseMonthString(String monthString) {
+    final parts = monthString.split(' ');
+    if (parts.length != 2) return null;
+
+    const months = {
+      'Jan': 1,
+      'Feb': 2,
+      'Mar': 3,
+      'Apr': 4,
+      'May': 5,
+      'Jun': 6,
+      'Jul': 7,
+      'Aug': 8,
+      'Sep': 9,
+      'Oct': 10,
+      'Nov': 11,
+      'Dec': 12
+    };
+
+    final monthNum = months[parts[0]];
+    final year = int.tryParse(parts[1]);
+
+    if (monthNum != null && year != null) {
+      return DateTime(year, monthNum);
+    }
+    return null;
+  }
+
+  // Get available months
+  Future<List<String>> getAvailableMonths() {
+    return _jobListService.getAvailableJobListMonths();
   }
 
   // Debounced update system - store locally first, batch update to database after delay
@@ -153,7 +239,7 @@ class JobListProvider extends ChangeNotifier {
     // Process each update
     for (final entry in updatesToProcess.entries) {
       try {
-        await _jobListService.updateJobListItem(entry.value);
+        await _jobListService.updateJobListItem(entry.value, entry.value.date);
 
         // Update local cache with successful database update
         final index = _jobListItems.indexWhere((item) => item.id == entry.key);
@@ -187,7 +273,7 @@ class JobListProvider extends ChangeNotifier {
   // Add job list item
   Future<void> addJobListItem(JobListItem jobListItem) async {
     try {
-      await _jobListService.addJobListItem(jobListItem);
+      await _jobListService.addJobListItem(jobListItem, jobListItem.date);
     } catch (error) {
       _error = error.toString();
       notifyListeners();
@@ -198,7 +284,7 @@ class JobListProvider extends ChangeNotifier {
   // Update job list item (immediate database update - use sparingly)
   Future<void> updateJobListItemImmediate(JobListItem jobListItem) async {
     try {
-      await _jobListService.updateJobListItem(jobListItem);
+      await _jobListService.updateJobListItem(jobListItem, jobListItem.date);
     } catch (error) {
       _error = error.toString();
       notifyListeners();
@@ -214,7 +300,10 @@ class JobListProvider extends ChangeNotifier {
   // Delete job list item
   Future<void> deleteJobListItem(String id) async {
     try {
-      await _jobListService.deleteJobListItem(id);
+      // Find the item to get its date for proper monthly context
+      final item = getJobListItemById(id);
+      final itemDate = item?.date ?? _currentMonth;
+      await _jobListService.deleteJobListItem(id, itemDate);
     } catch (error) {
       _error = error.toString();
       notifyListeners();
@@ -239,7 +328,10 @@ class JobListProvider extends ChangeNotifier {
   Future<void> updateJobStatusImmediate(
       String id, JobListStatus newStatus) async {
     try {
-      await _jobListService.updateJobStatus(id, newStatus);
+      // Find the item to get its date for proper monthly context
+      final item = getJobListItemById(id);
+      final itemDate = item?.date ?? _currentMonth;
+      await _jobListService.updateJobStatus(id, newStatus, itemDate);
     } catch (error) {
       _error = error.toString();
       notifyListeners();
@@ -352,6 +444,7 @@ class JobListProvider extends ChangeNotifier {
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    _jobListSubscription?.cancel();
     super.dispose();
   }
 }

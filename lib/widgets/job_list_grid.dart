@@ -6,6 +6,7 @@ import '../providers/job_list_provider.dart';
 import 'add_edit_job_dialog.dart';
 import 'editable_table_cell.dart';
 import 'multi_select_status_filter.dart';
+import 'month_navigation_widget.dart';
 
 class JobListGrid extends StatefulWidget {
   const JobListGrid({super.key});
@@ -66,6 +67,16 @@ class _JobListGridState extends State<JobListGrid> {
 
         return Column(
           children: [
+            // Month navigation
+            MonthNavigationWidget(
+              currentMonthDisplay: jobListProvider.currentMonthDisplay,
+              onPreviousMonth: jobListProvider.goToPreviousMonth,
+              onNextMonth: jobListProvider.goToNextMonth,
+              onCurrentMonth: jobListProvider.goToCurrentMonth,
+              onMonthSelected: jobListProvider.goToMonth,
+              availableMonths: jobListProvider.getAvailableMonths(),
+            ),
+
             // Search and Filter Bar
             Container(
               padding: const EdgeInsets.all(16),

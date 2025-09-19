@@ -16,10 +16,10 @@ Future<void> seedJobListData() async {
       area: 'Contact at Webprinter, deliver to Jawitz,2000',
       quantity: 17,
       manDays: 2.5,
-      date: DateTime(2025, 7, 1),
+      date: DateTime(2025, 9, 1),
       collectionAddress: 'Webprinter',
-      collectionDate: DateTime(2025, 7, 1),
-      specialInstructions: '40m, 1 July - Deliver to Jawitz office on 1 July',
+      collectionDate: DateTime(2025, 9, 1),
+      specialInstructions: '40m, 1 Sept - Deliver to Jawitz office on 1 Sept',
       quantityDistributed: 0,
       invoiceDetails: '',
       reportAddresses: '',
@@ -35,9 +35,9 @@ Future<void> seedJobListData() async {
       area: '1 Sunny Side Road, Sunningdale',
       quantity: 1,
       manDays: 1.0,
-      date: DateTime(2025, 7, 2),
+      date: DateTime(2025, 9, 2),
       collectionAddress: '10:00 AM',
-      collectionDate: DateTime(2025, 7, 2),
+      collectionDate: DateTime(2025, 9, 2),
       specialInstructions: 'David 083 626 3025',
       quantityDistributed: 0,
       invoiceDetails: '',
@@ -54,10 +54,10 @@ Future<void> seedJobListData() async {
       area: 'Chand',
       quantity: 3,
       manDays: 1.5,
-      date: DateTime(2025, 7, 10),
+      date: DateTime(2025, 9, 10),
       collectionAddress: 'Chand',
-      collectionDate: DateTime(2025, 7, 2),
-      specialInstructions: '2 July',
+      collectionDate: DateTime(2025, 9, 2),
+      specialInstructions: '2 Sept',
       quantityDistributed: 0,
       invoiceDetails: '',
       reportAddresses: '',
@@ -70,12 +70,12 @@ Future<void> seedJobListData() async {
       client: 'FURNITURE MOVE: Stellenbosch to Muizenberg',
       jobStatus: JobListStatus.reportCompliled,
       jobType: JobType.furnitureMove,
-      area: '1 Skadu Road, Dalsig, Stellenbosch to 3 Hyndrd 4 July',
+      area: '1 Skadu Road, Dalsig, Stellenbosch to 3 Hyndrd 4 Sept',
       quantity: 1,
       manDays: 2.0,
-      date: DateTime(2025, 7, 4),
+      date: DateTime(2025, 9, 4),
       collectionAddress: '9:30 in Stellenbosch Daniel 072 750 32',
-      collectionDate: DateTime(2025, 7, 4),
+      collectionDate: DateTime(2025, 9, 4),
       specialInstructions: 'Take plastic sheeting to cover the trailer',
       quantityDistributed: 0,
       invoiceDetails: '',
@@ -92,9 +92,9 @@ Future<void> seedJobListData() async {
       area: '56 Lower Weldon Road, Otterstoer',
       quantity: 1,
       manDays: 0.5,
-      date: DateTime(2025, 7, 5),
+      date: DateTime(2025, 9, 5),
       collectionAddress: '2:00 PM',
-      collectionDate: DateTime(2025, 7, 5),
+      collectionDate: DateTime(2025, 9, 5),
       specialInstructions:
           'Cath 083 272 6533 - Sent Remedy - this will call back',
       quantityDistributed: 0,
@@ -109,12 +109,12 @@ Future<void> seedJobListData() async {
       client: 'Anton Liebenberg (Staff)',
       jobStatus: JobListStatus.invoiceSent,
       jobType: JobType.flyerDistribution,
-      area: 'Staff Constantia - before 5 July',
+      area: 'Staff Constantia - before 5 Sept',
       quantity: 1000,
       manDays: 3.0,
-      date: DateTime(2025, 7, 5),
-      collectionAddress: 'Staff Constantia - before 5 July',
-      collectionDate: DateTime(2025, 7, 5),
+      date: DateTime(2025, 9, 5),
+      collectionAddress: 'Staff Constantia - before 5 Sept',
+      collectionDate: DateTime(2025, 9, 5),
       specialInstructions: '',
       quantityDistributed: 0,
       invoiceDetails: '',
@@ -123,10 +123,13 @@ Future<void> seedJobListData() async {
     ),
   ];
 
-  // Add sample jobs to Firestore
+  // Add sample jobs to Firestore (they will be added to the appropriate month based on their date)
   for (final job in sampleJobs) {
     try {
-      await jobListService.addJobListItem(job);
+      print(
+          'Adding job ${job.invoice} with date ${job.date} to month ${jobListService.getMonthlyDocumentId(job.date)}');
+      await jobListService.addJobListItem(job, job.date);
+      print('Successfully added job ${job.invoice}');
     } catch (e) {
       print('Error adding job ${job.invoice}: $e');
     }

@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 
 import '../models/job.dart';
 import '../providers/schedule_provider.dart';
 import 'job_card.dart';
+import 'month_navigation_widget.dart';
 
 class ScheduleGrid extends StatefulWidget {
   const ScheduleGrid({super.key});
@@ -18,6 +20,9 @@ class _ScheduleGridState extends State<ScheduleGrid> {
   int _selectedWeekOffset = 0; // Selected week in the week selector
   int _viewOffset = 0; // Offset for the 5-week view in the top bar
   int _dayOffset = 0; // Day-based navigation offset
+
+  // Keep track of current month to reset offsets when it changes
+  String _currentMonthDisplay = '';
 
   // Scroll controllers for horizontal and vertical scrolling
   final ScrollController _horizontalScrollController = ScrollController();
@@ -49,11 +54,11 @@ class _ScheduleGridState extends State<ScheduleGrid> {
     return months[month - 1];
   }
 
-  // Get the start of the current week (Friday)
-  DateTime _getCurrentWeekStart() {
-    final now = DateTime.now();
-    final daysUntilFriday = (DateTime.friday - now.weekday + 7) % 7;
-    return DateTime(now.year, now.month, now.day + daysUntilFriday);
+  // Get the start of the current week (Friday) based on selected month
+  DateTime _getCurrentWeekStart(DateTime baseDate) {
+    final daysUntilFriday = (DateTime.friday - baseDate.weekday + 7) % 7;
+    return DateTime(
+        baseDate.year, baseDate.month, baseDate.day + daysUntilFriday);
   }
 
   // Get week number and year
@@ -69,8 +74,8 @@ class _ScheduleGridState extends State<ScheduleGrid> {
   }
 
   // Generate list of weeks for the top bar
-  List<DateTime> _getWeekStarts() {
-    final currentWeekStart = _getCurrentWeekStart();
+  List<DateTime> _getWeekStarts(DateTime baseDate) {
+    final currentWeekStart = _getCurrentWeekStart(baseDate);
     return List.generate(5, (index) {
       return currentWeekStart.add(
         Duration(days: 7 * (index + _viewOffset - 2)),
@@ -79,8 +84,8 @@ class _ScheduleGridState extends State<ScheduleGrid> {
   }
 
   // Generate list of 12 days centered around the selected week
-  List<DateTime> _getDates() {
-    final selectedWeekStart = _getCurrentWeekStart().add(
+  List<DateTime> _getDates(DateTime baseDate) {
+    final selectedWeekStart = _getCurrentWeekStart(baseDate).add(
       Duration(days: 7 * _selectedWeekOffset),
     );
     // Start 2 days before the selected week, and add day offset
@@ -92,25 +97,63 @@ class _ScheduleGridState extends State<ScheduleGrid> {
     });
   }
 
-  void _previousWeeks() {
+  void _previousWeeks(ScheduleProvider scheduleProvider) {
     setState(() {
       _viewOffset--;
       _dayOffset = 0; // Reset day offset when changing weeks
     });
+
+    // Check if we moved to a different month
+    final currentMonth = scheduleProvider.currentMonth;
+    final newWeekStart = _getCurrentWeekStart(currentMonth).add(
+      Duration(days: 7 * (_viewOffset - 2)),
+    );
+
+    if (newWeekStart.month != currentMonth.month ||
+        newWeekStart.year != currentMonth.year) {
+      scheduleProvider
+          .setCurrentMonth(DateTime(newWeekStart.year, newWeekStart.month));
+    }
   }
 
-  void _nextWeeks() {
+  void _nextWeeks(ScheduleProvider scheduleProvider) {
     setState(() {
       _viewOffset++;
       _dayOffset = 0; // Reset day offset when changing weeks
     });
+
+    // Check if we moved to a different month
+    final currentMonth = scheduleProvider.currentMonth;
+    final newWeekStart = _getCurrentWeekStart(currentMonth).add(
+      Duration(days: 7 * (_viewOffset + 2)),
+    );
+
+    if (newWeekStart.month != currentMonth.month ||
+        newWeekStart.year != currentMonth.year) {
+      scheduleProvider
+          .setCurrentMonth(DateTime(newWeekStart.year, newWeekStart.month));
+    }
   }
 
-  void _selectWeek(int offset) {
+  void _selectWeek(int offset, ScheduleProvider scheduleProvider) {
     setState(() {
       _selectedWeekOffset = offset + _viewOffset - 2;
       _dayOffset = 0; // Reset day offset when selecting a new week
     });
+
+    // Calculate the date for the selected week
+    final currentMonth = scheduleProvider.currentMonth;
+    final selectedWeekStart = _getCurrentWeekStart(currentMonth).add(
+      Duration(days: 7 * _selectedWeekOffset),
+    );
+
+    // Check if the selected week is in a different month
+    if (selectedWeekStart.month != currentMonth.month ||
+        selectedWeekStart.year != currentMonth.year) {
+      // Update the provider to the new month
+      scheduleProvider.setCurrentMonth(
+          DateTime(selectedWeekStart.year, selectedWeekStart.month));
+    }
   }
 
   void _previousDays() {
@@ -133,13 +176,31 @@ class _ScheduleGridState extends State<ScheduleGrid> {
   Widget build(BuildContext context) {
     return Consumer<ScheduleProvider>(
       builder: (context, scheduleProvider, child) {
-        final dates = _getDates();
-        final weekStarts = _getWeekStarts();
+        // Check if month changed and reset offsets
+        if (_currentMonthDisplay != scheduleProvider.currentMonthDisplay) {
+          _currentMonthDisplay = scheduleProvider.currentMonthDisplay;
+          _selectedWeekOffset = 0;
+          _viewOffset = 0;
+          _dayOffset = 0;
+        }
+
+        final currentMonth = scheduleProvider.currentMonth;
+        final dates = _getDates(currentMonth);
+        final weekStarts = _getWeekStarts(currentMonth);
         final distributors = scheduleProvider.distributors;
 
         return Column(
           children: [
-            // Week selector bar
+            // Month navigation
+            MonthNavigationWidget(
+              currentMonthDisplay: scheduleProvider.currentMonthDisplay,
+              onPreviousMonth: scheduleProvider.goToPreviousMonth,
+              onNextMonth: scheduleProvider.goToNextMonth,
+              onCurrentMonth: scheduleProvider.goToCurrentMonth,
+              onMonthSelected: scheduleProvider.goToMonth,
+              availableMonths: scheduleProvider.getAvailableMonths(),
+            ),
+
             Container(
               decoration: ShapeDecoration.fromBoxDecoration(
                 BoxDecoration(
@@ -164,7 +225,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                 children: [
                   IconButton(
                     icon: const Icon(Icons.arrow_left),
-                    onPressed: _previousWeeks,
+                    onPressed: () => _previousWeeks(scheduleProvider),
                     padding: EdgeInsets.zero,
                   ),
                   Expanded(
@@ -175,7 +236,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                         final isSelected =
                             index == 2 + _selectedWeekOffset - _viewOffset;
                         return TextButton(
-                          onPressed: () => _selectWeek(index),
+                          onPressed: () => _selectWeek(index, scheduleProvider),
                           style: TextButton.styleFrom(
                             backgroundColor: isSelected
                                 ? Theme.of(
@@ -191,7 +252,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                   ),
                   IconButton(
                     icon: const Icon(Icons.arrow_right),
-                    onPressed: _nextWeeks,
+                    onPressed: () => _nextWeeks(scheduleProvider),
                     padding: EdgeInsets.zero,
                   ),
                 ],
@@ -323,7 +384,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                               child: LayoutBuilder(
                                 builder: (context, constraints) {
                                   final dateText =
-                                      '${date.day} ${_getMonthAbbreviation(date.month)}';
+                                      '${DateFormat('EEE').format(date)} ${date.day} ${_getMonthAbbreviation(date.month)}';
 
                                   return Row(
                                     mainAxisAlignment: MainAxisAlignment.center,
