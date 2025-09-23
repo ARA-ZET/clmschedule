@@ -87,7 +87,7 @@ class _EditableTableCellState extends State<EditableTableCell> {
           keyboardType: widget.keyboardType,
           inputFormatters: widget.inputFormatters,
           maxLines: widget.maxLines,
-          style: const TextStyle(fontSize: 14),
+          style: const TextStyle(fontSize: 12),
           decoration: const InputDecoration(
             isDense: true,
             contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -108,7 +108,7 @@ class _EditableTableCellState extends State<EditableTableCell> {
           child: Text(
             widget.value.isEmpty ? 'Click to edit' : widget.value,
             style: TextStyle(
-              fontSize: 14,
+              fontSize: 12,
               color: widget.value.isEmpty ? Colors.grey : null,
               fontStyle: widget.value.isEmpty ? FontStyle.italic : null,
             ),
@@ -142,7 +142,7 @@ class EditableDateCell extends StatelessWidget {
           final date = await showDatePicker(
             context: context,
             initialDate: value,
-            firstDate: DateTime(2020),
+            firstDate: DateTime(2025),
             lastDate: DateTime(2030),
           );
           if (date != null) {
@@ -156,7 +156,7 @@ class EditableDateCell extends StatelessWidget {
             children: [
               Text(
                 DateFormat('dd MMM').format(value),
-                style: const TextStyle(fontSize: 14),
+                style: const TextStyle(fontSize: 12),
               ),
               const SizedBox(width: 4),
               const Icon(Icons.calendar_today, size: 12, color: Colors.grey),

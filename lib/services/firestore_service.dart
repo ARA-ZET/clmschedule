@@ -122,6 +122,9 @@ class FirestoreService {
 
   // Stream jobs for a specific date
   Stream<List<Job>> _streamJobsForDate(DateTime date) {
+    // Ensure monthly document exists when streaming
+    _monthlyService.ensureScheduleMonthlyDocExists(date);
+
     return _getJobsCollection(date).snapshots().map((snapshot) {
       return snapshot.docs.map((doc) {
         return Job.fromMap(doc.id, doc.data() as Map<String, dynamic>);
@@ -141,14 +144,22 @@ class FirestoreService {
   }
 
   // Update a job
-  Future<void> updateJob(Job job, [DateTime? date]) {
+  Future<void> updateJob(Job job, [DateTime? date]) async {
     final targetDate = date ?? job.date;
+
+    // Ensure monthly document exists before updating
+    await _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
+
     return _getJobsCollection(targetDate).doc(job.id).update(job.toMap());
   }
 
   // Delete a job
-  Future<void> deleteJob(String jobId, [DateTime? date]) {
+  Future<void> deleteJob(String jobId, [DateTime? date]) async {
     final targetDate = date ?? DateTime.now();
+
+    // Ensure monthly document exists before deleting
+    await _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
+
     return _getJobsCollection(targetDate).doc(jobId).delete();
   }
 
@@ -156,6 +167,10 @@ class FirestoreService {
   Stream<List<Job>> streamJobsForDistributor(String distributorId,
       [DateTime? date]) {
     final targetDate = date ?? DateTime.now();
+
+    // Ensure monthly document exists when streaming
+    _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
+
     return _getJobsCollection(targetDate)
         .where('distributorId', isEqualTo: distributorId)
         .snapshots()
@@ -170,6 +185,10 @@ class FirestoreService {
   Stream<List<Job>> streamJobsForDateRange(DateTime start, DateTime end,
       [DateTime? monthContext]) {
     final targetDate = monthContext ?? start;
+
+    // Ensure monthly document exists when streaming
+    _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
+
     return _getJobsCollection(targetDate)
         .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(start))
         .where('date', isLessThanOrEqualTo: Timestamp.fromDate(end))

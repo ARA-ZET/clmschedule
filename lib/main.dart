@@ -5,9 +5,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:provider/provider.dart';
 import 'providers/schedule_provider.dart';
 import 'providers/job_list_provider.dart';
+import 'providers/scale_provider.dart';
 import 'widgets/schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
 import 'widgets/distributor_management_dialog.dart';
+import 'widgets/lazy_loading_indicator.dart';
+import 'widgets/scale_settings_dialog.dart';
 import 'utils/seed_data.dart';
 import 'utils/seed_job_list_data.dart';
 import 'services/work_area_service.dart';
@@ -32,7 +35,21 @@ void main() async {
     print('Firestore settings already configured: $e');
   }
 
-  runApp(const MyApp());
+  runApp(MultiProvider(providers: [
+    ChangeNotifierProvider(create: (context) => ScheduleProvider()),
+    ChangeNotifierProvider(create: (context) => ScaleProvider()),
+    Provider(
+      create: (context) => WorkAreaService(FirebaseFirestore.instance),
+    ),
+    Provider(
+      create: (context) => JobListService(FirebaseFirestore.instance),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => JobListProvider(
+        context.read<JobListService>(),
+      ),
+    ),
+  ], child: const MyApp()));
 }
 
 class MyApp extends StatelessWidget {
@@ -40,30 +57,14 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (context) => ScheduleProvider()),
-        Provider(
-          create: (context) => WorkAreaService(FirebaseFirestore.instance),
-        ),
-        Provider(
-          create: (context) => JobListService(FirebaseFirestore.instance),
-        ),
-        ChangeNotifierProvider(
-          create: (context) => JobListProvider(
-            context.read<JobListService>(),
-          ),
-        ),
-      ],
-      child: MaterialApp(
-        title: 'CLM DASHBOARD',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-          useMaterial3: true,
-        ),
-        home: const DashboardScreen(),
+    return MaterialApp(
+      title: 'CLM DASHBOARD',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        useMaterial3: true,
       ),
+      home: const DashboardScreen(),
     );
   }
 }
@@ -78,15 +79,30 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  int _currentTabIndex = 0;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(
+      length: 4,
+      vsync: this,
+      animationDuration: Duration.zero, // Remove tab animation
+    );
+    _tabController.addListener(_handleTabChange);
+  }
+
+  void _handleTabChange() {
+    if (_tabController.index != _currentTabIndex) {
+      setState(() {
+        _currentTabIndex = _tabController.index;
+      });
+    }
   }
 
   @override
   void dispose() {
+    _tabController.removeListener(_handleTabChange);
     _tabController.dispose();
     super.dispose();
   }
@@ -117,6 +133,9 @@ class _DashboardScreenState extends State<DashboardScreen>
           unselectedLabelColor: Colors.black54,
           indicatorColor: Colors.black,
           dividerColor: Colors.transparent,
+          splashFactory: NoSplash.splashFactory, // Remove tap animation
+          overlayColor:
+              MaterialStateProperty.all(Colors.transparent), // Remove overlay
           tabs: const [
             Tab(text: 'Schedule'),
             Tab(text: 'Job List'),
@@ -138,78 +157,88 @@ class _DashboardScreenState extends State<DashboardScreen>
           IconButton(
             icon: const Icon(Icons.data_array),
             onPressed: () async {
-              try {
-                await seedData();
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Sample schedule data added successfully!'),
-                    ),
-                  );
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error adding schedule data: $e')),
-                  );
-                }
-              }
+              // try {
+              //   await seedData();
+              //   if (context.mounted) {
+              //     ScaffoldMessenger.of(context).showSnackBar(
+              //       const SnackBar(
+              //         content: Text('Sample schedule data added successfully!'),
+              //       ),
+              //     );
+              //   }
+              // } catch (e) {
+              //   if (context.mounted) {
+              //     ScaffoldMessenger.of(context).showSnackBar(
+              //       SnackBar(content: Text('Error adding schedule data: $e')),
+              //     );
+              //   }
+              // }
             },
             tooltip: 'Add sample schedule data',
           ),
           IconButton(
             icon: const Icon(Icons.list_alt),
             onPressed: () async {
-              try {
-                await seedJobListData();
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Sample job list data added successfully!'),
-                    ),
-                  );
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error adding job list data: $e')),
-                  );
-                }
-              }
+              // try {
+              //   await seedJobListData();
+              //   if (context.mounted) {
+              //     ScaffoldMessenger.of(context).showSnackBar(
+              //       const SnackBar(
+              //         content: Text('Sample job list data added successfully!'),
+              //       ),
+              //     );
+              //   }
+              // } catch (e) {
+              //   if (context.mounted) {
+              //     ScaffoldMessenger.of(context).showSnackBar(
+              //       SnackBar(content: Text('Error adding job list data: $e')),
+              //     );
+              //   }
+              // }
             },
             tooltip: 'Add sample job list data',
           ),
           IconButton(
             icon: const Icon(Icons.map),
             onPressed: () async {
-              final workAreaService = context.read<WorkAreaService>();
-              try {
-                final workAreas = await workAreaService.createFromKml(
-                  'maps.kml',
-                );
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        'Imported ${workAreas.length} work areas from KML file',
-                      ),
-                    ),
-                  );
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error importing KML data: $e')),
-                  );
-                }
-              }
+              // final workAreaService = context.read<WorkAreaService>();
+              // try {
+              //   final workAreas = await workAreaService.createFromKml(
+              //     'maps.kml',
+              //   );
+              //   if (context.mounted) {
+              //     ScaffoldMessenger.of(context).showSnackBar(
+              //       SnackBar(
+              //         content: Text(
+              //           'Imported ${workAreas.length} work areas from KML file',
+              //         ),
+              //       ),
+              //     );
+              //   }
+              // } catch (e) {
+              //   if (context.mounted) {
+              //     ScaffoldMessenger.of(context).showSnackBar(
+              //       SnackBar(content: Text('Error importing KML data: $e')),
+              //     );
+              //   }
+              // }
             },
             tooltip: 'Import KML data',
           ),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              showDialog(
+                context: context,
+                builder: (context) => const ScaleSettingsDialog(),
+              );
+            },
+            tooltip: 'Interface Scale Settings',
+          ),
         ],
       ),
-      body: TabBarView(
-        controller: _tabController,
+      body: IndexedStack(
+        index: _currentTabIndex,
         children: const [
           ScheduleTab(),
           JobListTab(),
@@ -221,29 +250,151 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 }
 
-class ScheduleTab extends StatelessWidget {
+class ScheduleTab extends StatefulWidget {
   const ScheduleTab({super.key});
 
   @override
+  State<ScheduleTab> createState() => _ScheduleTabState();
+}
+
+class _ScheduleTabState extends State<ScheduleTab>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
   Widget build(BuildContext context) {
-    return const ScheduleGrid();
+    super.build(context); // Required for AutomaticKeepAliveClientMixin
+    return Consumer<ScheduleProvider>(
+      builder: (context, scheduleProvider, child) {
+        final isLoading = scheduleProvider.distributors.isEmpty &&
+            scheduleProvider.jobs.isEmpty;
+
+        return LazyLoadingIndicator(
+          isLoading: isLoading,
+          message: 'Loading Schedule...',
+          child: isLoading
+              ? Container(
+                  color: Theme.of(context).scaffoldBackgroundColor,
+                  child: const SizedBox.expand(),
+                )
+              : const ScheduleGrid(),
+        );
+      },
+    );
   }
 }
 
-class JobListTab extends StatelessWidget {
+class JobListTab extends StatefulWidget {
   const JobListTab({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return const JobListGrid();
-  }
+  State<JobListTab> createState() => _JobListTabState();
 }
 
-class CollectionScheduleTab extends StatelessWidget {
-  const CollectionScheduleTab({super.key});
+class _JobListTabState extends State<JobListTab>
+    with AutomaticKeepAliveClientMixin {
+  bool _isInitialized = false;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    // Initialize JobList data asynchronously
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initializeJobListData();
+    });
+  }
+
+  Future<void> _initializeJobListData() async {
+    if (!_isInitialized && mounted) {
+      setState(() {
+        _isInitialized = true;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // Required for AutomaticKeepAliveClientMixin
+
+    return Consumer<JobListProvider>(
+      builder: (context, jobListProvider, child) {
+        // Show error state if there's an error
+        if (jobListProvider.error != null && _isInitialized) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(
+                  Icons.error_outline,
+                  size: 64,
+                  color: Colors.red,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Error loading Job List',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  jobListProvider.error!,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: () {
+                    // Retry loading
+                    setState(() {
+                      _isInitialized = false;
+                    });
+                    _initializeJobListData();
+                  },
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          );
+        }
+
+        // Show loading state
+        if (!_isInitialized || jobListProvider.isLoading) {
+          return LazyLoadingIndicator(
+            isLoading: true,
+            message: _isInitialized
+                ? 'Loading Job List Data...'
+                : 'Initializing Job List...',
+            child: Container(
+              color: Theme.of(context).scaffoldBackgroundColor,
+              child: const SizedBox.expand(),
+            ),
+          );
+        }
+
+        return const JobListGrid();
+      },
+    );
+  }
+}
+
+class CollectionScheduleTab extends StatefulWidget {
+  const CollectionScheduleTab({super.key});
+
+  @override
+  State<CollectionScheduleTab> createState() => _CollectionScheduleTabState();
+}
+
+class _CollectionScheduleTabState extends State<CollectionScheduleTab>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context); // Required for AutomaticKeepAliveClientMixin
     return const Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -265,11 +416,21 @@ class CollectionScheduleTab extends StatelessWidget {
   }
 }
 
-class SolarPanelScheduleTab extends StatelessWidget {
+class SolarPanelScheduleTab extends StatefulWidget {
   const SolarPanelScheduleTab({super.key});
 
   @override
+  State<SolarPanelScheduleTab> createState() => _SolarPanelScheduleTabState();
+}
+
+class _SolarPanelScheduleTabState extends State<SolarPanelScheduleTab>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
   Widget build(BuildContext context) {
+    super.build(context); // Required for AutomaticKeepAliveClientMixin
     return const Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,

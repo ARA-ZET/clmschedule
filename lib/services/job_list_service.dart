@@ -19,6 +19,10 @@ class JobListService {
     print('JobListService: Getting job list items for date: $targetDate');
     print(
         'JobListService: Monthly doc ID: ${_monthlyService.getMonthlyDocumentId(targetDate)}');
+
+    // Ensure monthly document exists when streaming
+    _monthlyService.ensureJobListMonthlyDocExists(targetDate);
+
     return _getJobListItemsCollection(targetDate)
         .orderBy('date', descending: true)
         .snapshots()
@@ -49,6 +53,10 @@ class JobListService {
   Future<void> updateJobListItem(JobListItem jobListItem,
       [DateTime? date]) async {
     final targetDate = date ?? jobListItem.date;
+
+    // Ensure monthly document exists before updating
+    await _monthlyService.ensureJobListMonthlyDocExists(targetDate);
+
     await _getJobListItemsCollection(targetDate)
         .doc(jobListItem.id)
         .update(jobListItem.toMap());
@@ -57,6 +65,10 @@ class JobListService {
   // Delete a job list item
   Future<void> deleteJobListItem(String id, [DateTime? date]) async {
     final targetDate = date ?? DateTime.now();
+
+    // Ensure monthly document exists before deleting
+    await _monthlyService.ensureJobListMonthlyDocExists(targetDate);
+
     await _getJobListItemsCollection(targetDate).doc(id).delete();
   }
 
@@ -74,6 +86,10 @@ class JobListService {
   Future<void> updateJobStatus(String id, JobListStatus newStatus,
       [DateTime? date]) async {
     final targetDate = date ?? DateTime.now();
+
+    // Ensure monthly document exists before updating status
+    await _monthlyService.ensureJobListMonthlyDocExists(targetDate);
+
     await _getJobListItemsCollection(targetDate)
         .doc(id)
         .update({'jobStatus': newStatus.name});
@@ -83,6 +99,10 @@ class JobListService {
   Stream<List<JobListItem>> getJobListItemsByStatus(JobListStatus status,
       [DateTime? date]) {
     final targetDate = date ?? DateTime.now();
+
+    // Ensure monthly document exists when streaming
+    _monthlyService.ensureJobListMonthlyDocExists(targetDate);
+
     return _getJobListItemsCollection(targetDate)
         .where('jobStatus', isEqualTo: status.name)
         .orderBy('date', descending: true)
@@ -98,6 +118,10 @@ class JobListService {
   Stream<List<JobListItem>> getJobListItemsByClient(String client,
       [DateTime? date]) {
     final targetDate = date ?? DateTime.now();
+
+    // Ensure monthly document exists when streaming
+    _monthlyService.ensureJobListMonthlyDocExists(targetDate);
+
     return _getJobListItemsCollection(targetDate)
         .where('client', isEqualTo: client)
         .orderBy('date', descending: true)
@@ -113,6 +137,10 @@ class JobListService {
   Stream<List<JobListItem>> searchJobListItemsByClient(String searchTerm,
       [DateTime? date]) {
     final targetDate = date ?? DateTime.now();
+
+    // Ensure monthly document exists when streaming
+    _monthlyService.ensureJobListMonthlyDocExists(targetDate);
+
     return _getJobListItemsCollection(targetDate)
         .orderBy('client')
         .startAt([searchTerm.toLowerCase()])

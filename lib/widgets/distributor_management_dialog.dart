@@ -16,7 +16,7 @@ class _DistributorManagementDialogState
     extends State<DistributorManagementDialog> {
   // Track changes locally before committing to database
   List<Distributor> _localDistributors = [];
-  Set<String> _deletedDistributorIds = {};
+  final Set<String> _deletedDistributorIds = {};
   bool _hasChanges = false;
   bool _isLoading = false;
 

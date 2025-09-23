@@ -5,8 +5,10 @@ import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 
 import '../models/job.dart';
 import '../providers/schedule_provider.dart';
+import '../providers/scale_provider.dart';
 import 'job_card.dart';
 import 'month_navigation_widget.dart';
+import 'job_drop_confirmation_dialog.dart';
 
 class ScheduleGrid extends StatefulWidget {
   const ScheduleGrid({super.key});
@@ -56,9 +58,17 @@ class _ScheduleGridState extends State<ScheduleGrid> {
 
   // Get the start of the current week (Friday) based on selected month
   DateTime _getCurrentWeekStart(DateTime baseDate) {
-    final daysUntilFriday = (DateTime.friday - baseDate.weekday + 7) % 7;
+    // Calculate days from Friday
+    // If today is Friday (5), daysSinceFriday = 0
+    // If today is Saturday (6), daysSinceFriday = 1
+    // If today is Sunday (7), daysSinceFriday = 2
+    // If today is Monday (1), daysSinceFriday = 3
+    // If today is Tuesday (2), daysSinceFriday = 4
+    // If today is Wednesday (3), daysSinceFriday = 5
+    // If today is Thursday (4), daysSinceFriday = 6
+    final daysSinceFriday = (baseDate.weekday - DateTime.friday + 7) % 7;
     return DateTime(
-        baseDate.year, baseDate.month, baseDate.day + daysUntilFriday);
+        baseDate.year, baseDate.month, baseDate.day - daysSinceFriday);
   }
 
   // Get week number and year
@@ -170,12 +180,11 @@ class _ScheduleGridState extends State<ScheduleGrid> {
 
   static const double cellWidth = 200.0;
   static const double headerHeight = 40.0;
-  static const double rowHeight = 90.0; // Adjusted to match card height
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ScheduleProvider>(
-      builder: (context, scheduleProvider, child) {
+    return Consumer2<ScheduleProvider, ScaleProvider>(
+      builder: (context, scheduleProvider, scaleProvider, child) {
         // Check if month changed and reset offsets
         if (_currentMonthDisplay != scheduleProvider.currentMonthDisplay) {
           _currentMonthDisplay = scheduleProvider.currentMonthDisplay;
@@ -188,6 +197,8 @@ class _ScheduleGridState extends State<ScheduleGrid> {
         final dates = _getDates(currentMonth);
         final weekStarts = _getWeekStarts(currentMonth);
         final distributors = scheduleProvider.distributors;
+
+        final double rowHeight = 92.0 * scaleProvider.scale;
 
         return Column(
           children: [
@@ -224,9 +235,11 @@ class _ScheduleGridState extends State<ScheduleGrid> {
               child: Row(
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.arrow_left),
+                    icon: Icon(Icons.arrow_left,
+                        size: scaleProvider.mediumIconSize),
                     onPressed: () => _previousWeeks(scheduleProvider),
                     padding: EdgeInsets.zero,
+                    tooltip: 'Previous weeks',
                   ),
                   Expanded(
                     child: Row(
@@ -235,25 +248,32 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                         final weekStart = weekStarts[index];
                         final isSelected =
                             index == 2 + _selectedWeekOffset - _viewOffset;
-                        return TextButton(
-                          onPressed: () => _selectWeek(index, scheduleProvider),
-                          style: TextButton.styleFrom(
-                            backgroundColor: isSelected
-                                ? Theme.of(
-                                    context,
-                                  ).primaryColor.withOpacity(0.1)
-                                : null,
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                        return Tooltip(
+                          message: 'Select week of ${_getWeekLabel(weekStart)}',
+                          child: TextButton(
+                            onPressed: () =>
+                                _selectWeek(index, scheduleProvider),
+                            style: TextButton.styleFrom(
+                              backgroundColor: isSelected
+                                  ? Theme.of(
+                                      context,
+                                    ).primaryColor.withOpacity(0.1)
+                                  : null,
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 12),
+                            ),
+                            child: Text(_getWeekLabel(weekStart)),
                           ),
-                          child: Text(_getWeekLabel(weekStart)),
                         );
                       }),
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.arrow_right),
+                    icon: Icon(Icons.arrow_right,
+                        size: scaleProvider.mediumIconSize),
                     onPressed: () => _nextWeeks(scheduleProvider),
                     padding: EdgeInsets.zero,
+                    tooltip: 'Next weeks',
                   ),
                 ],
               ),
@@ -329,7 +349,9 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                           return TableViewCell(
                             child: Card(
                               child: IconButton(
-                                icon: const Icon(Icons.person_add),
+                                icon: Icon(Icons.person_add,
+                                    size: scaleProvider.mediumIconSize),
+                                tooltip: 'Add new distributor',
                                 onPressed: () {
                                   // Show dialog to add new distributor
                                   showDialog(
@@ -347,23 +369,31 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                           autofocus: true,
                                         ),
                                         actions: [
-                                          TextButton(
-                                            onPressed: () {
-                                              Navigator.of(context).pop();
-                                            },
-                                            child: const Text('Cancel'),
-                                          ),
-                                          TextButton(
-                                            onPressed: () {
-                                              if (nameController
-                                                  .text.isNotEmpty) {
-                                                scheduleProvider.addDistributor(
-                                                  nameController.text,
-                                                );
+                                          Tooltip(
+                                            message:
+                                                'Cancel adding distributor',
+                                            child: TextButton(
+                                              onPressed: () {
                                                 Navigator.of(context).pop();
-                                              }
-                                            },
-                                            child: const Text('Add'),
+                                              },
+                                              child: const Text('Cancel'),
+                                            ),
+                                          ),
+                                          Tooltip(
+                                            message: 'Add new distributor',
+                                            child: TextButton(
+                                              onPressed: () {
+                                                if (nameController
+                                                    .text.isNotEmpty) {
+                                                  scheduleProvider
+                                                      .addDistributor(
+                                                    nameController.text,
+                                                  );
+                                                  Navigator.of(context).pop();
+                                                }
+                                              },
+                                              child: const Text('Add'),
+                                            ),
                                           ),
                                         ],
                                       );
@@ -391,11 +421,13 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                     children: [
                                       if (isFirstColumn)
                                         IconButton(
-                                          icon: const Icon(Icons.arrow_left),
+                                          icon: Icon(Icons.arrow_left,
+                                              size:
+                                                  scaleProvider.smallIconSize),
                                           onPressed: _previousDays,
                                           padding: EdgeInsets.zero,
                                           constraints: const BoxConstraints(),
-                                          iconSize: 16,
+                                          tooltip: 'Previous days',
                                         ),
                                       Expanded(
                                         child: Center(
@@ -405,7 +437,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                               dateText,
                                               style: Theme.of(
                                                 context,
-                                              ).textTheme.titleMedium,
+                                              ).textTheme.titleSmall,
                                               textAlign: TextAlign.center,
                                               maxLines: 2,
                                             ),
@@ -414,11 +446,13 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                       ),
                                       if (isLastColumn)
                                         IconButton(
-                                          icon: const Icon(Icons.arrow_right),
+                                          icon: Icon(Icons.arrow_right,
+                                              size:
+                                                  scaleProvider.smallIconSize),
                                           onPressed: _nextDays,
                                           padding: EdgeInsets.zero,
                                           constraints: const BoxConstraints(),
-                                          iconSize: 16,
+                                          tooltip: 'Next days',
                                         ),
                                     ],
                                   );
@@ -450,7 +484,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                         distributor.name,
                                         style: Theme.of(
                                           context,
-                                        ).textTheme.titleMedium,
+                                        ).textTheme.titleSmall,
                                         overflow: TextOverflow.ellipsis,
                                       ),
                                     ),
@@ -468,7 +502,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
 
                           return TableViewCell(
                             child: DragTarget<Job>(
-                              onAcceptWithDetails: (jobDetails) {
+                              onAcceptWithDetails: (jobDetails) async {
                                 // Get the dragged job
                                 final draggedJob = jobDetails.data;
 
@@ -476,22 +510,75 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                 if (jobs.isNotEmpty) {
                                   final targetJob = jobs.first;
 
-                                  // Swap the jobs by updating both
-                                  scheduleProvider.updateJob(
-                                    draggedJob.copyWith(
-                                      distributorId: distributor.id,
-                                      date: date,
+                                  // Show confirmation dialog
+                                  final action = await showDialog<DropAction>(
+                                    context: context,
+                                    builder: (context) =>
+                                        JobDropConfirmationDialog(
+                                      draggedJob: draggedJob,
+                                      targetJob: targetJob,
+                                      distributorName: distributor.name,
+                                      targetDate: date,
                                     ),
                                   );
 
-                                  scheduleProvider.updateJob(
-                                    targetJob.copyWith(
-                                      distributorId: draggedJob.distributorId,
-                                      date: draggedJob.date,
-                                    ),
-                                  );
+                                  if (action == null) return; // User cancelled
+
+                                  if (action == DropAction.swap) {
+                                    // Swap the jobs by updating both
+                                    scheduleProvider.updateJob(
+                                      draggedJob.copyWith(
+                                        distributorId: distributor.id,
+                                        date: date,
+                                      ),
+                                    );
+
+                                    scheduleProvider.updateJob(
+                                      targetJob.copyWith(
+                                        distributorId: draggedJob.distributorId,
+                                        date: draggedJob.date,
+                                      ),
+                                    );
+                                  } else if (action ==
+                                      DropAction.addToExisting) {
+                                    // Combine the jobs - merge clients and working areas
+                                    final combinedClients = <String>{
+                                      ...targetJob.clients,
+                                      ...draggedJob.clients,
+                                    }.toList(); // Remove duplicates
+
+                                    final combinedWorkingAreas = <String>{
+                                      ...targetJob.workingAreas,
+                                      ...draggedJob.workingAreas,
+                                    }.toList(); // Remove duplicates
+
+                                    // Update the target job with combined data
+                                    scheduleProvider.updateJob(
+                                      targetJob.copyWith(
+                                        clients: combinedClients,
+                                        workingAreas: combinedWorkingAreas,
+                                      ),
+                                    );
+
+                                    // Delete the dragged job since we merged it
+                                    scheduleProvider.deleteJob(draggedJob.id);
+                                  }
                                 } else {
-                                  // If target cell is empty, just move the dragged job
+                                  // If target cell is empty, show simple confirmation
+                                  // final action = await showDialog<DropAction>(
+                                  //   context: context,
+                                  //   builder: (context) =>
+                                  //       JobDropConfirmationDialog(
+                                  //     draggedJob: draggedJob,
+                                  //     targetJob: null,
+                                  //     distributorName: distributor.name,
+                                  //     targetDate: date,
+                                  //   ),
+                                  // );
+
+                                  // if (action == null) return; // User cancelled
+
+                                  // Just move the dragged job
                                   scheduleProvider.updateJob(
                                     draggedJob.copyWith(
                                       distributorId: distributor.id,
@@ -511,15 +598,17 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                   child: jobs.isEmpty
                                       ? Center(
                                           child: IconButton(
-                                            icon: const Icon(Icons.add),
+                                            icon: Icon(Icons.add,
+                                                size: scaleProvider
+                                                    .mediumIconSize),
+                                            tooltip: 'Add new job',
                                             onPressed: () {
                                               final newJob = Job(
                                                 id: '', // Will be set by Firestore
-                                                client: '',
+                                                clients: [],
                                                 workAreaId:
                                                     '', // Empty ID to be selected later
-                                                workingArea:
-                                                    '', // Empty name to be selected later
+                                                workingAreas: [], // Empty names to be selected later
                                                 distributorId: distributor.id,
                                                 date: date,
                                                 status: JobStatus.scheduled,

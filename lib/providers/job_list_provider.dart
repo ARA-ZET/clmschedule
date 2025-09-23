@@ -7,12 +7,13 @@ class JobListProvider extends ChangeNotifier {
   final JobListService _jobListService;
   List<JobListItem> _jobListItems = [];
   bool _isLoading = false;
+  bool _isInitialized = false;
   String? _error;
   String _searchQuery = '';
   Set<JobListStatus> _statusFilters = {};
   DateTime _currentMonth = DateTime.now();
 
-  // Subscription for job list items stream
+  // Subscription for job list items stream (current month only)
   StreamSubscription<List<JobListItem>>? _jobListSubscription;
 
   // Sorting functionality
@@ -25,13 +26,20 @@ class JobListProvider extends ChangeNotifier {
   final Map<String, DateTime> _updateTimestamps = {};
   static const Duration _debounceDelay = Duration(seconds: 5);
 
+  // Lazy loading state
+  bool _hasInitialLoad = false;
+
   JobListProvider(this._jobListService) {
-    _loadJobListItems();
+    // Initialize with postFrameCallback to avoid blocking UI
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initializeCurrentMonthData();
+    });
   }
 
   // Getters
   List<JobListItem> get jobListItems => _filteredJobListItems();
   bool get isLoading => _isLoading;
+  bool get isInitialized => _isInitialized;
   String? get error => _error;
   String get searchQuery => _searchQuery;
   Set<JobListStatus> get statusFilters => _statusFilters;
@@ -109,31 +117,51 @@ class JobListProvider extends ChangeNotifier {
     return filtered;
   }
 
-  // Load job list items for current month
-  void _loadJobListItems() {
+  // Initialize current month data with lazy loading
+  Future<void> _initializeCurrentMonthData() async {
+    if (_hasInitialLoad) return;
+
     _isLoading = true;
-    _error = null;
     notifyListeners();
+
+    try {
+      // Set up snapshot listener for current month only
+      await _setupCurrentMonthListener();
+      _hasInitialLoad = true;
+      _isInitialized = true;
+    } catch (error) {
+      _error = 'Failed to initialize data: $error';
+      print('JobListProvider: Initialization error: $error');
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  // Set up real-time listener for current month data only
+  Future<void> _setupCurrentMonthListener() async {
+    // Cancel existing subscription
+    _jobListSubscription?.cancel();
 
     // Debug logging
     print(
-        'JobListProvider: Loading data for month: ${_jobListService.getMonthlyDocumentId(_currentMonth)}');
-    print('JobListProvider: Current month date: $_currentMonth');
-
-    // Cancel existing subscription
-    _jobListSubscription?.cancel();
+        'JobListProvider: Setting up listener for month: ${_jobListService.getMonthlyDocumentId(_currentMonth)}');
 
     _jobListSubscription =
         _jobListService.getJobListItems(_currentMonth).listen(
       (jobListItems) {
-        print('JobListProvider: Loaded ${jobListItems.length} job list items');
+        print(
+            'JobListProvider: Received ${jobListItems.length} job list items via snapshot');
         _jobListItems = jobListItems;
         _isLoading = false;
         _error = null;
         notifyListeners();
+
+        // Pre-load adjacent months in background after successful load
+        _preloadAdjacentMonths();
       },
       onError: (error) {
-        print('JobListProvider: Error loading job list items: $error');
+        print('JobListProvider: Snapshot error: $error');
         _error = error.toString();
         _isLoading = false;
         notifyListeners();
@@ -141,37 +169,58 @@ class JobListProvider extends ChangeNotifier {
     );
   }
 
-  // Change current month
-  void setCurrentMonth(DateTime month) {
-    if (_currentMonth != month) {
-      _currentMonth = month;
-      _loadJobListItems();
+  // Change current month (optimized)
+  Future<void> setCurrentMonth(DateTime month) async {
+    if (_currentMonth.year == month.year &&
+        _currentMonth.month == month.month) {
+      return; // No change needed
+    }
+
+    final oldMonth = _currentMonth;
+    _currentMonth = month;
+
+    // Clear current data and show loading state
+    _isLoading = true;
+    notifyListeners();
+
+    try {
+      // Set up listener for new month
+      await _setupCurrentMonthListener();
+      print('JobListProvider: Successfully changed from $oldMonth to $month');
+    } catch (error) {
+      // Revert on error
+      _currentMonth = oldMonth;
+      _error =
+          'Failed to load data for ${_jobListService.getMonthlyDocumentId(month)}: $error';
+      print('JobListProvider: Error changing month: $error');
+    } finally {
+      _isLoading = false;
       notifyListeners();
     }
   }
 
-  // Go to next month
-  void goToNextMonth() {
+  // Go to next month (optimized)
+  Future<void> goToNextMonth() async {
     final nextMonth = DateTime(_currentMonth.year, _currentMonth.month + 1);
-    setCurrentMonth(nextMonth);
+    await setCurrentMonth(nextMonth);
   }
 
-  // Go to previous month
-  void goToPreviousMonth() {
+  // Go to previous month (optimized)
+  Future<void> goToPreviousMonth() async {
     final previousMonth = DateTime(_currentMonth.year, _currentMonth.month - 1);
-    setCurrentMonth(previousMonth);
+    await setCurrentMonth(previousMonth);
   }
 
-  // Go to current month
-  void goToCurrentMonth() {
-    setCurrentMonth(DateTime.now());
+  // Go to current month (optimized)
+  Future<void> goToCurrentMonth() async {
+    await setCurrentMonth(DateTime.now());
   }
 
-  // Go to specific month by month string (e.g., "Sep 2025")
-  void goToMonth(String monthString) {
+  // Go to specific month by month string (e.g., "Sep 2025") (optimized)
+  Future<void> goToMonth(String monthString) async {
     final DateTime? month = _parseMonthString(monthString);
     if (month != null) {
-      setCurrentMonth(month);
+      await setCurrentMonth(month);
     }
   }
 
@@ -204,9 +253,33 @@ class JobListProvider extends ChangeNotifier {
     return null;
   }
 
-  // Get available months
+  // Get available months (cached for better performance)
   Future<List<String>> getAvailableMonths() {
     return _jobListService.getAvailableJobListMonths();
+  }
+
+  // Pre-load adjacent months in background (lazy loading optimization)
+  Future<void> _preloadAdjacentMonths() async {
+    try {
+      final previousMonth =
+          DateTime(_currentMonth.year, _currentMonth.month - 1);
+      final nextMonth = DateTime(_currentMonth.year, _currentMonth.month + 1);
+
+      // Pre-load previous and next month data in background without blocking UI
+      _jobListService.getJobListItems(previousMonth).take(1).listen((_) {
+        print('JobListProvider: Pre-loaded previous month data');
+      }, onError: (error) {
+        print('JobListProvider: Error pre-loading previous month: $error');
+      });
+
+      _jobListService.getJobListItems(nextMonth).take(1).listen((_) {
+        print('JobListProvider: Pre-loaded next month data');
+      }, onError: (error) {
+        print('JobListProvider: Error pre-loading next month: $error');
+      });
+    } catch (error) {
+      print('JobListProvider: Error in pre-loading adjacent months: $error');
+    }
   }
 
   // Debounced update system - store locally first, batch update to database after delay

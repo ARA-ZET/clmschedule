@@ -82,7 +82,7 @@ class _EditableTextFieldState extends State<EditableTextField> {
               ? (widget.hintText ?? '')
               : widget.initialValue,
           style: TextStyle(
-            fontSize: 14,
+            fontSize: 13,
             color: widget.initialValue.isEmpty ? Colors.white70 : Colors.white,
             fontWeight: FontWeight.bold,
           ),

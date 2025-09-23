@@ -6,9 +6,9 @@ enum JobStatus { standby, scheduled, done, urgent }
 
 class Job {
   final String id;
-  final String client;
+  final List<String> clients;
   final String workAreaId; // Reference to the original work area
-  final String workingArea; // Name of the work area for display
+  final List<String> workingAreas; // Names of the work areas for display
   final WorkArea? customWorkArea; // Optional custom work area if edited
   final String distributorId;
   final DateTime date;
@@ -16,9 +16,9 @@ class Job {
 
   Job({
     required this.id,
-    required this.client,
+    required this.clients,
     required this.workAreaId,
-    required this.workingArea,
+    required this.workingAreas,
     this.customWorkArea,
     required this.distributorId,
     required this.date,
@@ -29,9 +29,15 @@ class Job {
   factory Job.fromMap(String id, Map<String, dynamic> data) {
     return Job(
       id: id,
-      client: data['client'] as String? ?? '',
+      clients: (data['clients'] as List<dynamic>?)?.cast<String>() ??
+          (data['client'] != null
+              ? [data['client'] as String]
+              : ['']), // Backwards compatibility
       workAreaId: data['workAreaId'] as String? ?? '',
-      workingArea: data['workingArea'] as String? ?? '',
+      workingAreas: (data['workingAreas'] as List<dynamic>?)?.cast<String>() ??
+          (data['workingArea'] != null
+              ? [data['workingArea'] as String]
+              : ['']), // Backwards compatibility
       customWorkArea: data['customWorkArea'] != null
           ? WorkArea.fromMap(data['customWorkArea'] as Map<String, dynamic>)
           : null,
@@ -49,12 +55,15 @@ class Job {
   // Convert to Firestore
   Map<String, dynamic> toMap() {
     final map = {
-      'client': client,
+      'clients': clients,
       'workAreaId': workAreaId,
-      'workingArea': workingArea,
+      'workingAreas': workingAreas,
       'distributorId': distributorId,
       'date': Timestamp.fromDate(date),
       'status': status.toString().split('.').last,
+      // Keep backwards compatibility
+      'client': clients.isNotEmpty ? clients.first : '',
+      'workingArea': workingAreas.isNotEmpty ? workingAreas.first : '',
     };
 
     if (customWorkArea != null) {
@@ -66,9 +75,9 @@ class Job {
 
   // Create a copy of job with some fields updated
   Job copyWith({
-    String? client,
+    List<String>? clients,
     String? workAreaId,
-    String? workingArea,
+    List<String>? workingAreas,
     WorkArea? customWorkArea,
     String? distributorId,
     DateTime? date,
@@ -76,9 +85,9 @@ class Job {
   }) {
     return Job(
       id: id,
-      client: client ?? this.client,
+      clients: clients ?? this.clients,
       workAreaId: workAreaId ?? this.workAreaId,
-      workingArea: workingArea ?? this.workingArea,
+      workingAreas: workingAreas ?? this.workingAreas,
       customWorkArea: customWorkArea ?? this.customWorkArea,
       distributorId: distributorId ?? this.distributorId,
       date: date ?? this.date,
@@ -102,8 +111,19 @@ class Job {
 
   @override
   String toString() {
-    return 'Job(id: $id, client: $client, workAreaId: $workAreaId, '
+    return 'Job(id: $id, clients: $clients, workAreaId: $workAreaId, '
         'hasCustomArea: ${customWorkArea != null}, '
         'distributorId: $distributorId, date: $date, status: $status)';
   }
+
+  // Helper methods for backwards compatibility and ease of use
+  String get primaryClient => clients.isNotEmpty ? clients.first : '';
+  String get primaryWorkingArea =>
+      workingAreas.isNotEmpty ? workingAreas.first : '';
+
+  // Helper method to get display text for clients
+  String get clientsDisplay => clients.join(', ');
+
+  // Helper method to get display text for working areas
+  String get workingAreasDisplay => workingAreas.join(', ');
 }

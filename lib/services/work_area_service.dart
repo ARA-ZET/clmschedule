@@ -57,8 +57,7 @@ class WorkAreaService {
       for (final placemark in placemarks) {
         try {
           // Try to extract name from either 'n' element or 'name' element
-          var nameElement =
-              placemark.findElements('n').firstOrNull ??
+          var nameElement = placemark.findElements('n').firstOrNull ??
               placemark.findElements('name').firstOrNull;
           if (nameElement == null) {
             print('Skipping placemark: no name element found');
@@ -79,9 +78,8 @@ class WorkAreaService {
           String? coordinates;
 
           // Check for MultiGeometry first
-          final multiGeometry = placemark
-              .findElements('MultiGeometry')
-              .firstOrNull;
+          final multiGeometry =
+              placemark.findElements('MultiGeometry').firstOrNull;
           if (multiGeometry != null) {
             // Use the first polygon in MultiGeometry
             final polygon = multiGeometry.findElements('Polygon').firstOrNull;
@@ -200,9 +198,8 @@ class WorkAreaService {
         return null;
       }
 
-      final coordinatesElement = linearRing
-          .findElements('coordinates')
-          .firstOrNull;
+      final coordinatesElement =
+          linearRing.findElements('coordinates').firstOrNull;
       if (coordinatesElement == null) {
         print('No coordinates element found');
         return null;
@@ -246,5 +243,28 @@ class WorkAreaService {
   // Delete a work area
   Future<void> deleteWorkArea(String id) async {
     await _firestore.collection(collectionName).doc(id).delete();
+  }
+
+  // Create a new work area from polygon points
+  Future<WorkArea> createWorkArea({
+    required String name,
+    required String description,
+    required List<LatLng> polygonPoints,
+  }) async {
+    final workArea = WorkArea(
+      id: '', // Will be set by Firestore
+      name: name,
+      description: description,
+      polygonPoints: polygonPoints,
+      kmlFileName: '', // User-created areas don't have KML files
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+
+    // Save to Firestore
+    final docRef =
+        await _firestore.collection(collectionName).add(workArea.toFirestore());
+
+    return workArea.copyWith(id: docRef.id);
   }
 }
