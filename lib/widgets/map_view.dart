@@ -33,7 +33,8 @@ class _MapViewState extends State<MapView> {
   bool _isLoading = true;
   List<WorkArea> _workAreas = [];
   WorkArea? _selectedWorkArea;
-  List<WorkArea> _editableWorkAreas = []; // Collection of work areas for this job
+  List<WorkArea> _editableWorkAreas =
+      []; // Collection of work areas for this job
   List<LatLng> _editingPoints = [];
   bool _isEditing = false;
   bool _hasUnsavedChanges = false;
@@ -291,7 +292,7 @@ class _MapViewState extends State<MapView> {
     for (int i = 0; i < _editableWorkAreas.length; i++) {
       final area = _editableWorkAreas[i];
       final isCurrentlyEditing = _isEditing && area == _selectedWorkArea;
-      
+
       _polygons.add(
         Polygon(
           polygonId: PolygonId(area.id.isNotEmpty ? area.id : 'area_$i'),
@@ -499,18 +500,19 @@ class _MapViewState extends State<MapView> {
                         createdAt: now,
                         updatedAt: now,
                       );
-                      
+
                       setState(() {
                         _editableWorkAreas.add(newWorkArea);
                         _isCreatingNewPolygon = false;
                         _newPolygonPoints.clear();
                         _updateMapView();
                       });
-                      
+
                       // Show success message
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
-                          content: Text('New area added! You can create more areas or tap "Done" when finished.'),
+                          content: Text(
+                              'New area added! You can create more areas or tap "Done" when finished.'),
                           backgroundColor: Colors.green,
                           duration: Duration(seconds: 3),
                         ),
@@ -519,15 +521,17 @@ class _MapViewState extends State<MapView> {
                   ),
 
                 // Done button (when there are multiple areas to save)
-                if (!_isEditing && !_isCreatingNewPolygon && _editableWorkAreas.length > 1)
+                if (!_isEditing &&
+                    !_isCreatingNewPolygon &&
+                    _editableWorkAreas.length > 1)
                   IconButton(
                     icon: const Icon(Icons.done),
                     tooltip: 'Finish editing',
                     onPressed: () {
                       // Return all polygon points combined (for now, return the primary area's points)
                       // This might need adjustment based on how the parent handles multiple polygons
-                      final allPoints = _editableWorkAreas.isNotEmpty 
-                          ? _editableWorkAreas.first.polygonPoints 
+                      final allPoints = _editableWorkAreas.isNotEmpty
+                          ? _editableWorkAreas.first.polygonPoints
                           : <LatLng>[];
                       Navigator.of(context).pop(allPoints);
                     },
