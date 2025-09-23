@@ -5,14 +5,17 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:provider/provider.dart';
 import 'providers/schedule_provider.dart';
 import 'providers/job_list_provider.dart';
+import 'providers/job_status_provider.dart';
+import 'providers/job_list_status_provider.dart';
 import 'providers/scale_provider.dart';
 import 'widgets/schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
 import 'widgets/distributor_management_dialog.dart';
 import 'widgets/lazy_loading_indicator.dart';
 import 'widgets/scale_settings_dialog.dart';
+import 'widgets/job_status_management_dialog.dart';
+import 'widgets/job_list_status_management_dialog.dart';
 import 'utils/seed_data.dart';
-import 'utils/seed_job_list_data.dart';
 import 'services/work_area_service.dart';
 import 'services/job_list_service.dart';
 import 'firebase_options.dart';
@@ -38,6 +41,12 @@ void main() async {
   runApp(MultiProvider(providers: [
     ChangeNotifierProvider(create: (context) => ScheduleProvider()),
     ChangeNotifierProvider(create: (context) => ScaleProvider()),
+    ChangeNotifierProvider(
+      create: (context) => JobStatusProvider(),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => JobListStatusProvider(),
+    ),
     Provider(
       create: (context) => WorkAreaService(FirebaseFirestore.instance),
     ),
@@ -225,15 +234,53 @@ class _DashboardScreenState extends State<DashboardScreen>
             },
             tooltip: 'Import KML data',
           ),
-          IconButton(
+          PopupMenuButton<String>(
             icon: const Icon(Icons.settings),
-            onPressed: () {
-              showDialog(
-                context: context,
-                builder: (context) => const ScaleSettingsDialog(),
-              );
+            tooltip: 'Settings',
+            onSelected: (String value) {
+              if (value == 'scale') {
+                showDialog(
+                  context: context,
+                  builder: (context) => const ScaleSettingsDialog(),
+                );
+              } else if (value == 'status') {
+                showDialog(
+                  context: context,
+                  builder: (context) => const JobStatusManagementDialog(),
+                );
+              } else if (value == 'job_list_status') {
+                showDialog(
+                  context: context,
+                  builder: (context) => const JobListStatusManagementDialog(),
+                );
+              }
             },
-            tooltip: 'Interface Scale Settings',
+            itemBuilder: (BuildContext context) => [
+              const PopupMenuItem<String>(
+                value: 'scale',
+                child: ListTile(
+                  leading: Icon(Icons.zoom_in),
+                  title: Text('Interface Scale'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'status',
+                child: ListTile(
+                  leading: Icon(Icons.label),
+                  title: Text('Job Statuses'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'job_list_status',
+                child: ListTile(
+                  leading: Icon(Icons.list_alt),
+                  title: Text('Job List Statuses'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+            ],
           ),
         ],
       ),

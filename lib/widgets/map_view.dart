@@ -5,11 +5,14 @@ import 'dart:math' show min, max;
 import 'dart:ui' as ui;
 import '../services/work_area_service.dart';
 import '../models/work_area.dart';
+import '../models/custom_polygon.dart';
 
 class MapView extends StatefulWidget {
   final String? jobId;
   final String? workAreaId;
   final WorkArea? customWorkArea;
+  final List<CustomPolygon>?
+      customPolygons; // New field for direct polygon support
   final String? title;
   final bool isEditable;
 
@@ -18,6 +21,7 @@ class MapView extends StatefulWidget {
     this.jobId,
     this.workAreaId,
     this.customWorkArea,
+    this.customPolygons,
     this.title,
     this.isEditable = false,
   });
@@ -35,6 +39,12 @@ class _MapViewState extends State<MapView> {
   WorkArea? _selectedWorkArea;
   List<WorkArea> _editableWorkAreas =
       []; // Collection of work areas for this job
+
+  // New fields for CustomPolygon support
+  List<CustomPolygon> _customPolygons = [];
+  CustomPolygon? _selectedCustomPolygon;
+  int? _selectedPolygonIndex;
+
   List<LatLng> _editingPoints = [];
   bool _isEditing = false;
   bool _hasUnsavedChanges = false;
@@ -125,7 +135,8 @@ class _MapViewState extends State<MapView> {
             setState(() {
               _editingPoints[i] = newPosition;
               _hasUnsavedChanges = true;
-              _updateMapView();
+              // _updateMapView();
+              // _updateMapCenter(); // Auto-zoom to include moved point
             });
           },
         ),
@@ -159,7 +170,8 @@ class _MapViewState extends State<MapView> {
                   _editingPoints[_draggingMidpointIndex!] = newPosition;
                 }
                 _draggingMidpointIndex = null;
-                _updateMapView();
+                // _updateMapView();
+                // _updateMapCenter(); // Auto-zoom to include new midpoint
               });
             },
           ),
@@ -171,12 +183,17 @@ class _MapViewState extends State<MapView> {
   }
 
   void _onMapTap(LatLng tappedPoint) {
-    if (!_isCreatingNewPolygon) return;
+    if (_isCreatingNewPolygon) {
+      // Handle new polygon creation
+      setState(() {
+        _newPolygonPoints.add(tappedPoint);
+        _updateMapView();
+        _updateMapCenter(); // Auto-zoom to include new point
+      });
+      return;
+    }
 
-    setState(() {
-      _newPolygonPoints.add(tappedPoint);
-      _updateMapView();
-    });
+    // Note: Polygon selection is now handled by polygon.onTap directly
   }
 
   Set<Marker> _buildNewPolygonMarkers() {
@@ -193,7 +210,8 @@ class _MapViewState extends State<MapView> {
           onDragEnd: (newPosition) {
             setState(() {
               _newPolygonPoints[i] = newPosition;
-              _updateMapView();
+              // _updateMapView();
+              // _updateMapCenter(); // Auto-zoom to include moved point
             });
           },
         ),
@@ -239,35 +257,51 @@ class _MapViewState extends State<MapView> {
 
   Future<void> _initializeMap() async {
     try {
-      // Load all work areas first
-      final workAreaService = context.read<WorkAreaService>();
-      _workAreas = await workAreaService.getWorkAreas().first;
+      // Check if we're using the new CustomPolygon system
+      if (widget.customPolygons != null && widget.customPolygons!.isNotEmpty) {
+        // New system: Initialize with CustomPolygons
+        _customPolygons = List.from(widget.customPolygons!);
+        if (_customPolygons.isNotEmpty) {
+          _selectedCustomPolygon = _customPolygons.first;
+          _selectedPolygonIndex = 0;
 
-      // Initialize the editable work areas collection for this job
-      _editableWorkAreas.clear();
-
-      // Find selected work area and add it to the editable collection
-      if (widget.workAreaId != null && widget.workAreaId!.isNotEmpty) {
-        try {
-          _selectedWorkArea = _workAreas.firstWhere(
-            (area) => area.id == widget.workAreaId,
-          );
-          _editableWorkAreas.add(_selectedWorkArea!);
-        } catch (e) {
-          if (widget.customWorkArea != null) {
-            _selectedWorkArea = widget.customWorkArea;
-            _editableWorkAreas.add(_selectedWorkArea!);
+          // Initialize editing points if editing is enabled
+          if (widget.isEditable) {
+            _editingPoints = List.from(_selectedCustomPolygon!.points);
+            _isEditing = true;
           }
         }
-      } else if (widget.customWorkArea != null) {
-        _selectedWorkArea = widget.customWorkArea;
-        _editableWorkAreas.add(_selectedWorkArea!);
-      }
+      } else {
+        // Legacy system: Load WorkAreas from service
+        final workAreaService = context.read<WorkAreaService>();
+        _workAreas = await workAreaService.getWorkAreas().first;
 
-      // Initialize editing points if editing is enabled and we have a selected area
-      if (widget.isEditable && _selectedWorkArea != null) {
-        _editingPoints = List.from(_selectedWorkArea!.polygonPoints);
-        _isEditing = true;
+        // Initialize the editable work areas collection for this job
+        _editableWorkAreas.clear();
+
+        // Find selected work area and add it to the editable collection
+        if (widget.workAreaId != null && widget.workAreaId!.isNotEmpty) {
+          try {
+            _selectedWorkArea = _workAreas.firstWhere(
+              (area) => area.id == widget.workAreaId,
+            );
+            _editableWorkAreas.add(_selectedWorkArea!);
+          } catch (e) {
+            if (widget.customWorkArea != null) {
+              _selectedWorkArea = widget.customWorkArea;
+              _editableWorkAreas.add(_selectedWorkArea!);
+            }
+          }
+        } else if (widget.customWorkArea != null) {
+          _selectedWorkArea = widget.customWorkArea;
+          _editableWorkAreas.add(_selectedWorkArea!);
+        }
+
+        // Initialize editing points if editing is enabled and we have a selected area
+        if (widget.isEditable && _selectedWorkArea != null) {
+          _editingPoints = List.from(_selectedWorkArea!.polygonPoints);
+          _isEditing = true;
+        }
       }
 
       _updateMapView();
@@ -285,23 +319,80 @@ class _MapViewState extends State<MapView> {
   void _updateMapView() {
     _polygons.clear();
 
-    // Don't show background work areas - only show the job-specific polygon
-    // This ensures only the current job's work area is visible
+    // Check if we're using the new CustomPolygon system
+    if (_customPolygons.isNotEmpty) {
+      // New system: Add CustomPolygons
+      for (int i = 0; i < _customPolygons.length; i++) {
+        final customPolygon = _customPolygons[i];
+        final isCurrentlyEditing = _isEditing && i == _selectedPolygonIndex;
+        final isSelected = i == _selectedPolygonIndex;
 
-    // Add all editable work areas for this job
-    for (int i = 0; i < _editableWorkAreas.length; i++) {
-      final area = _editableWorkAreas[i];
-      final isCurrentlyEditing = _isEditing && area == _selectedWorkArea;
+        _polygons.add(
+          Polygon(
+            polygonId: PolygonId('custom_polygon_$i'),
+            points: isCurrentlyEditing ? _editingPoints : customPolygon.points,
+            fillColor: isCurrentlyEditing
+                ? Colors.red.withOpacity(0.1)
+                : isSelected
+                    ? Colors.red.withOpacity(0.1)
+                    : customPolygon.color.withOpacity(0.2),
+            strokeColor: isCurrentlyEditing
+                ? Colors.red
+                : isSelected
+                    ? Colors.red
+                    : customPolygon.color,
+            strokeWidth: isCurrentlyEditing
+                ? 5
+                : isSelected
+                    ? 4
+                    : 2,
+            onTap: !_isEditing && !_isCreatingNewPolygon
+                ? () {
+                    setState(() {
+                      _selectedPolygonIndex = i;
+                      _selectedCustomPolygon = customPolygon;
+                      _updateMapView();
+                    });
+                  }
+                : null,
+          ),
+        );
+      }
+    } else {
+      // Legacy system: Add WorkAreas
+      for (int i = 0; i < _editableWorkAreas.length; i++) {
+        final area = _editableWorkAreas[i];
+        final isCurrentlyEditing = _isEditing && area == _selectedWorkArea;
+        final isSelected = area == _selectedWorkArea;
 
-      _polygons.add(
-        Polygon(
-          polygonId: PolygonId(area.id.isNotEmpty ? area.id : 'area_$i'),
-          points: isCurrentlyEditing ? _editingPoints : area.polygonPoints,
-          fillColor: Colors.red.withOpacity(0.0), // Transparent fill
-          strokeColor: isCurrentlyEditing ? Colors.red : Colors.orange,
-          strokeWidth: isCurrentlyEditing ? 5 : 3,
-        ),
-      );
+        _polygons.add(
+          Polygon(
+            polygonId: PolygonId(area.id.isNotEmpty ? area.id : 'area_$i'),
+            points: isCurrentlyEditing ? _editingPoints : area.polygonPoints,
+            fillColor: isSelected
+                ? Colors.red.withOpacity(0.1)
+                : Colors.orange.withOpacity(0.05),
+            strokeColor: isCurrentlyEditing
+                ? Colors.red
+                : isSelected
+                    ? Colors.red
+                    : Colors.orange,
+            strokeWidth: isCurrentlyEditing
+                ? 5
+                : isSelected
+                    ? 4
+                    : 2,
+            onTap: !_isEditing && !_isCreatingNewPolygon
+                ? () {
+                    setState(() {
+                      _selectedWorkArea = area;
+                      _updateMapView();
+                    });
+                  }
+                : null,
+          ),
+        );
+      }
     }
 
     // Add new polygon being created
@@ -324,12 +415,25 @@ class _MapViewState extends State<MapView> {
   void _updateMapCenter() {
     List<LatLng> points = [];
 
-    // Include all editable work areas in the center calculation
-    for (final area in _editableWorkAreas) {
-      if (area == _selectedWorkArea && _isEditing) {
-        points.addAll(_editingPoints);
-      } else {
-        points.addAll(area.polygonPoints);
+    // Check if we're using the new CustomPolygon system
+    if (_customPolygons.isNotEmpty) {
+      // New system: Include custom polygons in center calculation
+      for (int i = 0; i < _customPolygons.length; i++) {
+        final customPolygon = _customPolygons[i];
+        if (i == _selectedPolygonIndex && _isEditing) {
+          points.addAll(_editingPoints);
+        } else {
+          points.addAll(customPolygon.points);
+        }
+      }
+    } else {
+      // Legacy system: Include all editable work areas in the center calculation
+      for (final area in _editableWorkAreas) {
+        if (area == _selectedWorkArea && _isEditing) {
+          points.addAll(_editingPoints);
+        } else {
+          points.addAll(area.polygonPoints);
+        }
       }
     }
 
@@ -339,34 +443,50 @@ class _MapViewState extends State<MapView> {
     }
 
     if (points.isNotEmpty) {
-      double minLat = 90;
-      double maxLat = -90;
-      double minLng = 180;
-      double maxLng = -180;
+      if (points.length == 1) {
+        // Single point - just center on it with a reasonable zoom level
+        _center = points.first;
+        if (_controller != null && mounted) {
+          try {
+            _controller!.animateCamera(
+              CameraUpdate.newLatLngZoom(
+                  _center, 16.0), // Good zoom level for single point
+            );
+          } catch (e) {
+            print('Error animating camera to single point: $e');
+          }
+        }
+      } else {
+        // Multiple points - calculate bounds
+        double minLat = 90;
+        double maxLat = -90;
+        double minLng = 180;
+        double maxLng = -180;
 
-      for (final point in points) {
-        minLat = min(minLat, point.latitude);
-        maxLat = max(maxLat, point.latitude);
-        minLng = min(minLng, point.longitude);
-        maxLng = max(maxLng, point.longitude);
-      }
+        for (final point in points) {
+          minLat = min(minLat, point.latitude);
+          maxLat = max(maxLat, point.latitude);
+          minLng = min(minLng, point.longitude);
+          maxLng = max(maxLng, point.longitude);
+        }
 
-      _center = LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
+        _center = LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
 
-      // Only animate camera if controller is available and not disposed
-      if (_controller != null && mounted) {
-        try {
-          _controller!.animateCamera(
-            CameraUpdate.newLatLngBounds(
-              LatLngBounds(
-                southwest: LatLng(minLat, minLng),
-                northeast: LatLng(maxLat, maxLng),
+        // Only animate camera if controller is available and not disposed
+        if (_controller != null && mounted) {
+          try {
+            _controller!.animateCamera(
+              CameraUpdate.newLatLngBounds(
+                LatLngBounds(
+                  southwest: LatLng(minLat, minLng),
+                  northeast: LatLng(maxLat, maxLng),
+                ),
+                100, // Increased padding for better visualization
               ),
-              50, // padding
-            ),
-          );
-        } catch (e) {
-          print('Error animating camera: $e');
+            );
+          } catch (e) {
+            print('Error animating camera: $e');
+          }
         }
       }
     } else {
@@ -437,16 +557,23 @@ class _MapViewState extends State<MapView> {
                 // Edit existing area button (only when area is selected)
                 if (!_isEditing &&
                     !_isCreatingNewPolygon &&
-                    _selectedWorkArea != null)
+                    (_selectedWorkArea != null ||
+                        _selectedCustomPolygon != null))
                   IconButton(
                     icon: const Icon(Icons.edit),
                     tooltip: 'Edit area boundary',
                     onPressed: () {
                       setState(() {
                         _isEditing = true;
-                        _editingPoints = List.from(
-                          _selectedWorkArea!.polygonPoints,
-                        );
+                        if (_selectedCustomPolygon != null) {
+                          // New system: edit custom polygon
+                          _editingPoints =
+                              List.from(_selectedCustomPolygon!.points);
+                        } else if (_selectedWorkArea != null) {
+                          // Legacy system: edit work area
+                          _editingPoints =
+                              List.from(_selectedWorkArea!.polygonPoints);
+                        }
                         _hasUnsavedChanges = false;
                       });
                     },
@@ -552,7 +679,8 @@ class _MapViewState extends State<MapView> {
                 print('Error in onMapCreated: $e');
               }
             },
-            onTap: _isCreatingNewPolygon ? _onMapTap : null,
+            onTap:
+                _onMapTap, // Always enable tap for both polygon creation and selection
             cloudMapId: "89c628d2bb3002712797ce42",
             style: "",
             initialCameraPosition: CameraPosition(target: _center, zoom: 12),
@@ -627,6 +755,32 @@ class _MapViewState extends State<MapView> {
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+
+          // Instructions overlay for polygon selection
+          if (!_isCreatingNewPolygon &&
+              !_isEditing &&
+              _editableWorkAreas.length > 1)
+            Positioned(
+              top: 16,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.green.withOpacity(0.9),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  'Tap on any polygon to select it, then tap the Edit button to modify it.',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
                   textAlign: TextAlign.center,

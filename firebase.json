@@ -1,1 +1,52 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"clmschedule","appId":"1:346281153032:android:19e5702f1e0afae2d577bd","fileOutput":"android/app/google-services.json"}},"ios":{"default":{"projectId":"clmschedule","appId":"1:346281153032:ios:d4e537d49729edaad577bd","uploadDebugSymbols":false,"fileOutput":"ios/Runner/GoogleService-Info.plist"}},"macos":{"default":{"projectId":"clmschedule","appId":"1:346281153032:ios:d4e537d49729edaad577bd","uploadDebugSymbols":false,"fileOutput":"macos/Runner/GoogleService-Info.plist"}},"dart":{"lib/firebase_options.dart":{"projectId":"clmschedule","configurations":{"android":"1:346281153032:android:19e5702f1e0afae2d577bd","ios":"1:346281153032:ios:d4e537d49729edaad577bd","macos":"1:346281153032:ios:d4e537d49729edaad577bd","web":"1:346281153032:web:bad17071670be9b7d577bd","windows":"1:346281153032:web:a0dfccc4c61775bbd577bd"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "clmschedule",
+          "appId": "1:346281153032:android:19e5702f1e0afae2d577bd",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "ios": {
+        "default": {
+          "projectId": "clmschedule",
+          "appId": "1:346281153032:ios:d4e537d49729edaad577bd",
+          "uploadDebugSymbols": false,
+          "fileOutput": "ios/Runner/GoogleService-Info.plist"
+        }
+      },
+      "macos": {
+        "default": {
+          "projectId": "clmschedule",
+          "appId": "1:346281153032:ios:d4e537d49729edaad577bd",
+          "uploadDebugSymbols": false,
+          "fileOutput": "macos/Runner/GoogleService-Info.plist"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "clmschedule",
+          "configurations": {
+            "android": "1:346281153032:android:19e5702f1e0afae2d577bd",
+            "ios": "1:346281153032:ios:d4e537d49729edaad577bd",
+            "macos": "1:346281153032:ios:d4e537d49729edaad577bd",
+            "web": "1:346281153032:web:bad17071670be9b7d577bd",
+            "windows": "1:346281153032:web:a0dfccc4c61775bbd577bd"
+          }
+        }
+      }
+    }
+  },
+  "hosting": {
+    "source": ".",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "frameworksBackend": {
+      "region": "us-central1"
+    }
+  }
+}

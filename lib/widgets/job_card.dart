@@ -3,7 +3,9 @@ import 'package:provider/provider.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
-import '../services/work_area_service.dart';
+import '../models/custom_polygon.dart';
+import '../providers/job_status_provider.dart';
+import '../utils/work_area_converter.dart';
 import 'map_view.dart';
 import 'print_map_view.dart';
 import '../providers/schedule_provider.dart';
@@ -15,17 +17,10 @@ class JobCard extends StatelessWidget {
 
   const JobCard({super.key, required this.job});
 
-  Color _getStatusColor() {
-    switch (job.status) {
-      case JobStatus.standby:
-        return Colors.grey.shade700; // Darker grey
-      case JobStatus.scheduled:
-        return const Color.fromARGB(255, 188, 85, 0); // Deep orange
-      case JobStatus.done:
-        return Colors.green.shade700; // Forest green
-      case JobStatus.urgent:
-        return Colors.red.shade700; // Deep red
-    }
+  Color _getStatusColor(BuildContext context) {
+    final statusProvider = context.read<JobStatusProvider>();
+    final status = statusProvider.getStatusById(job.statusId);
+    return status?.color ?? Colors.grey.shade700; // Darker grey for better contrast
   }
 
   void _printMapLink(BuildContext context) {
@@ -58,7 +53,7 @@ class JobCard extends StatelessWidget {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to open print map: $e'),
-            backgroundColor: Colors.red,
+            backgroundColor: Colors.red.shade800, // Darker red for better contrast
           ),
         );
       }
@@ -71,7 +66,7 @@ class JobCard extends StatelessWidget {
       builder: (context, scaleProvider, child) {
         return Card(
           margin: const EdgeInsets.all(1),
-          color: _getStatusColor(),
+          color: _getStatusColor(context),
           child: Padding(
             padding: const EdgeInsets.all(3),
             child: Column(
@@ -126,26 +121,34 @@ class JobCard extends StatelessWidget {
                                     displayStringForOption: (WorkArea area) =>
                                         area.name,
                                     onSelected: (WorkArea area) {
-                                      if (area.id != job.workAreaId ||
-                                          area.name != job.primaryWorkingArea) {
-                                        // Replace first working area or add as new working area
-                                        final updatedAreas =
-                                            job.workingAreas.isEmpty
-                                                ? [area.name]
-                                                : <String>[
-                                                    area.name,
-                                                    ...job.workingAreas.skip(1)
-                                                  ];
-                                        context
-                                            .read<ScheduleProvider>()
-                                            .updateJob(
-                                              job.copyWith(
-                                                workAreaId: area.id,
-                                                workingAreas: updatedAreas,
-                                                customWorkArea: null,
-                                              ),
-                                            );
-                                      }
+                                      // Convert WorkArea to CustomPolygon and add to workMaps
+                                      final customPolygon = WorkAreaConverter
+                                          .workAreaToCustomPolygon(area);
+
+                                      // Update working areas list and workMaps
+                                      final updatedAreas =
+                                          job.workingAreas.isEmpty
+                                              ? [area.name]
+                                              : <String>[
+                                                  area.name,
+                                                  ...job.workingAreas.skip(1)
+                                                ];
+
+                                      // Update or add to workMaps
+                                      final updatedWorkMaps = <CustomPolygon>[
+                                        customPolygon,
+                                        ...job.workMaps.where(
+                                            (map) => map.name != area.name),
+                                      ];
+
+                                      context
+                                          .read<ScheduleProvider>()
+                                          .updateJob(
+                                            job.copyWith(
+                                              workingAreas: updatedAreas,
+                                              workMaps: updatedWorkMaps,
+                                            ),
+                                          );
                                     },
                                     optionsBuilder:
                                         (TextEditingValue textEditingValue) {
@@ -277,8 +280,7 @@ class JobCard extends StatelessWidget {
                                             Dialog.fullscreen(
                                           child: MapView(
                                             jobId: job.id,
-                                            workAreaId: job.workAreaId,
-                                            customWorkArea: job.customWorkArea,
+                                            customPolygons: job.workMaps,
                                             title: job.clientsDisplay,
                                             isEditable: true,
                                           ),
@@ -287,48 +289,44 @@ class JobCard extends StatelessWidget {
 
                                       if (result != null) {
                                         try {
-                                          // Check if we're updating an existing custom work area or creating a new one
-                                          if (job.customWorkArea != null) {
-                                            // Update existing custom work area
-                                            final updatedCustomWorkArea =
-                                                job.customWorkArea!.copyWith(
-                                              polygonPoints: result,
-                                            );
+                                          // Create new CustomPolygon with the edited points
+                                          final newCustomPolygon =
+                                              WorkAreaConverter
+                                                  .createCustomPolygonFromPoints(
+                                            result,
+                                            name: '${job.primaryClient} ',
+                                            description:
+                                                'Custom work area for ${job.primaryClient}',
+                                          );
 
-                                            context
-                                                .read<ScheduleProvider>()
-                                                .updateJob(
-                                                  job.copyWith(
-                                                    customWorkArea:
-                                                        updatedCustomWorkArea,
-                                                  ),
-                                                );
-                                          } else {
-                                            // Create new work area using WorkAreaService
-                                            final workAreaService =
-                                                context.read<WorkAreaService>();
-                                            final newWorkArea =
-                                                await workAreaService
-                                                    .createWorkArea(
-                                              name:
-                                                  '${job.primaryClient} Work Area',
-                                              description:
-                                                  'Custom work area for ${job.primaryClient}',
-                                              polygonPoints: result,
-                                            );
+                                          // Add or update the custom polygon in workMaps
+                                          final updatedWorkMaps =
+                                              <CustomPolygon>[
+                                            newCustomPolygon,
+                                            ...job.workMaps.where((map) =>
+                                                map.name !=
+                                                newCustomPolygon.name),
+                                          ];
 
-                                            context
-                                                .read<ScheduleProvider>()
-                                                .updateJob(
-                                                  job.copyWith(
-                                                    workAreaId: newWorkArea.id,
-                                                    workingAreas: [
-                                                      newWorkArea.name
-                                                    ],
-                                                    customWorkArea: newWorkArea,
-                                                  ),
-                                                );
-                                          }
+                                          // Update working areas if needed
+                                          final updatedWorkingAreas =
+                                              job.workingAreas.contains(
+                                                      newCustomPolygon.name)
+                                                  ? job.workingAreas
+                                                  : [
+                                                      newCustomPolygon.name,
+                                                      ...job.workingAreas
+                                                    ];
+
+                                          context
+                                              .read<ScheduleProvider>()
+                                              .updateJob(
+                                                job.copyWith(
+                                                  workingAreas:
+                                                      updatedWorkingAreas,
+                                                  workMaps: updatedWorkMaps,
+                                                ),
+                                              );
                                         } catch (e) {
                                           if (context.mounted) {
                                             ScaffoldMessenger.of(context)
@@ -336,7 +334,7 @@ class JobCard extends StatelessWidget {
                                               SnackBar(
                                                 content: Text(
                                                     'Failed to save work area: $e'),
-                                                backgroundColor: Colors.red,
+                                                backgroundColor: Colors.red.shade800, // Darker red for better contrast
                                               ),
                                             );
                                           }
@@ -349,7 +347,7 @@ class JobCard extends StatelessWidget {
                                           SnackBar(
                                             content:
                                                 Text('Failed to open map: $e'),
-                                            backgroundColor: Colors.red,
+                                            backgroundColor: Colors.red.shade800, // Darker red for better contrast
                                           ),
                                         );
                                       }
@@ -401,52 +399,71 @@ class JobCard extends StatelessWidget {
                       ),
                       Tooltip(
                         message: 'Change job status',
-                        child: TextButton(
-                          onPressed: () {
-                            showDialog(
-                              context: context,
-                              builder: (context) => AlertDialog(
-                                title: const Text('Change Status'),
-                                content: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: JobStatus.values.map((status) {
-                                    return ListTile(
-                                      dense: true,
-                                      title: Text(status.name),
-                                      tileColor: status == job.status
-                                          ? _getStatusColor()
-                                          : null,
-                                      onTap: () {
-                                        context
-                                            .read<ScheduleProvider>()
-                                            .updateJob(
-                                              job.copyWith(status: status),
-                                            );
-                                        Navigator.of(context).pop();
-                                      },
-                                    );
-                                  }).toList(),
+                        child: Consumer<JobStatusProvider>(
+                          builder: (context, statusProvider, child) {
+                            final currentStatus =
+                                statusProvider.getStatusById(job.statusId);
+                            return TextButton(
+                              onPressed: () {
+                                showDialog(
+                                  context: context,
+                                  builder: (context) => AlertDialog(
+                                    title: const Text('Change Status'),
+                                    content: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children:
+                                          statusProvider.statuses.map((status) {
+                                        final isSelected =
+                                            status.id == job.statusId;
+                                        return ListTile(
+                                          dense: true,
+                                          title: Text(status.label),
+                                          tileColor: isSelected
+                                              ? status.color.withOpacity(0.3)
+                                              : null,
+                                          leading: Container(
+                                            width: 20,
+                                            height: 20,
+                                            decoration: BoxDecoration(
+                                              color: status.color,
+                                              shape: BoxShape.circle,
+                                            ),
+                                          ),
+                                          onTap: () {
+                                            context
+                                                .read<ScheduleProvider>()
+                                                .updateJob(
+                                                  job.copyWith(
+                                                      statusId: status.id),
+                                                );
+                                            Navigator.of(context).pop();
+                                          },
+                                        );
+                                      }).toList(),
+                                    ),
+                                  ),
+                                );
+                              },
+                              style: TextButton.styleFrom(
+                                backgroundColor: _getStatusColor(context),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
                                 ),
+                                minimumSize: Size.zero,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              child: Text(
+                                (currentStatus?.label ?? 'UNKNOWN')
+                                    .toUpperCase(),
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: scaleProvider.smallFontSize),
+                                overflow: TextOverflow.ellipsis,
+                                maxLines: 1,
                               ),
                             );
                           },
-                          style: TextButton.styleFrom(
-                            backgroundColor: _getStatusColor(),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
-                            ),
-                            minimumSize: Size.zero,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          child: Text(
-                            job.status.name.toUpperCase(),
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: scaleProvider.smallFontSize),
-                            overflow: TextOverflow.ellipsis,
-                            maxLines: 1,
-                          ),
                         ),
                       ),
                     ],
@@ -490,10 +507,11 @@ class _ClientListEditorState extends State<_ClientListEditor> {
   void didUpdateWidget(_ClientListEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.job.clients != widget.job.clients) {
-      _localClients = List.from(widget.job.clients);
-      if (!_isEditing) {
+      setState(() {
+        _localClients = List.from(widget.job.clients);
         _controller.text = widget.job.clientsDisplay;
-      }
+        _isEditing = false; // Reset editing state when job changes
+      });
     }
   }
 
@@ -534,144 +552,25 @@ class _ClientListEditorState extends State<_ClientListEditor> {
         return Row(
           children: [
             Expanded(
-              child: Autocomplete<String>(
-                initialValue: TextEditingValue(text: _controller.text),
-                optionsBuilder: (TextEditingValue textEditingValue) {
-                  if (textEditingValue.text.isEmpty) {
-                    return uniqueClients.take(10);
-                  }
-                  return uniqueClients.where((String client) {
-                    return client.toLowerCase().contains(
-                          textEditingValue.text.toLowerCase(),
-                        );
-                  }).take(10);
-                },
-                onSelected: (String selectedClient) {
-                  // Parse the current input to see if we're replacing or adding
-                  final currentText = _controller.text.trim();
-                  List<String> updatedClients;
-
-                  if (currentText.isEmpty) {
-                    updatedClients = [selectedClient];
-                  } else if (currentText.contains(',')) {
-                    // Multiple clients, replace the last one
-                    final parts =
-                        currentText.split(',').map((e) => e.trim()).toList();
-                    parts[parts.length - 1] = selectedClient;
-                    updatedClients = parts;
-                  } else {
-                    // Single client, replace it
-                    updatedClients = [selectedClient];
-                  }
-
-                  setState(() {
-                    _localClients = updatedClients;
-                    _controller.text = updatedClients.join(', ');
-                  });
-                  widget.onClientsChanged(updatedClients);
-                },
-                fieldViewBuilder: (
-                  BuildContext context,
-                  TextEditingController controller,
-                  FocusNode focusNode,
-                  VoidCallback onFieldSubmitted,
-                ) {
-                  // Sync the autocomplete controller with our local controller
-                  if (controller.text != _controller.text) {
-                    controller.text = _controller.text;
-                    controller.selection =
-                        TextSelection.collapsed(offset: controller.text.length);
-                  }
-
-                  return TextFormField(
-                    controller: controller,
-                    focusNode: focusNode,
-                    maxLines: 2,
-                    onChanged: (value) {
-                      _controller.text = value;
-                      setState(() {
-                        _isEditing = true;
-                      });
-                    },
-                    onFieldSubmitted: (String value) {
-                      onFieldSubmitted();
-                      // Parse comma-separated clients
-                      final clients = value
-                          .split(',')
+              child: Container(
+                margin: const EdgeInsets.only(left: 4),
+                child: Text(
+                  _localClients.isEmpty
+                      ? 'add client'
+                      : _localClients
                           .map((e) => e.trim())
                           .where((e) => e.isNotEmpty)
-                          .toList();
-
-                      setState(() {
-                        _localClients = clients;
-                        _isEditing = false;
-                      });
-                      widget.onClientsChanged(clients);
-                    },
-                    onTap: () {
-                      setState(() {
-                        _isEditing = true;
-                      });
-                    },
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      hintText: 'Client Name(s)',
-                    ),
-                    style: TextStyle(
+                          .join(', '),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 2,
+                  style: TextStyle(
+                      fontSize: scaleProvider.mediumFontSize,
                       color: Colors.white,
-                      fontSize: scaleProvider.smallFontSize,
-                    ),
-                  );
-                },
-                optionsViewBuilder: (
-                  BuildContext context,
-                  void Function(String) onSelected,
-                  Iterable<String> options,
-                ) {
-                  return Align(
-                    alignment: Alignment.topLeft,
-                    child: Material(
-                      elevation: 4.0,
-                      child: Container(
-                        width: 300,
-                        constraints: const BoxConstraints(
-                          maxHeight: 200,
-                        ),
-                        child: ListView.builder(
-                          padding: EdgeInsets.zero,
-                          shrinkWrap: true,
-                          itemCount: options.length,
-                          itemBuilder: (BuildContext context, int index) {
-                            final String option = options.elementAt(index);
-                            return InkWell(
-                              onTap: () => onSelected(option),
-                              child: ListTile(
-                                dense: true,
-                                title: Text(
-                                  option,
-                                  style: TextStyle(
-                                    color: Theme.of(context)
-                                        .textTheme
-                                        .bodyMedium
-                                        ?.color,
-                                    fontSize: scaleProvider.baseFontSize,
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                  );
-                },
+                      fontWeight: FontWeight.bold),
+                ),
               ),
             ),
+
             // Always show edit button for client management
             IconButton(
               icon: Icon(_localClients.length > 1 ? Icons.list : Icons.edit,

@@ -1,54 +1,62 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/material.dart';
-import 'work_area.dart';
+import 'custom_polygon.dart';
 
+// Keep enum for backwards compatibility during migration
 enum JobStatus { standby, scheduled, done, urgent }
 
 class Job {
   final String id;
   final List<String> clients;
-  final String workAreaId; // Reference to the original work area
   final List<String> workingAreas; // Names of the work areas for display
-  final WorkArea? customWorkArea; // Optional custom work area if edited
+  final List<CustomPolygon>
+      workMaps; // Custom polygons with name, description, points, color
   final String distributorId;
   final DateTime date;
-  final JobStatus status;
+  final String statusId; // Changed from JobStatus enum to String
 
   Job({
     required this.id,
     required this.clients,
-    required this.workAreaId,
     required this.workingAreas,
-    this.customWorkArea,
+    required this.workMaps,
     required this.distributorId,
     required this.date,
-    required this.status,
+    required this.statusId,
   });
 
   // Create from Firestore
   factory Job.fromMap(String id, Map<String, dynamic> data) {
+    // Handle migration from old enum-based status to new string-based statusId
+    String statusId;
+    if (data['statusId'] != null) {
+      statusId = data['statusId'] as String;
+    } else if (data['status'] != null) {
+      // Migration: convert old enum status to statusId
+      statusId = data['status'] as String;
+    } else {
+      statusId = 'scheduled'; // Default fallback
+    }
+
     return Job(
       id: id,
       clients: (data['clients'] as List<dynamic>?)?.cast<String>() ??
           (data['client'] != null
               ? [data['client'] as String]
               : ['']), // Backwards compatibility
-      workAreaId: data['workAreaId'] as String? ?? '',
       workingAreas: (data['workingAreas'] as List<dynamic>?)?.cast<String>() ??
           (data['workingArea'] != null
               ? [data['workingArea'] as String]
               : ['']), // Backwards compatibility
-      customWorkArea: data['customWorkArea'] != null
-          ? WorkArea.fromMap(data['customWorkArea'] as Map<String, dynamic>)
-          : null,
+      workMaps: (data['workMaps'] as List<dynamic>?)
+              ?.map((mapData) =>
+                  CustomPolygon.fromMap(mapData as Map<String, dynamic>))
+              .toList() ??
+          [],
       distributorId: data['distributorId'] as String? ?? '',
       date: data['date'] != null
           ? (data['date'] as Timestamp).toDate()
           : DateTime.now(),
-      status: JobStatus.values.firstWhere(
-        (e) => e.toString() == 'JobStatus.${data['status']}',
-        orElse: () => JobStatus.scheduled,
-      ),
+      statusId: statusId,
     );
   }
 
@@ -56,19 +64,16 @@ class Job {
   Map<String, dynamic> toMap() {
     final map = {
       'clients': clients,
-      'workAreaId': workAreaId,
       'workingAreas': workingAreas,
+      'workMaps': workMaps.map((workMap) => workMap.toMap()).toList(),
       'distributorId': distributorId,
       'date': Timestamp.fromDate(date),
-      'status': status.toString().split('.').last,
+      'statusId': statusId,
       // Keep backwards compatibility
+      'status': statusId, // Also store as status for backwards compatibility
       'client': clients.isNotEmpty ? clients.first : '',
       'workingArea': workingAreas.isNotEmpty ? workingAreas.first : '',
     };
-
-    if (customWorkArea != null) {
-      map['customWorkArea'] = customWorkArea!.toMap();
-    }
 
     return map;
   }
@@ -76,44 +81,30 @@ class Job {
   // Create a copy of job with some fields updated
   Job copyWith({
     List<String>? clients,
-    String? workAreaId,
     List<String>? workingAreas,
-    WorkArea? customWorkArea,
+    List<CustomPolygon>? workMaps,
     String? distributorId,
     DateTime? date,
-    JobStatus? status,
+    String? statusId,
   }) {
     return Job(
       id: id,
       clients: clients ?? this.clients,
-      workAreaId: workAreaId ?? this.workAreaId,
       workingAreas: workingAreas ?? this.workingAreas,
-      customWorkArea: customWorkArea ?? this.customWorkArea,
+      workMaps: workMaps ?? this.workMaps,
       distributorId: distributorId ?? this.distributorId,
       date: date ?? this.date,
-      status: status ?? this.status,
+      statusId: statusId ?? this.statusId,
     );
   }
 
-  // Get card color based on status
-  Color getStatusColor() {
-    switch (status) {
-      case JobStatus.standby:
-        return Colors.grey;
-      case JobStatus.scheduled:
-        return Colors.orange;
-      case JobStatus.done:
-        return Colors.green;
-      case JobStatus.urgent:
-        return Colors.red;
-    }
-  }
+  // Note: Status color is now handled by JobStatusProvider
 
   @override
   String toString() {
-    return 'Job(id: $id, clients: $clients, workAreaId: $workAreaId, '
-        'hasCustomArea: ${customWorkArea != null}, '
-        'distributorId: $distributorId, date: $date, status: $status)';
+    return 'Job(id: $id, clients: $clients, workingAreas: $workingAreas, '
+        'workMapsCount: ${workMaps.length}, '
+        'distributorId: $distributorId, date: $date, statusId: $statusId)';
   }
 
   // Helper methods for backwards compatibility and ease of use

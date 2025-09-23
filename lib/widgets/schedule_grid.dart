@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 
 import '../models/job.dart';
+import '../models/custom_polygon.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/scale_provider.dart';
 import 'job_card.dart';
@@ -221,8 +222,8 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                       color: const Color.fromARGB(
                         255,
                         1,
-                        141,
-                        211,
+                        100, // Darker blue - was 141
+                        150, // Darker blue - was 211
                       ).withOpacity(0.15),
                       blurRadius: 4,
                       offset: const Offset(0, 2),
@@ -541,7 +542,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                     );
                                   } else if (action ==
                                       DropAction.addToExisting) {
-                                    // Combine the jobs - merge clients and working areas
+                                    // Combine the jobs - merge clients, working areas, and polygons
                                     final combinedClients = <String>{
                                       ...targetJob.clients,
                                       ...draggedJob.clients,
@@ -552,11 +553,27 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                       ...draggedJob.workingAreas,
                                     }.toList(); // Remove duplicates
 
+                                    // Debug: Print the combination results
+                                    print('Combining jobs:');
+                                    print(
+                                        'Target clients: ${targetJob.clients}');
+                                    print(
+                                        'Dragged clients: ${draggedJob.clients}');
+                                    print('Combined clients: $combinedClients');
+
+                                    // Combine work area polygons if either job has custom work areas
+                                    // Combine work maps from both jobs
+                                    final combinedWorkMaps = <CustomPolygon>[
+                                      ...targetJob.workMaps,
+                                      ...draggedJob.workMaps,
+                                    ];
+
                                     // Update the target job with combined data
                                     scheduleProvider.updateJob(
                                       targetJob.copyWith(
                                         clients: combinedClients,
                                         workingAreas: combinedWorkingAreas,
+                                        workMaps: combinedWorkMaps,
                                       ),
                                     );
 
@@ -606,12 +623,12 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                               final newJob = Job(
                                                 id: '', // Will be set by Firestore
                                                 clients: [],
-                                                workAreaId:
-                                                    '', // Empty ID to be selected later
                                                 workingAreas: [], // Empty names to be selected later
+                                                workMaps: [], // Empty work maps to be added later
                                                 distributorId: distributor.id,
                                                 date: date,
-                                                status: JobStatus.scheduled,
+                                                statusId:
+                                                    'scheduled', // Use default scheduled status
                                               );
                                               scheduleProvider.addJob(newJob);
                                             },

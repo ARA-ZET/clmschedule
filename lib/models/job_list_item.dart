@@ -1,6 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/material.dart';
 
+// Legacy enum for backwards compatibility during migration
 enum JobListStatus {
   orderConfirmedNotPaid('Order Confirmed Not Paid'),
   jobUnderWay('Job Under Way'),
@@ -22,6 +22,46 @@ enum JobListStatus {
 
   const JobListStatus(this.displayName);
   final String displayName;
+
+  // Helper method to convert enum to custom status ID
+  String get customStatusId {
+    switch (this) {
+      case JobListStatus.orderConfirmedNotPaid:
+        return 'order_confirmed_not_paid';
+      case JobListStatus.jobUnderWay:
+        return 'job_under_way';
+      case JobListStatus.jobDone:
+        return 'job_done';
+      case JobListStatus.reportCompliled:
+        return 'report_compliled';
+      case JobListStatus.outstanding:
+        return 'outstanding';
+      case JobListStatus.invoiceSent:
+        return 'invoice_sent';
+      case JobListStatus.standby:
+        return 'standby';
+      case JobListStatus.printingOrderConfirmed:
+        return 'printing_order_confirmed';
+      case JobListStatus.printingArtworkSubmitted:
+        return 'printing_artwork_submitted';
+      case JobListStatus.printingArtworkApproved:
+        return 'printing_artwork_approved';
+      case JobListStatus.printingAwaitingPayment:
+        return 'printing_awaiting_payment';
+      case JobListStatus.printingUnderWay:
+        return 'printing_under_way';
+      case JobListStatus.printingReadyForCollection:
+        return 'printing_ready_for_collection';
+      case JobListStatus.query:
+        return 'query';
+      case JobListStatus.orderConfirmedPaid:
+        return 'order_confirmed_paid';
+      case JobListStatus.reportSent:
+        return 'report_sent';
+      case JobListStatus.paid:
+        return 'paid';
+    }
+  }
 }
 
 enum JobType {
@@ -41,7 +81,7 @@ class JobListItem {
   final String invoice;
   final double amount;
   final String client;
-  final JobListStatus jobStatus;
+  final String jobStatusId; // Changed from JobListStatus enum to String
   final JobType jobType;
   final String area;
   final int quantity;
@@ -60,7 +100,7 @@ class JobListItem {
     required this.invoice,
     required this.amount,
     required this.client,
-    required this.jobStatus,
+    required this.jobStatusId,
     required this.jobType,
     required this.area,
     required this.quantity,
@@ -77,15 +117,33 @@ class JobListItem {
 
   // Create from Firestore
   factory JobListItem.fromMap(String id, Map<String, dynamic> data) {
+    // Handle backwards compatibility for jobStatus field
+    String jobStatusId = data['jobStatusId'] as String? ?? '';
+
+    // If jobStatusId is empty but jobStatus exists (old enum format), convert it
+    if (jobStatusId.isEmpty && data['jobStatus'] != null) {
+      try {
+        final oldStatus = JobListStatus.values.firstWhere(
+          (e) => e.name == data['jobStatus'],
+          orElse: () => JobListStatus.standby,
+        );
+        jobStatusId = oldStatus.customStatusId;
+      } catch (e) {
+        jobStatusId = 'standby'; // Default fallback
+      }
+    }
+
+    // If still empty, use default
+    if (jobStatusId.isEmpty) {
+      jobStatusId = 'standby';
+    }
+
     return JobListItem(
       id: id,
       invoice: data['invoice'] as String? ?? '',
       amount: (data['amount'] as num?)?.toDouble() ?? 0.0,
       client: data['client'] as String? ?? '',
-      jobStatus: JobListStatus.values.firstWhere(
-        (e) => e.name == data['jobStatus'],
-        orElse: () => JobListStatus.standby,
-      ),
+      jobStatusId: jobStatusId,
       jobType: JobType.values.firstWhere(
         (e) => e.name == data['jobType'],
         orElse: () => JobType.flyersPrintingOnly,
@@ -114,7 +172,7 @@ class JobListItem {
       'invoice': invoice,
       'amount': amount,
       'client': client,
-      'jobStatus': jobStatus.name,
+      'jobStatusId': jobStatusId, // Changed from jobStatus.name to jobStatusId
       'jobType': jobType.name,
       'area': area,
       'quantity': quantity,
@@ -135,7 +193,8 @@ class JobListItem {
     String? invoice,
     double? amount,
     String? client,
-    JobListStatus? jobStatus,
+    String?
+        jobStatusId, // Changed from JobListStatus? jobStatus to String? jobStatusId
     JobType? jobType,
     String? area,
     int? quantity,
@@ -154,7 +213,7 @@ class JobListItem {
       invoice: invoice ?? this.invoice,
       amount: amount ?? this.amount,
       client: client ?? this.client,
-      jobStatus: jobStatus ?? this.jobStatus,
+      jobStatusId: jobStatusId ?? this.jobStatusId,
       jobType: jobType ?? this.jobType,
       area: area ?? this.area,
       quantity: quantity ?? this.quantity,
@@ -170,39 +229,20 @@ class JobListItem {
     );
   }
 
-  // Get status color
-  Color getStatusColor() {
-    switch (jobStatus) {
-      case JobListStatus.orderConfirmedNotPaid:
-      case JobListStatus.orderConfirmedPaid:
-        return Colors.blue;
-      case JobListStatus.jobUnderWay:
-      case JobListStatus.printingUnderWay:
-        return Colors.orange;
-      case JobListStatus.jobDone:
-      case JobListStatus.reportCompliled:
-      case JobListStatus.paid:
-        return Colors.green;
-      case JobListStatus.outstanding:
-      case JobListStatus.query:
-        return Colors.red;
-      case JobListStatus.standby:
-        return Colors.grey;
-      case JobListStatus.invoiceSent:
-      case JobListStatus.reportSent:
-        return Colors.purple;
-      case JobListStatus.printingOrderConfirmed:
-      case JobListStatus.printingArtworkSubmitted:
-      case JobListStatus.printingArtworkApproved:
-      case JobListStatus.printingAwaitingPayment:
-      case JobListStatus.printingReadyForCollection:
-        return Colors.teal;
+  // Backwards compatibility getter - converts jobStatusId back to JobListStatus enum
+  JobListStatus get jobStatus {
+    for (final status in JobListStatus.values) {
+      if (status.customStatusId == jobStatusId) {
+        return status;
+      }
     }
+    // Default fallback if no match found
+    return JobListStatus.standby;
   }
 
   @override
   String toString() {
     return 'JobListItem(id: $id, invoice: $invoice, client: $client, '
-        'jobStatus: $jobStatus, amount: $amount)';
+        'jobStatusId: $jobStatusId, amount: $amount)';
   }
 }

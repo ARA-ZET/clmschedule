@@ -10,7 +10,7 @@ class JobListProvider extends ChangeNotifier {
   bool _isInitialized = false;
   String? _error;
   String _searchQuery = '';
-  Set<JobListStatus> _statusFilters = {};
+  Set<String> _statusFilters = {};
   DateTime _currentMonth = DateTime.now();
 
   // Subscription for job list items stream (current month only)
@@ -42,7 +42,7 @@ class JobListProvider extends ChangeNotifier {
   bool get isInitialized => _isInitialized;
   String? get error => _error;
   String get searchQuery => _searchQuery;
-  Set<JobListStatus> get statusFilters => _statusFilters;
+  Set<String> get statusFilters => _statusFilters;
   String get sortField => _sortField;
   bool get sortAscending => _sortAscending;
   DateTime get currentMonth => _currentMonth;
@@ -73,7 +73,7 @@ class JobListProvider extends ChangeNotifier {
     // Apply status filter
     if (_statusFilters.isNotEmpty) {
       filtered = filtered
-          .where((item) => _statusFilters.contains(item.jobStatus))
+          .where((item) => _statusFilters.contains(item.jobStatusId))
           .toList();
     }
 
@@ -391,7 +391,8 @@ class JobListProvider extends ChangeNotifier {
     if (currentItem == null) return;
 
     // Create updated item with new status
-    final updatedItem = currentItem.copyWith(jobStatus: newStatus);
+    final updatedItem =
+        currentItem.copyWith(jobStatusId: newStatus.customStatusId);
 
     // Use debounced update
     updateJobListItemLocal(updatedItem);
@@ -419,29 +420,29 @@ class JobListProvider extends ChangeNotifier {
   }
 
   // Set status filter
-  void setStatusFilter(JobListStatus? status) {
-    _statusFilters = status != null ? {status} : {};
+  void setStatusFilter(String? statusId) {
+    _statusFilters = statusId != null ? {statusId} : {};
     notifyListeners();
   }
 
   // Add status to filter
-  void addStatusFilter(JobListStatus status) {
-    _statusFilters.add(status);
+  void addStatusFilter(String statusId) {
+    _statusFilters.add(statusId);
     notifyListeners();
   }
 
   // Remove status from filter
-  void removeStatusFilter(JobListStatus status) {
-    _statusFilters.remove(status);
+  void removeStatusFilter(String statusId) {
+    _statusFilters.remove(statusId);
     notifyListeners();
   }
 
   // Toggle status filter
-  void toggleStatusFilter(JobListStatus status) {
-    if (_statusFilters.contains(status)) {
-      _statusFilters.remove(status);
+  void toggleStatusFilter(String statusId) {
+    if (_statusFilters.contains(statusId)) {
+      _statusFilters.remove(statusId);
     } else {
-      _statusFilters.add(status);
+      _statusFilters.add(statusId);
     }
     notifyListeners();
   }

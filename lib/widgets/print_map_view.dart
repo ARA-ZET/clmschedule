@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:provider/provider.dart';
 import 'dart:math' show min, max;
 import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import '../services/work_area_service.dart';
 import '../models/work_area.dart';
 import '../models/job.dart';
 import 'package:intl/intl.dart';
@@ -29,7 +27,6 @@ class _PrintMapViewState extends State<PrintMapView> {
   final Set<Polygon> _polygons = {};
   LatLng _center = const LatLng(-33.925, 18.425); // Cape Town city center
   bool _isLoading = true;
-  List<WorkArea> _workAreas = [];
   WorkArea? _selectedWorkArea;
   bool _isPortrait = true;
   bool _isDraggingInfoBox = false; // Track when dragging info box
@@ -51,21 +48,22 @@ class _PrintMapViewState extends State<PrintMapView> {
 
   Future<void> _initializeMap() async {
     try {
-      // Load all work areas first
-      final workAreaService = context.read<WorkAreaService>();
-      _workAreas = await workAreaService.getWorkAreas().first;
+      // Use work maps from the job directly
+      if (widget.job.workMaps.isNotEmpty) {
+        // For printing, we'll use the first work map as the selected area
+        // In the future, this could show all work maps or allow selection
+        final firstWorkMap = widget.job.workMaps.first;
 
-      // Find selected work area
-      if (widget.job.workAreaId.isNotEmpty) {
-        try {
-          _selectedWorkArea = _workAreas.firstWhere(
-            (area) => area.id == widget.job.workAreaId,
-          );
-        } catch (e) {
-          _selectedWorkArea = widget.job.customWorkArea;
-        }
-      } else if (widget.job.customWorkArea != null) {
-        _selectedWorkArea = widget.job.customWorkArea;
+        // Create a temporary WorkArea for compatibility with existing printing logic
+        _selectedWorkArea = WorkArea(
+          id: 'temp_${firstWorkMap.name}',
+          name: firstWorkMap.name,
+          description: firstWorkMap.description,
+          polygonPoints: firstWorkMap.points,
+          kmlFileName: '',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        );
       }
 
       _updateMapView();

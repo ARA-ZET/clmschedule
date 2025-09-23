@@ -208,6 +208,17 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                         Row(
                           children: [
                             Expanded(
+                              flex: 2,
+                              child: TextFormField(
+                                controller: _areaController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Area',
+                                  border: OutlineInputBorder(),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
                               child: DropdownButtonFormField<JobListStatus>(
                                 initialValue: _selectedJobStatus,
                                 decoration: const InputDecoration(
@@ -260,18 +271,6 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                         Row(
                           children: [
                             Expanded(
-                              flex: 2,
-                              child: TextFormField(
-                                controller: _areaController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Area',
-                                  border: OutlineInputBorder(),
-                                ),
-                                maxLines: 2,
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            Expanded(
                               child: TextFormField(
                                 controller: _quantityController,
                                 decoration: const InputDecoration(
@@ -284,12 +283,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                 ],
                               ),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                        // Man-Days field
-                        Row(
-                          children: [
+                            const SizedBox(width: 16),
+                            // Man-Days field
                             Expanded(
                               child: TextFormField(
                                 controller: _manDaysController,
@@ -320,16 +315,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                 },
                               ),
                             ),
-                            const SizedBox(width: 16),
-                            const Expanded(
-                                child: SizedBox()), // Empty space for alignment
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-
-                        // Row 4: Date, Collection Date
-                        Row(
-                          children: [
+                            SizedBox(width: 16),
                             Expanded(
                               child: FormField<DateTime>(
                                 initialValue: _selectedDate,
@@ -419,29 +405,33 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                           ],
                         ),
                         const SizedBox(height: 16),
-
                         // Row 5: Collection Address
-                        TextFormField(
-                          controller: _collectionAddressController,
-                          decoration: const InputDecoration(
-                            labelText: 'Collection Address',
-                            border: OutlineInputBorder(),
+                        Row(children: [
+                          Expanded(
+                            child: TextFormField(
+                              controller: _collectionAddressController,
+                              decoration: const InputDecoration(
+                                labelText: 'Collection Address',
+                                border: OutlineInputBorder(),
+                              ),
+                              maxLines: 3,
+                            ),
                           ),
-                          maxLines: 3,
-                        ),
-                        const SizedBox(height: 16),
+                          const SizedBox(width: 16),
 
-                        // Row 6: Special Instructions
-                        TextFormField(
-                          controller: _specialInstructionsController,
-                          decoration: const InputDecoration(
-                            labelText: 'Special Instructions',
-                            border: OutlineInputBorder(),
+                          // Row 6: Special Instructions
+                          Expanded(
+                            child: TextFormField(
+                              controller: _specialInstructionsController,
+                              decoration: const InputDecoration(
+                                labelText: 'Special Instructions',
+                                border: OutlineInputBorder(),
+                              ),
+                              maxLines: 3,
+                            ),
                           ),
-                          maxLines: 3,
-                        ),
+                        ]),
                         const SizedBox(height: 16),
-
                         // Row 7: Quantity Distributed
                         Row(
                           children: [
@@ -531,7 +521,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         invoice: _invoiceController.text.trim(),
         amount: double.tryParse(_amountController.text) ?? 0.0,
         client: _clientController.text.trim(),
-        jobStatus: _selectedJobStatus,
+        jobStatusId: _selectedJobStatus.customStatusId,
         jobType: _selectedJobType,
         area: _areaController.text.trim(),
         quantity: int.tryParse(_quantityController.text) ?? 0,
@@ -571,9 +561,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         client: jobListItem.client,
         manDays: jobListItem.manDays,
         startDate: jobListItem.date,
-        workAreaId: '', // Default - can be edited later on schedule
-        workingArea:
-            'To be assigned', // Default - can be edited later on schedule
+        workingArea: '.', // Default - can be edited later on schedule
       );
 
       if (assignments.isEmpty) {

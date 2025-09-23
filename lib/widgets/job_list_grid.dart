@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/job_list_item.dart';
 import '../providers/job_list_provider.dart';
+import '../providers/job_list_status_provider.dart';
 import '../providers/scale_provider.dart';
 import '../widgets/lazy_loading_indicator.dart';
 import 'add_edit_job_dialog.dart';
@@ -122,10 +123,8 @@ class _JobListGridState extends State<JobListGrid> {
                     const SizedBox(width: 16),
                     Expanded(
                       child: MultiSelectStatusFilter(
-                        selectedStatuses: jobListProvider.statusFilters,
-                        onToggle: (status) {
-                          jobListProvider.toggleStatusFilter(status);
-                        },
+                        selectedStatusIds: jobListProvider.statusFilters,
+                        onToggle: jobListProvider.toggleStatusFilter,
                         onClear: () {
                           jobListProvider.clearFilters();
                         },
@@ -349,7 +348,14 @@ class _JobListGridState extends State<JobListGrid> {
                                   rows: jobListItems.map((item) {
                                     return DataRow(
                                       color: WidgetStateProperty.all(
-                                        item.getStatusColor().withOpacity(0.1),
+                                        (Provider.of<JobListStatusProvider>(
+                                                        context,
+                                                        listen: false)
+                                                    .getStatusById(
+                                                        item.jobStatusId)
+                                                    ?.color ??
+                                                Colors.grey)
+                                            .withOpacity(0.1),
                                       ),
                                       cells: [
                                         DataCell(
@@ -413,53 +419,92 @@ class _JobListGridState extends State<JobListGrid> {
                                           ),
                                         ),
                                         DataCell(
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 8,
-                                              vertical: 4,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: item
-                                                  .getStatusColor()
-                                                  .withOpacity(0.2),
-                                              border: Border.all(
-                                                color: item
-                                                    .getStatusColor()
-                                                    .withOpacity(0.5),
-                                                width: 1,
-                                              ),
-                                              borderRadius:
-                                                  BorderRadius.circular(4),
-                                            ),
-                                            child:
-                                                DropdownButton<JobListStatus>(
-                                              value: item.jobStatus,
-                                              underline:
-                                                  const SizedBox.shrink(),
-                                              isDense: true,
-                                              items: JobListStatus.values
-                                                  .map((status) {
-                                                return DropdownMenuItem<
-                                                    JobListStatus>(
-                                                  value: status,
-                                                  child: Text(
-                                                    status.displayName,
-                                                    style: TextStyle(
-                                                        fontSize: scaleProvider
-                                                            .mediumFontSize),
+                                          Consumer<JobListStatusProvider>(
+                                            builder: (context, statusProvider,
+                                                child) {
+                                              final currentStatus =
+                                                  statusProvider.getStatusById(
+                                                      item.jobStatusId);
+                                              return Container(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                  horizontal: 8,
+                                                  vertical: 4,
+                                                ),
+                                                decoration: BoxDecoration(
+                                                  color:
+                                                      (currentStatus?.color ??
+                                                              Colors.grey)
+                                                          .withOpacity(0.2),
+                                                  border: Border.all(
+                                                    color:
+                                                        (currentStatus?.color ??
+                                                                Colors.grey)
+                                                            .withOpacity(0.5),
+                                                    width: 1,
                                                   ),
-                                                );
-                                              }).toList(),
-                                              onChanged: (newStatus) {
-                                                if (newStatus != null) {
-                                                  jobListProvider
-                                                      .updateJobStatus(
-                                                    item.id,
-                                                    newStatus,
-                                                  );
-                                                }
-                                              },
-                                            ),
+                                                  borderRadius:
+                                                      BorderRadius.circular(4),
+                                                ),
+                                                child: DropdownButton<String>(
+                                                  value: statusProvider.statuses
+                                                          .any((s) =>
+                                                              s.id ==
+                                                              item.jobStatusId)
+                                                      ? item.jobStatusId
+                                                      : null,
+                                                  underline:
+                                                      const SizedBox.shrink(),
+                                                  isDense: true,
+                                                  items: statusProvider.statuses
+                                                      .map((status) {
+                                                    return DropdownMenuItem<
+                                                        String>(
+                                                      value: status.id,
+                                                      child: Row(
+                                                        mainAxisSize:
+                                                            MainAxisSize.min,
+                                                        children: [
+                                                          Container(
+                                                            width: 12,
+                                                            height: 12,
+                                                            margin:
+                                                                const EdgeInsets
+                                                                    .only(
+                                                                    right: 8),
+                                                            decoration:
+                                                                BoxDecoration(
+                                                              color:
+                                                                  status.color,
+                                                              shape: BoxShape
+                                                                  .circle,
+                                                            ),
+                                                          ),
+                                                          Text(
+                                                            status.label,
+                                                            style: TextStyle(
+                                                              fontSize:
+                                                                  scaleProvider
+                                                                      .mediumFontSize,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    );
+                                                  }).toList(),
+                                                  onChanged: (newStatusId) {
+                                                    if (newStatusId != null) {
+                                                      jobListProvider
+                                                          .updateJobListItemLocal(
+                                                        item.copyWith(
+                                                            jobStatusId:
+                                                                newStatusId),
+                                                      );
+                                                    }
+                                                  },
+                                                ),
+                                              );
+                                            },
                                           ),
                                         ),
                                         DataCell(
