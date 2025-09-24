@@ -131,12 +131,17 @@ class _MapViewState extends State<MapView> {
           icon: _circleMarkerIcon!,
           position: _editingPoints[i],
           draggable: true,
+          onDrag: (newPosition) {
+            setState(() {
+              _editingPoints[i] = newPosition;
+              _updateMapView();
+            });
+          },
           onDragEnd: (newPosition) {
             setState(() {
               _editingPoints[i] = newPosition;
               _hasUnsavedChanges = true;
-              // _updateMapView();
-              // _updateMapCenter(); // Auto-zoom to include moved point
+              _updateMapView();
             });
           },
         ),
@@ -170,8 +175,7 @@ class _MapViewState extends State<MapView> {
                   _editingPoints[_draggingMidpointIndex!] = newPosition;
                 }
                 _draggingMidpointIndex = null;
-                // _updateMapView();
-                // _updateMapCenter(); // Auto-zoom to include new midpoint
+                _updateMapView();
               });
             },
           ),
@@ -207,11 +211,16 @@ class _MapViewState extends State<MapView> {
           position: _newPolygonPoints[i],
           icon: _circleMarkerIcon ?? BitmapDescriptor.defaultMarker,
           draggable: true,
+          onDrag: (newPosition) {
+            setState(() {
+              _newPolygonPoints[i] = newPosition;
+              _updateMapView();
+            });
+          },
           onDragEnd: (newPosition) {
             setState(() {
               _newPolygonPoints[i] = newPosition;
-              // _updateMapView();
-              // _updateMapCenter(); // Auto-zoom to include moved point
+              _updateMapView();
             });
           },
         ),
@@ -265,11 +274,8 @@ class _MapViewState extends State<MapView> {
           _selectedCustomPolygon = _customPolygons.first;
           _selectedPolygonIndex = 0;
 
-          // Initialize editing points if editing is enabled
-          if (widget.isEditable) {
-            _editingPoints = List.from(_selectedCustomPolygon!.points);
-            _isEditing = true;
-          }
+          // Don't automatically start editing - let user select which polygon to edit
+          // User needs to tap a polygon and then press edit button
         }
       } else {
         // Legacy system: Load WorkAreas from service
@@ -529,11 +535,127 @@ class _MapViewState extends State<MapView> {
     return result ?? false;
   }
 
+  Future<void> _showEditNameDialog() async {
+    if (_selectedCustomPolygon == null || _selectedPolygonIndex == null) return;
+
+    final TextEditingController nameController = TextEditingController(
+      text: _selectedCustomPolygon!.name,
+    );
+
+    Color selectedColor = _selectedCustomPolygon!.color;
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Edit Polygon Properties'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Name',
+                  hintText: 'Enter polygon name',
+                ),
+                autofocus: true,
+              ),
+              const SizedBox(height: 16),
+              const Text('Color:',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  Colors.blue,
+                  Colors.red,
+                  Colors.green,
+                  Colors.orange,
+                  Colors.purple,
+                  Colors.teal,
+                  Colors.indigo,
+                  Colors.brown,
+                  Colors.pink,
+                  Colors.cyan,
+                ]
+                    .map((color) => GestureDetector(
+                          onTap: () {
+                            setDialogState(() {
+                              selectedColor = color;
+                            });
+                          },
+                          child: Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: color,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: selectedColor == color
+                                    ? Colors.black
+                                    : Colors.grey.shade300,
+                                width: selectedColor == color ? 3 : 1,
+                              ),
+                            ),
+                            child: selectedColor == color
+                                ? const Icon(Icons.check, color: Colors.white)
+                                : null,
+                          ),
+                        ))
+                    .toList(),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                final newName = nameController.text.trim();
+                if (newName.isNotEmpty) {
+                  Navigator.of(context).pop({
+                    'name': newName,
+                    'color': selectedColor,
+                  });
+                }
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != null) {
+      setState(() {
+        // Update the polygon with the new name and color
+        final updatedPolygon = _selectedCustomPolygon!.copyWith(
+          name: result['name'] as String,
+          color: result['color'] as Color,
+        );
+        _customPolygons[_selectedPolygonIndex!] = updatedPolygon;
+        _selectedCustomPolygon = updatedPolygon;
+        _hasUnsavedChanges = true;
+        _updateMapView();
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        leading: CloseButton(onPressed: () => Navigator.of(context).pop()),
+        leading: CloseButton(onPressed: () {
+          // Return updated CustomPolygons if available
+          if (_customPolygons.isNotEmpty) {
+            Navigator.of(context).pop(_customPolygons);
+          } else {
+            Navigator.of(context).pop();
+          }
+        }),
         title: Text(
           '${widget.title ?? 'Map View'}${_hasUnsavedChanges ? ' •' : ''}',
         ),
@@ -579,6 +701,16 @@ class _MapViewState extends State<MapView> {
                     },
                   ),
 
+                // Edit polygon properties button (only for CustomPolygons)
+                if (!_isEditing &&
+                    !_isCreatingNewPolygon &&
+                    _selectedCustomPolygon != null)
+                  IconButton(
+                    icon: const Icon(Icons.edit_note),
+                    tooltip: 'Edit polygon name & color',
+                    onPressed: _showEditNameDialog,
+                  ),
+
                 // Cancel buttons for editing/creating
                 if (_isEditing || _isCreatingNewPolygon)
                   IconButton(
@@ -608,32 +740,85 @@ class _MapViewState extends State<MapView> {
                     icon: const Icon(Icons.check),
                     tooltip: 'Save changes',
                     onPressed: () {
-                      Navigator.of(context).pop(_editingPoints);
+                      // Update the selected polygon with new points and return updated list
+                      if (_customPolygons.isNotEmpty &&
+                          _selectedPolygonIndex != null) {
+                        // Create updated polygon
+                        final updatedPolygon =
+                            _customPolygons[_selectedPolygonIndex!].copyWith(
+                          points: _editingPoints,
+                        );
+
+                        // Create updated list
+                        final updatedCustomPolygons = <CustomPolygon>[];
+                        for (int i = 0; i < _customPolygons.length; i++) {
+                          if (i == _selectedPolygonIndex) {
+                            updatedCustomPolygons.add(updatedPolygon);
+                          } else {
+                            updatedCustomPolygons.add(_customPolygons[i]);
+                          }
+                        }
+
+                        Navigator.of(context).pop(updatedCustomPolygons);
+                      } else {
+                        // Legacy fallback - return just points
+                        Navigator.of(context).pop([]);
+                      }
                     },
                   ),
+
+                // Save button for name changes (when not editing boundary)
+                if (!_isEditing && !_isCreatingNewPolygon && _hasUnsavedChanges)
+                  IconButton(
+                    icon: const Icon(Icons.save),
+                    tooltip: 'Save changes',
+                    onPressed: () {
+                      // Return the updated list with name changes
+                      Navigator.of(context).pop(_customPolygons);
+                    },
+                  ),
+
                 if (_isCreatingNewPolygon && _newPolygonPoints.length >= 3)
                   IconButton(
                     icon: const Icon(Icons.check),
                     tooltip: 'Save new area',
                     onPressed: () {
-                      // Add the new polygon to the editable collection
-                      final now = DateTime.now();
-                      final newWorkArea = WorkArea(
-                        id: 'new_${now.millisecondsSinceEpoch}',
-                        name: 'New Area ${_editableWorkAreas.length + 1}',
-                        description: 'User created area',
-                        polygonPoints: List.from(_newPolygonPoints),
-                        kmlFileName: '',
-                        createdAt: now,
-                        updatedAt: now,
-                      );
+                      // Check if we're using CustomPolygons or WorkAreas
+                      if (_customPolygons.isNotEmpty) {
+                        // New system: Add to CustomPolygons
+                        final newCustomPolygon = CustomPolygon(
+                          name: 'New Area ${_customPolygons.length + 1}',
+                          description: 'User created area',
+                          points: List.from(_newPolygonPoints),
+                          color: Colors.blue, // Default color for new polygons
+                        );
 
-                      setState(() {
-                        _editableWorkAreas.add(newWorkArea);
-                        _isCreatingNewPolygon = false;
-                        _newPolygonPoints.clear();
-                        _updateMapView();
-                      });
+                        setState(() {
+                          _customPolygons.add(newCustomPolygon);
+                          _isCreatingNewPolygon = false;
+                          _newPolygonPoints.clear();
+                          _updateMapView();
+                        });
+                      } else {
+                        // Legacy system: Add to WorkAreas
+                        final now = DateTime.now();
+                        final newWorkArea = WorkArea(
+                          id: 'new_${now.millisecondsSinceEpoch}',
+                          name: 'New Area ${_editableWorkAreas.length + 1}',
+                          description: 'User created area',
+                          polygonPoints: List.from(_newPolygonPoints),
+                          kmlFileName: '',
+                          createdAt: now,
+                          updatedAt: now,
+                        );
+
+                        setState(() {
+                          _editableWorkAreas.add(newWorkArea);
+                          _isCreatingNewPolygon = false;
+                          _newPolygonPoints.clear();
+                          _updateMapView();
+                        });
+                      }
 
                       // Show success message
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -650,17 +835,19 @@ class _MapViewState extends State<MapView> {
                 // Done button (when there are multiple areas to save)
                 if (!_isEditing &&
                     !_isCreatingNewPolygon &&
-                    _editableWorkAreas.length > 1)
+                    (_customPolygons.length > 1 ||
+                        _editableWorkAreas.length > 1))
                   IconButton(
                     icon: const Icon(Icons.done),
                     tooltip: 'Finish editing',
                     onPressed: () {
-                      // Return all polygon points combined (for now, return the primary area's points)
-                      // This might need adjustment based on how the parent handles multiple polygons
-                      final allPoints = _editableWorkAreas.isNotEmpty
-                          ? _editableWorkAreas.first.polygonPoints
-                          : <LatLng>[];
-                      Navigator.of(context).pop(allPoints);
+                      // Return updated CustomPolygons or legacy WorkAreas
+                      if (_customPolygons.isNotEmpty) {
+                        Navigator.of(context).pop(_customPolygons);
+                      } else {
+                        // Legacy fallback
+                        Navigator.of(context).pop([]);
+                      }
                     },
                   ),
               ]

@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
 import '../providers/job_status_provider.dart';
-import '../utils/work_area_converter.dart';
 import 'map_view.dart';
 import 'print_map_view.dart';
 import '../providers/schedule_provider.dart';
@@ -20,7 +18,8 @@ class JobCard extends StatelessWidget {
   Color _getStatusColor(BuildContext context) {
     final statusProvider = context.read<JobStatusProvider>();
     final status = statusProvider.getStatusById(job.statusId);
-    return status?.color ?? Colors.grey.shade700; // Darker grey for better contrast
+    return status?.color ??
+        Colors.grey.shade700; // Darker grey for better contrast
   }
 
   void _printMapLink(BuildContext context) {
@@ -53,7 +52,8 @@ class JobCard extends StatelessWidget {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to open print map: $e'),
-            backgroundColor: Colors.red.shade800, // Darker red for better contrast
+            backgroundColor:
+                Colors.red.shade800, // Darker red for better contrast
           ),
         );
       }
@@ -97,271 +97,33 @@ class JobCard extends StatelessWidget {
                   color: Colors.white54,
                   margin: const EdgeInsets.symmetric(vertical: 2),
                 ),
+                // Work Area Row
                 Flexible(
                   flex: 3,
                   child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      // Work Area Selection with Buttons
                       Expanded(
-                        flex: 3,
-                        child: Consumer<ScheduleProvider>(
-                          builder: (context, provider, child) {
-                            final workAreas = provider.workAreas;
-
-                            return Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                // Work Area Autocomplete
-                                Expanded(
-                                  child: Autocomplete<WorkArea>(
-                                    initialValue: TextEditingValue(
-                                      text: job.workingAreasDisplay,
-                                    ),
-                                    displayStringForOption: (WorkArea area) =>
-                                        area.name,
-                                    onSelected: (WorkArea area) {
-                                      // Convert WorkArea to CustomPolygon and add to workMaps
-                                      final customPolygon = WorkAreaConverter
-                                          .workAreaToCustomPolygon(area);
-
-                                      // Update working areas list and workMaps
-                                      final updatedAreas =
-                                          job.workingAreas.isEmpty
-                                              ? [area.name]
-                                              : <String>[
-                                                  area.name,
-                                                  ...job.workingAreas.skip(1)
-                                                ];
-
-                                      // Update or add to workMaps
-                                      final updatedWorkMaps = <CustomPolygon>[
-                                        customPolygon,
-                                        ...job.workMaps.where(
-                                            (map) => map.name != area.name),
-                                      ];
-
-                                      context
-                                          .read<ScheduleProvider>()
-                                          .updateJob(
-                                            job.copyWith(
-                                              workingAreas: updatedAreas,
-                                              workMaps: updatedWorkMaps,
-                                            ),
-                                          );
-                                    },
-                                    optionsBuilder:
-                                        (TextEditingValue textEditingValue) {
-                                      if (textEditingValue.text.isEmpty) {
-                                        return workAreas;
-                                      }
-                                      return workAreas.where((WorkArea area) {
-                                        return area.name.toLowerCase().contains(
-                                                  textEditingValue.text
-                                                      .toLowerCase(),
-                                                ) ||
-                                            area.description
-                                                .toLowerCase()
-                                                .contains(
-                                                  textEditingValue.text
-                                                      .toLowerCase(),
-                                                );
-                                      });
-                                    },
-                                    fieldViewBuilder: (
-                                      BuildContext context,
-                                      TextEditingController controller,
-                                      FocusNode focusNode,
-                                      VoidCallback onFieldSubmitted,
-                                    ) {
-                                      return TextFormField(
-                                        controller: controller,
-                                        focusNode: focusNode,
-                                        onFieldSubmitted: (String value) {
-                                          onFieldSubmitted();
-                                        },
-                                        decoration: InputDecoration(
-                                          isDense: true,
-                                          border: InputBorder.none,
-                                          contentPadding:
-                                              const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                          ),
-                                          labelStyle: TextStyle(
-                                            color: Theme.of(
-                                              context,
-                                            ).textTheme.bodyMedium?.color,
-                                          ),
-                                        ),
-                                        style: TextStyle(
-                                          color: Colors.white,
-                                          fontSize: scaleProvider.smallFontSize,
-                                        ),
-                                        maxLines: 2,
-                                      );
-                                    },
-                                    optionsViewBuilder: (
-                                      BuildContext context,
-                                      void Function(WorkArea) onSelected,
-                                      Iterable<WorkArea> options,
-                                    ) {
-                                      return Align(
-                                        alignment: Alignment.topLeft,
-                                        child: Material(
-                                          elevation: 4.0,
-                                          child: Container(
-                                            width: 400,
-                                            constraints: const BoxConstraints(
-                                              maxHeight: 200,
-                                            ),
-                                            child: ListView.builder(
-                                              padding: EdgeInsets.zero,
-                                              shrinkWrap: true,
-                                              itemCount: options.length,
-                                              itemBuilder: (
-                                                BuildContext context,
-                                                int index,
-                                              ) {
-                                                final WorkArea option =
-                                                    options.elementAt(index);
-                                                return InkWell(
-                                                  onTap: () {
-                                                    onSelected(option);
-                                                  },
-                                                  child: ListTile(
-                                                    dense: true,
-                                                    title: Text(
-                                                      option.name,
-                                                      style: TextStyle(
-                                                        color: Theme.of(context)
-                                                            .textTheme
-                                                            .bodyMedium
-                                                            ?.color,
-                                                      ),
-                                                    ),
-                                                    subtitle: Text(
-                                                      option.description,
-                                                      style: TextStyle(
-                                                        color: Theme.of(context)
-                                                            .textTheme
-                                                            .bodySmall
-                                                            ?.color,
-                                                        fontSize: scaleProvider
-                                                            .smallFontSize,
-                                                      ),
-                                                    ),
-                                                  ),
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                        ),
-                                      );
-                                    },
+                        flex: 2,
+                        child: _WorkAreaListEditor(
+                          job: job,
+                          onWorkAreasChanged:
+                              (List<CustomPolygon> updatedWorkMaps) {
+                            final updatedWorkingAreas = updatedWorkMaps
+                                .map((polygon) => polygon.name)
+                                .toList();
+                            context.read<ScheduleProvider>().updateJob(
+                                  job.copyWith(
+                                    workingAreas: updatedWorkingAreas,
+                                    workMaps: updatedWorkMaps,
                                   ),
-                                ),
-                                // Map Edit Button
-                                IconButton(
-                                  icon: const Icon(
-                                    Icons.edit_location_alt,
-                                    color: Colors.white,
-                                  ),
-                                  constraints: const BoxConstraints(),
-                                  padding: EdgeInsets.zero,
-                                  iconSize: scaleProvider.mediumIconSize,
-                                  tooltip: 'Edit work area on map',
-                                  onPressed: () async {
-                                    try {
-                                      final result =
-                                          await showDialog<List<LatLng>>(
-                                        context: context,
-                                        useSafeArea: true,
-                                        builder: (BuildContext context) =>
-                                            Dialog.fullscreen(
-                                          child: MapView(
-                                            jobId: job.id,
-                                            customPolygons: job.workMaps,
-                                            title: job.clientsDisplay,
-                                            isEditable: true,
-                                          ),
-                                        ),
-                                      );
-
-                                      if (result != null) {
-                                        try {
-                                          // Create new CustomPolygon with the edited points
-                                          final newCustomPolygon =
-                                              WorkAreaConverter
-                                                  .createCustomPolygonFromPoints(
-                                            result,
-                                            name: '${job.primaryClient} ',
-                                            description:
-                                                'Custom work area for ${job.primaryClient}',
-                                          );
-
-                                          // Add or update the custom polygon in workMaps
-                                          final updatedWorkMaps =
-                                              <CustomPolygon>[
-                                            newCustomPolygon,
-                                            ...job.workMaps.where((map) =>
-                                                map.name !=
-                                                newCustomPolygon.name),
-                                          ];
-
-                                          // Update working areas if needed
-                                          final updatedWorkingAreas =
-                                              job.workingAreas.contains(
-                                                      newCustomPolygon.name)
-                                                  ? job.workingAreas
-                                                  : [
-                                                      newCustomPolygon.name,
-                                                      ...job.workingAreas
-                                                    ];
-
-                                          context
-                                              .read<ScheduleProvider>()
-                                              .updateJob(
-                                                job.copyWith(
-                                                  workingAreas:
-                                                      updatedWorkingAreas,
-                                                  workMaps: updatedWorkMaps,
-                                                ),
-                                              );
-                                        } catch (e) {
-                                          if (context.mounted) {
-                                            ScaffoldMessenger.of(context)
-                                                .showSnackBar(
-                                              SnackBar(
-                                                content: Text(
-                                                    'Failed to save work area: $e'),
-                                                backgroundColor: Colors.red.shade800, // Darker red for better contrast
-                                              ),
-                                            );
-                                          }
-                                        }
-                                      }
-                                    } catch (e) {
-                                      if (context.mounted) {
-                                        ScaffoldMessenger.of(context)
-                                            .showSnackBar(
-                                          SnackBar(
-                                            content:
-                                                Text('Failed to open map: $e'),
-                                            backgroundColor: Colors.red.shade800, // Darker red for better contrast
-                                          ),
-                                        );
-                                      }
-                                    }
-                                  },
-                                ),
-                              ],
-                            );
+                                );
                           },
                         ),
                       ),
                     ],
                   ),
                 ),
+
                 Container(
                   height: 1,
                   color: Colors.white54,
@@ -494,7 +256,6 @@ class _ClientListEditor extends StatefulWidget {
 class _ClientListEditorState extends State<_ClientListEditor> {
   late TextEditingController _controller;
   late List<String> _localClients;
-  bool _isEditing = false;
 
   @override
   void initState() {
@@ -510,7 +271,6 @@ class _ClientListEditorState extends State<_ClientListEditor> {
       setState(() {
         _localClients = List.from(widget.job.clients);
         _controller.text = widget.job.clientsDisplay;
-        _isEditing = false; // Reset editing state when job changes
       });
     }
   }
@@ -539,16 +299,8 @@ class _ClientListEditorState extends State<_ClientListEditor> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<JobListProvider, ScaleProvider>(
-      builder: (context, jobListProvider, scaleProvider, child) {
-        // Get unique client names from current month job list items
-        final uniqueClients = jobListProvider.jobListItems
-            .map((item) => item.client)
-            .where((client) => client.isNotEmpty)
-            .toSet()
-            .toList()
-          ..sort();
-
+    return Consumer<ScaleProvider>(
+      builder: (context, scaleProvider, child) {
         return Row(
           children: [
             Expanded(
@@ -828,6 +580,420 @@ class _ClientListDialogState extends State<_ClientListDialog> {
                 child: const Text('Save'),
               ),
             ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _WorkAreaListEditor extends StatefulWidget {
+  final Job job;
+  final Function(List<CustomPolygon>) onWorkAreasChanged;
+
+  const _WorkAreaListEditor({
+    required this.job,
+    required this.onWorkAreasChanged,
+  });
+
+  @override
+  State<_WorkAreaListEditor> createState() => _WorkAreaListEditorState();
+}
+
+class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
+  late List<CustomPolygon> _localWorkMaps;
+  bool _hasUnsavedChanges = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _localWorkMaps = List.from(widget.job.workMaps);
+  }
+
+  @override
+  void didUpdateWidget(_WorkAreaListEditor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.job.workMaps != widget.job.workMaps) {
+      setState(() {
+        _localWorkMaps = List.from(widget.job.workMaps);
+        _hasUnsavedChanges = false;
+      });
+    }
+  }
+
+  void _showWorkAreaListDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => _WorkAreaListDialog(
+        workMaps: _localWorkMaps,
+        onWorkAreasChanged: (updatedWorkMaps, bool hasChanges) {
+          setState(() {
+            _localWorkMaps = updatedWorkMaps;
+            _hasUnsavedChanges = hasChanges;
+          });
+        },
+        onSaveChanges: () {
+          widget.onWorkAreasChanged(_localWorkMaps);
+          setState(() {
+            _hasUnsavedChanges = false;
+          });
+        },
+      ),
+    );
+  }
+
+  String _getDisplayText() {
+    if (_localWorkMaps.isEmpty) {
+      return 'add work area';
+    }
+    final names = _localWorkMaps.map((w) => w.name).where((n) => n.isNotEmpty);
+    return names.join(', ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<ScaleProvider>(
+      builder: (context, scaleProvider, child) {
+        return Row(
+          children: [
+            Expanded(
+              child: GestureDetector(
+                onTap: _showWorkAreaListDialog,
+                child: Container(
+                  margin: const EdgeInsets.only(left: 4),
+                  child: Text(
+                    _getDisplayText(),
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 2,
+                    style: TextStyle(
+                      fontSize: scaleProvider.mediumFontSize,
+                      color: _hasUnsavedChanges ? Colors.amber : Colors.white,
+                      fontWeight: FontWeight.w400,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            // Map Edit Button
+            IconButton(
+              icon: const Icon(
+                Icons.edit_location_alt,
+                color: Colors.white,
+              ),
+              constraints: const BoxConstraints(),
+              padding: EdgeInsets.zero,
+              iconSize: scaleProvider.mediumIconSize,
+              tooltip: 'Edit work area on map',
+              onPressed: () async {
+                try {
+                  // Add a small delay to prevent rapid dialog opening/closing
+                  await Future.delayed(const Duration(milliseconds: 100));
+                  
+                  if (!context.mounted) return;
+                  
+                  final result = await Navigator.of(context).push<List<CustomPolygon>>(
+                    MaterialPageRoute(
+                      fullscreenDialog: true,
+                      builder: (BuildContext context) => MapView(
+                        jobId: widget.job.id,
+                        customPolygons: _localWorkMaps,
+                        title: widget.job.clientsDisplay,
+                        isEditable: true,
+                      ),
+                    ),
+                  );
+
+                  if (result != null && context.mounted) {
+                    try {
+                      setState(() {
+                        _localWorkMaps = result;
+                        _hasUnsavedChanges = true;
+                      });
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Failed to save work area: $e'),
+                            backgroundColor: Colors.red.shade800,
+                          ),
+                        );
+                      }
+                    }
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Failed to open map: $e'),
+                        backgroundColor: Colors.red.shade800,
+                      ),
+                    );
+                  }
+                }
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _WorkAreaListDialog extends StatefulWidget {
+  final List<CustomPolygon> workMaps;
+  final Function(List<CustomPolygon>, bool) onWorkAreasChanged;
+  final VoidCallback onSaveChanges;
+
+  const _WorkAreaListDialog({
+    required this.workMaps,
+    required this.onWorkAreasChanged,
+    required this.onSaveChanges,
+  });
+
+  @override
+  State<_WorkAreaListDialog> createState() => _WorkAreaListDialogState();
+}
+
+class _WorkAreaListDialogState extends State<_WorkAreaListDialog> {
+  late List<CustomPolygon> _workMaps;
+  bool _hasUnsavedChanges = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _workMaps = List.from(widget.workMaps);
+  }
+
+  void _addWorkArea(WorkArea workArea) {
+    // Generate a unique color for the new work area
+    final colors = [
+      Colors.blue,
+      Colors.green,
+      Colors.orange,
+      Colors.purple,
+      Colors.teal
+    ];
+    final color = colors[_workMaps.length % colors.length];
+
+    final customPolygon = CustomPolygon(
+      name: workArea.name,
+      description: workArea.description,
+      points: workArea.polygonPoints,
+      color: color,
+    );
+
+    setState(() {
+      _workMaps.add(customPolygon);
+      _hasUnsavedChanges = true;
+    });
+
+    widget.onWorkAreasChanged(_workMaps, _hasUnsavedChanges);
+  }
+
+  void _removeWorkArea(int index) {
+    setState(() {
+      _workMaps.removeAt(index);
+      _hasUnsavedChanges = true;
+    });
+
+    widget.onWorkAreasChanged(_workMaps, _hasUnsavedChanges);
+  }
+
+  void _saveChanges() {
+    widget.onSaveChanges();
+    setState(() {
+      _hasUnsavedChanges = false;
+    });
+    Navigator.of(context).pop();
+  }
+
+  void _discardChanges() {
+    if (_hasUnsavedChanges) {
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Discard Changes?'),
+          content: const Text(
+              'You have unsaved changes. Are you sure you want to discard them?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop(); // Close confirmation dialog
+                Navigator.of(context).pop(); // Close main dialog
+              },
+              child: const Text('Discard'),
+            ),
+          ],
+        ),
+      );
+    } else {
+      Navigator.of(context).pop();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer2<ScheduleProvider, ScaleProvider>(
+      builder: (context, scheduleProvider, scaleProvider, child) {
+        final workAreas = scheduleProvider.workAreas;
+
+        return AlertDialog(
+          title: Row(
+            children: [
+              const Text('Manage Work Areas'),
+              if (_hasUnsavedChanges)
+                Container(
+                  margin: const EdgeInsets.only(left: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.amber,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Text(
+                    'Unsaved',
+                    style: TextStyle(fontSize: 10, color: Colors.black),
+                  ),
+                ),
+            ],
+          ),
+          content: SizedBox(
+            width: 500,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Current work areas:'),
+                const SizedBox(height: 8),
+                if (_workMaps.isEmpty)
+                  const Text('No work areas selected')
+                else
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: _workMaps.length,
+                      itemBuilder: (context, index) {
+                        final workMap = _workMaps[index];
+                        return Card(
+                          child: ListTile(
+                            leading: Container(
+                              width: 20,
+                              height: 20,
+                              decoration: BoxDecoration(
+                                color: workMap.color,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            title: Text(workMap.name),
+                            subtitle: Text(workMap.description),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.delete),
+                              onPressed: () => _removeWorkArea(index),
+                              tooltip: 'Remove work area',
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                const SizedBox(height: 16),
+                const Text('Add work area:'),
+                const SizedBox(height: 8),
+                Autocomplete<WorkArea>(
+                  optionsBuilder: (TextEditingValue textEditingValue) {
+                    if (textEditingValue.text.isEmpty) {
+                      return workAreas.where((area) =>
+                          !_workMaps.any((wm) => wm.name == area.name));
+                    }
+                    return workAreas.where((WorkArea area) {
+                      if (_workMaps.any((wm) => wm.name == area.name)) {
+                        return false; // Don't show already added areas
+                      }
+                      return area.name.toLowerCase().contains(
+                                textEditingValue.text.toLowerCase(),
+                              ) ||
+                          area.description.toLowerCase().contains(
+                                textEditingValue.text.toLowerCase(),
+                              );
+                    });
+                  },
+                  displayStringForOption: (WorkArea area) => area.name,
+                  onSelected: (WorkArea area) {
+                    _addWorkArea(area);
+                  },
+                  fieldViewBuilder: (
+                    BuildContext context,
+                    TextEditingController controller,
+                    FocusNode focusNode,
+                    VoidCallback onFieldSubmitted,
+                  ) {
+                    return TextFormField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      decoration: const InputDecoration(
+                        labelText: 'Search work areas...',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                      onFieldSubmitted: (String value) {
+                        onFieldSubmitted();
+                      },
+                    );
+                  },
+                  optionsViewBuilder: (
+                    BuildContext context,
+                    void Function(WorkArea) onSelected,
+                    Iterable<WorkArea> options,
+                  ) {
+                    return Align(
+                      alignment: Alignment.topLeft,
+                      child: Material(
+                        elevation: 4.0,
+                        child: Container(
+                          width: 400,
+                          constraints: const BoxConstraints(
+                            maxHeight: 200,
+                          ),
+                          child: ListView.builder(
+                            padding: EdgeInsets.zero,
+                            shrinkWrap: true,
+                            itemCount: options.length,
+                            itemBuilder: (BuildContext context, int index) {
+                              final WorkArea option = options.elementAt(index);
+                              return InkWell(
+                                onTap: () {
+                                  onSelected(option);
+                                },
+                                child: ListTile(
+                                  dense: true,
+                                  title: Text(option.name),
+                                  subtitle: Text(option.description),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: _discardChanges,
+              child: const Text('Cancel'),
+            ),
+            if (_hasUnsavedChanges)
+              ElevatedButton(
+                onPressed: _saveChanges,
+                child: const Text('Save Changes'),
+              ),
           ],
         );
       },

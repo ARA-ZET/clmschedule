@@ -324,26 +324,87 @@ class _JobListGridState extends State<JobListGrid> {
                                     Colors.grey[100],
                                   ),
                                   columns: const [
-                                    DataColumn(label: Text('Invoice')),
-                                    DataColumn(label: Text('Amount')),
-                                    DataColumn(label: Text('Client')),
-                                    DataColumn(label: Text('Job Status')),
-                                    DataColumn(label: Text('Job Type')),
-                                    DataColumn(label: Text('Area')),
-                                    DataColumn(label: Text('Quantity')),
-                                    DataColumn(label: Text('Man-Days')),
-                                    DataColumn(label: Text('Date')),
                                     DataColumn(
-                                        label: Text('Collection Address')),
-                                    DataColumn(label: Text('Collection Date')),
+                                        label: Text(
+                                      'Invoice',
+                                      style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.black),
+                                    )),
                                     DataColumn(
-                                        label: Text('Special Instructions')),
+                                        label: Text(
+                                      'Amount',
+                                      style: TextStyle(
+                                          fontWeight: FontWeight.bold),
+                                    )),
                                     DataColumn(
-                                        label: Text('Quantity Distributed')),
-                                    DataColumn(label: Text('Invoice Details')),
-                                    DataColumn(label: Text('Report Addresses')),
-                                    DataColumn(label: Text('Who to Invoice')),
-                                    DataColumn(label: Text('Actions')),
+                                        label: Text(
+                                      'Client',
+                                      style: TextStyle(
+                                          fontWeight: FontWeight.bold),
+                                    )),
+                                    DataColumn(
+                                        label: Text(
+                                      'Job Status',
+                                      style: TextStyle(
+                                          fontWeight: FontWeight.bold),
+                                    )),
+                                    DataColumn(
+                                        label: Text(
+                                      'Job Type',
+                                      style: TextStyle(
+                                          fontWeight: FontWeight.bold),
+                                    )),
+                                    DataColumn(
+                                        label: Text(
+                                      'Area',
+                                      style: TextStyle(
+                                          fontWeight: FontWeight.bold),
+                                    )),
+                                    DataColumn(
+                                        label: Text('Qty',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Man-Days',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Date',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Collection Address',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Coll Date',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Special Instructions',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Qty Distributed',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Invoice Details',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Report Addresses',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Who to Invoice',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
+                                    DataColumn(
+                                        label: Text('Actions',
+                                            style: TextStyle(
+                                                fontWeight: FontWeight.bold))),
                                   ],
                                   rows: jobListItems.map((item) {
                                     return DataRow(
@@ -411,7 +472,7 @@ class _JobListGridState extends State<JobListGrid> {
                                             value: item.client,
                                             onSave: (value) => _updateJobField(
                                                 item, 'client', value),
-                                            width: 200,
+                                            width: 250,
                                             validator: (value) =>
                                                 value?.isEmpty == true
                                                     ? 'Client required'
@@ -532,12 +593,11 @@ class _JobListGridState extends State<JobListGrid> {
                                           ),
                                         ),
                                         DataCell(
-                                          EditableTableCell(
+                                          LinkCell(
                                             value: item.area,
                                             onSave: (value) => _updateJobField(
                                                 item, 'area', value),
                                             width: 120,
-                                            maxLines: 2,
                                           ),
                                         ),
                                         DataCell(

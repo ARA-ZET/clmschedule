@@ -93,7 +93,7 @@ class CustomJobStatus {
       const CustomJobStatus(
         id: 'scheduled',
         label: 'Scheduled',
-        color: Color.fromARGB(255, 120, 69, 0), // Darker orange
+        color: Color.fromARGB(255, 163, 95, 0), // Darker orange
         isDefault: true,
         order: 1,
       ),

@@ -4,7 +4,6 @@ import 'dart:math' show min, max;
 import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import '../models/work_area.dart';
 import '../models/job.dart';
 import 'package:intl/intl.dart';
 
@@ -27,7 +26,6 @@ class _PrintMapViewState extends State<PrintMapView> {
   final Set<Polygon> _polygons = {};
   LatLng _center = const LatLng(-33.925, 18.425); // Cape Town city center
   bool _isLoading = true;
-  WorkArea? _selectedWorkArea;
   bool _isPortrait = true;
   bool _isDraggingInfoBox = false; // Track when dragging info box
   bool _isResizingInfoBox = false; // Track when resizing info box
@@ -36,6 +34,13 @@ class _PrintMapViewState extends State<PrintMapView> {
   Offset _infoBoxPosition = const Offset(20, 20);
   Size _infoBoxSize = const Size(250, 160); // Default size
   double _fontScale = 1.0; // Font scale factor
+
+  // Position and size of the work areas box (when multiple areas exist)
+  Offset _workAreasBoxPosition = const Offset(20, 200);
+  Size _workAreasBoxSize = const Size(250, 100); // Default size
+  double _workAreasFontScale = 1.0; // Font scale factor
+  bool _isDraggingWorkAreasBox = false; // Track when dragging work areas box
+  bool _isResizingWorkAreasBox = false; // Track when resizing work areas box
 
   // Global key for capturing the map widget
   final GlobalKey _mapKey = GlobalKey();
@@ -48,24 +53,7 @@ class _PrintMapViewState extends State<PrintMapView> {
 
   Future<void> _initializeMap() async {
     try {
-      // Use work maps from the job directly
-      if (widget.job.workMaps.isNotEmpty) {
-        // For printing, we'll use the first work map as the selected area
-        // In the future, this could show all work maps or allow selection
-        final firstWorkMap = widget.job.workMaps.first;
-
-        // Create a temporary WorkArea for compatibility with existing printing logic
-        _selectedWorkArea = WorkArea(
-          id: 'temp_${firstWorkMap.name}',
-          name: firstWorkMap.name,
-          description: firstWorkMap.description,
-          polygonPoints: firstWorkMap.points,
-          kmlFileName: '',
-          createdAt: DateTime.now(),
-          updatedAt: DateTime.now(),
-        );
-      }
-
+      // Initialize map view with all work maps
       _updateMapView();
     } catch (e) {
       print('Error initializing map: $e');
@@ -81,39 +69,44 @@ class _PrintMapViewState extends State<PrintMapView> {
   void _updateMapView() {
     _polygons.clear();
 
-    // Don't show background work areas - only show the job-specific polygon
-    // This ensures only the current job's work area is visible when printing
+    // Show all work maps with their respective colors
+    if (widget.job.workMaps.isNotEmpty) {
+      for (int i = 0; i < widget.job.workMaps.length; i++) {
+        final workMap = widget.job.workMaps[i];
 
-    // Add the selected work area (highlighted)
-    if (_selectedWorkArea != null) {
-      _polygons.add(
-        Polygon(
-          polygonId: PolygonId(_selectedWorkArea!.id),
-          points: _selectedWorkArea!.polygonPoints,
-          fillColor: Colors.red.withOpacity(0), // Semi-transparent fill
-          strokeColor: Colors.red,
-          strokeWidth: 3,
-        ),
-      );
+        _polygons.add(
+          Polygon(
+            polygonId: PolygonId('workmap_$i'),
+            points: workMap.points,
+            fillColor: workMap.color
+                .withOpacity(0), // Semi-transparent fill with original color
+            strokeColor: workMap.color, // Use the polygon's original color
+            strokeWidth: 3,
+          ),
+        );
+      }
     }
 
-    // Center map on selected area
+    // Center map on all polygons
     _updateMapCenter();
   }
 
   void _updateMapCenter() {
-    if (_selectedWorkArea?.polygonPoints.isNotEmpty == true) {
-      final points = _selectedWorkArea!.polygonPoints;
+    if (widget.job.workMaps.isNotEmpty) {
+      // Calculate bounds for all polygons
       double minLat = 90;
       double maxLat = -90;
       double minLng = 180;
       double maxLng = -180;
 
-      for (final point in points) {
-        minLat = min(minLat, point.latitude);
-        maxLat = max(maxLat, point.latitude);
-        minLng = min(minLng, point.longitude);
-        maxLng = max(maxLng, point.longitude);
+      // Iterate through all work maps to find overall bounds
+      for (final workMap in widget.job.workMaps) {
+        for (final point in workMap.points) {
+          minLat = min(minLat, point.latitude);
+          maxLat = max(maxLat, point.latitude);
+          minLng = min(minLng, point.longitude);
+          maxLng = max(maxLng, point.longitude);
+        }
       }
 
       _center = LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
@@ -284,6 +277,9 @@ class _PrintMapViewState extends State<PrintMapView> {
                 _infoBoxPosition = const Offset(20, 20);
                 _infoBoxSize = const Size(250, 160);
                 _fontScale = 1.0;
+                _workAreasBoxPosition = const Offset(20, 200);
+                _workAreasBoxSize = const Size(250, 100);
+                _workAreasFontScale = 1.0;
               });
             },
           ),
@@ -338,10 +334,14 @@ class _PrintMapViewState extends State<PrintMapView> {
                       zoomControlsEnabled: false,
                       mapToolbarEnabled: false,
                       myLocationButtonEnabled: false,
-                      scrollGesturesEnabled:
-                          !_isDraggingInfoBox && !_isResizingInfoBox,
-                      zoomGesturesEnabled:
-                          !_isDraggingInfoBox && !_isResizingInfoBox,
+                      scrollGesturesEnabled: !_isDraggingInfoBox &&
+                          !_isResizingInfoBox &&
+                          !_isDraggingWorkAreasBox &&
+                          !_isResizingWorkAreasBox,
+                      zoomGesturesEnabled: !_isDraggingInfoBox &&
+                          !_isResizingInfoBox &&
+                          !_isDraggingWorkAreasBox &&
+                          !_isResizingWorkAreasBox,
                       rotateGesturesEnabled: false,
                       tiltGesturesEnabled: false,
                     ),
@@ -357,6 +357,13 @@ class _PrintMapViewState extends State<PrintMapView> {
                       top: _infoBoxPosition.dy,
                       child: _buildInfoBox(),
                     ),
+                    // Work Areas Box (only when multiple areas exist)
+                    if (widget.job.workMaps.length > 1)
+                      Positioned(
+                        left: _workAreasBoxPosition.dx,
+                        top: _workAreasBoxPosition.dy,
+                        child: _buildWorkAreasBox(),
+                      ),
                   ],
                 ),
               ),
@@ -484,6 +491,134 @@ class _PrintMapViewState extends State<PrintMapView> {
               ),
             ),
           ),
+
+          // Movable Work Areas Box (for positioning only - invisible, only when multiple areas exist)
+          if (widget.job.workMaps.length > 1)
+            Positioned(
+              left: mapLeft + _workAreasBoxPosition.dx,
+              top: mapTop + _workAreasBoxPosition.dy,
+              child: GestureDetector(
+                onPanStart: (details) {
+                  setState(() {
+                    _isDraggingWorkAreasBox = true;
+                  });
+                },
+                onPanUpdate: (details) {
+                  setState(() {
+                    final newX = _workAreasBoxPosition.dx + details.delta.dx;
+                    final newY = _workAreasBoxPosition.dy + details.delta.dy;
+
+                    // Keep the box within the map bounds using dynamic size
+                    _workAreasBoxPosition = Offset(
+                      newX.clamp(0, mapWidth - _workAreasBoxSize.width),
+                      newY.clamp(0, mapHeight - _workAreasBoxSize.height),
+                    );
+                  });
+                },
+                onPanEnd: (details) {
+                  setState(() {
+                    _isDraggingWorkAreasBox = false;
+                  });
+                },
+                child: Stack(
+                  children: [
+                    // Main draggable container
+                    Container(
+                      width: _workAreasBoxSize.width,
+                      height: _workAreasBoxSize.height,
+                      decoration: BoxDecoration(
+                        color: Colors.transparent,
+                        border: Border.all(
+                          color: (_isDraggingWorkAreasBox ||
+                                  _isResizingWorkAreasBox)
+                              ? Colors.red.withOpacity(0.8)
+                              : Colors.blue.withOpacity(0),
+                          width: (_isDraggingWorkAreasBox ||
+                                  _isResizingWorkAreasBox)
+                              ? 2
+                              : 1,
+                        ),
+                      ),
+                      child: Center(
+                        child: Icon(
+                          Icons.drag_handle,
+                          color: (_isDraggingWorkAreasBox ||
+                                  _isResizingWorkAreasBox)
+                              ? Colors.red.withOpacity(0.7)
+                              : Colors.blue.withOpacity(0),
+                          size: 20 * _workAreasFontScale,
+                        ),
+                      ),
+                    ),
+                    // Resize handle in bottom-right corner
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: GestureDetector(
+                        onPanStart: (details) {
+                          setState(() {
+                            _isResizingWorkAreasBox = true;
+                          });
+                        },
+                        onPanUpdate: (details) {
+                          setState(() {
+                            final newWidth =
+                                _workAreasBoxSize.width + details.delta.dx;
+                            final newHeight =
+                                _workAreasBoxSize.height + details.delta.dy;
+
+                            // Min and max constraints for size
+                            const minSize = Size(200, 60);
+                            final maxSize =
+                                Size(mapWidth * 0.6, mapHeight * 0.3);
+
+                            _workAreasBoxSize = Size(
+                              newWidth.clamp(minSize.width, maxSize.width),
+                              newHeight.clamp(minSize.height, maxSize.height),
+                            );
+
+                            // Update font scale based on size
+                            final sizeRatio = (_workAreasBoxSize.width / 250 +
+                                    _workAreasBoxSize.height / 100) /
+                                2;
+                            _workAreasFontScale = sizeRatio.clamp(0.6, 2.0);
+
+                            // Adjust position if needed to stay within bounds
+                            _workAreasBoxPosition = Offset(
+                              _workAreasBoxPosition.dx
+                                  .clamp(0, mapWidth - _workAreasBoxSize.width),
+                              _workAreasBoxPosition.dy.clamp(
+                                  0, mapHeight - _workAreasBoxSize.height),
+                            );
+                          });
+                        },
+                        onPanEnd: (details) {
+                          setState(() {
+                            _isResizingWorkAreasBox = false;
+                          });
+                        },
+                        child: Container(
+                          width: 16,
+                          height: 16,
+                          decoration: BoxDecoration(
+                            color: _isResizingWorkAreasBox
+                                ? Colors.red.withOpacity(0.8)
+                                : Colors.blue.withOpacity(
+                                    _isDraggingWorkAreasBox ? 0.6 : 0),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                          child: const Icon(
+                            Icons.drag_handle,
+                            color: Colors.white,
+                            size: 10,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -534,12 +669,14 @@ class _PrintMapViewState extends State<PrintMapView> {
             // Name (Distributor)
             _buildInfoRow('Name:', widget.distributorName ?? '.'),
 
-            // Map (Working Area)
+            // Map (Working Area) - show single area or indicate multiple
             _buildInfoRow(
                 'Map:',
-                widget.job.primaryWorkingArea.isNotEmpty
-                    ? widget.job.primaryWorkingArea
-                    : '.'),
+                widget.job.workMaps.isEmpty
+                    ? '.'
+                    : widget.job.workMaps.length == 1
+                        ? widget.job.workMaps.first.name
+                        : '${widget.job.workMaps.length} work areas'),
 
             // Date
             _buildInfoRow('Date:', dateFormatter.format(widget.job.date)),
@@ -582,6 +719,83 @@ class _PrintMapViewState extends State<PrintMapView> {
                   ),
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWorkAreasBox() {
+    return Container(
+      width: _workAreasBoxSize.width,
+      height: _workAreasBoxSize.height,
+      padding: EdgeInsets.all(8 * _workAreasFontScale),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: Colors.black, width: 1),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.2),
+            blurRadius: 4,
+            offset: const Offset(2, 2),
+          ),
+        ],
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Header
+            Row(
+              children: [
+                Icon(Icons.drag_handle,
+                    size: 12 * _workAreasFontScale, color: Colors.grey),
+                SizedBox(width: 4 * _workAreasFontScale),
+                Expanded(
+                  child: Text(
+                    'Work Areas',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 11 * _workAreasFontScale,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            Divider(thickness: 1 * _workAreasFontScale),
+
+            // Work areas in a single line format
+            Wrap(
+              spacing: 8 * _workAreasFontScale,
+              runSpacing: 4 * _workAreasFontScale,
+              children: widget.job.workMaps.asMap().entries.map((entry) {
+                final index = entry.key + 1;
+                final workMap = entry.value;
+                return Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 10 * _workAreasFontScale,
+                      height: 10 * _workAreasFontScale,
+                      decoration: BoxDecoration(
+                        color: workMap.color,
+                        border: Border.all(color: Colors.black, width: 0.5),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    SizedBox(width: 4 * _workAreasFontScale),
+                    Text(
+                      '$index. ${workMap.name}',
+                      style: TextStyle(
+                        fontSize: 9 * _workAreasFontScale,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                );
+              }).toList(),
+            ),
           ],
         ),
       ),

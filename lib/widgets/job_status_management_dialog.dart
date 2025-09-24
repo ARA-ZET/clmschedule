@@ -277,7 +277,7 @@ class _StatusFormDialogState extends State<_StatusFormDialog> {
       Colors.yellow,
       Colors.amber,
       Colors.orange,
-      Colors.deepOrange,
+      const Color.fromARGB(255, 201, 110, 0),
       Colors.brown,
       Colors.grey,
       Colors.blueGrey,
