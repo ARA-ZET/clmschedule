@@ -11,6 +11,44 @@ import 'editable_table_cell.dart';
 import 'multi_select_status_filter.dart';
 import 'month_navigation_widget.dart';
 
+// Reusable DataTable column header widget
+class DataTableHeaderWidget extends StatelessWidget {
+  final String text;
+  final Color? textColor;
+  final double? width;
+
+  const DataTableHeaderWidget({
+    super.key,
+    required this.text,
+    this.textColor = Colors.black,
+    this.width,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    Widget headerWidget = Container(
+      width: width,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(
+          color: Colors.grey[400]!,
+          width: 1,
+        ),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontWeight: FontWeight.bold,
+          color: textColor,
+        ),
+      ),
+    );
+
+    return width != null ? headerWidget : Expanded(child: headerWidget);
+  }
+}
+
 class JobListGrid extends StatefulWidget {
   const JobListGrid({super.key});
 
@@ -111,9 +149,9 @@ class _JobListGridState extends State<JobListGrid> {
                           hintText: 'Search by client, invoice, or area...',
                           prefixIcon: Icon(Icons.search,
                               size: scaleProvider.mediumIconSize),
-                          border: OutlineInputBorder(),
-                          contentPadding:
-                              EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                          border: const OutlineInputBorder(),
+                          contentPadding: const EdgeInsets.symmetric(
+                              vertical: 8, horizontal: 12),
                         ),
                         onChanged: (value) {
                           jobListProvider.setSearchQuery(value);
@@ -278,7 +316,7 @@ class _JobListGridState extends State<JobListGrid> {
                             Icon(Icons.list_alt,
                                 size: scaleProvider.xlargeIconSize,
                                 color: Colors.grey),
-                            SizedBox(height: 16),
+                            const SizedBox(height: 16),
                             Text(
                               'No jobs found',
                               style: TextStyle(
@@ -287,8 +325,8 @@ class _JobListGridState extends State<JobListGrid> {
                                 color: Colors.grey,
                               ),
                             ),
-                            SizedBox(height: 8),
-                            Text(
+                            const SizedBox(height: 8),
+                            const Text(
                               'Add a job to get started',
                               style: TextStyle(color: Colors.grey),
                             ),
@@ -318,93 +356,81 @@ class _JobListGridState extends State<JobListGrid> {
                               child: SingleChildScrollView(
                                 scrollDirection: Axis.vertical,
                                 child: DataTable(
-                                  columnSpacing: 20,
+                                  columnSpacing: 8,
                                   horizontalMargin: 16,
                                   headingRowColor: WidgetStateProperty.all(
                                     Colors.grey[100],
                                   ),
                                   columns: const [
                                     DataColumn(
-                                        label: Text(
-                                      'Invoice',
-                                      style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.black),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Invoice',
+                                      textColor: Colors.black,
                                     )),
                                     DataColumn(
-                                        label: Text(
-                                      'Amount',
-                                      style: TextStyle(
-                                          fontWeight: FontWeight.bold),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Amount',
                                     )),
                                     DataColumn(
-                                        label: Text(
-                                      'Client',
-                                      style: TextStyle(
-                                          fontWeight: FontWeight.bold),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Client',
                                     )),
                                     DataColumn(
-                                        label: Text(
-                                      'Job Status',
-                                      style: TextStyle(
-                                          fontWeight: FontWeight.bold),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Job Status',
                                     )),
                                     DataColumn(
-                                        label: Text(
-                                      'Job Type',
-                                      style: TextStyle(
-                                          fontWeight: FontWeight.bold),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Job Type',
                                     )),
                                     DataColumn(
-                                        label: Text(
-                                      'Area',
-                                      style: TextStyle(
-                                          fontWeight: FontWeight.bold),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Area',
                                     )),
                                     DataColumn(
-                                        label: Text('Qty',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Qty',
+                                    )),
                                     DataColumn(
-                                        label: Text('Man-Days',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Man-Days',
+                                    )),
                                     DataColumn(
-                                        label: Text('Date',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Date',
+                                    )),
                                     DataColumn(
-                                        label: Text('Collection Address',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Col. Address',
+                                    )),
                                     DataColumn(
-                                        label: Text('Coll Date',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Special Instructions',
+                                    )),
                                     DataColumn(
-                                        label: Text('Special Instructions',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Col. Date',
+                                    )),
                                     DataColumn(
-                                        label: Text('Qty Distributed',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Qty Distributed',
+                                    )),
                                     DataColumn(
-                                        label: Text('Invoice Details',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Invoice Details',
+                                    )),
                                     DataColumn(
-                                        label: Text('Report Addresses',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Report Addresses',
+                                    )),
                                     DataColumn(
-                                        label: Text('Who to Invoice',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Who to Invoice',
+                                    )),
                                     DataColumn(
-                                        label: Text('Actions',
-                                            style: TextStyle(
-                                                fontWeight: FontWeight.bold))),
+                                        label: DataTableHeaderWidget(
+                                      text: 'Actions',
+                                    )),
                                   ],
                                   rows: jobListItems.map((item) {
                                     return DataRow(
@@ -656,13 +682,6 @@ class _JobListGridState extends State<JobListGrid> {
                                           ),
                                         ),
                                         DataCell(
-                                          EditableDateCell(
-                                            value: item.collectionDate,
-                                            onSave: (date) => _updateJobField(
-                                                item, 'collectionDate', date),
-                                          ),
-                                        ),
-                                        DataCell(
                                           EditableTableCell(
                                             value: item.specialInstructions,
                                             onSave: (value) => _updateJobField(
@@ -671,6 +690,13 @@ class _JobListGridState extends State<JobListGrid> {
                                                 value),
                                             width: 150,
                                             maxLines: 2,
+                                          ),
+                                        ),
+                                        DataCell(
+                                          EditableDateCell(
+                                            value: item.collectionDate,
+                                            onSave: (date) => _updateJobField(
+                                                item, 'collectionDate', date),
                                           ),
                                         ),
                                         DataCell(

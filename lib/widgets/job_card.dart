@@ -146,7 +146,6 @@ class JobCard extends StatelessWidget {
                             style: TextStyle(
                               color: Colors.white,
                               fontSize: scaleProvider.smallFontSize,
-                              decoration: TextDecoration.underline,
                               letterSpacing: 1,
                               fontWeight: FontWeight.w500,
                             ),
@@ -616,7 +615,7 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
     if (oldWidget.job.workMaps != widget.job.workMaps) {
       setState(() {
         _localWorkMaps = List.from(widget.job.workMaps);
-        _hasUnsavedChanges = false;
+        _hasUnsavedChanges = false; // Clear unsaved changes when job updates
       });
     }
   }
@@ -709,8 +708,11 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                     try {
                       setState(() {
                         _localWorkMaps = result;
-                        _hasUnsavedChanges = true;
+                        _hasUnsavedChanges =
+                            false; // Clear unsaved changes since we're auto-saving
                       });
+                      // Immediately save the changes to the database
+                      widget.onWorkAreasChanged(_localWorkMaps);
                     } catch (e) {
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(

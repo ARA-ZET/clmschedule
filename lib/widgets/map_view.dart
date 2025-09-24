@@ -3,9 +3,12 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:provider/provider.dart';
 import 'dart:math' show min, max;
 import 'dart:ui' as ui;
+import 'package:file_picker/file_picker.dart';
 import '../services/work_area_service.dart';
+import '../services/gpx_parser_service.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
+import '../models/gpx_track.dart';
 
 class MapView extends StatefulWidget {
   final String? jobId;
@@ -53,6 +56,11 @@ class _MapViewState extends State<MapView> {
   BitmapDescriptor? _circleMarkerIcon;
   BitmapDescriptor? _midpointMarkerIcon;
   int? _draggingMidpointIndex;
+
+  // GPX-related state
+  GpxData _gpxData = const GpxData(tracks: []);
+  bool _isSidebarVisible = true;
+  bool _isImportingGpx = false;
 
   @override
   void initState() {
@@ -535,6 +543,48 @@ class _MapViewState extends State<MapView> {
     return result ?? false;
   }
 
+  void _saveChanges() {
+    try {
+      // Apply editing changes if in editing mode
+      if (_isEditing && _selectedPolygonIndex != null) {
+        final updatedPolygon = _customPolygons[_selectedPolygonIndex!].copyWith(
+          points: _editingPoints,
+        );
+        _customPolygons[_selectedPolygonIndex!] = updatedPolygon;
+        _selectedCustomPolygon = updatedPolygon;
+
+        // Exit editing mode
+        setState(() {
+          _isEditing = false;
+          _editingPoints.clear();
+        });
+      }
+
+      // Clear unsaved changes flag - changes are now saved locally
+      setState(() {
+        _hasUnsavedChanges = false;
+        _updateMapView();
+      });
+
+      // Show success message
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('Changes saved! Continue editing or close when finished.'),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error saving changes: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
   Future<void> _showEditNameDialog() async {
     if (_selectedCustomPolygon == null || _selectedPolygonIndex == null) return;
 
@@ -648,7 +698,13 @@ class _MapViewState extends State<MapView> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        leading: CloseButton(onPressed: () {
+        leading: CloseButton(onPressed: () async {
+          // Check for unsaved changes before closing
+          if (_hasUnsavedChanges) {
+            final shouldDiscard = await _showDiscardDialog();
+            if (!shouldDiscard) return;
+          }
+
           // Return updated CustomPolygons if available
           if (_customPolygons.isNotEmpty) {
             Navigator.of(context).pop(_customPolygons);
@@ -670,7 +726,6 @@ class _MapViewState extends State<MapView> {
                       setState(() {
                         _isCreatingNewPolygon = true;
                         _newPolygonPoints.clear();
-                        // Don't deselect current area - keep existing polygons visible
                         _updateMapView();
                       });
                     },
@@ -688,11 +743,9 @@ class _MapViewState extends State<MapView> {
                       setState(() {
                         _isEditing = true;
                         if (_selectedCustomPolygon != null) {
-                          // New system: edit custom polygon
                           _editingPoints =
                               List.from(_selectedCustomPolygon!.points);
                         } else if (_selectedWorkArea != null) {
-                          // Legacy system: edit work area
                           _editingPoints =
                               List.from(_selectedWorkArea!.polygonPoints);
                         }
@@ -734,73 +787,43 @@ class _MapViewState extends State<MapView> {
                     },
                   ),
 
-                // Save buttons for editing/creating
-                if (_isEditing && _hasUnsavedChanges)
-                  IconButton(
-                    icon: const Icon(Icons.check),
-                    tooltip: 'Save changes',
-                    onPressed: () {
-                      // Update the selected polygon with new points and return updated list
-                      if (_customPolygons.isNotEmpty &&
-                          _selectedPolygonIndex != null) {
-                        // Create updated polygon
-                        final updatedPolygon =
-                            _customPolygons[_selectedPolygonIndex!].copyWith(
-                          points: _editingPoints,
-                        );
-
-                        // Create updated list
-                        final updatedCustomPolygons = <CustomPolygon>[];
-                        for (int i = 0; i < _customPolygons.length; i++) {
-                          if (i == _selectedPolygonIndex) {
-                            updatedCustomPolygons.add(updatedPolygon);
-                          } else {
-                            updatedCustomPolygons.add(_customPolygons[i]);
-                          }
-                        }
-
-                        Navigator.of(context).pop(updatedCustomPolygons);
-                      } else {
-                        // Legacy fallback - return just points
-                        Navigator.of(context).pop([]);
-                      }
-                    },
+                // Single "Save Changes" button - only appears when there are unsaved changes
+                if (_hasUnsavedChanges)
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.save, size: 16),
+                    label: const Text('Save Changes'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
+                    ),
+                    onPressed: _saveChanges,
                   ),
 
-                // Save button for name changes (when not editing boundary)
-                if (!_isEditing && !_isCreatingNewPolygon && _hasUnsavedChanges)
-                  IconButton(
-                    icon: const Icon(Icons.save),
-                    tooltip: 'Save changes',
-                    onPressed: () {
-                      // Return the updated list with name changes
-                      Navigator.of(context).pop(_customPolygons);
-                    },
-                  ),
-
+                // Finish creation button for new polygons
                 if (_isCreatingNewPolygon && _newPolygonPoints.length >= 3)
                   IconButton(
                     icon: const Icon(Icons.check),
-                    tooltip: 'Save new area',
+                    tooltip: 'Finish creating area',
                     onPressed: () {
-                      // Check if we're using CustomPolygons or WorkAreas
                       if (_customPolygons.isNotEmpty) {
-                        // New system: Add to CustomPolygons
                         final newCustomPolygon = CustomPolygon(
                           name: 'New Area ${_customPolygons.length + 1}',
                           description: 'User created area',
                           points: List.from(_newPolygonPoints),
-                          color: Colors.blue, // Default color for new polygons
+                          color: Colors.blue,
                         );
 
                         setState(() {
                           _customPolygons.add(newCustomPolygon);
                           _isCreatingNewPolygon = false;
                           _newPolygonPoints.clear();
+                          _hasUnsavedChanges =
+                              true; // Mark as unsaved so user can save later
                           _updateMapView();
                         });
                       } else {
-                        // Legacy system: Add to WorkAreas
                         final now = DateTime.now();
                         final newWorkArea = WorkArea(
                           id: 'new_${now.millisecondsSinceEpoch}',
@@ -816,170 +839,523 @@ class _MapViewState extends State<MapView> {
                           _editableWorkAreas.add(newWorkArea);
                           _isCreatingNewPolygon = false;
                           _newPolygonPoints.clear();
+                          _hasUnsavedChanges =
+                              true; // Mark as unsaved so user can save later
                           _updateMapView();
                         });
                       }
 
-                      // Show success message
                       ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
+                        const SnackBar(
                           content: Text(
-                              'New area added! You can create more areas or tap "Done" when finished.'),
+                              'Area created! Click "Save Changes" to save to database.'),
                           backgroundColor: Colors.green,
                           duration: Duration(seconds: 3),
                         ),
                       );
                     },
                   ),
-
-                // Done button (when there are multiple areas to save)
-                if (!_isEditing &&
-                    !_isCreatingNewPolygon &&
-                    (_customPolygons.length > 1 ||
-                        _editableWorkAreas.length > 1))
-                  IconButton(
-                    icon: const Icon(Icons.done),
-                    tooltip: 'Finish editing',
-                    onPressed: () {
-                      // Return updated CustomPolygons or legacy WorkAreas
-                      if (_customPolygons.isNotEmpty) {
-                        Navigator.of(context).pop(_customPolygons);
-                      } else {
-                        // Legacy fallback
-                        Navigator.of(context).pop([]);
-                      }
-                    },
-                  ),
               ]
             : null,
       ),
-      body: Stack(
+      body: Row(
         children: [
-          GoogleMap(
-            onMapCreated: (controller) {
-              try {
-                _controller = controller;
-                if (mounted) {
-                  _updateMapCenter();
-                }
-              } catch (e) {
-                print('Error in onMapCreated: $e');
-              }
-            },
-            onTap:
-                _onMapTap, // Always enable tap for both polygon creation and selection
-            cloudMapId: "89c628d2bb3002712797ce42",
-            style: "",
-            initialCameraPosition: CameraPosition(target: _center, zoom: 12),
-            polygons: _polygons,
-            markers: _isEditing &&
-                    _circleMarkerIcon != null &&
-                    _midpointMarkerIcon != null
-                ? _buildEditingMarkers()
-                : _isCreatingNewPolygon
-                    ? _buildNewPolygonMarkers()
-                    : {},
-            mapType: MapType.normal,
-            myLocationEnabled: true,
-            myLocationButtonEnabled: true,
-            zoomControlsEnabled: true,
-            zoomGesturesEnabled: true,
-          ),
-          if (_isLoading)
+          // Left Sidebar for GPX tracks
+          if (_isSidebarVisible)
             Container(
-              color: Colors.black45,
-              child: const Center(child: CircularProgressIndicator()),
-            ),
-          if (_isEditing || _isCreatingNewPolygon)
-            Positioned(
-              bottom: 16,
-              right: 16,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Undo button for editing existing polygon
-                  if (_isEditing && _editingPoints.isNotEmpty)
-                    FloatingActionButton(
-                      heroTag: 'undo_edit',
-                      onPressed: () {
-                        setState(() {
-                          _editingPoints.removeLast();
-                          _hasUnsavedChanges = true;
-                          _updateMapView();
-                        });
-                      },
-                      child: const Icon(Icons.undo),
-                    ),
-                  // Undo button for creating new polygon
-                  if (_isCreatingNewPolygon && _newPolygonPoints.isNotEmpty)
-                    FloatingActionButton(
-                      heroTag: 'undo_create',
-                      onPressed: () {
-                        setState(() {
-                          _newPolygonPoints.removeLast();
-                          _updateMapView();
-                        });
-                      },
-                      child: const Icon(Icons.undo),
-                    ),
+              width: 300,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                border: Border(
+                  right: BorderSide(color: Colors.grey.shade300),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 4,
+                    offset: const Offset(2, 0),
+                  ),
                 ],
               ),
-            ),
-          // Instructions overlay for new polygon creation
-          if (_isCreatingNewPolygon)
-            Positioned(
-              top: 16,
-              left: 16,
-              right: 16,
-              child: Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.blue,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  'Tap on the map to add points for your new area. You need at least 3 points to create an area.',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-              ),
+              child: _buildGpxSidebar(),
             ),
 
-          // Instructions overlay for polygon selection
-          if (!_isCreatingNewPolygon &&
-              !_isEditing &&
-              _editableWorkAreas.length > 1)
-            Positioned(
-              top: 16,
-              left: 16,
-              right: 16,
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.green.withOpacity(0.9),
-                  borderRadius: BorderRadius.circular(8),
+          // Main map view
+          Expanded(
+            child: Stack(
+              children: [
+                GoogleMap(
+                  onMapCreated: (controller) {
+                    try {
+                      _controller = controller;
+                      if (mounted) {
+                        _updateMapCenter();
+                      }
+                    } catch (e) {
+                      print('Error in onMapCreated: $e');
+                    }
+                  },
+                  onTap: _onMapTap,
+                  cloudMapId: "89c628d2bb3002712797ce42",
+                  style: "",
+                  initialCameraPosition:
+                      CameraPosition(target: _center, zoom: 12),
+                  polygons: _polygons,
+                  polylines: _gpxData.allPolylines.toSet(), // Add GPX polylines
+                  markers: _isEditing &&
+                          _circleMarkerIcon != null &&
+                          _midpointMarkerIcon != null
+                      ? _buildEditingMarkers()
+                      : _isCreatingNewPolygon
+                          ? _buildNewPolygonMarkers()
+                          : {},
+                  mapType: MapType.normal,
+                  myLocationEnabled: true,
+                  myLocationButtonEnabled: true,
+                  zoomControlsEnabled: true,
+                  zoomGesturesEnabled: true,
                 ),
-                child: Text(
-                  'Tap on any polygon to select it, then tap the Edit button to modify it.',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
+
+                // Sidebar toggle button
+                Positioned(
+                  top: 16,
+                  left: 16,
+                  child: FloatingActionButton(
+                    mini: true,
+                    onPressed: () {
+                      setState(() {
+                        _isSidebarVisible = !_isSidebarVisible;
+                      });
+                    },
+                    child: Icon(_isSidebarVisible ? Icons.close : Icons.menu),
+                    tooltip:
+                        _isSidebarVisible ? 'Hide sidebar' : 'Show sidebar',
                   ),
-                  textAlign: TextAlign.center,
                 ),
-              ),
+
+                if (_isLoading)
+                  Container(
+                    color: Colors.black45,
+                    child: const Center(child: CircularProgressIndicator()),
+                  ),
+                if (_isEditing || _isCreatingNewPolygon)
+                  Positioned(
+                    bottom: 16,
+                    right: 16,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Undo button for editing existing polygon
+                        if (_isEditing && _editingPoints.isNotEmpty)
+                          FloatingActionButton(
+                            heroTag: 'undo_edit',
+                            onPressed: () {
+                              setState(() {
+                                _editingPoints.removeLast();
+                                _hasUnsavedChanges = true;
+                                _updateMapView();
+                              });
+                            },
+                            child: const Icon(Icons.undo),
+                          ),
+                        // Undo button for creating new polygon
+                        if (_isCreatingNewPolygon &&
+                            _newPolygonPoints.isNotEmpty)
+                          FloatingActionButton(
+                            heroTag: 'undo_create',
+                            onPressed: () {
+                              setState(() {
+                                _newPolygonPoints.removeLast();
+                                _updateMapView();
+                              });
+                            },
+                            child: const Icon(Icons.undo),
+                          ),
+                      ],
+                    ),
+                  ),
+                // Instructions overlay for new polygon creation
+                if (_isCreatingNewPolygon)
+                  Positioned(
+                    top: 16,
+                    left: 16,
+                    right: 16,
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.blue,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        'Tap on the map to add points for your new area. You need at least 3 points to create an area.',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+
+                // Instructions overlay for polygon selection
+                if (!_isCreatingNewPolygon &&
+                    !_isEditing &&
+                    _editableWorkAreas.length > 1)
+                  Positioned(
+                    top: 16,
+                    left: 16,
+                    right: 16,
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withOpacity(0.9),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        'Tap on any polygon to select it, then tap the Edit button to modify it.',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+              ],
             ),
+          ),
         ],
       ),
     );
   }
 
-  @override
+  Widget _buildGpxSidebar() {
+    return Column(
+      children: [
+        // Header
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.blue.shade50,
+            border: Border(
+              bottom: BorderSide(color: Colors.grey.shade300),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.layers, color: Colors.blue.shade700),
+              const SizedBox(width: 8),
+              Text(
+                'GPX Tracks',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blue.shade700,
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Import button
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _isImportingGpx ? null : _importGpxFiles,
+              icon: _isImportingGpx
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.file_upload),
+              label:
+                  Text(_isImportingGpx ? 'Importing...' : 'Import GPX Files'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+            ),
+          ),
+        ),
+
+        // Track list
+        Expanded(
+          child: _gpxData.isEmpty
+              ? const Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.route, size: 48, color: Colors.grey),
+                      SizedBox(height: 16),
+                      Text(
+                        'No GPX tracks loaded',
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: Colors.grey,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        'Import GPX files to see tracks here',
+                        style: TextStyle(color: Colors.grey),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  itemCount: _gpxData.tracks.length,
+                  itemBuilder: (context, index) {
+                    final track = _gpxData.tracks[index];
+                    return _buildTrackListItem(track, index);
+                  },
+                ),
+        ),
+
+        // Footer with track count
+        if (_gpxData.isNotEmpty)
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade50,
+              border: Border(
+                top: BorderSide(color: Colors.grey.shade300),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.info_outline, size: 16, color: Colors.grey.shade600),
+                const SizedBox(width: 8),
+                Text(
+                  '${_gpxData.trackCount} tracks (${_gpxData.visibleTrackCount} visible)',
+                  style: TextStyle(
+                    color: Colors.grey.shade600,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildTrackListItem(GpxTrack track, int index) {
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: ListTile(
+        dense: true,
+        leading: Container(
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(
+            color: track.color,
+            shape: BoxShape.circle,
+          ),
+          child: track.isVisible
+              ? const Icon(Icons.visibility, color: Colors.white, size: 16)
+              : const Icon(Icons.visibility_off, color: Colors.white, size: 16),
+        ),
+        title: Text(
+          track.name,
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${track.allPoints.length} points • ${track.segments.length} segments',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+            Text(
+              'From: ${track.fileName}',
+              style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+        trailing: PopupMenuButton<String>(
+          onSelected: (value) => _handleTrackAction(value, track, index),
+          itemBuilder: (context) => [
+            PopupMenuItem(
+              value: 'toggle_visibility',
+              child: Row(
+                children: [
+                  Icon(track.isVisible
+                      ? Icons.visibility_off
+                      : Icons.visibility),
+                  const SizedBox(width: 8),
+                  Text(track.isVisible ? 'Hide' : 'Show'),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'zoom_to',
+              child: Row(
+                children: [
+                  Icon(Icons.zoom_in),
+                  SizedBox(width: 8),
+                  Text('Zoom to track'),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'remove',
+              child: Row(
+                children: [
+                  Icon(Icons.delete, color: Colors.red),
+                  SizedBox(width: 8),
+                  Text('Remove', style: TextStyle(color: Colors.red)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        onTap: () => _toggleTrackVisibility(track, index),
+      ),
+    );
+  }
+
+  Future<void> _importGpxFiles() async {
+    setState(() {
+      _isImportingGpx = true;
+    });
+
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['gpx'],
+        allowMultiple: true,
+        withData: true,
+      );
+
+      if (result != null && result.files.isNotEmpty) {
+        final newTracks = <GpxTrack>[];
+
+        for (final file in result.files) {
+          if (file.bytes != null && file.name.toLowerCase().endsWith('.gpx')) {
+            try {
+              final gpxData = await GpxParserService.parseGpxFile(
+                file.bytes!,
+                file.name,
+              );
+              newTracks.addAll(gpxData.tracks);
+            } catch (e) {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Failed to parse ${file.name}: $e'),
+                    backgroundColor: Colors.red,
+                  ),
+                );
+              }
+            }
+          }
+        }
+
+        if (newTracks.isNotEmpty) {
+          setState(() {
+            final allTracks = List<GpxTrack>.from(_gpxData.tracks);
+            allTracks.addAll(newTracks);
+            _gpxData = GpxData(tracks: allTracks);
+            _updateMapView();
+          });
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content:
+                    Text('Imported ${newTracks.length} tracks successfully'),
+                backgroundColor: Colors.green,
+              ),
+            );
+
+            // Zoom to fit all tracks
+            _zoomToAllTracks();
+          }
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error importing GPX files: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isImportingGpx = false;
+        });
+      }
+    }
+  }
+
+  void _handleTrackAction(String action, GpxTrack track, int index) {
+    switch (action) {
+      case 'toggle_visibility':
+        _toggleTrackVisibility(track, index);
+        break;
+      case 'zoom_to':
+        _zoomToTrack(track);
+        break;
+      case 'remove':
+        _removeTrack(index);
+        break;
+    }
+  }
+
+  void _toggleTrackVisibility(GpxTrack track, int index) {
+    final updatedTracks = List<GpxTrack>.from(_gpxData.tracks);
+    updatedTracks[index] = track.copyWith(isVisible: !track.isVisible);
+
+    setState(() {
+      _gpxData = GpxData(tracks: updatedTracks);
+      _updateMapView();
+    });
+  }
+
+  void _zoomToTrack(GpxTrack track) {
+    final bounds = track.bounds;
+    if (bounds != null && _controller != null) {
+      _controller!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, 100),
+      );
+    }
+  }
+
+  void _zoomToAllTracks() {
+    final bounds = _gpxData.combinedBounds;
+    if (bounds != null && _controller != null) {
+      _controller!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, 100),
+      );
+    }
+  }
+
+  void _removeTrack(int index) {
+    final updatedTracks = List<GpxTrack>.from(_gpxData.tracks);
+    updatedTracks.removeAt(index);
+
+    setState(() {
+      _gpxData = GpxData(tracks: updatedTracks);
+      _updateMapView();
+    });
+  }
+
   @override
   void dispose() {
     try {
