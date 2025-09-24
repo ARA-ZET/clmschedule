@@ -689,10 +689,11 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                 try {
                   // Add a small delay to prevent rapid dialog opening/closing
                   await Future.delayed(const Duration(milliseconds: 100));
-                  
+
                   if (!context.mounted) return;
-                  
-                  final result = await Navigator.of(context).push<List<CustomPolygon>>(
+
+                  final result =
+                      await Navigator.of(context).push<List<CustomPolygon>>(
                     MaterialPageRoute(
                       fullscreenDialog: true,
                       builder: (BuildContext context) => MapView(

@@ -221,7 +221,7 @@ class _LinkCellState extends State<LinkCell> {
 
   String _formatUrlForDisplay(String url) {
     if (url.isEmpty) return url;
-    
+
     // Add https:// if no scheme is present
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       return 'https://$url';
@@ -307,7 +307,9 @@ class _LinkCellState extends State<LinkCell> {
         onEnter: (_) => setState(() => _isHovering = true),
         onExit: (_) => setState(() => _isHovering = false),
         child: Tooltip(
-          message: isValidLink ? 'Click to open: $formattedUrl' : 'Right-click to edit',
+          message: isValidLink
+              ? 'Click to open: $formattedUrl'
+              : 'Right-click to edit',
           waitDuration: const Duration(milliseconds: 500),
           child: GestureDetector(
             onTap: isValidLink ? _launchUrl : null,
@@ -319,18 +321,23 @@ class _LinkCellState extends State<LinkCell> {
                 children: [
                   Expanded(
                     child: Text(
-                      widget.value.isEmpty ? 'Right-click to add link' : widget.value,
+                      widget.value.isEmpty
+                          ? 'Right-click to add link'
+                          : widget.value,
                       style: TextStyle(
                         fontSize: 12,
-                        color: widget.value.isEmpty 
-                          ? Colors.grey 
-                          : isValidLink 
-                            ? (_isHovering ? Colors.blue.shade700 : Colors.blue)
-                            : Colors.black,
-                        fontStyle: widget.value.isEmpty ? FontStyle.italic : null,
-                        decoration: isValidLink && _isHovering 
-                          ? TextDecoration.underline 
-                          : null,
+                        color: widget.value.isEmpty
+                            ? Colors.grey
+                            : isValidLink
+                                ? (_isHovering
+                                    ? Colors.blue.shade700
+                                    : Colors.blue)
+                                : Colors.black,
+                        fontStyle:
+                            widget.value.isEmpty ? FontStyle.italic : null,
+                        decoration: isValidLink && _isHovering
+                            ? TextDecoration.underline
+                            : null,
                       ),
                       overflow: TextOverflow.ellipsis,
                       maxLines: widget.maxLines,
