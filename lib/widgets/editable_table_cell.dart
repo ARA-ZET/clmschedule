@@ -52,7 +52,7 @@ class _EditableTableCellState extends State<EditableTableCell> {
     // Capture the original value at the start of editing
     _originalValue = widget.value;
     _controller.text = widget.value;
-    
+
     setState(() {
       _isEditing = true;
     });
@@ -67,7 +67,7 @@ class _EditableTableCellState extends State<EditableTableCell> {
 
   void _saveAndExit() {
     final currentValue = _controller.text;
-    
+
     // Validate the input
     if (widget.validator != null) {
       final error = widget.validator!(currentValue);
@@ -83,7 +83,8 @@ class _EditableTableCellState extends State<EditableTableCell> {
     // Only call onSave if the value actually changed
     if (currentValue != _originalValue) {
       widget.onSave(currentValue);
-      print('EditableTableCell: Value changed from "$_originalValue" to "$currentValue"');
+      print(
+          'EditableTableCell: Value changed from "$_originalValue" to "$currentValue"');
     } else {
       print('EditableTableCell: No change detected, skipping save');
     }
@@ -164,7 +165,8 @@ class EditableDateCell extends StatelessWidget {
           );
           if (date != null && date != value) {
             // Only call onSave if the date actually changed
-            print('EditableDateCell: Date changed from "${value.toIso8601String()}" to "${date.toIso8601String()}"');
+            print(
+                'EditableDateCell: Date changed from "${value.toIso8601String()}" to "${date.toIso8601String()}"');
             onSave(date);
           } else if (date != null) {
             print('EditableDateCell: No change detected, skipping save');
@@ -238,9 +240,9 @@ class _LinkCellState extends State<LinkCell> {
       if (url.contains('.') && !url.contains(' ')) {
         final formattedUrl = _formatUrlForDisplay(url);
         final uri = Uri.parse(formattedUrl);
-        return uri.hasScheme && 
-               (uri.scheme == 'http' || uri.scheme == 'https') &&
-               uri.host.isNotEmpty;
+        return uri.hasScheme &&
+            (uri.scheme == 'http' || uri.scheme == 'https') &&
+            uri.host.isNotEmpty;
       }
       return false;
     } catch (e) {
@@ -278,7 +280,7 @@ class _LinkCellState extends State<LinkCell> {
     // Capture the original value at the start of editing
     _originalValue = widget.value;
     _controller.text = widget.value;
-    
+
     setState(() {
       _isEditing = true;
     });
@@ -293,7 +295,7 @@ class _LinkCellState extends State<LinkCell> {
 
   void _saveAndExit() {
     final currentValue = _controller.text;
-    
+
     // Validate the input
     if (widget.validator != null) {
       final error = widget.validator!(currentValue);
@@ -308,7 +310,8 @@ class _LinkCellState extends State<LinkCell> {
     // Only call onSave if the value actually changed
     if (currentValue != _originalValue) {
       widget.onSave(currentValue);
-      print('LinkCell: Value changed from "$_originalValue" to "$currentValue"');
+      print(
+          'LinkCell: Value changed from "$_originalValue" to "$currentValue"');
     } else {
       print('LinkCell: No change detected, skipping save');
     }
@@ -372,9 +375,7 @@ class _LinkCellState extends State<LinkCell> {
                 children: [
                   Expanded(
                     child: Text(
-                      widget.value.isEmpty
-                          ? 'Click to add link'
-                          : widget.value,
+                      widget.value.isEmpty ? 'Click to add link' : widget.value,
                       style: TextStyle(
                         fontSize: 12,
                         color: widget.value.isEmpty

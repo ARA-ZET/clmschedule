@@ -103,15 +103,15 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     final isEditing = widget.jobToEdit != null;
     final screenWidth = MediaQuery.of(context).size.width;
     final isMobile = screenWidth < 768;
-    
+
     return Dialog(
       child: LayoutBuilder(
         builder: (context, constraints) {
           return Container(
-            width: isMobile 
+            width: isMobile
                 ? MediaQuery.of(context).size.width * 0.95
                 : MediaQuery.of(context).size.width * 0.8,
-            height: isMobile 
+            height: isMobile
                 ? MediaQuery.of(context).size.height * 0.95
                 : MediaQuery.of(context).size.height * 0.85,
             constraints: BoxConstraints(
@@ -119,508 +119,519 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
               maxHeight: isMobile ? double.infinity : 700,
             ),
             padding: EdgeInsets.all(isMobile ? 16 : 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  isEditing ? 'Edit Job' : 'Add New Job',
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
+                // Header
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      isEditing ? 'Edit Job' : 'Add New Job',
+                      style:
+                          Theme.of(context).textTheme.headlineSmall?.copyWith(
+                                fontWeight: FontWeight.bold,
+                              ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
                 ),
-                IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
+                const SizedBox(height: 16),
 
-            // Form
-            Expanded(
-              child: Form(
-                key: _formKey,
-                child: Scrollbar(
-                  controller: _scrollController,
-                  child: SingleChildScrollView(
-                    controller: _scrollController,
-                    child: Column(
-                      children: [
-                        // Row 1: Invoice, Amount, Client - Responsive Layout
-                        isMobile 
-                        ? Column(
-                            children: [
-                              TextFormField(
-                                controller: _invoiceController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Invoice',
-                                  border: OutlineInputBorder(),
-                                ),
-                              ),
-                              const SizedBox(height: 12),
-                              TextFormField(
-                                controller: _amountController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Amount *',
-                                  border: OutlineInputBorder(),
-                                  prefixText: 'R ',
-                                ),
-                                keyboardType:
-                                    const TextInputType.numberWithOptions(
-                                        decimal: true),
-                                inputFormatters: [
-                                  FilteringTextInputFormatter.allow(
-                                      RegExp(r'^\d+\.?\d{0,2}')),
-                                ],
-                                validator: (value) {
-                                  if (value == null || value.isEmpty) {
-                                    return 'Amount is required';
-                                  }
-                                  if (double.tryParse(value) == null) {
-                                    return 'Please enter a valid amount';
-                                  }
-                                  return null;
-                                },
-                              ),
-                              const SizedBox(height: 12),
-                              TextFormField(
-                                controller: _clientController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Client *',
-                                  border: OutlineInputBorder(),
-                                ),
-                                validator: (value) {
-                                  if (value == null || value.isEmpty) {
-                                    return 'Client is required';
-                                  }
-                                  return null;
-                                },
-                              ),
-                            ],
-                          )
-                        : Row(
+                // Form
+                Expanded(
+                  child: Form(
+                    key: _formKey,
+                    child: Scrollbar(
+                      controller: _scrollController,
+                      child: SingleChildScrollView(
+                        controller: _scrollController,
+                        child: Column(
                           children: [
-                            Expanded(
-                              child: TextFormField(
-                                controller: _invoiceController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Invoice',
-                                  border: OutlineInputBorder(),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            Expanded(
-                              child: TextFormField(
-                                controller: _amountController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Amount *',
-                                  border: OutlineInputBorder(),
-                                  prefixText: 'R ',
-                                ),
-                                keyboardType:
-                                    const TextInputType.numberWithOptions(
-                                        decimal: true),
-                                inputFormatters: [
-                                  FilteringTextInputFormatter.allow(
-                                      RegExp(r'^\d+\.?\d{0,2}')),
-                                ],
-                                validator: (value) {
-                                  if (value == null || value.isEmpty) {
-                                    return 'Amount is required';
-                                  }
-                                  if (double.tryParse(value) == null) {
-                                    return 'Please enter a valid amount';
-                                  }
-                                  return null;
-                                },
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            Expanded(
-                              flex: 2,
-                              child: TextFormField(
-                                controller: _clientController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Client *',
-                                  border: OutlineInputBorder(),
-                                ),
-                                validator: (value) {
-                                  if (value == null || value.isEmpty) {
-                                    return 'Client is required';
-                                  }
-                                  return null;
-                                },
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-
-                        // Row 2: Job Status, Job Type - Responsive Layout
-                        isMobile
-                        ? Column(
-                            children: [
-                              TextFormField(
-                                controller: _areaController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Area',
-                                  border: OutlineInputBorder(),
-                                ),
-                              ),
-                              const SizedBox(height: 12),
-                              DropdownButtonFormField<JobListStatus>(
-                                initialValue: _selectedJobStatus,
-                                decoration: const InputDecoration(
-                                  labelText: 'Job Status *',
-                                  border: OutlineInputBorder(),
-                                ),
-                                items: JobListStatus.values.map((status) {
-                                  return DropdownMenuItem<JobListStatus>(
-                                    value: status,
-                                    child: Text(status.displayName),
-                                  );
-                                }).toList(),
-                                onChanged: (value) {
-                                  if (value != null) {
-                                    setState(() {
-                                      _selectedJobStatus = value;
-                                    });
-                                  }
-                                },
-                              ),
-                              const SizedBox(height: 12),
-                              DropdownButtonFormField<JobType>(
-                                initialValue: _selectedJobType,
-                                decoration: const InputDecoration(
-                                  labelText: 'Job Type *',
-                                  border: OutlineInputBorder(),
-                                ),
-                                items: JobType.values.map((type) {
-                                  return DropdownMenuItem<JobType>(
-                                    value: type,
-                                    child: Text(type.displayName),
-                                  );
-                                }).toList(),
-                                onChanged: (value) {
-                                  if (value != null) {
-                                    setState(() {
-                                      _selectedJobType = value;
-                                    });
-                                  }
-                                },
-                              ),
-                            ],
-                          )
-                        : Row(
-                          children: [
-                            Expanded(
-                              flex: 2,
-                              child: TextFormField(
-                                controller: _areaController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Area',
-                                  border: OutlineInputBorder(),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            Expanded(
-                              child: DropdownButtonFormField<JobListStatus>(
-                                initialValue: _selectedJobStatus,
-                                decoration: const InputDecoration(
-                                  labelText: 'Job Status *',
-                                  border: OutlineInputBorder(),
-                                ),
-                                items: JobListStatus.values.map((status) {
-                                  return DropdownMenuItem<JobListStatus>(
-                                    value: status,
-                                    child: Text(status.displayName),
-                                  );
-                                }).toList(),
-                                onChanged: (value) {
-                                  if (value != null) {
-                                    setState(() {
-                                      _selectedJobStatus = value;
-                                    });
-                                  }
-                                },
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            Expanded(
-                              child: DropdownButtonFormField<JobType>(
-                                initialValue: _selectedJobType,
-                                decoration: const InputDecoration(
-                                  labelText: 'Job Type *',
-                                  border: OutlineInputBorder(),
-                                ),
-                                items: JobType.values.map((type) {
-                                  return DropdownMenuItem<JobType>(
-                                    value: type,
-                                    child: Text(type.displayName),
-                                  );
-                                }).toList(),
-                                onChanged: (value) {
-                                  if (value != null) {
-                                    setState(() {
-                                      _selectedJobType = value;
-                                    });
-                                  }
-                                },
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-
-                        // Row 3: Area, Quantity
-                        Row(
-                          children: [
-                            Expanded(
-                              child: TextFormField(
-                                controller: _quantityController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Quantity',
-                                  border: OutlineInputBorder(),
-                                ),
-                                keyboardType: TextInputType.number,
-                                inputFormatters: [
-                                  FilteringTextInputFormatter.digitsOnly
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            // Man-Days field
-                            Expanded(
-                              child: TextFormField(
-                                controller: _manDaysController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Man-Days *',
-                                  border: OutlineInputBorder(),
-                                ),
-                                keyboardType:
-                                    const TextInputType.numberWithOptions(
-                                        decimal: true),
-                                inputFormatters: [
-                                  FilteringTextInputFormatter.allow(
-                                    RegExp(r'^\d+\.?\d{0,2}'),
+                            // Row 1: Invoice, Amount, Client - Responsive Layout
+                            isMobile
+                                ? Column(
+                                    children: [
+                                      TextFormField(
+                                        controller: _invoiceController,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Invoice',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 12),
+                                      TextFormField(
+                                        controller: _amountController,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Amount *',
+                                          border: OutlineInputBorder(),
+                                          prefixText: 'R ',
+                                        ),
+                                        keyboardType: const TextInputType
+                                            .numberWithOptions(decimal: true),
+                                        inputFormatters: [
+                                          FilteringTextInputFormatter.allow(
+                                              RegExp(r'^\d+\.?\d{0,2}')),
+                                        ],
+                                        validator: (value) {
+                                          if (value == null || value.isEmpty) {
+                                            return 'Amount is required';
+                                          }
+                                          if (double.tryParse(value) == null) {
+                                            return 'Please enter a valid amount';
+                                          }
+                                          return null;
+                                        },
+                                      ),
+                                      const SizedBox(height: 12),
+                                      TextFormField(
+                                        controller: _clientController,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Client *',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        validator: (value) {
+                                          if (value == null || value.isEmpty) {
+                                            return 'Client is required';
+                                          }
+                                          return null;
+                                        },
+                                      ),
+                                    ],
                                   )
-                                ],
-                                validator: (value) {
-                                  if (value == null || value.isEmpty) {
-                                    return 'Man-Days is required';
-                                  }
-                                  final doubleValue = double.tryParse(value);
-                                  if (doubleValue == null) {
-                                    return 'Please enter a valid number';
-                                  }
-                                  if (doubleValue <= 0) {
-                                    return 'Man-Days must be greater than 0';
-                                  }
-                                  return null;
-                                },
-                              ),
-                            ),
-                            SizedBox(width: 16),
-                            Expanded(
-                              child: FormField<DateTime>(
-                                initialValue: _selectedDate,
-                                validator: (value) {
-                                  if (value == null) {
-                                    return 'Distribution Date is required';
-                                  }
-                                  return null;
-                                },
-                                builder: (FormFieldState<DateTime> state) {
-                                  return InkWell(
-                                    onTap: () async {
-                                      final date = await showDatePicker(
-                                        context: context,
-                                        initialDate:
-                                            _selectedDate ?? DateTime.now(),
-                                        firstDate: DateTime(2020),
-                                        lastDate: DateTime(2030),
-                                      );
-                                      if (date != null) {
-                                        setState(() {
-                                          _selectedDate = date;
-                                        });
-                                        state.didChange(date);
-                                      }
-                                    },
-                                    child: InputDecorator(
-                                      decoration: InputDecoration(
-                                        labelText: 'Distribution Date *',
-                                        border: const OutlineInputBorder(),
-                                        suffixIcon:
-                                            const Icon(Icons.calendar_today),
-                                        errorText: state.errorText,
+                                : Row(
+                                    children: [
+                                      Expanded(
+                                        child: TextFormField(
+                                          controller: _invoiceController,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Invoice',
+                                            border: OutlineInputBorder(),
+                                          ),
+                                        ),
                                       ),
-                                      child: Text(_selectedDate != null
-                                          ? DateFormat('dd MMM yyyy')
-                                              .format(_selectedDate!)
-                                          : 'Select Distribution Date'),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            Expanded(
-                              child: FormField<DateTime>(
-                                initialValue: _selectedCollectionDate,
-                                validator: (value) {
-                                  // Collection Date is not required
-                                  return null;
-                                },
-                                builder: (FormFieldState<DateTime> state) {
-                                  return InkWell(
-                                    onTap: () async {
-                                      final date = await showDatePicker(
-                                        context: context,
-                                        initialDate: _selectedCollectionDate ??
-                                            DateTime.now(),
-                                        firstDate: DateTime(2020),
-                                        lastDate: DateTime(2030),
-                                      );
-                                      if (date != null) {
-                                        setState(() {
-                                          _selectedCollectionDate = date;
-                                        });
-                                        state.didChange(date);
-                                      }
-                                    },
-                                    child: InputDecorator(
-                                      decoration: InputDecoration(
-                                        labelText: 'Collection Date',
-                                        border: const OutlineInputBorder(),
-                                        suffixIcon:
-                                            const Icon(Icons.calendar_today),
-                                        errorText: state.errorText,
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        child: TextFormField(
+                                          controller: _amountController,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Amount *',
+                                            border: OutlineInputBorder(),
+                                            prefixText: 'R ',
+                                          ),
+                                          keyboardType: const TextInputType
+                                              .numberWithOptions(decimal: true),
+                                          inputFormatters: [
+                                            FilteringTextInputFormatter.allow(
+                                                RegExp(r'^\d+\.?\d{0,2}')),
+                                          ],
+                                          validator: (value) {
+                                            if (value == null ||
+                                                value.isEmpty) {
+                                              return 'Amount is required';
+                                            }
+                                            if (double.tryParse(value) ==
+                                                null) {
+                                              return 'Please enter a valid amount';
+                                            }
+                                            return null;
+                                          },
+                                        ),
                                       ),
-                                      child: Text(_selectedCollectionDate !=
-                                              null
-                                          ? DateFormat('dd MMM yyyy')
-                                              .format(_selectedCollectionDate!)
-                                          : 'Select Collection Date'),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                        // Row 5: Collection Address
-                        Row(children: [
-                          Expanded(
-                            child: TextFormField(
-                              controller: _collectionAddressController,
-                              decoration: const InputDecoration(
-                                labelText: 'Collection Address',
-                                border: OutlineInputBorder(),
-                              ),
-                              maxLines: 3,
-                            ),
-                          ),
-                          const SizedBox(width: 16),
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        flex: 2,
+                                        child: TextFormField(
+                                          controller: _clientController,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Client *',
+                                            border: OutlineInputBorder(),
+                                          ),
+                                          validator: (value) {
+                                            if (value == null ||
+                                                value.isEmpty) {
+                                              return 'Client is required';
+                                            }
+                                            return null;
+                                          },
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                            const SizedBox(height: 16),
 
-                          // Row 6: Special Instructions
-                          Expanded(
-                            child: TextFormField(
-                              controller: _specialInstructionsController,
-                              decoration: const InputDecoration(
-                                labelText: 'Special Instructions',
-                                border: OutlineInputBorder(),
-                              ),
-                              maxLines: 3,
-                            ),
-                          ),
-                        ]),
-                        const SizedBox(height: 16),
-                        // Row 7: Quantity Distributed
-                        Row(
-                          children: [
-                            Expanded(
-                              child: TextFormField(
-                                controller: _quantityDistributedController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Quantity Distributed',
-                                  border: OutlineInputBorder(),
+                            // Row 2: Job Status, Job Type - Responsive Layout
+                            isMobile
+                                ? Column(
+                                    children: [
+                                      TextFormField(
+                                        controller: _areaController,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Area',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 12),
+                                      DropdownButtonFormField<JobListStatus>(
+                                        initialValue: _selectedJobStatus,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Job Status *',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        items:
+                                            JobListStatus.values.map((status) {
+                                          return DropdownMenuItem<
+                                              JobListStatus>(
+                                            value: status,
+                                            child: Text(status.displayName),
+                                          );
+                                        }).toList(),
+                                        onChanged: (value) {
+                                          if (value != null) {
+                                            setState(() {
+                                              _selectedJobStatus = value;
+                                            });
+                                          }
+                                        },
+                                      ),
+                                      const SizedBox(height: 12),
+                                      DropdownButtonFormField<JobType>(
+                                        initialValue: _selectedJobType,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Job Type *',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        items: JobType.values.map((type) {
+                                          return DropdownMenuItem<JobType>(
+                                            value: type,
+                                            child: Text(type.displayName),
+                                          );
+                                        }).toList(),
+                                        onChanged: (value) {
+                                          if (value != null) {
+                                            setState(() {
+                                              _selectedJobType = value;
+                                            });
+                                          }
+                                        },
+                                      ),
+                                    ],
+                                  )
+                                : Row(
+                                    children: [
+                                      Expanded(
+                                        flex: 2,
+                                        child: TextFormField(
+                                          controller: _areaController,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Area',
+                                            border: OutlineInputBorder(),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        child: DropdownButtonFormField<
+                                            JobListStatus>(
+                                          initialValue: _selectedJobStatus,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Job Status *',
+                                            border: OutlineInputBorder(),
+                                          ),
+                                          items: JobListStatus.values
+                                              .map((status) {
+                                            return DropdownMenuItem<
+                                                JobListStatus>(
+                                              value: status,
+                                              child: Text(status.displayName),
+                                            );
+                                          }).toList(),
+                                          onChanged: (value) {
+                                            if (value != null) {
+                                              setState(() {
+                                                _selectedJobStatus = value;
+                                              });
+                                            }
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        child: DropdownButtonFormField<JobType>(
+                                          initialValue: _selectedJobType,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Job Type *',
+                                            border: OutlineInputBorder(),
+                                          ),
+                                          items: JobType.values.map((type) {
+                                            return DropdownMenuItem<JobType>(
+                                              value: type,
+                                              child: Text(type.displayName),
+                                            );
+                                          }).toList(),
+                                          onChanged: (value) {
+                                            if (value != null) {
+                                              setState(() {
+                                                _selectedJobType = value;
+                                              });
+                                            }
+                                          },
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                            const SizedBox(height: 16),
+
+                            // Row 3: Area, Quantity
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextFormField(
+                                    controller: _quantityController,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Quantity',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                    keyboardType: TextInputType.number,
+                                    inputFormatters: [
+                                      FilteringTextInputFormatter.digitsOnly
+                                    ],
+                                  ),
                                 ),
-                                keyboardType: TextInputType.number,
-                                inputFormatters: [
-                                  FilteringTextInputFormatter.digitsOnly
-                                ],
+                                const SizedBox(width: 16),
+                                // Man-Days field
+                                Expanded(
+                                  child: TextFormField(
+                                    controller: _manDaysController,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Man-Days *',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                    keyboardType:
+                                        const TextInputType.numberWithOptions(
+                                            decimal: true),
+                                    inputFormatters: [
+                                      FilteringTextInputFormatter.allow(
+                                        RegExp(r'^\d+\.?\d{0,2}'),
+                                      )
+                                    ],
+                                    validator: (value) {
+                                      if (value == null || value.isEmpty) {
+                                        return 'Man-Days is required';
+                                      }
+                                      final doubleValue =
+                                          double.tryParse(value);
+                                      if (doubleValue == null) {
+                                        return 'Please enter a valid number';
+                                      }
+                                      if (doubleValue <= 0) {
+                                        return 'Man-Days must be greater than 0';
+                                      }
+                                      return null;
+                                    },
+                                  ),
+                                ),
+                                SizedBox(width: 16),
+                                Expanded(
+                                  child: FormField<DateTime>(
+                                    initialValue: _selectedDate,
+                                    validator: (value) {
+                                      if (value == null) {
+                                        return 'Distribution Date is required';
+                                      }
+                                      return null;
+                                    },
+                                    builder: (FormFieldState<DateTime> state) {
+                                      return InkWell(
+                                        onTap: () async {
+                                          final date = await showDatePicker(
+                                            context: context,
+                                            initialDate:
+                                                _selectedDate ?? DateTime.now(),
+                                            firstDate: DateTime(2020),
+                                            lastDate: DateTime(2030),
+                                          );
+                                          if (date != null) {
+                                            setState(() {
+                                              _selectedDate = date;
+                                            });
+                                            state.didChange(date);
+                                          }
+                                        },
+                                        child: InputDecorator(
+                                          decoration: InputDecoration(
+                                            labelText: 'Distribution Date *',
+                                            border: const OutlineInputBorder(),
+                                            suffixIcon: const Icon(
+                                                Icons.calendar_today),
+                                            errorText: state.errorText,
+                                          ),
+                                          child: Text(_selectedDate != null
+                                              ? DateFormat('dd MMM yyyy')
+                                                  .format(_selectedDate!)
+                                              : 'Select Distribution Date'),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(width: 16),
+                                Expanded(
+                                  child: FormField<DateTime>(
+                                    initialValue: _selectedCollectionDate,
+                                    validator: (value) {
+                                      // Collection Date is not required
+                                      return null;
+                                    },
+                                    builder: (FormFieldState<DateTime> state) {
+                                      return InkWell(
+                                        onTap: () async {
+                                          final date = await showDatePicker(
+                                            context: context,
+                                            initialDate:
+                                                _selectedCollectionDate ??
+                                                    DateTime.now(),
+                                            firstDate: DateTime(2020),
+                                            lastDate: DateTime(2030),
+                                          );
+                                          if (date != null) {
+                                            setState(() {
+                                              _selectedCollectionDate = date;
+                                            });
+                                            state.didChange(date);
+                                          }
+                                        },
+                                        child: InputDecorator(
+                                          decoration: InputDecoration(
+                                            labelText: 'Collection Date',
+                                            border: const OutlineInputBorder(),
+                                            suffixIcon: const Icon(
+                                                Icons.calendar_today),
+                                            errorText: state.errorText,
+                                          ),
+                                          child: Text(_selectedCollectionDate !=
+                                                  null
+                                              ? DateFormat('dd MMM yyyy')
+                                                  .format(
+                                                      _selectedCollectionDate!)
+                                              : 'Select Collection Date'),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 16),
+                            // Row 5: Collection Address
+                            Row(children: [
+                              Expanded(
+                                child: TextFormField(
+                                  controller: _collectionAddressController,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Collection Address',
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  maxLines: 3,
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+
+                              // Row 6: Special Instructions
+                              Expanded(
+                                child: TextFormField(
+                                  controller: _specialInstructionsController,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Special Instructions',
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  maxLines: 3,
+                                ),
+                              ),
+                            ]),
+                            const SizedBox(height: 16),
+                            // Row 7: Quantity Distributed
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextFormField(
+                                    controller: _quantityDistributedController,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Quantity Distributed',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                    keyboardType: TextInputType.number,
+                                    inputFormatters: [
+                                      FilteringTextInputFormatter.digitsOnly
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 16),
+                                const Expanded(
+                                    child: SizedBox.shrink()), // Spacer
+                              ],
+                            ),
+                            const SizedBox(height: 16),
+
+                            // Row 8: Invoice Details
+                            TextFormField(
+                              controller: _invoiceDetailsController,
+                              decoration: const InputDecoration(
+                                labelText: 'Invoice Details',
+                                border: OutlineInputBorder(),
+                              ),
+                              maxLines: 3,
+                            ),
+                            const SizedBox(height: 16),
+
+                            // Row 9: Report Addresses
+                            TextFormField(
+                              controller: _reportAddressesController,
+                              decoration: const InputDecoration(
+                                labelText: 'Report Addresses',
+                                border: OutlineInputBorder(),
+                              ),
+                              maxLines: 3,
+                            ),
+                            const SizedBox(height: 16),
+
+                            // Row 10: Who to Invoice
+                            TextFormField(
+                              controller: _whoToInvoiceController,
+                              decoration: const InputDecoration(
+                                labelText: 'Who to Invoice',
+                                border: OutlineInputBorder(),
                               ),
                             ),
-                            const SizedBox(width: 16),
-                            const Expanded(child: SizedBox.shrink()), // Spacer
                           ],
                         ),
-                        const SizedBox(height: 16),
-
-                        // Row 8: Invoice Details
-                        TextFormField(
-                          controller: _invoiceDetailsController,
-                          decoration: const InputDecoration(
-                            labelText: 'Invoice Details',
-                            border: OutlineInputBorder(),
-                          ),
-                          maxLines: 3,
-                        ),
-                        const SizedBox(height: 16),
-
-                        // Row 9: Report Addresses
-                        TextFormField(
-                          controller: _reportAddressesController,
-                          decoration: const InputDecoration(
-                            labelText: 'Report Addresses',
-                            border: OutlineInputBorder(),
-                          ),
-                          maxLines: 3,
-                        ),
-                        const SizedBox(height: 16),
-
-                        // Row 10: Who to Invoice
-                        TextFormField(
-                          controller: _whoToInvoiceController,
-                          decoration: const InputDecoration(
-                            labelText: 'Who to Invoice',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ),
 
-            const SizedBox(height: 16),
+                const SizedBox(height: 16),
 
-            // Action buttons
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Cancel'),
-                ),
-                const SizedBox(width: 16),
-                ElevatedButton(
-                  onPressed: _saveJob,
-                  child: Text(isEditing ? 'Update Job' : 'Add Job'),
+                // Action buttons
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: 16),
+                    ElevatedButton(
+                      onPressed: _saveJob,
+                      child: Text(isEditing ? 'Update Job' : 'Add Job'),
+                    ),
+                  ],
                 ),
               ],
             ),
-          ],
-        ),
           );
         },
       ),

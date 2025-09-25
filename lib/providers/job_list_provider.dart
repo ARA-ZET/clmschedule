@@ -259,15 +259,17 @@ class JobListProvider extends ChangeNotifier {
   void updateJobListItemLocal(JobListItem jobListItem) {
     // Get the current item to compare
     final currentItem = getJobListItemById(jobListItem.id);
-    
+
     // Check if there's actually a change
     if (currentItem != null && _areJobItemsEqual(currentItem, jobListItem)) {
-      print('JobListProvider: No changes detected for item ${jobListItem.id}, skipping update');
+      print(
+          'JobListProvider: No changes detected for item ${jobListItem.id}, skipping update');
       return;
     }
 
-    print('JobListProvider: Changes detected for item ${jobListItem.id}, processing update');
-    
+    print(
+        'JobListProvider: Changes detected for item ${jobListItem.id}, processing update');
+
     // Store the update locally
     _pendingUpdates[jobListItem.id] = jobListItem;
     _updateTimestamps[jobListItem.id] = DateTime.now();
