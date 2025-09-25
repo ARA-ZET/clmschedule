@@ -101,12 +101,24 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   @override
   Widget build(BuildContext context) {
     final isEditing = widget.jobToEdit != null;
-
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 768;
+    
     return Dialog(
-      child: Container(
-        width: MediaQuery.of(context).size.width * 0.9,
-        height: MediaQuery.of(context).size.height * 0.9,
-        padding: const EdgeInsets.all(24),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          return Container(
+            width: isMobile 
+                ? MediaQuery.of(context).size.width * 0.95
+                : MediaQuery.of(context).size.width * 0.8,
+            height: isMobile 
+                ? MediaQuery.of(context).size.height * 0.95
+                : MediaQuery.of(context).size.height * 0.85,
+            constraints: BoxConstraints(
+              maxWidth: isMobile ? double.infinity : 900,
+              maxHeight: isMobile ? double.infinity : 700,
+            ),
+            padding: EdgeInsets.all(isMobile ? 16 : 24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -138,8 +150,59 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                     controller: _scrollController,
                     child: Column(
                       children: [
-                        // Row 1: Invoice, Amount, Client
-                        Row(
+                        // Row 1: Invoice, Amount, Client - Responsive Layout
+                        isMobile 
+                        ? Column(
+                            children: [
+                              TextFormField(
+                                controller: _invoiceController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Invoice',
+                                  border: OutlineInputBorder(),
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              TextFormField(
+                                controller: _amountController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Amount *',
+                                  border: OutlineInputBorder(),
+                                  prefixText: 'R ',
+                                ),
+                                keyboardType:
+                                    const TextInputType.numberWithOptions(
+                                        decimal: true),
+                                inputFormatters: [
+                                  FilteringTextInputFormatter.allow(
+                                      RegExp(r'^\d+\.?\d{0,2}')),
+                                ],
+                                validator: (value) {
+                                  if (value == null || value.isEmpty) {
+                                    return 'Amount is required';
+                                  }
+                                  if (double.tryParse(value) == null) {
+                                    return 'Please enter a valid amount';
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 12),
+                              TextFormField(
+                                controller: _clientController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Client *',
+                                  border: OutlineInputBorder(),
+                                ),
+                                validator: (value) {
+                                  if (value == null || value.isEmpty) {
+                                    return 'Client is required';
+                                  }
+                                  return null;
+                                },
+                              ),
+                            ],
+                          )
+                        : Row(
                           children: [
                             Expanded(
                               child: TextFormField(
@@ -148,12 +211,6 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                   labelText: 'Invoice',
                                   border: OutlineInputBorder(),
                                 ),
-                                // validator: (value) {
-                                //   if (value == null || value.isEmpty) {
-                                //     return 'Invoice is required';
-                                //   }
-                                //   return null;
-                                // },
                               ),
                             ),
                             const SizedBox(width: 16),
@@ -204,8 +261,62 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                         ),
                         const SizedBox(height: 16),
 
-                        // Row 2: Job Status, Job Type
-                        Row(
+                        // Row 2: Job Status, Job Type - Responsive Layout
+                        isMobile
+                        ? Column(
+                            children: [
+                              TextFormField(
+                                controller: _areaController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Area',
+                                  border: OutlineInputBorder(),
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              DropdownButtonFormField<JobListStatus>(
+                                initialValue: _selectedJobStatus,
+                                decoration: const InputDecoration(
+                                  labelText: 'Job Status *',
+                                  border: OutlineInputBorder(),
+                                ),
+                                items: JobListStatus.values.map((status) {
+                                  return DropdownMenuItem<JobListStatus>(
+                                    value: status,
+                                    child: Text(status.displayName),
+                                  );
+                                }).toList(),
+                                onChanged: (value) {
+                                  if (value != null) {
+                                    setState(() {
+                                      _selectedJobStatus = value;
+                                    });
+                                  }
+                                },
+                              ),
+                              const SizedBox(height: 12),
+                              DropdownButtonFormField<JobType>(
+                                initialValue: _selectedJobType,
+                                decoration: const InputDecoration(
+                                  labelText: 'Job Type *',
+                                  border: OutlineInputBorder(),
+                                ),
+                                items: JobType.values.map((type) {
+                                  return DropdownMenuItem<JobType>(
+                                    value: type,
+                                    child: Text(type.displayName),
+                                  );
+                                }).toList(),
+                                onChanged: (value) {
+                                  if (value != null) {
+                                    setState(() {
+                                      _selectedJobType = value;
+                                    });
+                                  }
+                                },
+                              ),
+                            ],
+                          )
+                        : Row(
                           children: [
                             Expanded(
                               flex: 2,
@@ -510,6 +621,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
             ),
           ],
         ),
+          );
+        },
       ),
     );
   }

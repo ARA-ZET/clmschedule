@@ -31,10 +31,12 @@ class _EditableTableCellState extends State<EditableTableCell> {
   bool _isEditing = false;
   late TextEditingController _controller;
   late FocusNode _focusNode;
+  late String _originalValue;
 
   @override
   void initState() {
     super.initState();
+    _originalValue = widget.value;
     _controller = TextEditingController(text: widget.value);
     _focusNode = FocusNode();
   }
@@ -47,6 +49,10 @@ class _EditableTableCellState extends State<EditableTableCell> {
   }
 
   void _startEditing() {
+    // Capture the original value at the start of editing
+    _originalValue = widget.value;
+    _controller.text = widget.value;
+    
     setState(() {
       _isEditing = true;
     });
@@ -60,8 +66,11 @@ class _EditableTableCellState extends State<EditableTableCell> {
   }
 
   void _saveAndExit() {
+    final currentValue = _controller.text;
+    
+    // Validate the input
     if (widget.validator != null) {
-      final error = widget.validator!(_controller.text);
+      final error = widget.validator!(currentValue);
       if (error != null) {
         // Show error and don't save
         ScaffoldMessenger.of(context).showSnackBar(
@@ -71,7 +80,14 @@ class _EditableTableCellState extends State<EditableTableCell> {
       }
     }
 
-    widget.onSave(_controller.text);
+    // Only call onSave if the value actually changed
+    if (currentValue != _originalValue) {
+      widget.onSave(currentValue);
+      print('EditableTableCell: Value changed from "$_originalValue" to "$currentValue"');
+    } else {
+      print('EditableTableCell: No change detected, skipping save');
+    }
+
     setState(() {
       _isEditing = false;
     });
@@ -146,8 +162,12 @@ class EditableDateCell extends StatelessWidget {
             firstDate: DateTime(2025),
             lastDate: DateTime(2030),
           );
-          if (date != null) {
+          if (date != null && date != value) {
+            // Only call onSave if the date actually changed
+            print('EditableDateCell: Date changed from "${value.toIso8601String()}" to "${date.toIso8601String()}"');
             onSave(date);
+          } else if (date != null) {
+            print('EditableDateCell: No change detected, skipping save');
           }
         },
         child: Container(
@@ -194,10 +214,12 @@ class _LinkCellState extends State<LinkCell> {
   bool _isHovering = false;
   late TextEditingController _controller;
   late FocusNode _focusNode;
+  late String _originalValue;
 
   @override
   void initState() {
     super.initState();
+    _originalValue = widget.value;
     _controller = TextEditingController(text: widget.value);
     _focusNode = FocusNode();
   }
@@ -212,8 +234,15 @@ class _LinkCellState extends State<LinkCell> {
   bool _isValidUrl(String url) {
     if (url.isEmpty) return false;
     try {
-      final uri = Uri.parse(url);
-      return uri.hasScheme && (uri.scheme == 'http' || uri.scheme == 'https');
+      // Check if it looks like a URL (contains a domain)
+      if (url.contains('.') && !url.contains(' ')) {
+        final formattedUrl = _formatUrlForDisplay(url);
+        final uri = Uri.parse(formattedUrl);
+        return uri.hasScheme && 
+               (uri.scheme == 'http' || uri.scheme == 'https') &&
+               uri.host.isNotEmpty;
+      }
+      return false;
     } catch (e) {
       return false;
     }
@@ -246,6 +275,10 @@ class _LinkCellState extends State<LinkCell> {
   }
 
   void _startEditing() {
+    // Capture the original value at the start of editing
+    _originalValue = widget.value;
+    _controller.text = widget.value;
+    
     setState(() {
       _isEditing = true;
     });
@@ -259,8 +292,11 @@ class _LinkCellState extends State<LinkCell> {
   }
 
   void _saveAndExit() {
+    final currentValue = _controller.text;
+    
+    // Validate the input
     if (widget.validator != null) {
-      final error = widget.validator!(_controller.text);
+      final error = widget.validator!(currentValue);
       if (error != null) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(error)),
@@ -269,7 +305,14 @@ class _LinkCellState extends State<LinkCell> {
       }
     }
 
-    widget.onSave(_controller.text);
+    // Only call onSave if the value actually changed
+    if (currentValue != _originalValue) {
+      widget.onSave(currentValue);
+      print('LinkCell: Value changed from "$_originalValue" to "$currentValue"');
+    } else {
+      print('LinkCell: No change detected, skipping save');
+    }
+
     setState(() {
       _isEditing = false;
     });
@@ -309,30 +352,40 @@ class _LinkCellState extends State<LinkCell> {
         child: Tooltip(
           message: isValidLink
               ? 'Click to open: $formattedUrl'
-              : 'Right-click to edit',
+              : widget.value.isEmpty
+                  ? 'Click to add link'
+                  : 'Click to edit link',
           waitDuration: const Duration(milliseconds: 500),
           child: GestureDetector(
-            onTap: isValidLink ? _launchUrl : null,
+            onTap: isValidLink ? _launchUrl : _startEditing,
             onSecondaryTap: _startEditing,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                border: !isValidLink && _isHovering
+                    ? Border.all(color: Colors.grey[400]!, width: 1)
+                    : null,
+                borderRadius: BorderRadius.circular(4),
+              ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Expanded(
                     child: Text(
                       widget.value.isEmpty
-                          ? 'Right-click to add link'
+                          ? 'Click to add link'
                           : widget.value,
                       style: TextStyle(
                         fontSize: 12,
                         color: widget.value.isEmpty
-                            ? Colors.grey
+                            ? Colors.grey[600]
                             : isValidLink
                                 ? (_isHovering
                                     ? Colors.blue.shade700
                                     : Colors.blue)
-                                : Colors.black,
+                                : (_isHovering
+                                    ? Colors.grey[700]
+                                    : Colors.black),
                         fontStyle:
                             widget.value.isEmpty ? FontStyle.italic : null,
                         decoration: isValidLink && _isHovering
@@ -349,6 +402,20 @@ class _LinkCellState extends State<LinkCell> {
                       Icons.open_in_new,
                       size: 12,
                       color: _isHovering ? Colors.blue.shade700 : Colors.blue,
+                    ),
+                  ] else if (!widget.value.isEmpty) ...[
+                    const SizedBox(width: 4),
+                    Icon(
+                      Icons.edit,
+                      size: 12,
+                      color: _isHovering ? Colors.grey[700] : Colors.grey[500],
+                    ),
+                  ] else if (_isHovering) ...[
+                    const SizedBox(width: 4),
+                    Icon(
+                      Icons.add_link,
+                      size: 12,
+                      color: Colors.grey[600],
                     ),
                   ],
                 ],

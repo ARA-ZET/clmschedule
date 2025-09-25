@@ -156,9 +156,6 @@ class JobListProvider extends ChangeNotifier {
         _isLoading = false;
         _error = null;
         notifyListeners();
-
-        // Pre-load adjacent months in background after successful load
-        _preloadAdjacentMonths();
       },
       onError: (error) {
         print('JobListProvider: Snapshot error: $error');
@@ -258,32 +255,19 @@ class JobListProvider extends ChangeNotifier {
     return _jobListService.getAvailableJobListMonths();
   }
 
-  // Pre-load adjacent months in background (lazy loading optimization)
-  Future<void> _preloadAdjacentMonths() async {
-    try {
-      final previousMonth =
-          DateTime(_currentMonth.year, _currentMonth.month - 1);
-      final nextMonth = DateTime(_currentMonth.year, _currentMonth.month + 1);
-
-      // Pre-load previous and next month data in background without blocking UI
-      _jobListService.getJobListItems(previousMonth).take(1).listen((_) {
-        print('JobListProvider: Pre-loaded previous month data');
-      }, onError: (error) {
-        print('JobListProvider: Error pre-loading previous month: $error');
-      });
-
-      _jobListService.getJobListItems(nextMonth).take(1).listen((_) {
-        print('JobListProvider: Pre-loaded next month data');
-      }, onError: (error) {
-        print('JobListProvider: Error pre-loading next month: $error');
-      });
-    } catch (error) {
-      print('JobListProvider: Error in pre-loading adjacent months: $error');
-    }
-  }
-
   // Debounced update system - store locally first, batch update to database after delay
   void updateJobListItemLocal(JobListItem jobListItem) {
+    // Get the current item to compare
+    final currentItem = getJobListItemById(jobListItem.id);
+    
+    // Check if there's actually a change
+    if (currentItem != null && _areJobItemsEqual(currentItem, jobListItem)) {
+      print('JobListProvider: No changes detected for item ${jobListItem.id}, skipping update');
+      return;
+    }
+
+    print('JobListProvider: Changes detected for item ${jobListItem.id}, processing update');
+    
     // Store the update locally
     _pendingUpdates[jobListItem.id] = jobListItem;
     _updateTimestamps[jobListItem.id] = DateTime.now();
@@ -298,6 +282,27 @@ class JobListProvider extends ChangeNotifier {
     _debounceTimer = Timer(_debounceDelay, () {
       _processPendingUpdates();
     });
+  }
+
+  // Helper method to compare job items for equality
+  bool _areJobItemsEqual(JobListItem item1, JobListItem item2) {
+    return item1.id == item2.id &&
+        item1.invoice == item2.invoice &&
+        item1.amount == item2.amount &&
+        item1.client == item2.client &&
+        item1.jobStatusId == item2.jobStatusId &&
+        item1.jobType == item2.jobType &&
+        item1.area == item2.area &&
+        item1.quantity == item2.quantity &&
+        item1.manDays == item2.manDays &&
+        item1.date.isAtSameMomentAs(item2.date) &&
+        item1.collectionAddress == item2.collectionAddress &&
+        item1.collectionDate.isAtSameMomentAs(item2.collectionDate) &&
+        item1.specialInstructions == item2.specialInstructions &&
+        item1.quantityDistributed == item2.quantityDistributed &&
+        item1.invoiceDetails == item2.invoiceDetails &&
+        item1.reportAddresses == item2.reportAddresses &&
+        item1.whoToInvoice == item2.whoToInvoice;
   }
 
   // Process all pending updates as batch to database

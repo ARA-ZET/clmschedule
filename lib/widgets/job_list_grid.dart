@@ -5,7 +5,6 @@ import '../models/job_list_item.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/job_list_status_provider.dart';
 import '../providers/scale_provider.dart';
-import '../widgets/lazy_loading_indicator.dart';
 import 'add_edit_job_dialog.dart';
 import 'editable_table_cell.dart';
 import 'multi_select_status_filter.dart';
@@ -120,666 +119,653 @@ class _JobListGridState extends State<JobListGrid> {
           );
         }
 
-        // Main content with loading overlay for month changes
-        return LazyLoadingIndicator(
-          isLoading: isLoading && jobListItems.isNotEmpty,
-          message: 'Loading new month data...',
-          child: Column(
-            children: [
-              // Month navigation
-              MonthNavigationWidget(
-                currentMonthDisplay: jobListProvider.currentMonthDisplay,
-                onPreviousMonth: jobListProvider.goToPreviousMonth,
-                onNextMonth: jobListProvider.goToNextMonth,
-                onCurrentMonth: jobListProvider.goToCurrentMonth,
-                onMonthSelected: jobListProvider.goToMonth,
-                availableMonths: jobListProvider.getAvailableMonths(),
-              ),
+        // Main content
+        return Column(
+          children: [
+            // Month navigation
+            MonthNavigationWidget(
+              currentMonthDisplay: jobListProvider.currentMonthDisplay,
+              onPreviousMonth: jobListProvider.goToPreviousMonth,
+              onNextMonth: jobListProvider.goToNextMonth,
+              onCurrentMonth: jobListProvider.goToCurrentMonth,
+              onMonthSelected: jobListProvider.goToMonth,
+              availableMonths: jobListProvider.getAvailableMonths(),
+            ),
 
-              // Search and Filter Bar
-              Container(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    Expanded(
-                      flex: 2,
-                      child: TextField(
-                        controller: _searchController,
-                        decoration: InputDecoration(
-                          hintText: 'Search by client, invoice, or area...',
-                          prefixIcon: Icon(Icons.search,
-                              size: scaleProvider.mediumIconSize),
-                          border: const OutlineInputBorder(),
-                          contentPadding: const EdgeInsets.symmetric(
-                              vertical: 8, horizontal: 12),
-                        ),
-                        onChanged: (value) {
-                          jobListProvider.setSearchQuery(value);
-                        },
+            // Search and Filter Bar
+            Container(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Expanded(
+                    flex: 2,
+                    child: TextField(
+                      controller: _searchController,
+                      decoration: InputDecoration(
+                        hintText: 'Search by client, invoice, or area...',
+                        prefixIcon: Icon(Icons.search,
+                            size: scaleProvider.mediumIconSize),
+                        border: const OutlineInputBorder(),
+                        contentPadding: const EdgeInsets.symmetric(
+                            vertical: 8, horizontal: 12),
                       ),
+                      onChanged: (value) {
+                        jobListProvider.setSearchQuery(value);
+                      },
                     ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: MultiSelectStatusFilter(
-                        selectedStatusIds: jobListProvider.statusFilters,
-                        onToggle: jobListProvider.toggleStatusFilter,
-                        onClear: () {
-                          jobListProvider.clearFilters();
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        initialValue: jobListProvider.sortField,
-                        decoration: InputDecoration(
-                          labelText: 'Sort by',
-                          border: const OutlineInputBorder(),
-                          contentPadding: const EdgeInsets.symmetric(
-                              vertical: 8, horizontal: 12),
-                          suffixIcon: IconButton(
-                            icon: Icon(
-                              jobListProvider.sortAscending
-                                  ? Icons.arrow_upward
-                                  : Icons.arrow_downward,
-                              size: scaleProvider.largeFontSize,
-                            ),
-                            onPressed: () {
-                              jobListProvider.setSorting(
-                                jobListProvider.sortField,
-                                !jobListProvider.sortAscending,
-                              );
-                            },
-                            tooltip: jobListProvider.sortAscending
-                                ? 'Ascending'
-                                : 'Descending',
-                          ),
-                        ),
-                        items: const [
-                          DropdownMenuItem(
-                            value: 'date',
-                            child: Text('Date'),
-                          ),
-                          DropdownMenuItem(
-                            value: 'collectionDate',
-                            child: Text('Collection Date'),
-                          ),
-                          DropdownMenuItem(
-                            value: 'client',
-                            child: Text('Client'),
-                          ),
-                          DropdownMenuItem(
-                            value: 'invoice',
-                            child: Text('Invoice'),
-                          ),
-                          DropdownMenuItem(
-                            value: 'amount',
-                            child: Text('Amount'),
-                          ),
-                          DropdownMenuItem(
-                            value: 'area',
-                            child: Text('Area'),
-                          ),
-                          DropdownMenuItem(
-                            value: 'quantity',
-                            child: Text('Quantity'),
-                          ),
-                          DropdownMenuItem(
-                            value: 'manDays',
-                            child: Text('Man-Days'),
-                          ),
-                        ],
-                        onChanged: (value) {
-                          if (value != null) {
-                            jobListProvider.setSortField(value);
-                          }
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        _searchController.clear();
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: MultiSelectStatusFilter(
+                      selectedStatusIds: jobListProvider.statusFilters,
+                      onToggle: jobListProvider.toggleStatusFilter,
+                      onClear: () {
                         jobListProvider.clearFilters();
                       },
-                      icon:
-                          Icon(Icons.clear, size: scaleProvider.mediumIconSize),
-                      label: const Text('Clear'),
                     ),
-                    const SizedBox(width: 8),
-                    ElevatedButton.icon(
-                      onPressed: () => _showAddJobDialog(context),
-                      icon: Icon(Icons.add, size: scaleProvider.mediumIconSize),
-                      label: const Text('Add Job'),
-                    ),
-                    if (jobListProvider.pendingUpdatesCount > 0) ...[
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.shade100,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.orange.shade300),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.sync,
-                                size: scaleProvider.smallIconSize,
-                                color: Colors.orange.shade700),
-                            const SizedBox(width: 4),
-                            Text(
-                              '${jobListProvider.pendingUpdatesCount}',
-                              style: TextStyle(
-                                fontSize: scaleProvider.mediumFontSize,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.orange.shade700,
-                              ),
-                            ),
-                          ],
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      initialValue: jobListProvider.sortField,
+                      decoration: InputDecoration(
+                        labelText: 'Sort by',
+                        border: const OutlineInputBorder(),
+                        contentPadding: const EdgeInsets.symmetric(
+                            vertical: 8, horizontal: 12),
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            jobListProvider.sortAscending
+                                ? Icons.arrow_upward
+                                : Icons.arrow_downward,
+                            size: scaleProvider.largeFontSize,
+                          ),
+                          onPressed: () {
+                            jobListProvider.setSorting(
+                              jobListProvider.sortField,
+                              !jobListProvider.sortAscending,
+                            );
+                          },
+                          tooltip: jobListProvider.sortAscending
+                              ? 'Ascending'
+                              : 'Descending',
                         ),
                       ),
-                    ],
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'date',
+                          child: Text('Date'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'collectionDate',
+                          child: Text('Collection Date'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'client',
+                          child: Text('Client'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'invoice',
+                          child: Text('Invoice'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'amount',
+                          child: Text('Amount'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'area',
+                          child: Text('Area'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'quantity',
+                          child: Text('Quantity'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'manDays',
+                          child: Text('Man-Days'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          jobListProvider.setSortField(value);
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      _searchController.clear();
+                      jobListProvider.clearFilters();
+                    },
+                    icon: Icon(Icons.clear, size: scaleProvider.mediumIconSize),
+                    label: const Text('Clear'),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: () => _showAddJobDialog(context),
+                    icon: Icon(Icons.add, size: scaleProvider.mediumIconSize),
+                    label: const Text('Add Job'),
+                  ),
+                  if (jobListProvider.pendingUpdatesCount > 0) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade100,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.orange.shade300),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.sync,
+                              size: scaleProvider.smallIconSize,
+                              color: Colors.orange.shade700),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${jobListProvider.pendingUpdatesCount}',
+                            style: TextStyle(
+                              fontSize: scaleProvider.mediumFontSize,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.orange.shade700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
-                ),
+                ],
               ),
-              // Table scroll hint
-              // if (jobListItems.isNotEmpty)
-              //   Container(
-              //     padding:
-              //         const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              //     child: Row(
-              //       children: [
-              //         Icon(Icons.swipe_left, size: 16, color: Colors.grey[600]),
-              //         const SizedBox(width: 4),
-              //         Text(
-              //           'Scroll horizontally to view all columns',
-              //           style: TextStyle(
-              //             fontSize: 12,
-              //             color: Colors.grey[600],
-              //             fontStyle: FontStyle.italic,
-              //           ),
-              //         ),
-              //         const Spacer(),
-              //         Icon(Icons.swipe_right, size: 16, color: Colors.grey[600]),
-              //       ],
-              //     ),
-              //   ),
-              // Job List Table
-              Expanded(
-                child: jobListItems.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.list_alt,
-                                size: scaleProvider.xlargeIconSize,
-                                color: Colors.grey),
-                            const SizedBox(height: 16),
-                            Text(
-                              'No jobs found',
-                              style: TextStyle(
-                                fontSize: scaleProvider.xlargeFontSize,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.grey,
-                              ),
+            ),
+            // Table scroll hint
+            // if (jobListItems.isNotEmpty)
+            //   Container(
+            //     padding:
+            //         const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            //     child: Row(
+            //       children: [
+            //         Icon(Icons.swipe_left, size: 16, color: Colors.grey[600]),
+            //         const SizedBox(width: 4),
+            //         Text(
+            //           'Scroll horizontally to view all columns',
+            //           style: TextStyle(
+            //             fontSize: 12,
+            //             color: Colors.grey[600],
+            //             fontStyle: FontStyle.italic,
+            //           ),
+            //         ),
+            //         const Spacer(),
+            //         Icon(Icons.swipe_right, size: 16, color: Colors.grey[600]),
+            //       ],
+            //     ),
+            //   ),
+            // Job List Table
+            Expanded(
+              child: jobListItems.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.list_alt,
+                              size: scaleProvider.xlargeIconSize,
+                              color: Colors.grey),
+                          const SizedBox(height: 16),
+                          Text(
+                            'No jobs found',
+                            style: TextStyle(
+                              fontSize: scaleProvider.xlargeFontSize,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.grey,
                             ),
-                            const SizedBox(height: 8),
-                            const Text(
-                              'Add a job to get started',
-                              style: TextStyle(color: Colors.grey),
-                            ),
-                          ],
-                        ),
-                      )
-                    : Container(
-                        margin: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey[300]!),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Scrollbar(
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Add a job to get started',
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ],
+                      ),
+                    )
+                  : Container(
+                      margin: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey[300]!),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Scrollbar(
+                        controller: _scrollController,
+                        thumbVisibility: true,
+                        trackVisibility: true,
+                        thickness: 12,
+                        radius: const Radius.circular(6),
+                        child: SingleChildScrollView(
                           controller: _scrollController,
-                          thumbVisibility: true,
-                          trackVisibility: true,
-                          thickness: 12,
-                          radius: const Radius.circular(6),
-                          child: SingleChildScrollView(
-                            controller: _scrollController,
-                            scrollDirection: Axis.horizontal,
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(
-                                minWidth:
-                                    1200, // Ensure table is wide enough to scroll
-                              ),
-                              child: SingleChildScrollView(
-                                scrollDirection: Axis.vertical,
-                                child: DataTable(
-                                  columnSpacing: 8,
-                                  horizontalMargin: 16,
-                                  headingRowColor: WidgetStateProperty.all(
-                                    Colors.grey[100],
-                                  ),
-                                  columns: const [
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Invoice',
-                                      textColor: Colors.black,
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Amount',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Client',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Job Status',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Job Type',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Area',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Qty',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Man-Days',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Date',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Col. Address',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Special Instructions',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Col. Date',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Qty Distributed',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Invoice Details',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Report Addresses',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Who to Invoice',
-                                    )),
-                                    DataColumn(
-                                        label: DataTableHeaderWidget(
-                                      text: 'Actions',
-                                    )),
-                                  ],
-                                  rows: jobListItems.map((item) {
-                                    return DataRow(
-                                      color: WidgetStateProperty.all(
-                                        (Provider.of<JobListStatusProvider>(
-                                                        context,
-                                                        listen: false)
-                                                    .getStatusById(
-                                                        item.jobStatusId)
-                                                    ?.color ??
-                                                Colors.grey)
-                                            .withOpacity(0.1),
+                          scrollDirection: Axis.horizontal,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(
+                              minWidth:
+                                  1200, // Ensure table is wide enough to scroll
+                            ),
+                            child: SingleChildScrollView(
+                              scrollDirection: Axis.vertical,
+                              child: DataTable(
+                                columnSpacing: 8,
+                                horizontalMargin: 16,
+                                headingRowColor: WidgetStateProperty.all(
+                                  Colors.grey[100],
+                                ),
+                                columns: const [
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Invoice',
+                                    textColor: Colors.black,
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Amount',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Client',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Job Status',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Job Type',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Area',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Qty',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Man-Days',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Date',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Col. Address',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Special Instructions',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Col. Date',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Qty Distributed',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Invoice Details',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Report Addresses',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Who to Invoice',
+                                  )),
+                                  DataColumn(
+                                      label: DataTableHeaderWidget(
+                                    text: 'Actions',
+                                  )),
+                                ],
+                                rows: jobListItems.map((item) {
+                                  return DataRow(
+                                    color: WidgetStateProperty.all(
+                                      (Provider.of<JobListStatusProvider>(
+                                                      context,
+                                                      listen: false)
+                                                  .getStatusById(
+                                                      item.jobStatusId)
+                                                  ?.color ??
+                                              Colors.grey)
+                                          .withOpacity(0.1),
+                                    ),
+                                    cells: [
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.invoice,
+                                          onSave: (value) => _updateJobField(
+                                              item, 'invoice', value),
+                                          validator: (value) =>
+                                              value?.isEmpty == true
+                                                  ? 'Invoice required'
+                                                  : null,
+                                        ),
                                       ),
-                                      cells: [
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.invoice,
-                                            onSave: (value) => _updateJobField(
-                                                item, 'invoice', value),
-                                            validator: (value) =>
-                                                value?.isEmpty == true
-                                                    ? 'Invoice required'
-                                                    : null,
-                                          ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value:
+                                              'R${item.amount.toStringAsFixed(2)}',
+                                          onSave: (value) {
+                                            final cleanValue = value
+                                                .replaceAll('R', '')
+                                                .trim();
+                                            final amount =
+                                                double.tryParse(cleanValue) ??
+                                                    item.amount;
+                                            _updateJobField(
+                                                item, 'amount', amount);
+                                          },
+                                          keyboardType: const TextInputType
+                                              .numberWithOptions(decimal: true),
+                                          inputFormatters: [
+                                            FilteringTextInputFormatter.allow(
+                                                RegExp(r'[R0-9.]')),
+                                          ],
+                                          validator: (value) {
+                                            final cleanValue = value
+                                                ?.replaceAll('R', '')
+                                                .trim();
+                                            if (cleanValue?.isEmpty == true) {
+                                              return 'Amount required';
+                                            }
+                                            if (double.tryParse(cleanValue!) ==
+                                                null) {
+                                              return 'Invalid amount';
+                                            }
+                                            return null;
+                                          },
                                         ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value:
-                                                'R${item.amount.toStringAsFixed(2)}',
-                                            onSave: (value) {
-                                              final cleanValue = value
-                                                  .replaceAll('R', '')
-                                                  .trim();
-                                              final amount =
-                                                  double.tryParse(cleanValue) ??
-                                                      item.amount;
-                                              _updateJobField(
-                                                  item, 'amount', amount);
-                                            },
-                                            keyboardType: const TextInputType
-                                                .numberWithOptions(
-                                                decimal: true),
-                                            inputFormatters: [
-                                              FilteringTextInputFormatter.allow(
-                                                  RegExp(r'[R0-9.]')),
-                                            ],
-                                            validator: (value) {
-                                              final cleanValue = value
-                                                  ?.replaceAll('R', '')
-                                                  .trim();
-                                              if (cleanValue?.isEmpty == true) {
-                                                return 'Amount required';
-                                              }
-                                              if (double.tryParse(
-                                                      cleanValue!) ==
-                                                  null) {
-                                                return 'Invalid amount';
-                                              }
-                                              return null;
-                                            },
-                                          ),
+                                      ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.client,
+                                          onSave: (value) => _updateJobField(
+                                              item, 'client', value),
+                                          width: 250,
+                                          validator: (value) =>
+                                              value?.isEmpty == true
+                                                  ? 'Client required'
+                                                  : null,
                                         ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.client,
-                                            onSave: (value) => _updateJobField(
-                                                item, 'client', value),
-                                            width: 250,
-                                            validator: (value) =>
-                                                value?.isEmpty == true
-                                                    ? 'Client required'
-                                                    : null,
-                                          ),
-                                        ),
-                                        DataCell(
-                                          Consumer<JobListStatusProvider>(
-                                            builder: (context, statusProvider,
-                                                child) {
-                                              final currentStatus =
-                                                  statusProvider.getStatusById(
-                                                      item.jobStatusId);
-                                              return Container(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                  horizontal: 8,
-                                                  vertical: 4,
-                                                ),
-                                                decoration: BoxDecoration(
+                                      ),
+                                      DataCell(
+                                        Consumer<JobListStatusProvider>(
+                                          builder:
+                                              (context, statusProvider, child) {
+                                            final currentStatus =
+                                                statusProvider.getStatusById(
+                                                    item.jobStatusId);
+                                            return Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                horizontal: 8,
+                                                vertical: 4,
+                                              ),
+                                              decoration: BoxDecoration(
+                                                color: (currentStatus?.color ??
+                                                        Colors.grey)
+                                                    .withOpacity(0.2),
+                                                border: Border.all(
                                                   color:
                                                       (currentStatus?.color ??
                                                               Colors.grey)
-                                                          .withOpacity(0.2),
-                                                  border: Border.all(
-                                                    color:
-                                                        (currentStatus?.color ??
-                                                                Colors.grey)
-                                                            .withOpacity(0.5),
-                                                    width: 1,
-                                                  ),
-                                                  borderRadius:
-                                                      BorderRadius.circular(4),
+                                                          .withOpacity(0.5),
+                                                  width: 1,
                                                 ),
-                                                child: DropdownButton<String>(
-                                                  value: statusProvider.statuses
-                                                          .any((s) =>
-                                                              s.id ==
-                                                              item.jobStatusId)
-                                                      ? item.jobStatusId
-                                                      : null,
-                                                  underline:
-                                                      const SizedBox.shrink(),
-                                                  isDense: true,
-                                                  items: statusProvider.statuses
-                                                      .map((status) {
-                                                    return DropdownMenuItem<
-                                                        String>(
-                                                      value: status.id,
-                                                      child: Row(
-                                                        mainAxisSize:
-                                                            MainAxisSize.min,
-                                                        children: [
-                                                          Container(
-                                                            width: 12,
-                                                            height: 12,
-                                                            margin:
-                                                                const EdgeInsets
-                                                                    .only(
-                                                                    right: 8),
-                                                            decoration:
-                                                                BoxDecoration(
-                                                              color:
-                                                                  status.color,
-                                                              shape: BoxShape
-                                                                  .circle,
-                                                            ),
+                                                borderRadius:
+                                                    BorderRadius.circular(4),
+                                              ),
+                                              child: DropdownButton<String>(
+                                                value: statusProvider.statuses
+                                                        .any((s) =>
+                                                            s.id ==
+                                                            item.jobStatusId)
+                                                    ? item.jobStatusId
+                                                    : null,
+                                                underline:
+                                                    const SizedBox.shrink(),
+                                                isDense: true,
+                                                items: statusProvider.statuses
+                                                    .map((status) {
+                                                  return DropdownMenuItem<
+                                                      String>(
+                                                    value: status.id,
+                                                    child: Row(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      children: [
+                                                        Container(
+                                                          width: 12,
+                                                          height: 12,
+                                                          margin:
+                                                              const EdgeInsets
+                                                                  .only(
+                                                                  right: 8),
+                                                          decoration:
+                                                              BoxDecoration(
+                                                            color: status.color,
+                                                            shape:
+                                                                BoxShape.circle,
                                                           ),
-                                                          Text(
-                                                            status.label,
-                                                            style: TextStyle(
-                                                              fontSize:
-                                                                  scaleProvider
-                                                                      .mediumFontSize,
-                                                            ),
+                                                        ),
+                                                        Text(
+                                                          status.label,
+                                                          style: TextStyle(
+                                                            fontSize: scaleProvider
+                                                                .mediumFontSize,
                                                           ),
-                                                        ],
-                                                      ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  );
+                                                }).toList(),
+                                                onChanged: (newStatusId) {
+                                                  if (newStatusId != null) {
+                                                    jobListProvider
+                                                        .updateJobListItemLocal(
+                                                      item.copyWith(
+                                                          jobStatusId:
+                                                              newStatusId),
                                                     );
-                                                  }).toList(),
-                                                  onChanged: (newStatusId) {
-                                                    if (newStatusId != null) {
-                                                      jobListProvider
-                                                          .updateJobListItemLocal(
-                                                        item.copyWith(
-                                                            jobStatusId:
-                                                                newStatusId),
-                                                      );
-                                                    }
-                                                  },
-                                                ),
-                                              );
-                                            },
-                                          ),
-                                        ),
-                                        DataCell(
-                                          DropdownButton<JobType>(
-                                            value: item.jobType,
-                                            underline: const SizedBox.shrink(),
-                                            isDense: true,
-                                            items: JobType.values.map((type) {
-                                              return DropdownMenuItem<JobType>(
-                                                value: type,
-                                                child: Text(
-                                                  type.displayName,
-                                                  style: TextStyle(
-                                                      fontSize: scaleProvider
-                                                          .mediumFontSize),
-                                                ),
-                                              );
-                                            }).toList(),
-                                            onChanged: (newType) {
-                                              if (newType != null) {
-                                                _updateJobField(
-                                                    item, 'jobType', newType);
-                                              }
-                                            },
-                                          ),
-                                        ),
-                                        DataCell(
-                                          LinkCell(
-                                            value: item.area,
-                                            onSave: (value) => _updateJobField(
-                                                item, 'area', value),
-                                            width: 120,
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.quantity.toString(),
-                                            onSave: (value) {
-                                              final quantity =
-                                                  int.tryParse(value) ??
-                                                      item.quantity;
-                                              _updateJobField(
-                                                  item, 'quantity', quantity);
-                                            },
-                                            keyboardType: TextInputType.number,
-                                            inputFormatters: [
-                                              FilteringTextInputFormatter
-                                                  .digitsOnly
-                                            ],
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.manDays.toString(),
-                                            onSave: (value) {
-                                              final manDays =
-                                                  double.tryParse(value) ??
-                                                      item.manDays;
-                                              _updateJobField(
-                                                  item, 'manDays', manDays);
-                                            },
-                                            keyboardType: const TextInputType
-                                                .numberWithOptions(
-                                                decimal: true),
-                                            inputFormatters: [
-                                              FilteringTextInputFormatter.allow(
-                                                RegExp(r'^\d+\.?\d{0,2}'),
-                                              )
-                                            ],
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableDateCell(
-                                            value: item.date,
-                                            onSave: (date) => _updateJobField(
-                                                item, 'date', date),
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.collectionAddress,
-                                            onSave: (value) => _updateJobField(
-                                                item,
-                                                'collectionAddress',
-                                                value),
-                                            width: 200,
-                                            maxLines: 2,
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.specialInstructions,
-                                            onSave: (value) => _updateJobField(
-                                                item,
-                                                'specialInstructions',
-                                                value),
-                                            width: 150,
-                                            maxLines: 2,
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableDateCell(
-                                            value: item.collectionDate,
-                                            onSave: (date) => _updateJobField(
-                                                item, 'collectionDate', date),
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.quantityDistributed
-                                                .toString(),
-                                            onSave: (value) {
-                                              final quantity =
-                                                  int.tryParse(value) ??
-                                                      item.quantityDistributed;
-                                              _updateJobField(
-                                                  item,
-                                                  'quantityDistributed',
-                                                  quantity);
-                                            },
-                                            keyboardType: TextInputType.number,
-                                            inputFormatters: [
-                                              FilteringTextInputFormatter
-                                                  .digitsOnly
-                                            ],
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.invoiceDetails,
-                                            onSave: (value) => _updateJobField(
-                                                item, 'invoiceDetails', value),
-                                            width: 150,
-                                            maxLines: 2,
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.reportAddresses,
-                                            onSave: (value) => _updateJobField(
-                                                item, 'reportAddresses', value),
-                                            width: 150,
-                                            maxLines: 2,
-                                          ),
-                                        ),
-                                        DataCell(
-                                          EditableTableCell(
-                                            value: item.whoToInvoice,
-                                            onSave: (value) => _updateJobField(
-                                                item, 'whoToInvoice', value),
-                                            width: 120,
-                                          ),
-                                        ),
-                                        DataCell(
-                                          Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              IconButton(
-                                                icon: const Icon(Icons.edit,
-                                                    size: 18),
-                                                onPressed: () =>
-                                                    _showEditJobDialog(
-                                                        context, item),
-                                                tooltip: 'Edit',
+                                                  }
+                                                },
                                               ),
-                                              IconButton(
-                                                icon: const Icon(Icons.delete,
-                                                    size: 18),
-                                                onPressed: () =>
-                                                    _showDeleteConfirmation(
-                                                        context, item),
-                                                tooltip: 'Delete',
-                                              ),
-                                            ],
-                                          ),
+                                            );
+                                          },
                                         ),
-                                      ],
-                                    );
-                                  }).toList(),
-                                ), // Close DataTable
-                              ), // Close inner SingleChildScrollView (vertical)
-                            ), // Close ConstrainedBox
-                          ), // Close outer SingleChildScrollView (horizontal)
-                        ), // Close Scrollbar
-                      ), // Close Container
-              ),
-            ], // Close Column children
-          ),
+                                      ),
+                                      DataCell(
+                                        DropdownButton<JobType>(
+                                          value: item.jobType,
+                                          underline: const SizedBox.shrink(),
+                                          isDense: true,
+                                          items: JobType.values.map((type) {
+                                            return DropdownMenuItem<JobType>(
+                                              value: type,
+                                              child: Text(
+                                                type.displayName,
+                                                style: TextStyle(
+                                                    fontSize: scaleProvider
+                                                        .mediumFontSize),
+                                              ),
+                                            );
+                                          }).toList(),
+                                          onChanged: (newType) {
+                                            if (newType != null) {
+                                              _updateJobField(
+                                                  item, 'jobType', newType);
+                                            }
+                                          },
+                                        ),
+                                      ),
+                                      DataCell(
+                                        LinkCell(
+                                          value: item.area,
+                                          onSave: (value) => _updateJobField(
+                                              item, 'area', value),
+                                          width: 120,
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.quantity.toString(),
+                                          onSave: (value) {
+                                            final quantity =
+                                                int.tryParse(value) ??
+                                                    item.quantity;
+                                            _updateJobField(
+                                                item, 'quantity', quantity);
+                                          },
+                                          keyboardType: TextInputType.number,
+                                          inputFormatters: [
+                                            FilteringTextInputFormatter
+                                                .digitsOnly
+                                          ],
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.manDays.toString(),
+                                          onSave: (value) {
+                                            final manDays =
+                                                double.tryParse(value) ??
+                                                    item.manDays;
+                                            _updateJobField(
+                                                item, 'manDays', manDays);
+                                          },
+                                          keyboardType: const TextInputType
+                                              .numberWithOptions(decimal: true),
+                                          inputFormatters: [
+                                            FilteringTextInputFormatter.allow(
+                                              RegExp(r'^\d+\.?\d{0,2}'),
+                                            )
+                                          ],
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableDateCell(
+                                          value: item.date,
+                                          onSave: (date) => _updateJobField(
+                                              item, 'date', date),
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.collectionAddress,
+                                          onSave: (value) => _updateJobField(
+                                              item, 'collectionAddress', value),
+                                          width: 200,
+                                          maxLines: 2,
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.specialInstructions,
+                                          onSave: (value) => _updateJobField(
+                                              item,
+                                              'specialInstructions',
+                                              value),
+                                          width: 150,
+                                          maxLines: 2,
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableDateCell(
+                                          value: item.collectionDate,
+                                          onSave: (date) => _updateJobField(
+                                              item, 'collectionDate', date),
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.quantityDistributed
+                                              .toString(),
+                                          onSave: (value) {
+                                            final quantity =
+                                                int.tryParse(value) ??
+                                                    item.quantityDistributed;
+                                            _updateJobField(
+                                                item,
+                                                'quantityDistributed',
+                                                quantity);
+                                          },
+                                          keyboardType: TextInputType.number,
+                                          inputFormatters: [
+                                            FilteringTextInputFormatter
+                                                .digitsOnly
+                                          ],
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.invoiceDetails,
+                                          onSave: (value) => _updateJobField(
+                                              item, 'invoiceDetails', value),
+                                          width: 150,
+                                          maxLines: 2,
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.reportAddresses,
+                                          onSave: (value) => _updateJobField(
+                                              item, 'reportAddresses', value),
+                                          width: 150,
+                                          maxLines: 2,
+                                        ),
+                                      ),
+                                      DataCell(
+                                        EditableTableCell(
+                                          value: item.whoToInvoice,
+                                          onSave: (value) => _updateJobField(
+                                              item, 'whoToInvoice', value),
+                                          width: 120,
+                                        ),
+                                      ),
+                                      DataCell(
+                                        Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            IconButton(
+                                              icon: const Icon(Icons.edit,
+                                                  size: 18),
+                                              onPressed: () =>
+                                                  _showEditJobDialog(
+                                                      context, item),
+                                              tooltip: 'Edit',
+                                            ),
+                                            IconButton(
+                                              icon: const Icon(Icons.delete,
+                                                  size: 18),
+                                              onPressed: () =>
+                                                  _showDeleteConfirmation(
+                                                      context, item),
+                                              tooltip: 'Delete',
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  );
+                                }).toList(),
+                              ), // Close DataTable
+                            ), // Close inner SingleChildScrollView (vertical)
+                          ), // Close ConstrainedBox
+                        ), // Close outer SingleChildScrollView (horizontal)
+                      ), // Close Scrollbar
+                    ), // Close Container
+            ),
+          ], // Close Column children
         );
       },
     );
