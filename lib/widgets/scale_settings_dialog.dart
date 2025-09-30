@@ -53,9 +53,9 @@ class ScaleSettingsDialog extends StatelessWidget {
                       '${(ScaleProvider.minScale * 100).round()}%',
                       style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
-                    Text(
+                    const Text(
                       '100%',
-                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                     Text(
                       '${(ScaleProvider.maxScale * 100).round()}%',

@@ -170,4 +170,40 @@ class JobListService {
   String getMonthlyDocumentId(DateTime date) {
     return _monthlyService.getMonthlyDocumentId(date);
   }
+
+  // Move job list item from one month to another
+  Future<void> moveJobListItemToMonth(
+      JobListItem jobListItem, DateTime oldDate, DateTime newDate) async {
+    final oldMonthId = getMonthlyDocumentId(oldDate);
+    final newMonthId = getMonthlyDocumentId(newDate);
+
+    // If the months are the same, just do a regular update
+    if (oldMonthId == newMonthId) {
+      await updateJobListItem(jobListItem, newDate);
+      return;
+    }
+
+    print(
+        'JobListService: Moving job ${jobListItem.id} from $oldMonthId to $newMonthId');
+
+    // Ensure both monthly documents exist
+    await _monthlyService.ensureJobListMonthlyDocExists(oldDate);
+    await _monthlyService.ensureJobListMonthlyDocExists(newDate);
+
+    // Add to new month collection
+    await _getJobListItemsCollection(newDate)
+        .doc(jobListItem.id)
+        .set(jobListItem.toMap());
+
+    // Remove from old month collection (check if it exists first)
+    final oldDoc =
+        await _getJobListItemsCollection(oldDate).doc(jobListItem.id).get();
+
+    if (oldDoc.exists) {
+      await _getJobListItemsCollection(oldDate).doc(jobListItem.id).delete();
+    }
+
+    print(
+        'JobListService: Successfully moved job ${jobListItem.id} to $newMonthId');
+  }
 }

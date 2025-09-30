@@ -58,6 +58,7 @@ class JobListGrid extends StatefulWidget {
 class _JobListGridState extends State<JobListGrid> {
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _searchController = TextEditingController();
+  bool _isAddingJob = false;
 
   @override
   void dispose() {
@@ -243,9 +244,17 @@ class _JobListGridState extends State<JobListGrid> {
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton.icon(
-                    onPressed: () => _showAddJobDialog(context),
-                    icon: Icon(Icons.add, size: scaleProvider.mediumIconSize),
-                    label: const Text('Add Job'),
+                    onPressed:
+                        _isAddingJob ? null : () => _showAddJobDialog(context),
+                    icon: _isAddingJob
+                        ? SizedBox(
+                            width: scaleProvider.mediumIconSize,
+                            height: scaleProvider.mediumIconSize,
+                            child:
+                                const CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Icon(Icons.add, size: scaleProvider.mediumIconSize),
+                    label: Text(_isAddingJob ? 'Adding...' : 'Add Job'),
                   ),
                   if (jobListProvider.pendingUpdatesCount > 0) ...[
                     const SizedBox(width: 8),
@@ -384,7 +393,7 @@ class _JobListGridState extends State<JobListGrid> {
                                   )),
                                   DataColumn(
                                       label: DataTableHeaderWidget(
-                                    text: 'Qty',
+                                    text: 'Qty / Vihicle',
                                   )),
                                   DataColumn(
                                       label: DataTableHeaderWidget(
@@ -437,7 +446,7 @@ class _JobListGridState extends State<JobListGrid> {
                                                       item.jobStatusId)
                                                   ?.color ??
                                               Colors.grey)
-                                          .withOpacity(0.1),
+                                          .withOpacity(0.6),
                                     ),
                                     cells: [
                                       DataCell(
@@ -514,12 +523,11 @@ class _JobListGridState extends State<JobListGrid> {
                                               decoration: BoxDecoration(
                                                 color: (currentStatus?.color ??
                                                         Colors.grey)
-                                                    .withOpacity(0.2),
+                                                    .withOpacity(0.9),
                                                 border: Border.all(
                                                   color:
                                                       (currentStatus?.color ??
-                                                              Colors.grey)
-                                                          .withOpacity(0.5),
+                                                          Colors.grey),
                                                   width: 1,
                                                 ),
                                                 borderRadius:
@@ -614,23 +622,18 @@ class _JobListGridState extends State<JobListGrid> {
                                           onSave: (value) => _updateJobField(
                                               item, 'area', value),
                                           width: 120,
+                                          maxLines: 2,
                                         ),
                                       ),
                                       DataCell(
-                                        EditableTableCell(
-                                          value: item.quantity.toString(),
-                                          onSave: (value) {
-                                            final quantity =
-                                                int.tryParse(value) ??
-                                                    item.quantity;
+                                        EditableVehicleComboCell(
+                                          quantity: item.quantity,
+                                          jobType: item.jobType,
+                                          width: 180,
+                                          onSave: (quantity) {
                                             _updateJobField(
                                                 item, 'quantity', quantity);
                                           },
-                                          keyboardType: TextInputType.number,
-                                          inputFormatters: [
-                                            FilteringTextInputFormatter
-                                                .digitsOnly
-                                          ],
                                         ),
                                       ),
                                       DataCell(
@@ -655,6 +658,7 @@ class _JobListGridState extends State<JobListGrid> {
                                       DataCell(
                                         EditableDateCell(
                                           value: item.date,
+                                          jobType: item.jobType,
                                           onSave: (date) => _updateJobField(
                                               item, 'date', date),
                                         ),
@@ -793,7 +797,21 @@ class _JobListGridState extends State<JobListGrid> {
           updatedItem = item.copyWith(area: value as String);
           break;
         case 'quantity':
-          updatedItem = item.copyWith(quantity: value as int);
+          final newQuantity = value as int;
+          // Validate quantity for vehicle combo job types
+          if ((item.jobType == JobType.junkCollection ||
+                  item.jobType == JobType.furnitureMove) &&
+              (newQuantity < 1 || newQuantity > 9)) {
+            // Invalid quantity for vehicle combo, don't update
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Invalid vehicle combination selected'),
+                backgroundColor: Colors.red,
+              ),
+            );
+            return;
+          }
+          updatedItem = item.copyWith(quantity: newQuantity);
           break;
         case 'manDays':
           updatedItem = item.copyWith(manDays: value as double);
@@ -838,25 +856,73 @@ class _JobListGridState extends State<JobListGrid> {
   }
 
   void _showAddJobDialog(BuildContext context) async {
-    final result = await showDialog<JobListItem>(
-      context: context,
-      builder: (context) => const AddEditJobDialog(),
-    );
+    setState(() {
+      _isAddingJob = true;
+    });
 
-    if (result != null && context.mounted) {
-      try {
-        await context.read<JobListProvider>().addJobListItem(result);
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Job added successfully!')),
-          );
+    try {
+      final result = await showDialog<dynamic>(
+        context: context,
+        builder: (context) => const AddEditJobDialog(),
+      );
+
+      if (result != null && context.mounted) {
+        JobListItem job;
+        bool skipAllocation = false;
+
+        // Handle different return types from dialog
+        if (result is Map<String, dynamic>) {
+          job = result['job'] as JobListItem;
+          skipAllocation = result['skipAllocation'] == true;
+        } else if (result is JobListItem) {
+          job = result;
+          skipAllocation = false;
+        } else {
+          return; // Invalid result
         }
-      } catch (e) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error adding job: $e')),
-          );
+
+        try {
+          // Use appropriate method based on whether allocation is skipped
+          if (skipAllocation) {
+            // Job is already saved in database, just show success message
+            // No database operation needed as job was saved in the dialog already
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                      'Collection job added successfully with schedule allocation!'),
+                  backgroundColor: Colors.green,
+                ),
+              );
+            }
+          } else {
+            await context.read<JobListProvider>().addJobListItem(job);
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content:
+                      Text('Job added successfully with schedule allocation!'),
+                  backgroundColor: Colors.green,
+                ),
+              );
+            }
+          }
+        } catch (e) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Error adding job: $e'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
         }
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isAddingJob = false;
+        });
       }
     }
   }

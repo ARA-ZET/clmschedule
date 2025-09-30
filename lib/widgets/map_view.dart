@@ -40,7 +40,7 @@ class _MapViewState extends State<MapView> {
   bool _isLoading = true;
   List<WorkArea> _workAreas = [];
   WorkArea? _selectedWorkArea;
-  List<WorkArea> _editableWorkAreas =
+  final List<WorkArea> _editableWorkAreas =
       []; // Collection of work areas for this job
 
   // New fields for CustomPolygon support
@@ -52,7 +52,7 @@ class _MapViewState extends State<MapView> {
   bool _isEditing = false;
   bool _hasUnsavedChanges = false;
   bool _isCreatingNewPolygon = false;
-  List<LatLng> _newPolygonPoints = [];
+  final List<LatLng> _newPolygonPoints = [];
   BitmapDescriptor? _circleMarkerIcon;
   BitmapDescriptor? _midpointMarkerIcon;
   int? _draggingMidpointIndex;
@@ -67,6 +67,27 @@ class _MapViewState extends State<MapView> {
     super.initState();
     _createMarkerIcons();
     _initializeMap();
+  }
+
+  @override
+  void didUpdateWidget(MapView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    // Only update polygons if we're not currently editing and there's new data
+    if (!_isEditing &&
+        widget.customPolygons != null &&
+        widget.customPolygons != oldWidget.customPolygons) {
+      print('Widget updated with new polygons - preserving current state');
+      // Only update if we don't have unsaved changes
+      if (!_hasUnsavedChanges && _customPolygons.isEmpty) {
+        _customPolygons = List.from(widget.customPolygons!);
+        if (_customPolygons.isNotEmpty && _selectedPolygonIndex == null) {
+          _selectedCustomPolygon = _customPolygons.first;
+          _selectedPolygonIndex = 0;
+        }
+        _updateMapView();
+      }
+    }
   }
 
   Future<void> _createMarkerIcons() async {
@@ -86,14 +107,14 @@ class _MapViewState extends State<MapView> {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     const double size = 12.0;
-    final double radius = size / 2;
+    const double radius = size / 2;
 
     // Draw circle background
     final paint = Paint()
       ..color = Colors.orange
       ..style = PaintingStyle.fill;
 
-    canvas.drawCircle(Offset(radius, radius), radius - 1.0, paint);
+    canvas.drawCircle(const Offset(radius, radius), radius - 1.0, paint);
 
     // Draw border
     final borderPaint = Paint()
@@ -101,7 +122,7 @@ class _MapViewState extends State<MapView> {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.0;
 
-    canvas.drawCircle(Offset(radius, radius), radius - 1.0, borderPaint);
+    canvas.drawCircle(const Offset(radius, radius), radius - 1.0, borderPaint);
 
     final picture = recorder.endRecording();
     final img = await picture.toImage(size.toInt(), size.toInt());
@@ -276,9 +297,12 @@ class _MapViewState extends State<MapView> {
     try {
       // Check if we're using the new CustomPolygon system
       if (widget.customPolygons != null && widget.customPolygons!.isNotEmpty) {
-        // New system: Initialize with CustomPolygons
-        _customPolygons = List.from(widget.customPolygons!);
-        if (_customPolygons.isNotEmpty) {
+        // New system: Initialize with CustomPolygons (only if not already initialized)
+        if (_customPolygons.isEmpty) {
+          _customPolygons = List.from(widget.customPolygons!);
+          print('Initialized ${_customPolygons.length} custom polygons');
+        }
+        if (_customPolygons.isNotEmpty && _selectedPolygonIndex == null) {
           _selectedCustomPolygon = _customPolygons.first;
           _selectedPolygonIndex = 0;
 
@@ -332,6 +356,8 @@ class _MapViewState extends State<MapView> {
 
   void _updateMapView() {
     _polygons.clear();
+    print(
+        '_updateMapView called: ${_customPolygons.length} custom polygons available');
 
     // Check if we're using the new CustomPolygon system
     if (_customPolygons.isNotEmpty) {
@@ -341,10 +367,15 @@ class _MapViewState extends State<MapView> {
         final isCurrentlyEditing = _isEditing && i == _selectedPolygonIndex;
         final isSelected = i == _selectedPolygonIndex;
 
+        final polygonPoints =
+            isCurrentlyEditing ? _editingPoints : customPolygon.points;
+        print(
+            'Rendering polygon $i: isEditing=$isCurrentlyEditing, points=${polygonPoints.length}');
+
         _polygons.add(
           Polygon(
             polygonId: PolygonId('custom_polygon_$i'),
-            points: isCurrentlyEditing ? _editingPoints : customPolygon.points,
+            points: polygonPoints,
             fillColor: isCurrentlyEditing
                 ? Colors.red.withOpacity(0.1)
                 : isSelected
@@ -547,21 +578,19 @@ class _MapViewState extends State<MapView> {
     try {
       // Apply editing changes if in editing mode
       if (_isEditing && _selectedPolygonIndex != null) {
+        print('Saving polygon changes: ${_editingPoints.length} points');
         final updatedPolygon = _customPolygons[_selectedPolygonIndex!].copyWith(
-          points: _editingPoints,
+          points: List<LatLng>.from(_editingPoints), // Create defensive copy
         );
         _customPolygons[_selectedPolygonIndex!] = updatedPolygon;
         _selectedCustomPolygon = updatedPolygon;
-
-        // Exit editing mode
-        setState(() {
-          _isEditing = false;
-          _editingPoints.clear();
-        });
+        print('Updated polygon: ${updatedPolygon.points.length} points');
       }
 
-      // Clear unsaved changes flag - changes are now saved locally
+      // Exit editing mode and update map in single setState
       setState(() {
+        _isEditing = false;
+        _editingPoints.clear();
         _hasUnsavedChanges = false;
         _updateMapView();
       });
@@ -927,9 +956,9 @@ class _MapViewState extends State<MapView> {
                         _isSidebarVisible = !_isSidebarVisible;
                       });
                     },
-                    child: Icon(_isSidebarVisible ? Icons.close : Icons.menu),
                     tooltip:
                         _isSidebarVisible ? 'Hide sidebar' : 'Show sidebar',
+                    child: Icon(_isSidebarVisible ? Icons.close : Icons.menu),
                   ),
                 ),
 
@@ -986,9 +1015,9 @@ class _MapViewState extends State<MapView> {
                         color: Colors.blue,
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: Text(
+                      child: const Text(
                         'Tap on the map to add points for your new area. You need at least 3 points to create an area.',
-                        style: const TextStyle(
+                        style: TextStyle(
                           color: Colors.white,
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
@@ -1012,9 +1041,9 @@ class _MapViewState extends State<MapView> {
                         color: Colors.green.withOpacity(0.9),
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: Text(
+                      child: const Text(
                         'Tap on any polygon to select it, then tap the Edit button to modify it.',
-                        style: const TextStyle(
+                        style: TextStyle(
                           color: Colors.white,
                           fontSize: 12,
                           fontWeight: FontWeight.w500,

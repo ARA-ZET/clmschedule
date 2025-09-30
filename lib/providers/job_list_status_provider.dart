@@ -106,7 +106,13 @@ class JobListStatusProvider extends ChangeNotifier {
     try {
       _error = null;
 
-      final status = _statuses.firstWhere((s) => s.id == id);
+      final status = getStatusById(id);
+      if (status == null) {
+        _error = 'Status not found';
+        notifyListeners();
+        return;
+      }
+
       if (status.isDefault) {
         _error = 'Cannot delete default status';
         notifyListeners();
@@ -125,20 +131,22 @@ class JobListStatusProvider extends ChangeNotifier {
 
   // Get status by ID
   CustomJobListStatus? getStatusById(String id) {
-    try {
-      return _statuses.firstWhere((status) => status.id == id);
-    } catch (e) {
-      return null;
+    for (final status in _statuses) {
+      if (status.id == id) {
+        return status;
+      }
     }
+    return null;
   }
 
   // Get status by label (for backwards compatibility)
   CustomJobListStatus? getStatusByLabel(String label) {
-    try {
-      return _statuses.firstWhere((status) => status.label == label);
-    } catch (e) {
-      return null;
+    for (final status in _statuses) {
+      if (status.label == label) {
+        return status;
+      }
     }
+    return null;
   }
 
   // Initialize default statuses based on the original enum values

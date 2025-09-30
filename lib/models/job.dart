@@ -63,6 +63,7 @@ class Job {
   // Convert to Firestore
   Map<String, dynamic> toMap() {
     final map = {
+      'id': id, // Include ID for array storage
       'clients': clients,
       'workingAreas': workingAreas,
       'workMaps': workMaps.map((workMap) => workMap.toMap()).toList(),
@@ -76,6 +77,12 @@ class Job {
     };
 
     return map;
+  }
+
+  // Factory method for creating from array element
+  factory Job.fromArrayElement(Map<String, dynamic> data) {
+    final id = data['id'] as String;
+    return Job.fromMap(id, data);
   }
 
   // Create a copy of job with some fields updated

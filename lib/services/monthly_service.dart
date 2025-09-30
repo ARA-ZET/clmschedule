@@ -46,7 +46,15 @@ class MonthlyService {
     return _firestore.collection('jobLists').doc(monthlyId);
   }
 
+  /// Get monthly document reference for collection schedules
+  DocumentReference getCollectionScheduleMonthlyDoc(DateTime date) {
+    final monthlyId = getMonthlyDocumentId(date);
+    return _firestore.collection('collectionSchedules').doc(monthlyId);
+  }
+
   /// Get jobs subcollection reference for a specific month
+  /// @deprecated Jobs are now stored as array field in monthly documents
+  @Deprecated('Jobs are now stored as array field in monthly documents')
   CollectionReference getJobsCollection(DateTime date) {
     return getScheduleMonthlyDoc(date).collection('jobs');
   }
@@ -75,7 +83,14 @@ class MonthlyService {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
         'month': getMonthlyDocumentId(date),
+        'jobs': [], // Initialize with empty jobs array
       });
+    } else {
+      // Ensure jobs field exists for existing documents
+      final data = docSnapshot.data() as Map<String, dynamic>?;
+      if (data != null && !data.containsKey('jobs')) {
+        await doc.update({'jobs': []});
+      }
     }
   }
 
@@ -92,6 +107,26 @@ class MonthlyService {
     }
   }
 
+  /// Ensure collection schedule monthly document exists (creates if not present)
+  Future<void> ensureCollectionScheduleMonthlyDocExists(DateTime date) async {
+    final doc = getCollectionScheduleMonthlyDoc(date);
+    final docSnapshot = await doc.get();
+
+    if (!docSnapshot.exists) {
+      await doc.set({
+        'created': FieldValue.serverTimestamp(),
+        'month': getMonthlyDocumentId(date),
+        'collectionJobs': [], // Initialize with empty collection jobs array
+      });
+    } else {
+      // Ensure collectionJobs field exists for existing documents
+      final data = docSnapshot.data() as Map<String, dynamic>?;
+      if (data != null && !data.containsKey('collectionJobs')) {
+        await doc.update({'collectionJobs': []});
+      }
+    }
+  }
+
   /// Get all available monthly documents for schedules
   Future<List<String>> getAvailableScheduleMonths() async {
     final snapshot = await _firestore.collection('schedules').get();
@@ -103,6 +138,14 @@ class MonthlyService {
   /// Get all available monthly documents for job lists
   Future<List<String>> getAvailableJobListMonths() async {
     final snapshot = await _firestore.collection('jobLists').get();
+    return snapshot.docs.map((doc) => doc.id).toList()
+      ..sort((a, b) =>
+          _parseMonthYear(b).compareTo(_parseMonthYear(a))); // Latest first
+  }
+
+  /// Get all available monthly documents for collection schedules
+  Future<List<String>> getAvailableCollectionScheduleMonths() async {
+    final snapshot = await _firestore.collection('collectionSchedules').get();
     return snapshot.docs.map((doc) => doc.id).toList()
       ..sort((a, b) =>
           _parseMonthYear(b).compareTo(_parseMonthYear(a))); // Latest first

@@ -220,7 +220,7 @@ class _StatusFormDialogState extends State<_StatusFormDialog> {
             // Color picker
             Row(
               children: [
-                Text('Color: '),
+                const Text('Color: '),
                 const SizedBox(width: 8),
                 GestureDetector(
                   onTap: () => _showColorPicker(),
@@ -287,7 +287,7 @@ class _StatusFormDialogState extends State<_StatusFormDialog> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Choose Color'),
-        content: Container(
+        content: SizedBox(
           width: 300,
           height: 200,
           child: GridView.builder(

@@ -8,89 +8,114 @@ class JobStatusMigrationService {
 
   JobStatusMigrationService(this._firestore);
 
-  /// Migrate jobs collection from enum-based status to custom statusId
-  /// This should be run once after implementing the custom job status system
+  /// Migrate jobs from old subcollection structure to new array structure
+  /// AND migrate from enum-based status to custom statusId
+  /// This should be run once after implementing the new array structure
   Future<void> migrateJobsToCustomStatus() async {
     try {
-      print('Starting job status migration...');
+      print('Starting job status and structure migration...');
 
-      // Get all jobs
-      final jobsSnapshot = await _firestore.collection('jobs').get();
+      // Get all schedule monthly documents
+      final schedulesSnapshot = await _firestore.collection('schedules').get();
 
-      // Create a batch for efficient updates
-      WriteBatch batch = _firestore.batch();
-      int updateCount = 0;
+      int totalUpdateCount = 0;
 
-      for (final doc in jobsSnapshot.docs) {
-        final data = doc.data();
+      for (final monthDoc in schedulesSnapshot.docs) {
+        print('Processing month: ${monthDoc.id}');
 
-        // Check if job already has statusId (already migrated)
-        if (data.containsKey('statusId') && data['statusId'] != null) {
-          continue; // Skip already migrated jobs
+        // Check if already has jobs array (new structure)
+        final monthData = monthDoc.data();
+        if (monthData.containsKey('jobs') && monthData['jobs'] is List) {
+          print(
+              'Month ${monthDoc.id} already has jobs array, skipping subcollection migration');
+          continue;
         }
 
-        // Get old status field
-        String? oldStatus = data['status'] as String?;
-        String newStatusId;
+        // Get old jobs from subcollection
+        final jobsSnapshot = await monthDoc.reference.collection('jobs').get();
 
-        // Map old enum values to new status IDs
-        switch (oldStatus) {
-          case 'JobStatus.standby':
-          case 'standby':
-            newStatusId = 'standby';
-            break;
-          case 'JobStatus.scheduled':
-          case 'scheduled':
-            newStatusId = 'scheduled';
-            break;
-          case 'JobStatus.done':
-          case 'done':
-            newStatusId = 'done';
-            break;
-          case 'JobStatus.urgent':
-          case 'urgent':
-            newStatusId = 'urgent';
-            break;
-          default:
-            newStatusId = 'scheduled'; // Default fallback
+        if (jobsSnapshot.docs.isEmpty) {
+          print('No jobs found in ${monthDoc.id}');
+          continue;
         }
 
-        // Update the job document
-        batch.update(doc.reference, {
-          'statusId': newStatusId,
-          'status': newStatusId, // Keep for backwards compatibility
+        List<Map<String, dynamic>> migratedJobs = [];
+
+        for (final jobDoc in jobsSnapshot.docs) {
+          final data = jobDoc.data();
+
+          // Ensure job has an ID
+          data['id'] = jobDoc.id;
+
+          // Migrate status if needed
+          String newStatusId;
+          String? oldStatus = data['status'] as String?;
+
+          // Map old enum values to new status IDs
+          switch (oldStatus) {
+            case 'JobStatus.standby':
+            case 'standby':
+              newStatusId = 'standby';
+              break;
+            case 'JobStatus.scheduled':
+            case 'scheduled':
+              newStatusId = 'scheduled';
+              break;
+            case 'JobStatus.done':
+            case 'done':
+              newStatusId = 'done';
+              break;
+            case 'JobStatus.urgent':
+            case 'urgent':
+              newStatusId = 'urgent';
+              break;
+            default:
+              newStatusId = 'scheduled'; // Default fallback
+          }
+
+          data['statusId'] = newStatusId;
+          data['status'] = newStatusId; // Keep for backwards compatibility
+
+          migratedJobs.add(data);
+          totalUpdateCount++;
+        }
+
+        // Update monthly document with jobs array
+        await monthDoc.reference.update({
+          'jobs': migratedJobs,
         });
 
-        updateCount++;
+        print('Migrated ${migratedJobs.length} jobs for month ${monthDoc.id}');
       }
 
-      // Commit the batch
-      if (updateCount > 0) {
-        await batch.commit();
-        print('Migration completed: Updated $updateCount jobs');
-      } else {
-        print('Migration completed: No jobs needed migration');
-      }
+      print(
+          'Migration completed: Updated $totalUpdateCount jobs across all months');
     } catch (e) {
       print('Error during migration: $e');
       throw Exception('Job status migration failed: $e');
     }
   }
 
-  /// Check if migration is needed by looking for jobs with old status format
+  /// Check if migration is needed by looking for old subcollection structure
   Future<bool> isMigrationNeeded() async {
     try {
-      final jobsSnapshot = await _firestore
-          .collection('jobs')
-          .limit(10) // Just check a few documents
+      final schedulesSnapshot = await _firestore
+          .collection('schedules')
+          .limit(5) // Just check a few documents
           .get();
 
-      for (final doc in jobsSnapshot.docs) {
-        final data = doc.data();
+      for (final monthDoc in schedulesSnapshot.docs) {
+        final data = monthDoc.data();
 
-        // If any job doesn't have statusId, migration is needed
-        if (!data.containsKey('statusId') || data['statusId'] == null) {
-          return true;
+        // If any month document doesn't have jobs array, check for old subcollection
+        if (!data.containsKey('jobs') || data['jobs'] is! List) {
+          // Check if there are jobs in the old subcollection structure
+          final jobsSnapshot =
+              await monthDoc.reference.collection('jobs').limit(1).get();
+
+          if (jobsSnapshot.docs.isNotEmpty) {
+            return true; // Found old structure
+          }
         }
       }
 

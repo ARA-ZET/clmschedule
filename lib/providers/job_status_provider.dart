@@ -114,8 +114,13 @@ class JobStatusProvider extends ChangeNotifier {
   /// Get a status by ID
   CustomJobStatus? getStatusById(String id) {
     try {
-      return _statuses.firstWhere((status) => status.id == id);
+      final matchingStatuses = _statuses.where((status) => status.id == id);
+      if (matchingStatuses.isNotEmpty) {
+        return matchingStatuses.first;
+      }
+      return null;
     } catch (e) {
+      print('Error getting status by ID $id: $e');
       return null;
     }
   }

@@ -68,11 +68,21 @@ Future<void> seedData() async {
     },
   ];
 
-  // Add jobs to monthly collection
+  // Add jobs to monthly document as array
+  final monthlyDoc = monthlyService.getScheduleMonthlyDoc(currentMonth);
+
+  // Prepare jobs with IDs and proper timestamps
+  final List<Map<String, dynamic>> jobsWithIds = [];
   for (var job in jobs) {
+    // Generate unique ID for each job
+    job['id'] = FirebaseFirestore.instance.collection('dummy').doc().id;
     // Convert DateTime objects to Timestamps for Firestore
     job['date'] = Timestamp.fromDate(job['date'] as DateTime);
-
-    await monthlyService.getJobsCollection(currentMonth).add(job);
+    jobsWithIds.add(job);
   }
+
+  // Update monthly document with jobs array
+  await monthlyDoc.update({
+    'jobs': FieldValue.arrayUnion(jobsWithIds),
+  });
 }

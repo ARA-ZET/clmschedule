@@ -116,65 +116,104 @@ class _JobListStatusManagementDialogState
   }
 
   void _showColorPicker() {
-    final colors = [
-      Colors.red,
-      Colors.pink,
-      Colors.purple,
-      Colors.deepPurple,
-      Colors.indigo,
-      Colors.blue,
-      Colors.lightBlue,
-      Colors.cyan,
-      Colors.teal,
-      Colors.green,
-      Colors.lightGreen,
-      Colors.lime,
-      Colors.yellow,
-      Colors.amber,
-      Colors.orange,
-      Colors.deepOrange,
-      Colors.brown,
-      Colors.grey,
-      Colors.blueGrey,
-    ];
+    // Define 4 shades for each color family (lightest to darkest)
+    final colorFamilies = {
+      'Red': [
+        const Color(0xFFFFEBEE), // Red 50
+        const Color(0xFFEF9A9A), // Red 300
+        const Color(0xFFE57373), // Red 400
+        const Color(0xFFD32F2F), // Red 700
+      ],
+      'Blue': [
+        const Color(0xFFE3F2FD), // Blue 50
+        const Color(0xFF90CAF9), // Blue 300
+        const Color(0xFF64B5F6), // Blue 400
+        const Color(0xFF1976D2), // Blue 700
+      ],
+      'Green': [
+        const Color(0xFFE8F5E8), // Green 50
+        const Color(0xFFA5D6A7), // Green 300
+        const Color(0xFF81C784), // Green 400
+        const Color(0xFF388E3C), // Green 700
+      ],
+      'Grey': [
+        const Color(0xFFFAFAFA), // Grey 50
+        const Color(0xFFE0E0E0), // Grey 300
+        const Color(0xFFBDBDBD), // Grey 400
+        const Color(0xFF616161), // Grey 700
+      ],
+      'Orange': [
+        const Color(0xFFFFF3E0), // Orange 50
+        const Color(0xFFFFB74D), // Orange 300
+        const Color(0xFFFF9800), // Orange 500
+        const Color(0xFFE65100), // Orange 900
+      ],
+    };
 
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Choose Color'),
-        content: Container(
-          width: 300,
-          height: 200,
-          child: GridView.builder(
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 6,
-              mainAxisSpacing: 8,
-              crossAxisSpacing: 8,
-            ),
-            itemCount: colors.length,
-            itemBuilder: (context, index) {
-              final color = colors[index];
-              return GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _selectedColor = color;
-                  });
-                  Navigator.of(context).pop();
-                },
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: _selectedColor == color
-                          ? Colors.black
-                          : Colors.transparent,
-                      width: 2,
-                    ),
+        content: SizedBox(
+          width: 320,
+          height: 320,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: colorFamilies.entries.map((entry) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.key,
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: entry.value.map((color) {
+                          final isSelected = _selectedColor == color;
+                          return Expanded(
+                            child: GestureDetector(
+                              onTap: () {
+                                setState(() {
+                                  _selectedColor = color;
+                                });
+                                Navigator.of(context).pop();
+                              },
+                              child: Container(
+                                height: 40,
+                                margin:
+                                    const EdgeInsets.symmetric(horizontal: 2),
+                                decoration: BoxDecoration(
+                                  color: color,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: isSelected
+                                        ? Colors.black
+                                        : Colors.grey.withOpacity(0.3),
+                                    width: isSelected ? 3 : 1,
+                                  ),
+                                ),
+                                child: isSelected
+                                    ? const Icon(
+                                        Icons.check,
+                                        color: Colors.white,
+                                        size: 20,
+                                      )
+                                    : null,
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ],
                   ),
-                ),
-              );
-            },
+                );
+              }).toList(),
+            ),
           ),
         ),
         actions: [
@@ -197,6 +236,7 @@ class _JobListStatusManagementDialogState
             width: 400,
             height: 500,
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
                 if (provider.error != null)
                   Container(
@@ -212,111 +252,127 @@ class _JobListStatusManagementDialogState
                       style: const TextStyle(color: Colors.red),
                     ),
                   ),
-                if (_isAdding || _editingId != null) ...[
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _isAdding ? 'Add New Status' : 'Edit Status',
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
-                          const SizedBox(height: 16),
-                          TextField(
-                            controller: _labelController,
-                            decoration: const InputDecoration(
-                              labelText: 'Status Label',
-                              border: OutlineInputBorder(),
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_isAdding || _editingId != null) ...[
+                          Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _isAdding
+                                        ? 'Add New Status'
+                                        : 'Edit Status',
+                                    style:
+                                        Theme.of(context).textTheme.titleMedium,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  TextField(
+                                    controller: _labelController,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Status Label',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Row(
+                                    children: [
+                                      const Text('Color: '),
+                                      GestureDetector(
+                                        onTap: _showColorPicker,
+                                        child: Container(
+                                          width: 40,
+                                          height: 40,
+                                          decoration: BoxDecoration(
+                                            color: _selectedColor,
+                                            border:
+                                                Border.all(color: Colors.grey),
+                                            borderRadius:
+                                                BorderRadius.circular(20),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      TextButton(
+                                        onPressed: _showColorPicker,
+                                        child: const Text('Change Color'),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
+                                    children: [
+                                      TextButton(
+                                        onPressed: _cancelEdit,
+                                        child: const Text('Cancel'),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      ElevatedButton(
+                                        onPressed: _saveStatus,
+                                        child:
+                                            Text(_isAdding ? 'Add' : 'Update'),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                           const SizedBox(height: 16),
-                          Row(
-                            children: [
-                              const Text('Color: '),
-                              GestureDetector(
-                                onTap: _showColorPicker,
-                                child: Container(
-                                  width: 40,
-                                  height: 40,
-                                  decoration: BoxDecoration(
-                                    color: _selectedColor,
-                                    border: Border.all(color: Colors.grey),
-                                    borderRadius: BorderRadius.circular(20),
+                        ],
+                        if (provider.isLoading)
+                          const Center(child: CircularProgressIndicator())
+                        else
+                          ListView.builder(
+                            shrinkWrap: true,
+                            physics: const NeverScrollableScrollPhysics(),
+                            itemCount: provider.statuses.length,
+                            itemBuilder: (context, index) {
+                              final status = provider.statuses[index];
+                              return Card(
+                                child: ListTile(
+                                  leading: Container(
+                                    width: 24,
+                                    height: 24,
+                                    decoration: BoxDecoration(
+                                      color: status.color,
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  title: Text(status.label),
+                                  subtitle: status.isDefault
+                                      ? const Text('Default Status')
+                                      : null,
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (!status.isDefault) ...[
+                                        IconButton(
+                                          icon: const Icon(Icons.edit),
+                                          onPressed: () => _startEdit(status),
+                                        ),
+                                        IconButton(
+                                          icon: const Icon(Icons.delete,
+                                              color: Colors.red),
+                                          onPressed: () => _deleteStatus(
+                                              status.id, status.label),
+                                        ),
+                                      ],
+                                    ],
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 8),
-                              TextButton(
-                                onPressed: _showColorPicker,
-                                child: const Text('Change Color'),
-                              ),
-                            ],
+                              );
+                            },
                           ),
-                          const SizedBox(height: 16),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.end,
-                            children: [
-                              TextButton(
-                                onPressed: _cancelEdit,
-                                child: const Text('Cancel'),
-                              ),
-                              const SizedBox(width: 8),
-                              ElevatedButton(
-                                onPressed: _saveStatus,
-                                child: Text(_isAdding ? 'Add' : 'Update'),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 16),
-                ],
-                Expanded(
-                  child: provider.isLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : ListView.builder(
-                          itemCount: provider.statuses.length,
-                          itemBuilder: (context, index) {
-                            final status = provider.statuses[index];
-                            return Card(
-                              child: ListTile(
-                                leading: Container(
-                                  width: 24,
-                                  height: 24,
-                                  decoration: BoxDecoration(
-                                    color: status.color,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                title: Text(status.label),
-                                subtitle: status.isDefault
-                                    ? const Text('Default Status')
-                                    : null,
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    if (!status.isDefault) ...[
-                                      IconButton(
-                                        icon: const Icon(Icons.edit),
-                                        onPressed: () => _startEdit(status),
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(Icons.delete,
-                                            color: Colors.red),
-                                        onPressed: () => _deleteStatus(
-                                            status.id, status.label),
-                                      ),
-                                    ],
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
                 ),
               ],
             ),

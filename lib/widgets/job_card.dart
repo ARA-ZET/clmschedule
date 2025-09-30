@@ -17,6 +17,12 @@ class JobCard extends StatelessWidget {
 
   Color _getStatusColor(BuildContext context) {
     final statusProvider = context.read<JobStatusProvider>();
+
+    // Safety check for provider loading state
+    if (statusProvider.isLoading || statusProvider.statuses.isEmpty) {
+      return Colors.grey.shade700; // Default color while loading
+    }
+
     final status = statusProvider.getStatusById(job.statusId);
     return status?.color ??
         Colors.grey.shade700; // Darker grey for better contrast
@@ -150,7 +156,7 @@ class JobCard extends StatelessWidget {
                               fontWeight: FontWeight.w500,
                             ),
                             // Make text uppercase
-                            textScaler: TextScaler.linear(1),
+                            textScaler: const TextScaler.linear(1),
                             // The actual text is already 'Open Map', so use .toUpperCase()
                             // But since it's a const Text, change to:
                             // child: Text('OPEN MAP', ...)
@@ -285,6 +291,7 @@ class _ClientListEditorState extends State<_ClientListEditor> {
       context: context,
       builder: (context) => _ClientListDialog(
         clients: _localClients,
+        jobId: widget.job.id,
         onClientsChanged: (updatedClients) {
           setState(() {
             _localClients = updatedClients;
@@ -343,10 +350,12 @@ class _ClientListEditorState extends State<_ClientListEditor> {
 class _ClientListDialog extends StatefulWidget {
   final List<String> clients;
   final Function(List<String>) onClientsChanged;
+  final String jobId;
 
   const _ClientListDialog({
     required this.clients,
     required this.onClientsChanged,
+    required this.jobId,
   });
 
   @override
@@ -401,6 +410,26 @@ class _ClientListDialogState extends State<_ClientListDialog> {
     Navigator.of(context).pop();
   }
 
+  void _showDeleteJobConfirmation(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Job'),
+        content: const Text(
+          'Are you sure you want to permanently delete this entire job from the database?\n\n'
+          'This action cannot be undone and will remove all job data including clients, work areas, and schedule information.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          _DeleteJobButton(jobId: widget.jobId),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer2<JobListProvider, ScaleProvider>(
@@ -414,7 +443,17 @@ class _ClientListDialogState extends State<_ClientListDialog> {
           ..sort();
 
         return AlertDialog(
-          title: const Text('Edit Client List'),
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Edit Client List'),
+              IconButton(
+                icon: const Icon(Icons.delete_forever, color: Colors.red),
+                onPressed: () => _showDeleteJobConfirmation(context),
+                tooltip: 'Delete entire job from database',
+              ),
+            ],
+          ),
           content: SizedBox(
             width: 400,
             child: Column(
@@ -1000,6 +1039,84 @@ class _WorkAreaListDialogState extends State<_WorkAreaListDialog> {
           ],
         );
       },
+    );
+  }
+}
+
+class _DeleteJobButton extends StatefulWidget {
+  final String jobId;
+
+  const _DeleteJobButton({
+    required this.jobId,
+  });
+
+  @override
+  State<_DeleteJobButton> createState() => _DeleteJobButtonState();
+}
+
+class _DeleteJobButtonState extends State<_DeleteJobButton> {
+  bool _isDeleting = false;
+
+  Future<void> _deleteJob() async {
+    if (_isDeleting) return;
+
+    setState(() {
+      _isDeleting = true;
+    });
+
+    try {
+      await context.read<ScheduleProvider>().deleteJob(widget.jobId);
+
+      if (context.mounted) {
+        Navigator.of(context).pop(); // Close confirmation dialog
+        Navigator.of(context).pop(); // Close client list dialog
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Job deleted successfully'),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        Navigator.of(context).pop(); // Close confirmation dialog
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to delete job: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (context.mounted) {
+        setState(() {
+          _isDeleting = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(
+      onPressed: _isDeleting ? null : _deleteJob,
+      style: ElevatedButton.styleFrom(
+        backgroundColor: Colors.red,
+        foregroundColor: Colors.white,
+      ),
+      child: _isDeleting
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+              ),
+            )
+          : const Text('Delete Job'),
     );
   }
 }

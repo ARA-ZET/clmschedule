@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
+import '../models/collection_job.dart';
 import 'monthly_service.dart';
 
 class FirestoreService {
@@ -16,10 +17,7 @@ class FirestoreService {
       _firestore.collection('distributors');
   CollectionReference get _workAreas => _firestore.collection('workAreas');
 
-  // Monthly collection reference methods (for jobs only)
-  CollectionReference _getJobsCollection(DateTime date) {
-    return _monthlyService.getJobsCollection(date);
-  }
+  // Monthly collection reference methods are now handled directly by monthly service
 
   // DISTRIBUTOR OPERATIONS
 
@@ -120,14 +118,87 @@ class FirestoreService {
     return _streamJobsForDate(targetDate);
   }
 
+  // Stream jobs for optimized range (current month + next month only)
+  Stream<List<Job>> streamJobsExtendedRange([DateTime? date]) async* {
+    final targetDate = date ?? DateTime.now();
+
+    // Get the two months we need to cover (current + next, no previous)
+    final currentMonth = DateTime(targetDate.year, targetDate.month);
+    final nextMonth = DateTime(targetDate.year, targetDate.month + 1);
+
+    // Listen to current month stream and combine with fetched data from next month
+    await for (final currentJobs in _streamJobsForDate(currentMonth)) {
+      // Fetch jobs from next month only (not streaming to avoid too many streams)
+      final nextJobs = await fetchJobsForMonth(nextMonth);
+
+      final allJobs = <Job>[...currentJobs, ...nextJobs];
+
+      // Filter to only include jobs within the optimized range (current + next month)
+      final startDate = DateTime(targetDate.year, targetDate.month, 1);
+      final endDate = DateTime(targetDate.year, targetDate.month + 2, 0);
+
+      final filteredJobs = allJobs
+          .where((job) =>
+              job.date.isAfter(startDate.subtract(const Duration(days: 1))) &&
+              job.date.isBefore(endDate.add(const Duration(days: 1))))
+          .toList();
+
+      yield filteredJobs;
+    }
+  }
+
+  // Fetch jobs for a specific month (one-time, not streaming)
+  Future<List<Job>> fetchJobsForMonth(DateTime month) async {
+    try {
+      // Ensure monthly document exists
+      await _monthlyService.ensureScheduleMonthlyDocExists(month);
+
+      final snapshot = await _monthlyService.getScheduleMonthlyDoc(month).get();
+
+      if (!snapshot.exists || snapshot.data() == null) {
+        return <Job>[];
+      }
+
+      final data = snapshot.data() as Map<String, dynamic>;
+      final jobsArray = data['jobs'] as List<dynamic>?;
+
+      if (jobsArray == null || jobsArray.isEmpty) {
+        return <Job>[];
+      }
+
+      return jobsArray.map((jobData) {
+        final jobMap = jobData as Map<String, dynamic>;
+        return Job.fromArrayElement(jobMap);
+      }).toList();
+    } catch (e) {
+      print('Error fetching jobs for month ${month.year}-${month.month}: $e');
+      return <Job>[];
+    }
+  }
+
   // Stream jobs for a specific date
   Stream<List<Job>> _streamJobsForDate(DateTime date) {
     // Ensure monthly document exists when streaming
     _monthlyService.ensureScheduleMonthlyDocExists(date);
 
-    return _getJobsCollection(date).snapshots().map((snapshot) {
-      return snapshot.docs.map((doc) {
-        return Job.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+    return _monthlyService
+        .getScheduleMonthlyDoc(date)
+        .snapshots()
+        .map((snapshot) {
+      if (!snapshot.exists || snapshot.data() == null) {
+        return <Job>[];
+      }
+
+      final data = snapshot.data() as Map<String, dynamic>;
+      final jobsArray = data['jobs'] as List<dynamic>?;
+
+      if (jobsArray == null || jobsArray.isEmpty) {
+        return <Job>[];
+      }
+
+      return jobsArray.map((jobData) {
+        final jobMap = jobData as Map<String, dynamic>;
+        return Job.fromArrayElement(jobMap);
       }).toList();
     });
   }
@@ -139,18 +210,77 @@ class FirestoreService {
     // Ensure monthly document exists
     await _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
 
-    final docRef = await _getJobsCollection(targetDate).add(job.toMap());
-    return docRef.id;
+    final monthlyDoc = _monthlyService.getScheduleMonthlyDoc(targetDate);
+
+    // Generate a unique ID for the job if it doesn't have one
+    final jobId =
+        job.id.isEmpty ? _firestore.collection('dummy').doc().id : job.id;
+
+    // Create job with proper ID
+    final updatedJob = Job(
+      id: jobId,
+      clients: job.clients,
+      workingAreas: job.workingAreas,
+      workMaps: job.workMaps,
+      distributorId: job.distributorId,
+      date: job.date,
+      statusId: job.statusId,
+    );
+
+    // Add job to the jobs array in the monthly document
+    await monthlyDoc.update({
+      'jobs': FieldValue.arrayUnion([updatedJob.toMap()]),
+    });
+
+    return jobId;
   }
 
-  // Update a job
+  // Update a job (optimized version using current jobs data)
   Future<void> updateJob(Job job, [DateTime? date]) async {
     final targetDate = date ?? job.date;
 
     // Ensure monthly document exists before updating
     await _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
 
-    return _getJobsCollection(targetDate).doc(job.id).update(job.toMap());
+    final monthlyDoc = _monthlyService.getScheduleMonthlyDoc(targetDate);
+
+    // Get current document data
+    final snapshot = await monthlyDoc.get();
+    if (!snapshot.exists) return;
+
+    final data = snapshot.data() as Map<String, dynamic>;
+    final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
+
+    // Find and update the job in the array
+    final jobIndex = jobsArray.indexWhere((jobData) => jobData['id'] == job.id);
+    if (jobIndex != -1) {
+      jobsArray[jobIndex] = job.toMap();
+
+      // Update the document with the modified array
+      await monthlyDoc.update({'jobs': jobsArray});
+    }
+  }
+
+  // Update a job using already synced data (optimized - no read operation)
+  Future<void> updateJobOptimized(Job job, List<Job> currentJobs,
+      [DateTime? date]) async {
+    final targetDate = date ?? job.date;
+
+    // Ensure monthly document exists before updating
+    await _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
+
+    final monthlyDoc = _monthlyService.getScheduleMonthlyDoc(targetDate);
+
+    // Convert current jobs to map array and update the specific job
+    final jobsArray = currentJobs.map((j) => j.toMap()).toList();
+    final jobIndex = jobsArray.indexWhere((jobData) => jobData['id'] == job.id);
+
+    if (jobIndex != -1) {
+      jobsArray[jobIndex] = job.toMap();
+
+      // Update the document with the modified array (no read operation needed)
+      await monthlyDoc.update({'jobs': jobsArray});
+    }
   }
 
   // Delete a job
@@ -160,7 +290,40 @@ class FirestoreService {
     // Ensure monthly document exists before deleting
     await _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
 
-    return _getJobsCollection(targetDate).doc(jobId).delete();
+    final monthlyDoc = _monthlyService.getScheduleMonthlyDoc(targetDate);
+
+    // Get current document data
+    final snapshot = await monthlyDoc.get();
+    if (!snapshot.exists) return;
+
+    final data = snapshot.data() as Map<String, dynamic>;
+    final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
+
+    // Remove the job from the array
+    jobsArray.removeWhere((jobData) => jobData['id'] == jobId);
+
+    // Update the document with the modified array
+    await monthlyDoc.update({'jobs': jobsArray});
+  }
+
+  // Delete a job using already synced data (optimized - no read operation)
+  Future<void> deleteJobOptimized(String jobId, List<Job> currentJobs,
+      [DateTime? date]) async {
+    final targetDate = date ?? DateTime.now();
+
+    // Ensure monthly document exists before deleting
+    await _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
+
+    final monthlyDoc = _monthlyService.getScheduleMonthlyDoc(targetDate);
+
+    // Convert current jobs to map array and remove the specific job
+    final jobsArray = currentJobs
+        .where((job) => job.id != jobId)
+        .map((job) => job.toMap())
+        .toList();
+
+    // Update the document with the modified array (no read operation needed)
+    await monthlyDoc.update({'jobs': jobsArray});
   }
 
   // Stream jobs for a specific distributor
@@ -171,13 +334,28 @@ class FirestoreService {
     // Ensure monthly document exists when streaming
     _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
 
-    return _getJobsCollection(targetDate)
-        .where('distributorId', isEqualTo: distributorId)
+    return _monthlyService
+        .getScheduleMonthlyDoc(targetDate)
         .snapshots()
         .map((snapshot) {
-      return snapshot.docs.map((doc) {
-        return Job.fromMap(doc.id, doc.data() as Map<String, dynamic>);
-      }).toList();
+      if (!snapshot.exists || snapshot.data() == null) {
+        return <Job>[];
+      }
+
+      final data = snapshot.data() as Map<String, dynamic>;
+      final jobsArray = data['jobs'] as List<dynamic>?;
+
+      if (jobsArray == null || jobsArray.isEmpty) {
+        return <Job>[];
+      }
+
+      return jobsArray
+          .map((jobData) {
+            final jobMap = jobData as Map<String, dynamic>;
+            return Job.fromArrayElement(jobMap);
+          })
+          .where((job) => job.distributorId == distributorId)
+          .toList();
     });
   }
 
@@ -189,14 +367,30 @@ class FirestoreService {
     // Ensure monthly document exists when streaming
     _monthlyService.ensureScheduleMonthlyDocExists(targetDate);
 
-    return _getJobsCollection(targetDate)
-        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(start))
-        .where('date', isLessThanOrEqualTo: Timestamp.fromDate(end))
+    return _monthlyService
+        .getScheduleMonthlyDoc(targetDate)
         .snapshots()
         .map((snapshot) {
-      return snapshot.docs.map((doc) {
-        return Job.fromMap(doc.id, doc.data() as Map<String, dynamic>);
-      }).toList();
+      if (!snapshot.exists || snapshot.data() == null) {
+        return <Job>[];
+      }
+
+      final data = snapshot.data() as Map<String, dynamic>;
+      final jobsArray = data['jobs'] as List<dynamic>?;
+
+      if (jobsArray == null || jobsArray.isEmpty) {
+        return <Job>[];
+      }
+
+      return jobsArray
+          .map((jobData) {
+            final jobMap = jobData as Map<String, dynamic>;
+            return Job.fromArrayElement(jobMap);
+          })
+          .where((job) =>
+              job.date.isAfter(start.subtract(const Duration(days: 1))) &&
+              job.date.isBefore(end.add(const Duration(days: 1))))
+          .toList();
     });
   }
 
@@ -256,5 +450,125 @@ class FirestoreService {
   // Get monthly document ID for a specific date
   String getMonthlyDocumentId(DateTime date) {
     return _monthlyService.getMonthlyDocumentId(date);
+  }
+
+  // COLLECTION JOB OPERATIONS
+
+  // Stream collection jobs for a specific month
+  Stream<List<CollectionJob>> streamCollectionJobs(DateTime month) {
+    final monthlyDoc = _monthlyService.getCollectionScheduleMonthlyDoc(month);
+
+    return monthlyDoc.snapshots().map((snapshot) {
+      if (!snapshot.exists) return <CollectionJob>[];
+
+      final data = snapshot.data() as Map<String, dynamic>;
+      final jobsArray =
+          List<Map<String, dynamic>>.from(data['collectionJobs'] ?? []);
+
+      return jobsArray.map((jobData) {
+        final id = jobData['id'] as String;
+        return CollectionJob.fromMap(id, jobData);
+      }).toList();
+    });
+  }
+
+  // Fetch collection jobs for a specific month (one-time fetch)
+  Future<List<CollectionJob>> fetchCollectionJobsForMonth(
+      DateTime month) async {
+    final monthlyDoc = _monthlyService.getCollectionScheduleMonthlyDoc(month);
+
+    final snapshot = await monthlyDoc.get();
+    if (!snapshot.exists) return <CollectionJob>[];
+
+    final data = snapshot.data() as Map<String, dynamic>;
+    final jobsArray =
+        List<Map<String, dynamic>>.from(data['collectionJobs'] ?? []);
+
+    return jobsArray.map((jobData) {
+      final id = jobData['id'] as String;
+      return CollectionJob.fromMap(id, jobData);
+    }).toList();
+  }
+
+  // Add a collection job
+  Future<String> addCollectionJob(CollectionJob job, DateTime date) async {
+    final targetDate = date;
+
+    // Ensure monthly document exists
+    await _monthlyService.ensureCollectionScheduleMonthlyDocExists(targetDate);
+
+    final monthlyDoc =
+        _monthlyService.getCollectionScheduleMonthlyDoc(targetDate);
+
+    // Generate a unique ID for the job
+    final jobId = _firestore.collection('temp').doc().id;
+    final jobWithId = job.copyWith();
+    final jobMap = jobWithId.toMap();
+    jobMap['id'] = jobId; // Ensure ID is set in the map
+
+    // Add to the jobs array
+    await monthlyDoc.update({
+      'collectionJobs': FieldValue.arrayUnion([jobMap])
+    });
+
+    return jobId;
+  }
+
+  // Update a collection job
+  Future<void> updateCollectionJob(CollectionJob job, [DateTime? date]) async {
+    final targetDate = date ?? job.date;
+
+    // Ensure monthly document exists
+    await _monthlyService.ensureCollectionScheduleMonthlyDocExists(targetDate);
+
+    final monthlyDoc =
+        _monthlyService.getCollectionScheduleMonthlyDoc(targetDate);
+
+    // Get current document data
+    final snapshot = await monthlyDoc.get();
+    if (!snapshot.exists) return;
+
+    final data = snapshot.data() as Map<String, dynamic>;
+    final jobsArray =
+        List<Map<String, dynamic>>.from(data['collectionJobs'] ?? []);
+
+    // Find and update the job in the array
+    final jobIndex = jobsArray.indexWhere((jobData) => jobData['id'] == job.id);
+    if (jobIndex != -1) {
+      jobsArray[jobIndex] = job.toMap();
+
+      // Update the document with the modified array
+      await monthlyDoc.update({'collectionJobs': jobsArray});
+    }
+  }
+
+  // Delete a collection job
+  Future<void> deleteCollectionJob(String jobId, [DateTime? date]) async {
+    final targetDate = date ?? DateTime.now();
+
+    // Ensure monthly document exists
+    await _monthlyService.ensureCollectionScheduleMonthlyDocExists(targetDate);
+
+    final monthlyDoc =
+        _monthlyService.getCollectionScheduleMonthlyDoc(targetDate);
+
+    // Get current document data
+    final snapshot = await monthlyDoc.get();
+    if (!snapshot.exists) return;
+
+    final data = snapshot.data() as Map<String, dynamic>;
+    final jobsArray =
+        List<Map<String, dynamic>>.from(data['collectionJobs'] ?? []);
+
+    // Remove the job from the array
+    jobsArray.removeWhere((jobData) => jobData['id'] == jobId);
+
+    // Update the document with the modified array
+    await monthlyDoc.update({'collectionJobs': jobsArray});
+  }
+
+  // Get available schedule months for collection jobs
+  Future<List<String>> getAvailableCollectionScheduleMonths() async {
+    return await _monthlyService.getAvailableCollectionScheduleMonths();
   }
 }

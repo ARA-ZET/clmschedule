@@ -4,11 +4,13 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:provider/provider.dart';
 import 'providers/schedule_provider.dart';
+import 'providers/collection_schedule_provider.dart';
 import 'providers/job_list_provider.dart';
 import 'providers/job_status_provider.dart';
 import 'providers/job_list_status_provider.dart';
 import 'providers/scale_provider.dart';
 import 'widgets/schedule_grid.dart';
+import 'widgets/collection_schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
 import 'widgets/distributor_management_dialog.dart';
 import 'widgets/lazy_loading_indicator.dart';
@@ -57,6 +59,16 @@ void main() async {
       create: (context) => JobListProvider(
         context.read<JobListService>(),
       ),
+    ),
+    ChangeNotifierProxyProvider<JobListProvider, CollectionScheduleProvider>(
+      create: (context) => CollectionScheduleProvider(
+        jobListProvider: context.read<JobListProvider>(),
+      ),
+      update: (context, jobListProvider, previous) =>
+          previous ??
+          CollectionScheduleProvider(
+            jobListProvider: jobListProvider,
+          ),
     ),
   ], child: const MyApp()));
 }
@@ -144,7 +156,7 @@ class _DashboardScreenState extends State<DashboardScreen>
           dividerColor: Colors.transparent,
           splashFactory: NoSplash.splashFactory, // Remove tap animation
           overlayColor:
-              MaterialStateProperty.all(Colors.transparent), // Remove overlay
+              WidgetStateProperty.all(Colors.transparent), // Remove overlay
           tabs: const [
             Tab(text: 'Schedule'),
             Tab(text: 'Job List'),
@@ -442,23 +454,22 @@ class _CollectionScheduleTabState extends State<CollectionScheduleTab>
   @override
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
-    return const Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.schedule, size: 64, color: Colors.grey),
-          SizedBox(height: 16),
-          Text(
-            'Collection Schedule',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          SizedBox(height: 8),
-          Text(
-            'Collection schedule functionality will be implemented here',
-            style: TextStyle(color: Colors.grey),
-          ),
-        ],
-      ),
+    return Consumer<CollectionScheduleProvider>(
+      builder: (context, collectionProvider, child) {
+        final isLoading = collectionProvider.collectionJobs.isEmpty &&
+            collectionProvider.workAreas.isEmpty;
+
+        return LazyLoadingIndicator(
+          isLoading: isLoading,
+          message: 'Loading Collection Schedule...',
+          child: isLoading
+              ? Container(
+                  color: Theme.of(context).scaffoldBackgroundColor,
+                  child: const SizedBox.expand(),
+                )
+              : const CollectionScheduleGrid(),
+        );
+      },
     );
   }
 }

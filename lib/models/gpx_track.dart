@@ -79,7 +79,7 @@ class GpxTrack {
             points: segment.toLatLngs(),
             color: color,
             width: 3,
-            patterns: [], // Solid line
+            patterns: const [], // Solid line
           ),
         );
       }
@@ -90,7 +90,7 @@ class GpxTrack {
 
   /// Calculate bounding box for all track points
   LatLngBounds? get bounds {
-    final allPoints = this.allLatLngs;
+    final allPoints = allLatLngs;
     if (allPoints.isEmpty) return null;
 
     double minLat = allPoints.first.latitude;

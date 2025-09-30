@@ -319,26 +319,82 @@ class JobListProvider extends ChangeNotifier {
     // Process each update
     for (final entry in updatesToProcess.entries) {
       try {
-        await _jobListService.updateJobListItem(entry.value, entry.value.date);
+        final updatedJob = entry.value;
 
-        // Update local cache with successful database update
-        final index = _jobListItems.indexWhere((item) => item.id == entry.key);
-        if (index >= 0) {
-          _jobListItems[index] = entry.value;
+        // Find the original job to check for month changes
+        final originalIndex =
+            _jobListItems.indexWhere((item) => item.id == entry.key);
+        final originalJob =
+            originalIndex >= 0 ? _jobListItems[originalIndex] : null;
+
+        if (originalJob != null) {
+          // Check if primary date moved to a different month
+          final originalMonth =
+              _jobListService.getMonthlyDocumentId(originalJob.date);
+          final newMonth =
+              _jobListService.getMonthlyDocumentId(updatedJob.date);
+
+          // Determine if we need to move the job based on primary date change
+          final needsMove = originalMonth != newMonth;
+
+          if (needsMove) {
+            print(
+                'JobListProvider: Job ${updatedJob.client} needs to move from $originalMonth to $newMonth');
+            // Use the new move method that handles cross-month updates
+            await _jobListService.moveJobListItemToMonth(
+                updatedJob, originalJob.date, updatedJob.date);
+
+            // Remove from current month's local cache if it's being moved away
+            if (originalMonth ==
+                    _jobListService.getMonthlyDocumentId(_currentMonth) &&
+                originalIndex >= 0 &&
+                originalIndex < _jobListItems.length) {
+              _jobListItems.removeAt(originalIndex);
+            }
+
+            // Clear any pending updates for this job since it's been successfully moved
+            _pendingUpdates.remove(entry.key);
+            _updateTimestamps.remove(entry.key);
+          } else {
+            // Regular update within the same month
+            await _jobListService.updateJobListItem(
+                updatedJob, updatedJob.date);
+
+            // Update local cache
+            if (originalIndex >= 0 && originalIndex < _jobListItems.length) {
+              _jobListItems[originalIndex] = updatedJob;
+            }
+          }
+        } else {
+          // Fallback: treat as regular update if original job not found
+          await _jobListService.updateJobListItem(updatedJob, updatedJob.date);
         }
       } catch (error) {
-        // Re-add failed update to pending updates for retry
-        _pendingUpdates[entry.key] = entry.value;
-        _updateTimestamps[entry.key] = DateTime.now();
+        print(
+            'JobListProvider: Error processing update for ${entry.value.client}: $error');
 
-        _error = 'Failed to update ${entry.value.client}: $error';
+        // Only retry if it's not a RangeError or if the job hasn't been moved
+        // RangeErrors often indicate the job is no longer in the expected location
+        if (!error.toString().contains('RangeError')) {
+          // Re-add failed update to pending updates for retry
+          _pendingUpdates[entry.key] = entry.value;
+          _updateTimestamps[entry.key] = DateTime.now();
 
-        // Schedule retry after a short delay
-        Timer(const Duration(seconds: 10), () {
-          if (_pendingUpdates.containsKey(entry.key)) {
-            _processPendingUpdates();
-          }
-        });
+          _error = 'Failed to update ${entry.value.client}: $error';
+
+          // Schedule retry after a short delay
+          Timer(const Duration(seconds: 10), () {
+            if (_pendingUpdates.containsKey(entry.key)) {
+              _processPendingUpdates();
+            }
+          });
+        } else {
+          // For RangeErrors, just log and continue - likely the job was moved
+          print(
+              'JobListProvider: RangeError for ${entry.value.client}, possibly job was moved to different month');
+          _error =
+              null; // Clear the error since this is expected for moved jobs
+        }
       }
     }
 
@@ -361,14 +417,91 @@ class JobListProvider extends ChangeNotifier {
     }
   }
 
-  // Update job list item (immediate database update - use sparingly)
-  Future<void> updateJobListItemImmediate(JobListItem jobListItem) async {
+  // Add job list item and return the saved job with generated ID
+  Future<JobListItem> addJobListItemAndReturn(JobListItem jobListItem) async {
     try {
-      await _jobListService.updateJobListItem(jobListItem, jobListItem.date);
+      final generatedId =
+          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+      return JobListItem(
+        id: generatedId,
+        invoice: jobListItem.invoice,
+        amount: jobListItem.amount,
+        client: jobListItem.client,
+        jobStatusId: jobListItem.jobStatusId,
+        jobType: jobListItem.jobType,
+        area: jobListItem.area,
+        quantity: jobListItem.quantity,
+        manDays: jobListItem.manDays,
+        date: jobListItem.date,
+        collectionAddress: jobListItem.collectionAddress,
+        collectionDate: jobListItem.collectionDate,
+        specialInstructions: jobListItem.specialInstructions,
+        quantityDistributed: jobListItem.quantityDistributed,
+        invoiceDetails: jobListItem.invoiceDetails,
+        reportAddresses: jobListItem.reportAddresses,
+        whoToInvoice: jobListItem.whoToInvoice,
+        collectionJobId: jobListItem.collectionJobId,
+      );
     } catch (error) {
       _error = error.toString();
       notifyListeners();
       rethrow;
+    }
+  }
+
+  // Add job list item without allocation (skip schedule assignment)
+  Future<void> addJobListItemWithoutAllocation(JobListItem jobListItem) async {
+    try {
+      await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+    } catch (error) {
+      _error = error.toString();
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  // Update job list item (immediate database update - use sparingly)
+  Future<void> updateJobListItemImmediate(JobListItem jobListItem) async {
+    try {
+      // Find the original job to check for month changes
+      final originalJob = getJobListItemById(jobListItem.id);
+
+      if (originalJob != null) {
+        // Check if primary date moved to a different month
+        final originalMonth =
+            _jobListService.getMonthlyDocumentId(originalJob.date);
+        final newMonth = _jobListService.getMonthlyDocumentId(jobListItem.date);
+
+        if (originalMonth != newMonth) {
+          print(
+              'JobListProvider: Immediate update moving job ${jobListItem.client} from $originalMonth to $newMonth');
+          // Use the move method for cross-month updates
+          await _jobListService.moveJobListItemToMonth(
+              jobListItem, originalJob.date, jobListItem.date);
+        } else {
+          // Regular update within the same month
+          await _jobListService.updateJobListItem(
+              jobListItem, jobListItem.date);
+        }
+      } else {
+        // Fallback: treat as regular update if original job not found
+        await _jobListService.updateJobListItem(jobListItem, jobListItem.date);
+      }
+    } catch (error) {
+      print(
+          'JobListProvider: Error in immediate update for ${jobListItem.client}: $error');
+
+      // Don't rethrow RangeErrors for moved jobs
+      if (!error.toString().contains('RangeError')) {
+        _error = error.toString();
+        notifyListeners();
+        rethrow;
+      } else {
+        print(
+            'JobListProvider: RangeError in immediate update, possibly job was moved');
+        _error = null; // Clear the error since this is expected for moved jobs
+        notifyListeners();
+      }
     }
   }
 

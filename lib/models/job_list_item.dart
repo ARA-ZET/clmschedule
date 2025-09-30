@@ -70,7 +70,9 @@ enum JobType {
   flyersAndPosters('Flyers and posters'),
   furnitureMove('Furniture move'),
   flyerDistribution('Flyer distribution'),
-  flyerPrintingAndDistribution('Flyer printing and distribution');
+  flyerPrintingAndDistribution('Flyer printing and distribution'),
+  windowCleaning('Window Cleaning'),
+  solarPanelCleaning('Solar panel Cleaning');
 
   const JobType(this.displayName);
   final String displayName;
@@ -94,6 +96,7 @@ class JobListItem {
   final String invoiceDetails;
   final String reportAddresses;
   final String whoToInvoice;
+  final String collectionJobId; // Link to collection schedule job
 
   JobListItem({
     required this.id,
@@ -113,6 +116,7 @@ class JobListItem {
     required this.invoiceDetails,
     required this.reportAddresses,
     required this.whoToInvoice,
+    this.collectionJobId = '', // Optional link to collection job
   });
 
   // Create from Firestore
@@ -163,6 +167,7 @@ class JobListItem {
       invoiceDetails: data['invoiceDetails'] as String? ?? '',
       reportAddresses: data['reportAddresses'] as String? ?? '',
       whoToInvoice: data['whoToInvoice'] as String? ?? '',
+      collectionJobId: data['collectionJobId'] as String? ?? '',
     );
   }
 
@@ -185,6 +190,7 @@ class JobListItem {
       'invoiceDetails': invoiceDetails,
       'reportAddresses': reportAddresses,
       'whoToInvoice': whoToInvoice,
+      'collectionJobId': collectionJobId,
     };
   }
 
@@ -207,6 +213,7 @@ class JobListItem {
     String? invoiceDetails,
     String? reportAddresses,
     String? whoToInvoice,
+    String? collectionJobId,
   }) {
     return JobListItem(
       id: id,
@@ -226,6 +233,7 @@ class JobListItem {
       invoiceDetails: invoiceDetails ?? this.invoiceDetails,
       reportAddresses: reportAddresses ?? this.reportAddresses,
       whoToInvoice: whoToInvoice ?? this.whoToInvoice,
+      collectionJobId: collectionJobId ?? this.collectionJobId,
     );
   }
 

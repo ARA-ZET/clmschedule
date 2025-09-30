@@ -5,6 +5,7 @@ import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 
 import '../models/job.dart';
 import '../models/custom_polygon.dart';
+import '../models/distributor.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/scale_provider.dart';
 import 'job_card.dart';
@@ -19,13 +20,9 @@ class ScheduleGrid extends StatefulWidget {
 }
 
 class _ScheduleGridState extends State<ScheduleGrid> {
-  // Navigation offsets
-  int _selectedWeekOffset = 0; // Selected week in the week selector
-  int _viewOffset = 0; // Offset for the 5-week view in the top bar
-  int _dayOffset = 0; // Day-based navigation offset
-
-  // Keep track of current month to reset offsets when it changes
+  // Keep track of current month to reset scroll position when it changes
   String _currentMonthDisplay = '';
+  bool _hasScrolledToToday = false;
 
   // Scroll controllers for horizontal and vertical scrolling
   final ScrollController _horizontalScrollController = ScrollController();
@@ -57,126 +54,71 @@ class _ScheduleGridState extends State<ScheduleGrid> {
     return months[month - 1];
   }
 
-  // Get the start of the current week (Friday) based on selected month
-  DateTime _getCurrentWeekStart(DateTime baseDate) {
-    // Calculate days from Friday
-    // If today is Friday (5), daysSinceFriday = 0
-    // If today is Saturday (6), daysSinceFriday = 1
-    // If today is Sunday (7), daysSinceFriday = 2
-    // If today is Monday (1), daysSinceFriday = 3
-    // If today is Tuesday (2), daysSinceFriday = 4
-    // If today is Wednesday (3), daysSinceFriday = 5
-    // If today is Thursday (4), daysSinceFriday = 6
-    final daysSinceFriday = (baseDate.weekday - DateTime.friday + 7) % 7;
-    return DateTime(
-        baseDate.year, baseDate.month, baseDate.day - daysSinceFriday);
-  }
-
-  // Get week number and year
-  String _getWeekLabel(DateTime date) {
-    final firstDayOfYear = DateTime(date.year, 1, 1);
-    final daysOffset = firstDayOfYear.weekday - DateTime.friday;
-    final firstFriday = firstDayOfYear.add(
-      Duration(days: (daysOffset + 7) % 7),
-    );
-    final diff = date.difference(firstFriday);
-    final weekNum = (diff.inDays / 7).floor() + 1;
-    return 'Week $weekNum';
-  }
-
-  // Generate list of weeks for the top bar
-  List<DateTime> _getWeekStarts(DateTime baseDate) {
-    final currentWeekStart = _getCurrentWeekStart(baseDate);
-    return List.generate(5, (index) {
-      return currentWeekStart.add(
-        Duration(days: 7 * (index + _viewOffset - 2)),
-      );
-    });
-  }
-
-  // Generate list of 12 days centered around the selected week
+  // Generate list of days for the current month plus the next month (optimized for Firestore reads)
   List<DateTime> _getDates(DateTime baseDate) {
-    final selectedWeekStart = _getCurrentWeekStart(baseDate).add(
-      Duration(days: 7 * _selectedWeekOffset),
-    );
-    // Start 2 days before the selected week, and add day offset
-    final startDate = selectedWeekStart
-        .subtract(const Duration(days: 2))
-        .add(Duration(days: _dayOffset));
-    return List.generate(12, (index) {
-      return startDate.add(Duration(days: index));
+    // Get first day of the current month
+    final firstDayOfMonth = DateTime(baseDate.year, baseDate.month, 1);
+
+    // Get last day of the next month
+    final lastDayOfNextMonth = DateTime(baseDate.year, baseDate.month + 2, 0);
+
+    // Calculate total days from current month start to next month end
+    final totalDays = lastDayOfNextMonth.difference(firstDayOfMonth).inDays + 1;
+
+    // Generate all dates in the range (current month + next month)
+    return List.generate(totalDays, (index) {
+      return firstDayOfMonth.add(Duration(days: index));
     });
   }
 
-  void _previousWeeks(ScheduleProvider scheduleProvider) {
-    setState(() {
-      _viewOffset--;
-      _dayOffset = 0; // Reset day offset when changing weeks
-    });
+  // Find the index of today's date in the dates list
+  int _getTodayIndex(List<DateTime> dates) {
+    final today = DateTime.now();
+    final todayDateOnly = DateTime(today.year, today.month, today.day);
 
-    // Check if we moved to a different month
-    final currentMonth = scheduleProvider.currentMonth;
-    final newWeekStart = _getCurrentWeekStart(currentMonth).add(
-      Duration(days: 7 * (_viewOffset - 2)),
-    );
-
-    if (newWeekStart.month != currentMonth.month ||
-        newWeekStart.year != currentMonth.year) {
-      scheduleProvider
-          .setCurrentMonth(DateTime(newWeekStart.year, newWeekStart.month));
+    for (int i = 0; i < dates.length; i++) {
+      final dateOnly = DateTime(dates[i].year, dates[i].month, dates[i].day);
+      if (dateOnly == todayDateOnly) {
+        return i;
+      }
     }
+    return 0; // Fallback to first date if today is not found
   }
 
-  void _nextWeeks(ScheduleProvider scheduleProvider) {
-    setState(() {
-      _viewOffset++;
-      _dayOffset = 0; // Reset day offset when changing weeks
-    });
+  // Scroll to today's date in the horizontal scrollbar
+  void _scrollToToday(List<DateTime> dates) {
+    if (!_hasScrolledToToday && dates.isNotEmpty) {
+      final todayIndex = _getTodayIndex(dates);
+      if (todayIndex >= 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_horizontalScrollController.hasClients && mounted) {
+            // Calculate the scroll position to center today's date
+            // Account for viewport width and pinned column
+            final viewportWidth = MediaQuery.of(context).size.width;
+            const pinnedColumnWidth =
+                150.0; // Width of distributor names column
+            final availableWidth = viewportWidth - pinnedColumnWidth;
 
-    // Check if we moved to a different month
-    final currentMonth = scheduleProvider.currentMonth;
-    final newWeekStart = _getCurrentWeekStart(currentMonth).add(
-      Duration(days: 7 * (_viewOffset + 2)),
-    );
+            // Position to center today's column in the viewport
+            final targetPosition = (todayIndex * cellWidth) -
+                (availableWidth / 2) +
+                (cellWidth / 2);
 
-    if (newWeekStart.month != currentMonth.month ||
-        newWeekStart.year != currentMonth.year) {
-      scheduleProvider
-          .setCurrentMonth(DateTime(newWeekStart.year, newWeekStart.month));
+            final maxScroll =
+                _horizontalScrollController.position.maxScrollExtent;
+            final scrollPosition = targetPosition.clamp(0.0, maxScroll);
+
+            _horizontalScrollController.animateTo(
+              scrollPosition,
+              duration: const Duration(milliseconds: 800),
+              curve: Curves.easeInOut,
+            );
+          }
+        });
+
+        _hasScrolledToToday = true;
+      }
     }
-  }
-
-  void _selectWeek(int offset, ScheduleProvider scheduleProvider) {
-    setState(() {
-      _selectedWeekOffset = offset + _viewOffset - 2;
-      _dayOffset = 0; // Reset day offset when selecting a new week
-    });
-
-    // Calculate the date for the selected week
-    final currentMonth = scheduleProvider.currentMonth;
-    final selectedWeekStart = _getCurrentWeekStart(currentMonth).add(
-      Duration(days: 7 * _selectedWeekOffset),
-    );
-
-    // Check if the selected week is in a different month
-    if (selectedWeekStart.month != currentMonth.month ||
-        selectedWeekStart.year != currentMonth.year) {
-      // Update the provider to the new month
-      scheduleProvider.setCurrentMonth(
-          DateTime(selectedWeekStart.year, selectedWeekStart.month));
-    }
-  }
-
-  void _previousDays() {
-    setState(() {
-      _dayOffset -= 2; // Move 2 days back
-    });
-  }
-
-  void _nextDays() {
-    setState(() {
-      _dayOffset += 2; // Move 2 days forward
-    });
   }
 
   static const double cellWidth = 200.0;
@@ -186,20 +128,20 @@ class _ScheduleGridState extends State<ScheduleGrid> {
   Widget build(BuildContext context) {
     return Consumer2<ScheduleProvider, ScaleProvider>(
       builder: (context, scheduleProvider, scaleProvider, child) {
-        // Check if month changed and reset offsets
+        // Check if month changed and reset scroll position
         if (_currentMonthDisplay != scheduleProvider.currentMonthDisplay) {
           _currentMonthDisplay = scheduleProvider.currentMonthDisplay;
-          _selectedWeekOffset = 0;
-          _viewOffset = 0;
-          _dayOffset = 0;
+          _hasScrolledToToday = false; // Reset scroll flag for new month
         }
 
         final currentMonth = scheduleProvider.currentMonth;
         final dates = _getDates(currentMonth);
-        final weekStarts = _getWeekStarts(currentMonth);
         final distributors = scheduleProvider.distributors;
 
         final double rowHeight = 92.0 * scaleProvider.scale;
+
+        // Scroll to today's date when data is loaded
+        _scrollToToday(dates);
 
         return Column(
           children: [
@@ -213,72 +155,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
               availableMonths: scheduleProvider.getAvailableMonths(),
             ),
 
-            Container(
-              decoration: ShapeDecoration.fromBoxDecoration(
-                BoxDecoration(
-                  color: Theme.of(context).appBarTheme.backgroundColor,
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color.fromARGB(
-                        255,
-                        1,
-                        100, // Darker blue - was 141
-                        150, // Darker blue - was 211
-                      ).withOpacity(0.15),
-                      blurRadius: 4,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-              ),
-              height: 50,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Row(
-                children: [
-                  IconButton(
-                    icon: Icon(Icons.arrow_left,
-                        size: scaleProvider.mediumIconSize),
-                    onPressed: () => _previousWeeks(scheduleProvider),
-                    padding: EdgeInsets.zero,
-                    tooltip: 'Previous weeks',
-                  ),
-                  Expanded(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: List.generate(5, (index) {
-                        final weekStart = weekStarts[index];
-                        final isSelected =
-                            index == 2 + _selectedWeekOffset - _viewOffset;
-                        return Tooltip(
-                          message: 'Select week of ${_getWeekLabel(weekStart)}',
-                          child: TextButton(
-                            onPressed: () =>
-                                _selectWeek(index, scheduleProvider),
-                            style: TextButton.styleFrom(
-                              backgroundColor: isSelected
-                                  ? Theme.of(
-                                      context,
-                                    ).primaryColor.withOpacity(0.1)
-                                  : null,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 12),
-                            ),
-                            child: Text(_getWeekLabel(weekStart)),
-                          ),
-                        );
-                      }),
-                    ),
-                  ),
-                  IconButton(
-                    icon: Icon(Icons.arrow_right,
-                        size: scaleProvider.mediumIconSize),
-                    onPressed: () => _nextWeeks(scheduleProvider),
-                    padding: EdgeInsets.zero,
-                    tooltip: 'Next weeks',
-                  ),
-                ],
-              ),
-            ),
+            // Week navigation removed - using month navigation only
             // Table scroll hint
             // Container(
             //   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -325,7 +202,8 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                     ),
                     pinnedRowCount: 1,
                     pinnedColumnCount: 1,
-                    columnCount: 13, // 12 days + 1 for distributor names column
+                    columnCount: dates.length +
+                        1, // All dates + 1 for distributor names column
                     rowCount:
                         distributors.length + 1, // +1 for date headers row
                     columnBuilder: (int column) {
@@ -407,57 +285,36 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                         } else {
                           // Date headers
                           final date = dates[vicinity.column - 1];
-                          final isFirstColumn = vicinity.column == 1;
-                          final isLastColumn = vicinity.column == dates.length;
+                          final today = DateTime.now();
+                          final isToday = date.year == today.year &&
+                              date.month == today.month &&
+                              date.day == today.day;
 
                           return TableViewCell(
                             child: Card(
-                              child: LayoutBuilder(
-                                builder: (context, constraints) {
-                                  final dateText =
-                                      '${DateFormat('EEE').format(date)} ${date.day} ${_getMonthAbbreviation(date.month)}';
-
-                                  return Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      if (isFirstColumn)
-                                        IconButton(
-                                          icon: Icon(Icons.arrow_left,
-                                              size:
-                                                  scaleProvider.smallIconSize),
-                                          onPressed: _previousDays,
-                                          padding: EdgeInsets.zero,
-                                          constraints: const BoxConstraints(),
-                                          tooltip: 'Previous days',
+                              color: isToday
+                                  ? Theme.of(context)
+                                      .primaryColor
+                                      .withOpacity(0.2)
+                                  : null,
+                              child: Center(
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  child: Text(
+                                    '${DateFormat('EEE').format(date)} ${date.day} ${_getMonthAbbreviation(date.month)}',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleSmall
+                                        ?.copyWith(
+                                          fontWeight:
+                                              isToday ? FontWeight.bold : null,
+                                          color: isToday
+                                              ? Theme.of(context).primaryColor
+                                              : null,
                                         ),
-                                      Expanded(
-                                        child: Center(
-                                          child: FittedBox(
-                                            fit: BoxFit.scaleDown,
-                                            child: Text(
-                                              dateText,
-                                              style: Theme.of(
-                                                context,
-                                              ).textTheme.titleSmall,
-                                              textAlign: TextAlign.center,
-                                              maxLines: 2,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                      if (isLastColumn)
-                                        IconButton(
-                                          icon: Icon(Icons.arrow_right,
-                                              size:
-                                                  scaleProvider.smallIconSize),
-                                          onPressed: _nextDays,
-                                          padding: EdgeInsets.zero,
-                                          constraints: const BoxConstraints(),
-                                          tooltip: 'Next days',
-                                        ),
-                                    ],
-                                  );
-                                },
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ),
                               ),
                             ),
                           );
@@ -506,6 +363,40 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                               onAcceptWithDetails: (jobDetails) async {
                                 // Get the dragged job
                                 final draggedJob = jobDetails.data;
+
+                                // Check if dropping on the same day and distributor (no changes)
+                                final isSameDayAndDistributor =
+                                    draggedJob.distributorId ==
+                                            distributor.id &&
+                                        draggedJob.date.year == date.year &&
+                                        draggedJob.date.month == date.month &&
+                                        draggedJob.date.day == date.day;
+
+                                if (isSameDayAndDistributor) {
+                                  // Show feedback that no changes will be made
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Row(
+                                        children: [
+                                          const Icon(Icons.info_outline,
+                                              color: Colors.white),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              'Job is already on ${DateFormat('EEE, MMM d').format(date)} for ${distributor.name}',
+                                              style:
+                                                  const TextStyle(fontSize: 14),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      backgroundColor: Colors.orange,
+                                      duration: const Duration(seconds: 2),
+                                      behavior: SnackBarBehavior.floating,
+                                    ),
+                                  );
+                                  return; // Exit early, no changes needed
+                                }
 
                                 // If there's already a job in the target cell
                                 if (jobs.isNotEmpty) {
@@ -581,21 +472,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                     scheduleProvider.deleteJob(draggedJob.id);
                                   }
                                 } else {
-                                  // If target cell is empty, show simple confirmation
-                                  // final action = await showDialog<DropAction>(
-                                  //   context: context,
-                                  //   builder: (context) =>
-                                  //       JobDropConfirmationDialog(
-                                  //     draggedJob: draggedJob,
-                                  //     targetJob: null,
-                                  //     distributorName: distributor.name,
-                                  //     targetDate: date,
-                                  //   ),
-                                  // );
-
-                                  // if (action == null) return; // User cancelled
-
-                                  // Just move the dragged job
+                                  // If target cell is empty, just move the dragged job
                                   scheduleProvider.updateJob(
                                     draggedJob.copyWith(
                                       distributorId: distributor.id,
@@ -613,29 +490,16 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                         ).primaryColor.withOpacity(0.1)
                                       : null,
                                   child: jobs.isEmpty
-                                      ? Center(
-                                          child: IconButton(
-                                            icon: Icon(Icons.add,
-                                                size: scaleProvider
-                                                    .mediumIconSize),
-                                            tooltip: 'Add new job',
-                                            onPressed: () {
-                                              final newJob = Job(
-                                                id: '', // Will be set by Firestore
-                                                clients: [],
-                                                workingAreas: [], // Empty names to be selected later
-                                                workMaps: [], // Empty work maps to be added later
-                                                distributorId: distributor.id,
-                                                date: date,
-                                                statusId:
-                                                    'scheduled', // Use default scheduled status
-                                              );
-                                              scheduleProvider.addJob(newJob);
-                                            },
-                                          ),
+                                      ? _AddJobButton(
+                                          distributor: distributor,
+                                          date: date,
+                                          scaleProvider: scaleProvider,
                                         )
-                                      : Draggable<Job>(
+                                      : LongPressDraggable<Job>(
                                           data: jobs.first,
+                                          delay:
+                                              const Duration(milliseconds: 250),
+                                          hapticFeedbackOnStart: true,
                                           feedback: Material(
                                             elevation: 8.0,
                                             color: Colors.transparent,
@@ -668,6 +532,88 @@ class _ScheduleGridState extends State<ScheduleGrid> {
           ],
         );
       },
+    );
+  }
+}
+
+class _AddJobButton extends StatefulWidget {
+  final Distributor distributor;
+  final DateTime date;
+  final ScaleProvider scaleProvider;
+
+  const _AddJobButton({
+    required this.distributor,
+    required this.date,
+    required this.scaleProvider,
+  });
+
+  @override
+  State<_AddJobButton> createState() => _AddJobButtonState();
+}
+
+class _AddJobButtonState extends State<_AddJobButton> {
+  bool _isLoading = false;
+
+  Future<void> _addJob() async {
+    if (_isLoading) return;
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      final newJob = Job(
+        id: '', // Will be set by Firestore
+        clients: [],
+        workingAreas: [], // Empty names to be selected later
+        workMaps: [], // Empty work maps to be added later
+        distributorId: widget.distributor.id,
+        date: widget.date,
+        statusId: 'scheduled', // Use default scheduled status
+      );
+
+      await context.read<ScheduleProvider>().addJob(newJob);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to add job: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: _isLoading
+          ? SizedBox(
+              width: widget.scaleProvider.mediumIconSize,
+              height: widget.scaleProvider.mediumIconSize,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  Theme.of(context).primaryColor,
+                ),
+              ),
+            )
+          : IconButton(
+              icon: Icon(
+                Icons.add,
+                size: widget.scaleProvider.mediumIconSize,
+              ),
+              tooltip: 'Add new job',
+              onPressed: _addJob,
+            ),
     );
   }
 }
