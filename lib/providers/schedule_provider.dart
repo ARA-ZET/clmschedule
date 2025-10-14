@@ -4,10 +4,15 @@ import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/schedule.dart';
 import '../models/work_area.dart';
+import '../models/custom_polygon.dart';
 import '../services/firestore_service.dart';
+import '../services/undo_redo_manager.dart';
+import '../commands/schedule_commands.dart';
+import '../commands/map_commands.dart';
 
 class ScheduleProvider extends ChangeNotifier {
   final FirestoreService _firestoreService;
+  final UndoRedoManager _undoRedoManager;
 
   List<Distributor> _distributors = [];
   List<Job> _currentMonthJobs = [];
@@ -30,8 +35,14 @@ class ScheduleProvider extends ChangeNotifier {
   String get currentMonthDisplay =>
       _firestoreService.getMonthlyDocumentId(_currentMonth);
 
-  ScheduleProvider({FirestoreService? firestoreService})
-      : _firestoreService = firestoreService ?? FirestoreService() {
+  // Helper method to check if the next month has any jobs
+  bool get hasJobsInNextMonth => _nextMonthJobs.isNotEmpty;
+  UndoRedoManager get undoRedoManager => _undoRedoManager;
+
+  ScheduleProvider(
+      {FirestoreService? firestoreService, UndoRedoManager? undoRedoManager})
+      : _firestoreService = firestoreService ?? FirestoreService(),
+        _undoRedoManager = undoRedoManager ?? UndoRedoManager() {
     _initStreams();
   }
 
@@ -282,6 +293,135 @@ class ScheduleProvider extends ChangeNotifier {
   // Get next month display string
   String get nextMonthDisplay =>
       _firestoreService.getMonthlyDocumentId(nextMonth);
+
+  // Undo/Redo functionality for schedule operations
+  Future<void> addJobWithUndo(Job job, DateTime targetDate) async {
+    final command = AddJobCommand(
+      service: _firestoreService,
+      job: job,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  Future<void> updateJobWithUndo(
+      Job originalJob, Job modifiedJob, DateTime targetDate) async {
+    final command = EditJobCommand(
+      service: _firestoreService,
+      originalJob: originalJob,
+      modifiedJob: modifiedJob,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  Future<void> deleteJobWithUndo(Job job, DateTime targetDate) async {
+    final command = DeleteJobCommand(
+      service: _firestoreService,
+      job: job,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  Future<void> updateJobStatusWithUndo(String jobId, String newStatusId,
+      String originalStatusId, DateTime targetDate) async {
+    final command = UpdateJobStatusCommand(
+      service: _firestoreService,
+      jobId: jobId,
+      newStatusId: newStatusId,
+      originalStatusId: originalStatusId,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  Future<void> swapJobsWithUndo(
+      Job draggedJob, Job targetJob, DateTime targetDate) async {
+    final command = SwapJobsCommand(
+      service: _firestoreService,
+      draggedJob: draggedJob,
+      targetJob: targetJob,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  Future<void> combineJobsWithUndo(Job draggedJob, Job targetJob,
+      Job combinedJob, DateTime targetDate) async {
+    final command = CombineJobsCommand(
+      service: _firestoreService,
+      draggedJob: draggedJob,
+      targetJob: targetJob,
+      combinedJob: combinedJob,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  Future<void> copyAndCombineJobsWithUndo(
+      Job targetJob, Job combinedJob, DateTime targetDate) async {
+    final command = CopyAndCombineJobsCommand(
+      service: _firestoreService,
+      targetJob: targetJob,
+      combinedJob: combinedJob,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  // Undo/Redo functionality for map operations
+  Future<void> addPolygonWithUndo(
+      String jobId, CustomPolygon polygon, DateTime targetDate) async {
+    final command = AddPolygonToJobCommand(
+      service: _firestoreService,
+      jobId: jobId,
+      polygon: polygon,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  Future<void> editPolygonWithUndo(String jobId, CustomPolygon originalPolygon,
+      CustomPolygon modifiedPolygon, DateTime targetDate) async {
+    final command = EditPolygonInJobCommand(
+      service: _firestoreService,
+      jobId: jobId,
+      originalPolygon: originalPolygon,
+      modifiedPolygon: modifiedPolygon,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  Future<void> deletePolygonWithUndo(
+      String jobId, CustomPolygon polygon, DateTime targetDate) async {
+    final command = DeletePolygonFromJobCommand(
+      service: _firestoreService,
+      jobId: jobId,
+      polygon: polygon,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+  }
+
+  // Access to schedule grid undo/redo functionality (includes map operations)
+  bool get canUndo =>
+      undoRedoManager.canUndoForContext(UndoRedoContext.scheduleGrid);
+  bool get canRedo =>
+      undoRedoManager.canRedoForContext(UndoRedoContext.scheduleGrid);
+  String? get nextUndoDescription => undoRedoManager
+      .nextUndoDescriptionForContext(UndoRedoContext.scheduleGrid);
+  String? get nextRedoDescription => undoRedoManager
+      .nextRedoDescriptionForContext(UndoRedoContext.scheduleGrid);
+
+  Future<bool> undo() async {
+    return await undoRedoManager.undo(UndoRedoContext.scheduleGrid);
+  }
+
+  Future<bool> redo() async {
+    return await undoRedoManager.redo(UndoRedoContext.scheduleGrid);
+  }
 
   @override
   void dispose() {

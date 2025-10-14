@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/job.dart';
 
-enum DropAction { swap, addToExisting }
+enum DropAction { swap, addToExisting, copy }
 
 class JobDropConfirmationDialog extends StatelessWidget {
   final Job draggedJob;
@@ -143,6 +143,16 @@ class JobDropConfirmationDialog extends StatelessWidget {
                 label: const Text('Combine Jobs'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+              // Copy
+              ElevatedButton.icon(
+                onPressed: () => Navigator.of(context).pop(DropAction.copy),
+                icon: const Icon(Icons.copy),
+                label: const Text('Copy & Combine'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.purple,
                   foregroundColor: Colors.white,
                 ),
               ),

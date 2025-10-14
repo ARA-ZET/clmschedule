@@ -1,3 +1,4 @@
+import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -9,6 +10,7 @@ import 'providers/job_list_provider.dart';
 import 'providers/job_status_provider.dart';
 import 'providers/job_list_status_provider.dart';
 import 'providers/scale_provider.dart';
+import 'providers/auth_provider.dart';
 import 'widgets/schedule_grid.dart';
 import 'widgets/collection_schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
@@ -17,10 +19,36 @@ import 'widgets/lazy_loading_indicator.dart';
 import 'widgets/scale_settings_dialog.dart';
 import 'widgets/job_status_management_dialog.dart';
 import 'widgets/job_list_status_management_dialog.dart';
+import 'widgets/undo_redo_widgets.dart';
+import 'widgets/auth_gate.dart';
+import 'services/keyboard_shortcuts_service.dart';
+import 'services/undo_redo_manager.dart';
 import 'utils/seed_data.dart';
 import 'services/work_area_service.dart';
 import 'services/job_list_service.dart';
+import 'services/user_service.dart';
+import 'models/command.dart';
 import 'firebase_options.dart';
+
+// Simple test command for debugging undo functionality
+class TestCommand extends Command {
+  final String _description;
+
+  TestCommand(this._description);
+
+  @override
+  String get description => _description;
+
+  @override
+  Future<void> execute() async {
+    print('Executing: $_description');
+  }
+
+  @override
+  Future<void> undo() async {
+    print('Undoing: $_description');
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -41,8 +69,19 @@ void main() async {
   }
 
   runApp(MultiProvider(providers: [
-    ChangeNotifierProvider(create: (context) => ScheduleProvider()),
+    // Authentication Provider (must be first for initialization)
+    ChangeNotifierProvider(create: (context) => AuthProvider()),
+    ChangeNotifierProvider(create: (context) => UndoRedoManager()),
+    ChangeNotifierProxyProvider<UndoRedoManager, ScheduleProvider>(
+      create: (context) =>
+          ScheduleProvider(undoRedoManager: context.read<UndoRedoManager>()),
+      update: (context, undoRedoManager, previous) =>
+          previous ?? ScheduleProvider(undoRedoManager: undoRedoManager),
+    ),
     ChangeNotifierProvider(create: (context) => ScaleProvider()),
+    ChangeNotifierProvider(
+      create: (context) => TogglerProvider(),
+    ),
     ChangeNotifierProvider(
       create: (context) => JobStatusProvider(),
     ),
@@ -55,10 +94,20 @@ void main() async {
     Provider(
       create: (context) => JobListService(FirebaseFirestore.instance),
     ),
-    ChangeNotifierProvider(
+    Provider(
+      create: (context) => UserService(FirebaseFirestore.instance),
+    ),
+    ChangeNotifierProxyProvider<UndoRedoManager, JobListProvider>(
       create: (context) => JobListProvider(
         context.read<JobListService>(),
+        context.read<UndoRedoManager>(),
       ),
+      update: (context, undoRedoManager, previous) =>
+          previous ??
+          JobListProvider(
+            context.read<JobListService>(),
+            undoRedoManager,
+          ),
     ),
     ChangeNotifierProxyProvider<JobListProvider, CollectionScheduleProvider>(
       create: (context) => CollectionScheduleProvider(
@@ -73,8 +122,22 @@ void main() async {
   ], child: const MyApp()));
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  @override
+  void initState() {
+    super.initState();
+    // Initialize authentication after first frame
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<AuthProvider>().initialize();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -85,7 +148,11 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
-      home: const DashboardScreen(),
+      home: AuthGate(
+        child: KeyboardShortcutsService.initializeShortcuts(
+          child: const DashboardScreen(),
+        ),
+      ),
     );
   }
 }
@@ -111,6 +178,15 @@ class _DashboardScreenState extends State<DashboardScreen>
       animationDuration: Duration.zero, // Remove tab animation
     );
     _tabController.addListener(_handleTabChange);
+
+    // Set initial context after the first frame
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        final undoRedoManager = context.read<UndoRedoManager>();
+        undoRedoManager.setContext(
+            UndoRedoContext.scheduleGrid); // Default to schedule tab
+      }
+    });
   }
 
   void _handleTabChange() {
@@ -118,6 +194,22 @@ class _DashboardScreenState extends State<DashboardScreen>
       setState(() {
         _currentTabIndex = _tabController.index;
       });
+
+      // Set the appropriate undo/redo context based on the active tab
+      final undoRedoManager = context.read<UndoRedoManager>();
+      switch (_currentTabIndex) {
+        case 0: // Schedule tab (includes map editing)
+          undoRedoManager.setContext(UndoRedoContext.scheduleGrid);
+          break;
+        case 1: // Job List tab
+          undoRedoManager.setContext(UndoRedoContext.jobList);
+          break;
+        case 2: // Collection Schedule tab
+        case 3: // Solar Panel Schedule tab
+        default:
+          undoRedoManager.setContext(UndoRedoContext.global);
+          break;
+      }
     }
   }
 
@@ -165,6 +257,32 @@ class _DashboardScreenState extends State<DashboardScreen>
           ],
         ),
         actions: [
+          // Test button for undo functionality
+          // IconButton(
+          //   icon: const Icon(Icons.add_circle, color: Colors.green),
+          //   tooltip: 'Test Undo (Add fake operation)',
+          //   onPressed: () async {
+          //     final undoManager =
+          //         Provider.of<UndoRedoManager>(context, listen: false);
+          //     // Add a test command to verify undo system works
+          //     final testCommand = TestCommand(
+          //         'Test Operation ${DateTime.now().millisecondsSinceEpoch}');
+          //     await undoManager.executeCommand(testCommand);
+          //     print('Undo stack size: ${undoManager.undoStackSize}');
+          //     print('Can undo: ${undoManager.canUndo}');
+          //   },
+          // ),
+          // Undo/Redo buttons
+          const UndoRedoButtons(
+            showLabels: false,
+            padding: EdgeInsets.all(4.0),
+            enabledColor: Colors.deepOrange,
+          ),
+          const VerticalDivider(
+            color: Colors.grey,
+            thickness: 1,
+            width: 20,
+          ),
           IconButton(
             icon: const Icon(Icons.people),
             onPressed: () {
@@ -222,34 +340,34 @@ class _DashboardScreenState extends State<DashboardScreen>
           IconButton(
             icon: const Icon(Icons.map),
             onPressed: () async {
-              // final workAreaService = context.read<WorkAreaService>();
-              // try {
-              //   final workAreas = await workAreaService.createFromKml(
-              //     'maps.kml',
-              //   );
-              //   if (context.mounted) {
-              //     ScaffoldMessenger.of(context).showSnackBar(
-              //       SnackBar(
-              //         content: Text(
-              //           'Imported ${workAreas.length} work areas from KML file',
-              //         ),
-              //       ),
-              //     );
-              //   }
-              // } catch (e) {
-              //   if (context.mounted) {
-              //     ScaffoldMessenger.of(context).showSnackBar(
-              //       SnackBar(content: Text('Error importing KML data: $e')),
-              //     );
-              //   }
-              // }
+              final workAreaService = context.read<WorkAreaService>();
+              try {
+                final workAreas = await workAreaService.createFromKml(
+                  'jl.kml',
+                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'Imported ${workAreas.length} work areas from KML file',
+                      ),
+                    ),
+                  );
+                }
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Error importing KML data: $e')),
+                  );
+                }
+              }
             },
             tooltip: 'Import KML data',
           ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.settings),
             tooltip: 'Settings',
-            onSelected: (String value) {
+            onSelected: (String value) async {
               if (value == 'scale') {
                 showDialog(
                   context: context,
@@ -265,6 +383,28 @@ class _DashboardScreenState extends State<DashboardScreen>
                   context: context,
                   builder: (context) => const JobListStatusManagementDialog(),
                 );
+              } else if (value == 'signout') {
+                final confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    title: const Text('Sign Out'),
+                    content: const Text('Are you sure you want to sign out?'),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(false),
+                        child: const Text('Cancel'),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(true),
+                        child: const Text('Sign Out'),
+                      ),
+                    ],
+                  ),
+                );
+
+                if (confirmed == true && context.mounted) {
+                  await context.read<AuthProvider>().signOut();
+                }
               }
             },
             itemBuilder: (BuildContext context) => [
@@ -289,6 +429,15 @@ class _DashboardScreenState extends State<DashboardScreen>
                 child: ListTile(
                   leading: Icon(Icons.list_alt),
                   title: Text('Job List Statuses'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem<String>(
+                value: 'signout',
+                child: ListTile(
+                  leading: Icon(Icons.logout, color: Colors.red),
+                  title: Text('Sign Out', style: TextStyle(color: Colors.red)),
                   contentPadding: EdgeInsets.zero,
                 ),
               ),
@@ -324,22 +473,32 @@ class _ScheduleTabState extends State<ScheduleTab>
   @override
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
-    return Consumer<ScheduleProvider>(
-      builder: (context, scheduleProvider, child) {
-        final isLoading = scheduleProvider.distributors.isEmpty &&
-            scheduleProvider.jobs.isEmpty;
+    return Stack(
+      children: [
+        Consumer<ScheduleProvider>(
+          builder: (context, scheduleProvider, child) {
+            final isLoading = scheduleProvider.distributors.isEmpty &&
+                scheduleProvider.jobs.isEmpty;
 
-        return LazyLoadingIndicator(
-          isLoading: isLoading,
-          message: 'Loading Schedule...',
-          child: isLoading
-              ? Container(
-                  color: Theme.of(context).scaffoldBackgroundColor,
-                  child: const SizedBox.expand(),
-                )
-              : const ScheduleGrid(),
-        );
-      },
+            return LazyLoadingIndicator(
+              isLoading: isLoading,
+              message: 'Loading Schedule...',
+              child: isLoading
+                  ? Container(
+                      color: Theme.of(context).scaffoldBackgroundColor,
+                      child: const SizedBox.expand(),
+                    )
+                  : const ScheduleGrid(),
+            );
+          },
+        ),
+        // Floating undo/redo button for Schedule tab
+        const Positioned(
+          bottom: 16,
+          right: 16,
+          child: UndoRedoFAB(heroTag: "schedule"),
+        ),
+      ],
     );
   }
 }
@@ -433,7 +592,17 @@ class _JobListTabState extends State<JobListTab>
           );
         }
 
-        return const JobListGrid();
+        return const Stack(
+          children: [
+            JobListGrid(),
+            // Floating undo/redo button for Job List tab
+            Positioned(
+              bottom: 16,
+              right: 16,
+              child: UndoRedoFAB(heroTag: "joblist"),
+            ),
+          ],
+        );
       },
     );
   }
@@ -459,15 +628,25 @@ class _CollectionScheduleTabState extends State<CollectionScheduleTab>
         final isLoading = collectionProvider.collectionJobs.isEmpty &&
             collectionProvider.workAreas.isEmpty;
 
-        return LazyLoadingIndicator(
-          isLoading: isLoading,
-          message: 'Loading Collection Schedule...',
-          child: isLoading
-              ? Container(
-                  color: Theme.of(context).scaffoldBackgroundColor,
-                  child: const SizedBox.expand(),
-                )
-              : const CollectionScheduleGrid(),
+        return Stack(
+          children: [
+            LazyLoadingIndicator(
+              isLoading: isLoading,
+              message: 'Loading Collection Schedule...',
+              child: isLoading
+                  ? Container(
+                      color: Theme.of(context).scaffoldBackgroundColor,
+                      child: const SizedBox.expand(),
+                    )
+                  : const CollectionScheduleGrid(),
+            ),
+            // Floating undo/redo button for Collection Schedule tab
+            const Positioned(
+              bottom: 16,
+              right: 16,
+              child: UndoRedoFAB(heroTag: "collection"),
+            ),
+          ],
         );
       },
     );

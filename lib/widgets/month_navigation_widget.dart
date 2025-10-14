@@ -1,4 +1,6 @@
+import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 class MonthNavigationWidget extends StatelessWidget {
   final String currentMonthDisplay;
@@ -68,6 +70,7 @@ class MonthNavigationWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final monthRange = _generateMonthRange(currentMonthDisplay);
+    final isFullview = context.watch<TogglerProvider>().isFullview;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -163,56 +166,76 @@ class MonthNavigationWidget extends StatelessWidget {
           const Spacer(),
 
           // Available Months Dropdown
-          FutureBuilder<List<String>>(
-            future: availableMonths,
-            builder: (context, snapshot) {
-              if (!snapshot.hasData || snapshot.data!.isEmpty) {
-                return const SizedBox.shrink();
-              }
+          Row(
+            children: [
+              IconButton(
+                  onPressed: () {
+                    context.read<TogglerProvider>().toggleFullview();
+                  },
+                  tooltip:
+                      isFullview ? "Exit Fullscreen" : "Change to fullscreen",
+                  icon: isFullview
+                      ? const Icon(
+                          Icons.fullscreen_exit,
+                          size: 32,
+                        )
+                      : const Icon(
+                          Icons.fullscreen,
+                          size: 32,
+                        )),
+              const SizedBox(width: 8),
+              FutureBuilder<List<String>>(
+                future: availableMonths,
+                builder: (context, snapshot) {
+                  if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                    return const SizedBox.shrink();
+                  }
 
-              return PopupMenuButton<String>(
-                icon: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.calendar_month),
-                    const SizedBox(width: 4),
-                    Text(
-                      'All Months',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey.shade700,
-                      ),
-                    ),
-                  ],
-                ),
-                tooltip: 'Select month',
-                onSelected: (monthId) {
-                  onMonthSelected(monthId);
-                },
-                itemBuilder: (context) {
-                  return snapshot.data!.map((monthId) {
-                    return PopupMenuItem<String>(
-                      value: monthId,
-                      child: Row(
-                        children: [
-                          Icon(
-                            monthId == currentMonthDisplay
-                                ? Icons.radio_button_checked
-                                : Icons.radio_button_unchecked,
-                            size: 16,
-                            color: monthId == currentMonthDisplay
-                                ? Colors.blue
-                                : Colors.grey,
+                  return PopupMenuButton<String>(
+                    icon: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.calendar_month),
+                        const SizedBox(width: 4),
+                        Text(
+                          'All Months',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade700,
                           ),
-                          const SizedBox(width: 8),
-                          Text(monthId),
-                        ],
-                      ),
-                    );
-                  }).toList();
+                        ),
+                      ],
+                    ),
+                    tooltip: 'Select month',
+                    onSelected: (monthId) {
+                      onMonthSelected(monthId);
+                    },
+                    itemBuilder: (context) {
+                      return snapshot.data!.map((monthId) {
+                        return PopupMenuItem<String>(
+                          value: monthId,
+                          child: Row(
+                            children: [
+                              Icon(
+                                monthId == currentMonthDisplay
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_unchecked,
+                                size: 16,
+                                color: monthId == currentMonthDisplay
+                                    ? Colors.blue
+                                    : Colors.grey,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(monthId),
+                            ],
+                          ),
+                        );
+                      }).toList();
+                    },
+                  );
                 },
-              );
-            },
+              ),
+            ],
           ),
         ],
       ),

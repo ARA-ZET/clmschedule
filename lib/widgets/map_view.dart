@@ -3,12 +3,18 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:provider/provider.dart';
 import 'dart:math' show min, max;
 import 'dart:ui' as ui;
+import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../services/work_area_service.dart';
 import '../services/gpx_parser_service.dart';
+import '../services/kml_parser_service.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
 import '../models/gpx_track.dart';
+import '../models/job_list_item.dart';
+import '../providers/job_list_provider.dart';
+import 'mymaps_kml_downloader.dart';
 
 class MapView extends StatefulWidget {
   final String? jobId;
@@ -62,11 +68,23 @@ class _MapViewState extends State<MapView> {
   bool _isSidebarVisible = true;
   bool _isImportingGpx = false;
 
+  // Client Maps state
+  final TextEditingController _clientMapsController = TextEditingController();
+  bool _isDownloadingMaps = false;
+  bool _showSuggestions = false;
+
   @override
   void initState() {
     super.initState();
     _createMarkerIcons();
     _initializeMap();
+
+    // Add listener to _clientMapsController to update UI when text changes
+    _clientMapsController.addListener(() {
+      setState(() {
+        // This will trigger a rebuild to update the download button state
+      });
+    });
   }
 
   @override
@@ -925,8 +943,7 @@ class _MapViewState extends State<MapView> {
                     }
                   },
                   onTap: _onMapTap,
-                  cloudMapId: "89c628d2bb3002712797ce42",
-                  style: "",
+
                   initialCameraPosition:
                       CameraPosition(target: _center, zoom: 12),
                   polygons: _polygons,
@@ -1063,117 +1080,318 @@ class _MapViewState extends State<MapView> {
   Widget _buildGpxSidebar() {
     return Column(
       children: [
-        // Header
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.blue.shade50,
-            border: Border(
-              bottom: BorderSide(color: Colors.grey.shade300),
-            ),
-          ),
-          child: Row(
+        // GPX Tracks Section
+        Expanded(
+          flex: 2,
+          child: Column(
             children: [
-              Icon(Icons.layers, color: Colors.blue.shade700),
-              const SizedBox(width: 8),
-              Text(
-                'GPX Tracks',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.blue.shade700,
+              // GPX Header
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  border: Border(
+                    bottom: BorderSide(color: Colors.grey.shade300),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.layers, color: Colors.blue.shade700),
+                    const SizedBox(width: 8),
+                    Text(
+                      'GPX Tracks',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blue.shade700,
+                      ),
+                    ),
+                  ],
                 ),
               ),
+
+              // Import button
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _isImportingGpx ? null : _importGpxFiles,
+                    icon: _isImportingGpx
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.file_upload),
+                    label: Text(
+                        _isImportingGpx ? 'Importing...' : 'Import GPX Files'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+              ),
+
+              // Track list
+              Expanded(
+                child: _gpxData.isEmpty
+                    ? const Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.route, size: 48, color: Colors.grey),
+                            SizedBox(height: 16),
+                            Text(
+                              'No GPX tracks loaded',
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Colors.grey,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            SizedBox(height: 8),
+                            Text(
+                              'Import GPX files to see tracks here',
+                              style: TextStyle(color: Colors.grey),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        itemCount: _gpxData.tracks.length,
+                        itemBuilder: (context, index) {
+                          final track = _gpxData.tracks[index];
+                          return _buildTrackListItem(track, index);
+                        },
+                      ),
+              ),
+
+              // Footer with track count
+              if (_gpxData.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade50,
+                    border: Border(
+                      top: BorderSide(color: Colors.grey.shade300),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_outline,
+                          size: 16, color: Colors.grey.shade600),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${_gpxData.trackCount} tracks (${_gpxData.visibleTrackCount} visible)',
+                        style: TextStyle(
+                          color: Colors.grey.shade600,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
             ],
           ),
         ),
 
-        // Import button
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _isImportingGpx ? null : _importGpxFiles,
-              icon: _isImportingGpx
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.file_upload),
-              label:
-                  Text(_isImportingGpx ? 'Importing...' : 'Import GPX Files'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.green,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-              ),
-            ),
-          ),
-        ),
-
-        // Track list
+        // Client Maps Section
         Expanded(
-          child: _gpxData.isEmpty
-              ? const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.route, size: 48, color: Colors.grey),
-                      SizedBox(height: 16),
-                      Text(
-                        'No GPX tracks loaded',
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: Colors.grey,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      SizedBox(height: 8),
-                      Text(
-                        'Import GPX files to see tracks here',
-                        style: TextStyle(color: Colors.grey),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  itemCount: _gpxData.tracks.length,
-                  itemBuilder: (context, index) {
-                    final track = _gpxData.tracks[index];
-                    return _buildTrackListItem(track, index);
-                  },
-                ),
+          flex: 1,
+          child: _buildClientMapsSection(),
         ),
+      ],
+    );
+  }
 
-        // Footer with track count
-        if (_gpxData.isNotEmpty)
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade50,
-              border: Border(
-                top: BorderSide(color: Colors.grey.shade300),
+  Widget _buildClientMapsSection() {
+    return Consumer<JobListProvider>(
+      builder: (context, jobListProvider, child) {
+        return Column(
+          children: [
+            // Client Maps Header
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                border: Border(
+                  top: BorderSide(color: Colors.grey.shade300),
+                  bottom: BorderSide(color: Colors.grey.shade300),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.map, color: Colors.orange.shade700),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Client Maps',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.orange.shade700,
+                    ),
+                  ),
+                ],
               ),
             ),
-            child: Row(
-              children: [
-                Icon(Icons.info_outline, size: 16, color: Colors.grey.shade600),
-                const SizedBox(width: 8),
-                Text(
-                  '${_gpxData.trackCount} tracks (${_gpxData.visibleTrackCount} visible)',
-                  style: TextStyle(
-                    color: Colors.grey.shade600,
-                    fontSize: 12,
-                  ),
+
+            // URL/Text input with client suggestions
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Text field for Google My Maps URL with client suggestions
+                    // GestureDetector(
+                    //   onTap: () {
+                    //     // Hide suggestions when tapping outside
+                    //     setState(() {
+                    //       _showSuggestions = false;
+                    //     });
+                    //   },
+                    //   child: TextField(
+                    //     controller: _clientMapsController,
+                    //     onChanged: (value) {
+                    //       setState(() {
+                    //         _showSuggestions = value.isNotEmpty &&
+                    //             !value.startsWith('http') &&
+                    //             jobListProvider.jobListItems.any((item) => item
+                    //                 .client
+                    //                 .toLowerCase()
+                    //                 .contains(value.toLowerCase()));
+                    //       });
+                    //     },
+                    //     onTap: () {
+                    //       setState(() {
+                    //         _showSuggestions = _clientMapsController
+                    //                 .text.isNotEmpty &&
+                    //             !_clientMapsController.text.startsWith('http');
+                    //       });
+                    //     },
+                    //     decoration: InputDecoration(
+                    //       labelText: 'Google My Maps URL or Client',
+                    //       hintText: 'Enter URL or type client name...',
+                    //       border: const OutlineInputBorder(),
+                    //       suffixIcon: _isDownloadingMaps
+                    //           ? const SizedBox(
+                    //               width: 20,
+                    //               height: 20,
+                    //               child:
+                    //                   CircularProgressIndicator(strokeWidth: 2),
+                    //             )
+                    //           : IconButton(
+                    //               icon: const Icon(Icons.download),
+                    //               onPressed:
+                    //                   _clientMapsController.text.isNotEmpty
+                    //                       ? _downloadMaps
+                    //                       : null,
+                    //               tooltip: 'Download Maps',
+                    //             ),
+                    //     ),
+                    //   ),
+                    // ),
+
+                    // // Client suggestions dropdown
+                    // if (_clientMapsController.text.isNotEmpty &&
+                    //     _showSuggestions)
+                    //   _buildClientSuggestions(jobListProvider),
+
+                    // const SizedBox(height: 16),
+
+                    // // Download button (inline)
+                    // SizedBox(
+                    //   width: double.infinity,
+                    //   child: ElevatedButton.icon(
+                    //     onPressed: _isDownloadingMaps ||
+                    //             _clientMapsController.text.isEmpty
+                    //         ? null
+                    //         : _downloadMaps,
+                    //     icon: _isDownloadingMaps
+                    //         ? const SizedBox(
+                    //             width: 16,
+                    //             height: 16,
+                    //             child:
+                    //                 CircularProgressIndicator(strokeWidth: 2),
+                    //           )
+                    //         : const Icon(Icons.download),
+                    //     label: Text(_isDownloadingMaps
+                    //         ? 'Downloading...'
+                    //         : 'Download Maps'),
+                    //     style: ElevatedButton.styleFrom(
+                    //       backgroundColor: Colors.orange,
+                    //       foregroundColor: Colors.white,
+                    //       padding: const EdgeInsets.symmetric(vertical: 12),
+                    //     ),
+                    //   ),
+                    // ),
+
+                    const SizedBox(height: 24),
+
+                    // KML Downloader Widget
+                    MyMapsKmlDownloader(
+                      onKmlDataRetrieved: _handleKmlData,
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
-          ),
-      ],
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildClientSuggestions(JobListProvider jobListProvider) {
+    final query = _clientMapsController.text.toLowerCase();
+    final suggestions = jobListProvider.jobListItems
+        .where((item) =>
+            item.client.toLowerCase().contains(query) &&
+            item.client.toLowerCase() != query)
+        .take(5)
+        .toList();
+
+    if (suggestions.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(top: 4),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.grey.shade300),
+        borderRadius: BorderRadius.circular(4),
+        color: Colors.white,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: suggestions.map((item) {
+          return ListTile(
+            dense: true,
+            title: Text(item.client),
+            subtitle: item.area.isNotEmpty
+                ? Text(
+                    item.area,
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  )
+                : null,
+            onTap: () {
+              setState(() {
+                _clientMapsController.text =
+                    item.area.isNotEmpty ? item.area : item.client;
+                _showSuggestions = false;
+              });
+              _navigateToJob(item);
+            },
+          );
+        }).toList(),
+      ),
     );
   }
 
@@ -1385,8 +1603,178 @@ class _MapViewState extends State<MapView> {
     });
   }
 
+  // Client Maps functionality
+  void _navigateToJob(JobListItem jobItem) {
+    // Show a snackbar with job information
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Selected Job: ${jobItem.client}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              Text('Invoice: ${jobItem.invoice}'),
+              Text('Area: ${jobItem.area}'),
+              Text(
+                  'Date: ${jobItem.date.day}/${jobItem.date.month}/${jobItem.date.year}'),
+            ],
+          ),
+          backgroundColor: Colors.orange,
+          duration: const Duration(seconds: 4),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// Check if URL is a valid KML or Google My Maps URL
+  bool _isValidKmlUrl(String url) {
+    return url.toLowerCase().contains('.kml') ||
+        url.contains('google.com/maps') ||
+        url.contains('drive.google.com') ||
+        url.contains('mymaps.google.com');
+  }
+
+  /// Handle KML data retrieved from MyMapsKmlDownloader
+  void _handleKmlData(Uint8List kmlBytes, String fileName) async {
+    try {
+      // Parse KML data using KmlParserService
+      final polygons = await KmlParserService.parseKmlData(kmlBytes, fileName);
+
+      if (polygons.isNotEmpty) {
+        setState(() {
+          _customPolygons.addAll(polygons);
+          _hasUnsavedChanges = true;
+
+          // Select the first new polygon
+          if (_selectedPolygonIndex == null && _customPolygons.isNotEmpty) {
+            _selectedPolygonIndex =
+                (_customPolygons.length - polygons.length).toInt();
+            _selectedCustomPolygon = _customPolygons[_selectedPolygonIndex!];
+          }
+        });
+
+        // Update the map display
+        _updateMapView();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content:
+                  Text('Loaded ${polygons.length} polygon(s) from $fileName'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No polygons found in the KML file'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error processing KML: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _downloadMaps() async {
+    if (_clientMapsController.text.isEmpty) return;
+
+    setState(() {
+      _isDownloadingMaps = true;
+    });
+
+    try {
+      final text = _clientMapsController.text.trim();
+
+      if (text.contains('google.com/maps') || text.contains('goo.gl')) {
+        // Launch the URL in external app for Google Maps URLs
+        final uri = Uri.parse(text);
+        if (await canLaunchUrl(uri)) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Opening Google My Maps in external app...'),
+                backgroundColor: Colors.blue,
+              ),
+            );
+          }
+        } else {
+          throw Exception('Could not launch URL');
+        }
+      } else {
+        // Check if it's a selected job with area URL
+        final jobListProvider =
+            Provider.of<JobListProvider>(context, listen: false);
+        final selectedJob = jobListProvider.jobListItems
+            .where((job) => job.client == text)
+            .firstOrNull;
+
+        if (selectedJob != null && selectedJob.area.isNotEmpty) {
+          // For job areas, just open in external app since we can't download without user interaction
+          if (_isValidKmlUrl(selectedJob.area)) {
+            final uri = Uri.parse(selectedJob.area);
+            if (await canLaunchUrl(uri)) {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                        'Opening ${selectedJob.client} area in external app...'),
+                    backgroundColor: Colors.blue,
+                  ),
+                );
+              }
+            }
+          } else {
+            throw Exception('Invalid KML URL in job area field');
+          }
+        } else {
+          throw Exception(
+              'No job found with that client name, or use the KML downloader below for URLs');
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isDownloadingMaps = false;
+        });
+      }
+    }
+  }
+
   @override
   void dispose() {
+    _clientMapsController.dispose();
     try {
       _controller?.dispose();
     } catch (e) {

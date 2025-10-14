@@ -65,14 +65,17 @@ enum JobListStatus {
 }
 
 enum JobType {
-  flyersPrintingOnly('Flyers - printing only'),
-  junkCollection('Junk collection'),
-  flyersAndPosters('Flyers and posters'),
-  furnitureMove('Furniture move'),
-  flyerDistribution('Flyer distribution'),
-  flyerPrintingAndDistribution('Flyer printing and distribution'),
+  flyersPrintingOnly('Flyers - Printing only'),
+  junkCollection('Junk Collection'),
+  flyersAndPosters('Flyers and Posters'),
+  furnitureMove('Furniture Move'),
+  flyerDistribution('Flyer Distribution'),
+  flyerPrintingAndDistribution('Flyer Printing and Distribution'),
   windowCleaning('Window Cleaning'),
-  solarPanelCleaning('Solar panel Cleaning');
+  solarPanelCleaning('Solar Panel Cleaning'),
+  calendersDistribution('Calenders Distribution'),
+  trailerTowing('Trailer Towing'),
+  postering('Postering');
 
   const JobType(this.displayName);
   final String displayName;

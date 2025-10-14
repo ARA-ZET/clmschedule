@@ -66,7 +66,8 @@ class CollectionScheduleProvider extends ChangeNotifier {
     _collectionJobs = jobListItems
         .where((job) =>
             job.jobType == JobType.junkCollection ||
-            job.jobType == JobType.furnitureMove)
+            job.jobType == JobType.furnitureMove ||
+            job.jobType == JobType.trailerTowing)
         .map((job) => _jobListItemToCollectionJob(job))
         .toList();
 
@@ -82,6 +83,11 @@ class CollectionScheduleProvider extends ChangeNotifier {
         _getVehicleTrailerComboFromQuantity(jobListItem.quantity);
     final vehicleTrailer = _parseVehicleTrailerCombo(vehicleTrailerCombo ?? '');
 
+    // Determine timeSlots from quantityDistributed (default to 1 if not set or invalid)
+    final timeSlots = (jobListItem.quantityDistributed > 0)
+        ? jobListItem.quantityDistributed
+        : 1;
+
     return CollectionJob(
       id: jobListItem.id,
       location: jobListItem.collectionAddress.isNotEmpty
@@ -90,7 +96,9 @@ class CollectionScheduleProvider extends ChangeNotifier {
       vehicleType: vehicleTrailer?.vehicleType ?? VehicleType.hyundai,
       trailerType: vehicleTrailer?.trailerType ?? TrailerType.noTrailer,
       date: jobListItem.date,
-      timeSlot: jobListItem.date.hour,
+      timeSlot:
+          '${jobListItem.date.hour.toString().padLeft(2, '0')}:${jobListItem.date.minute.toString().padLeft(2, '0')}',
+      timeSlots: timeSlots,
       assignedStaff: [], // Can be populated later
       staffCount: jobListItem.manDays.ceil(),
       jobType: jobListItem.jobType.displayName,
@@ -107,6 +115,12 @@ class CollectionScheduleProvider extends ChangeNotifier {
         .where((job) =>
             job.date.year == month.year && job.date.month == month.month)
         .toList();
+  }
+
+  // Helper method to check if the next month has any jobs
+  bool hasJobsInNextMonth(DateTime currentMonth) {
+    final nextMonth = DateTime(currentMonth.year, currentMonth.month + 1, 1);
+    return _getJobsForMonth(nextMonth).isNotEmpty;
   }
 
   // Helper methods for vehicle/trailer parsing (copied from add_edit_job_dialog.dart)
@@ -298,15 +312,30 @@ class CollectionScheduleProvider extends ChangeNotifier {
   }
 
   List<CollectionJob> getJobsForVehicleAndTimeSlot(
-      VehicleType vehicleType, DateTime date, int timeSlot) {
+      VehicleType vehicleType, DateTime date, String timeSlot) {
     return collectionJobs
         .where((job) =>
             job.vehicleType == vehicleType &&
             job.date.year == date.year &&
             job.date.month == date.month &&
             job.date.day == date.day &&
-            job.timeSlot == timeSlot)
+            _jobOccupiesTimeSlot(job, timeSlot))
         .toList();
+  }
+
+  // Helper method to check if a job occupies a specific time slot
+  bool _jobOccupiesTimeSlot(CollectionJob job, String timeSlot) {
+    final availableTimeSlots = CollectionJob.availableTimeSlots;
+    final jobStartIndex = availableTimeSlots.indexOf(job.timeSlot);
+    final checkIndex = availableTimeSlots.indexOf(timeSlot);
+
+    if (jobStartIndex == -1 || checkIndex == -1) {
+      return job.timeSlot == timeSlot; // Fallback to exact match
+    }
+
+    // Check if the timeSlot falls within the job's duration
+    return checkIndex >= jobStartIndex &&
+        checkIndex < (jobStartIndex + job.timeSlots);
   }
 
   List<CollectionJob> getJobsForDate(DateTime date) {
@@ -326,18 +355,161 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   // Check if a specific time slot is available for a vehicle on a date
   bool isTimeSlotAvailable(
-      VehicleType vehicleType, DateTime date, int timeSlot) {
+      VehicleType vehicleType, DateTime date, String timeSlot) {
     return !collectionJobs.any((job) =>
         job.vehicleType == vehicleType &&
         job.date.year == date.year &&
         job.date.month == date.month &&
         job.date.day == date.day &&
-        job.timeSlot == timeSlot);
+        _jobOccupiesTimeSlot(job, timeSlot));
+  }
+
+  // Get all occupied time slots for a vehicle on a specific date
+  List<String> getOccupiedTimeSlots(VehicleType vehicleType, DateTime date,
+      {String? excludeJobId}) {
+    const allTimeSlots = [
+      "07:30",
+      "08:00",
+      "08:30",
+      "09:00",
+      "09:30",
+      "10:00",
+      "10:30",
+      "11:00",
+      "11:30",
+      "12:00",
+      "12:30",
+      "13:00",
+      "13:30",
+      "14:00",
+      "14:30",
+      "15:00",
+      "15:30",
+      "16:00",
+      "16:30",
+      "17:00",
+      "17:30",
+      "18:00",
+      "18:30",
+      "19:00",
+      "19:30",
+      "20:00"
+    ];
+
+    Set<String> occupiedSlots = {};
+
+    for (var job in collectionJobs) {
+      // Skip the job being edited if excludeJobId is provided
+      if (excludeJobId != null && job.id == excludeJobId) continue;
+
+      if (job.vehicleType == vehicleType &&
+          job.date.year == date.year &&
+          job.date.month == date.month &&
+          job.date.day == date.day) {
+        // Add all time slots occupied by this job
+        for (var timeSlot in allTimeSlots) {
+          if (_jobOccupiesTimeSlot(job, timeSlot)) {
+            occupiedSlots.add(timeSlot);
+          }
+        }
+      }
+    }
+
+    return occupiedSlots.toList();
+  }
+
+  // Check if selecting a time slot with given duration would overlap with existing jobs
+  bool wouldOverlapWithExistingJobs(VehicleType vehicleType, DateTime date,
+      String startTimeSlot, int duration,
+      {String? excludeJobId}) {
+    const allTimeSlots = [
+      "07:30",
+      "08:00",
+      "08:30",
+      "09:00",
+      "09:30",
+      "10:00",
+      "10:30",
+      "11:00",
+      "11:30",
+      "12:00",
+      "12:30",
+      "13:00",
+      "13:30",
+      "14:00",
+      "14:30",
+      "15:00",
+      "15:30",
+      "16:00",
+      "16:30",
+      "17:00",
+      "17:30",
+      "18:00",
+      "18:30",
+      "19:00",
+      "19:30",
+      "20:00"
+    ];
+
+    final startIndex = allTimeSlots.indexOf(startTimeSlot);
+    if (startIndex == -1) return false;
+
+    // Check if any of the slots this job would occupy are already taken
+    for (int i = 0; i < duration; i++) {
+      if (startIndex + i >= allTimeSlots.length) break;
+
+      final slotToCheck = allTimeSlots[startIndex + i];
+      if (!isTimeSlotAvailable(vehicleType, date, slotToCheck)) {
+        // If excludeJobId is provided, check if the conflict is with a different job
+        if (excludeJobId != null) {
+          final conflictingJobs = collectionJobs.where((job) =>
+              job.id != excludeJobId &&
+              job.vehicleType == vehicleType &&
+              job.date.year == date.year &&
+              job.date.month == date.month &&
+              job.date.day == date.day &&
+              _jobOccupiesTimeSlot(job, slotToCheck));
+
+          if (conflictingJobs.isNotEmpty) return true;
+        } else {
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   // Get available time slots for a vehicle on a specific date
-  List<int> getAvailableTimeSlots(VehicleType vehicleType, DateTime date) {
-    const allTimeSlots = [8, 9, 10, 11, 12, 13, 14, 15, 16]; // 08:00 to 16:00
+  List<String> getAvailableTimeSlots(VehicleType vehicleType, DateTime date) {
+    const allTimeSlots = [
+      "07:30",
+      "08:00",
+      "08:30",
+      "09:00",
+      "09:30",
+      "10:00",
+      "10:30",
+      "11:00",
+      "11:30",
+      "12:00",
+      "12:30",
+      "13:00",
+      "13:30",
+      "14:00",
+      "14:30",
+      "15:00",
+      "15:30",
+      "16:00",
+      "16:30",
+      "17:00",
+      "17:30",
+      "18:00",
+      "18:30",
+      "19:00",
+      "19:30",
+      "20:00"
+    ];
     return allTimeSlots
         .where((slot) => isTimeSlotAvailable(vehicleType, date, slot))
         .toList();

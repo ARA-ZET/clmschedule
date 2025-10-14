@@ -1,0 +1,232 @@
+import 'package:flutter/foundation.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import '../services/auth_service.dart';
+
+/// Provider for managing authentication state throughout the app
+/// Integrates with Firebase Auth and provides reactive state updates
+class AuthProvider extends ChangeNotifier {
+  final AuthService _authService = AuthService();
+  
+  // Private state variables
+  User? _user;
+  bool _isLoading = false;
+  String? _errorMessage;
+  bool _isInitialized = false;
+
+  // Public getters
+  User? get user => _user;
+  bool get isAuthenticated => _user != null;
+  bool get isLoading => _isLoading;
+  String? get errorMessage => _errorMessage;
+  bool get isInitialized => _isInitialized;
+
+  /// Initialize the auth provider and set up authentication listeners
+  Future<void> initialize() async {
+    if (_isInitialized) return;
+    
+    _setLoading(true);
+    
+    try {
+      // Initialize the auth service
+      await _authService.initialize();
+      
+      // Set initial user state
+      _user = _authService.currentUser;
+      
+      // Listen to authentication state changes
+      _authService.authStateChanges.listen((User? user) {
+        _user = user;
+        _clearError();
+        notifyListeners();
+        
+        debugPrint('Auth state changed. User: ${user?.email ?? 'None'}');
+      });
+      
+      _isInitialized = true;
+      debugPrint('AuthProvider initialized. Current user: ${_user?.email ?? 'None'}');
+      
+    } catch (e) {
+      _setError('Failed to initialize authentication: $e');
+      debugPrint('Error initializing AuthProvider: $e');
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  /// Sign in with email and password
+  Future<bool> signInWithEmailAndPassword({
+    required String email,
+    required String password,
+  }) async {
+    _setLoading(true);
+    _clearError();
+    
+    try {
+      final result = await _authService.signInWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+      
+      if (result != null) {
+        debugPrint('Sign in successful via AuthProvider');
+        return true;
+      }
+      
+      _setError('Sign in failed. Please try again.');
+      return false;
+      
+    } catch (e) {
+      _setError(e.toString().replaceFirst('Exception: ', ''));
+      debugPrint('Sign in error in AuthProvider: $e');
+      return false;
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  /// Create new user account with email and password
+  Future<bool> createUserWithEmailAndPassword({
+    required String email,
+    required String password,
+  }) async {
+    _setLoading(true);
+    _clearError();
+    
+    try {
+      final result = await _authService.createUserWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+      
+      if (result != null) {
+        debugPrint('Account creation successful via AuthProvider');
+        return true;
+      }
+      
+      _setError('Account creation failed. Please try again.');
+      return false;
+      
+    } catch (e) {
+      _setError(e.toString().replaceFirst('Exception: ', ''));
+      debugPrint('Account creation error in AuthProvider: $e');
+      return false;
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  /// Sign out the current user
+  Future<void> signOut() async {
+    _setLoading(true);
+    _clearError();
+    
+    try {
+      await _authService.signOut();
+      debugPrint('Sign out successful via AuthProvider');
+    } catch (e) {
+      _setError(e.toString().replaceFirst('Exception: ', ''));
+      debugPrint('Sign out error in AuthProvider: $e');
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  /// Send password reset email
+  Future<bool> sendPasswordResetEmail(String email) async {
+    _setLoading(true);
+    _clearError();
+    
+    try {
+      await _authService.sendPasswordResetEmail(email);
+      debugPrint('Password reset email sent via AuthProvider');
+      return true;
+    } catch (e) {
+      _setError(e.toString().replaceFirst('Exception: ', ''));
+      debugPrint('Password reset error in AuthProvider: $e');
+      return false;
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  /// Update user display name
+  Future<bool> updateDisplayName(String displayName) async {
+    if (!isAuthenticated) {
+      _setError('User must be authenticated to update display name');
+      return false;
+    }
+    
+    _setLoading(true);
+    _clearError();
+    
+    try {
+      await _authService.updateDisplayName(displayName);
+      // User object will be updated via auth state listener
+      debugPrint('Display name updated via AuthProvider');
+      return true;
+    } catch (e) {
+      _setError(e.toString().replaceFirst('Exception: ', ''));
+      debugPrint('Display name update error in AuthProvider: $e');
+      return false;
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  /// Delete current user account
+  Future<bool> deleteAccount() async {
+    if (!isAuthenticated) {
+      _setError('User must be authenticated to delete account');
+      return false;
+    }
+    
+    _setLoading(true);
+    _clearError();
+    
+    try {
+      await _authService.deleteAccount();
+      debugPrint('Account deleted via AuthProvider');
+      return true;
+    } catch (e) {
+      _setError(e.toString().replaceFirst('Exception: ', ''));
+      debugPrint('Account deletion error in AuthProvider: $e');
+      return false;
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  /// Clear any current error message
+  void clearError() {
+    _clearError();
+  }
+
+  /// Get comprehensive user information
+  Map<String, dynamic> getUserInfo() {
+    return _authService.getUserInfo();
+  }
+
+  // Private helper methods
+  void _setLoading(bool loading) {
+    _isLoading = loading;
+    notifyListeners();
+  }
+
+  void _setError(String error) {
+    _errorMessage = error;
+    notifyListeners();
+  }
+
+  void _clearError() {
+    if (_errorMessage != null) {
+      _errorMessage = null;
+      notifyListeners();
+    }
+  }
+
+  @override
+  void dispose() {
+    // Clean up any subscriptions if needed
+    super.dispose();
+  }
+}

@@ -10,7 +10,9 @@ class CollectionJob {
   final VehicleType vehicleType;
   final TrailerType trailerType;
   final DateTime date;
-  final int timeSlot; // Hour in 24-hour format (8-16)
+  final String timeSlot; // Time in HH:MM format (08:00-16:00)
+  final int
+      timeSlots; // Number of 30-minute slots this job occupies (1 or more)
   final List<String> assignedStaff; // Staff names/IDs
   final int staffCount; // Number of staff needed
   final String jobType; // 'junk collection', 'furniture move', etc.
@@ -26,6 +28,7 @@ class CollectionJob {
     required this.trailerType,
     required this.date,
     required this.timeSlot,
+    int? timeSlots,
     required this.assignedStaff,
     required this.staffCount,
     required this.jobType,
@@ -33,7 +36,7 @@ class CollectionJob {
     required this.clients,
     this.notes = '',
     this.jobListItemId = '', // Optional link to job list item
-  });
+  }) : timeSlots = (timeSlots != null && timeSlots >= 1) ? timeSlots : 1;
 
   // Create from Firestore
   factory CollectionJob.fromMap(String id, Map<String, dynamic> data) {
@@ -55,7 +58,11 @@ class CollectionJob {
       date: data['date'] != null
           ? (data['date'] as Timestamp).toDate()
           : DateTime.now(),
-      timeSlot: data['timeSlot'] as int? ?? 8,
+      timeSlot: data['timeSlot'] is int
+          ? '${(data['timeSlot'] as int).toString().padLeft(2, '0')}:00'
+          : data['timeSlot'] as String? ?? '08:00',
+      timeSlots: data['timeSlots']
+          as int?, // Will default to 1 in constructor if null or < 1
       assignedStaff:
           (data['assignedStaff'] as List<dynamic>?)?.cast<String>() ?? [],
       staffCount: data['staffCount'] as int? ?? 1,
@@ -76,6 +83,7 @@ class CollectionJob {
       'trailerType': trailerType.name,
       'date': Timestamp.fromDate(date),
       'timeSlot': timeSlot,
+      'timeSlots': timeSlots,
       'assignedStaff': assignedStaff,
       'staffCount': staffCount,
       'jobType': jobType,
@@ -92,7 +100,8 @@ class CollectionJob {
     VehicleType? vehicleType,
     TrailerType? trailerType,
     DateTime? date,
-    int? timeSlot,
+    String? timeSlot,
+    int? timeSlots,
     List<String>? assignedStaff,
     int? staffCount,
     String? jobType,
@@ -108,6 +117,7 @@ class CollectionJob {
       trailerType: trailerType ?? this.trailerType,
       date: date ?? this.date,
       timeSlot: timeSlot ?? this.timeSlot,
+      timeSlots: timeSlots ?? this.timeSlots,
       assignedStaff: assignedStaff ?? this.assignedStaff,
       staffCount: staffCount ?? this.staffCount,
       jobType: jobType ?? this.jobType,
@@ -142,14 +152,25 @@ class CollectionJob {
   }
 
   String get timeSlotDisplay {
-    return '${timeSlot.toString().padLeft(2, '0')}:00';
+    return timeSlot;
   }
 
   String get assignedStaffDisplay => assignedStaff.join(', ');
 
   String get clientsDisplay => clients.join(', ');
 
-  bool get isValidTimeSlot => timeSlot >= 8 && timeSlot <= 16;
+  bool get isValidTimeSlot {
+    if (timeSlot.isEmpty) return false;
+    try {
+      final parts = timeSlot.split(':');
+      if (parts.length != 2) return false;
+      final hour = int.parse(parts[0]);
+      final minute = int.parse(parts[1]);
+      return hour >= 8 && hour <= 16 && (minute == 0 || minute == 30);
+    } catch (e) {
+      return false;
+    }
+  }
 
   @override
   String toString() {
@@ -160,8 +181,32 @@ class CollectionJob {
 
   // Static helper methods
   static List<String> get availableTimeSlots {
-    return List.generate(
-        9, (index) => '${(index + 8).toString().padLeft(2, '0')}:00');
+    final List<String> slots = [];
+    for (int hour = 8; hour <= 16; hour++) {
+      slots.add('${hour.toString().padLeft(2, '0')}:00');
+      if (hour < 16) {
+        // Don't add :30 for the last hour (16:00)
+        slots.add('${hour.toString().padLeft(2, '0')}:30');
+      }
+    }
+    return slots;
+  }
+
+  // Get the end time slot for this job
+  String get endTimeSlot {
+    final availableSlots = CollectionJob.availableTimeSlots;
+    final startIndex = availableSlots.indexOf(timeSlot);
+    if (startIndex == -1) return timeSlot;
+
+    final endIndex =
+        (startIndex + timeSlots - 1).clamp(0, availableSlots.length - 1);
+    return availableSlots[endIndex];
+  }
+
+  // Get display text showing the time range
+  String get timeRangeDisplay {
+    if (timeSlots <= 1) return timeSlot;
+    return '$timeSlot - $endTimeSlot';
   }
 
   static List<VehicleType> get availableVehicleTypes => VehicleType.values;

@@ -1,3 +1,4 @@
+import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/job.dart';
@@ -70,6 +71,7 @@ class JobCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<ScaleProvider>(
       builder: (context, scaleProvider, child) {
+        final isFullscreen = context.watch<TogglerProvider>().isFullview;
         return Card(
           margin: const EdgeInsets.all(1),
           color: _getStatusColor(context),
@@ -89,8 +91,13 @@ class JobCard extends StatelessWidget {
                         child: _ClientListEditor(
                           job: job,
                           onClientsChanged: (List<String> updatedClients) {
-                            context.read<ScheduleProvider>().updateJob(
-                                  job.copyWith(clients: updatedClients),
+                            final originalJob = job;
+                            final modifiedJob =
+                                job.copyWith(clients: updatedClients);
+                            context.read<ScheduleProvider>().updateJobWithUndo(
+                                  originalJob,
+                                  modifiedJob,
+                                  job.date,
                                 );
                           },
                         ),
@@ -98,144 +105,166 @@ class JobCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                Container(
-                  height: 1,
-                  color: Colors.white54,
-                  margin: const EdgeInsets.symmetric(vertical: 2),
-                ),
+                !isFullscreen
+                    ? const SizedBox.shrink()
+                    : Container(
+                        height: 1,
+                        color: Colors.white54,
+                        margin: const EdgeInsets.symmetric(vertical: 2),
+                      ),
                 // Work Area Row
-                Flexible(
-                  flex: 3,
-                  child: Row(
-                    children: [
-                      Expanded(
-                        flex: 2,
-                        child: _WorkAreaListEditor(
-                          job: job,
-                          onWorkAreasChanged:
-                              (List<CustomPolygon> updatedWorkMaps) {
-                            final updatedWorkingAreas = updatedWorkMaps
-                                .map((polygon) => polygon.name)
-                                .toList();
-                            context.read<ScheduleProvider>().updateJob(
-                                  job.copyWith(
+                !isFullscreen
+                    ? const SizedBox.shrink()
+                    : Flexible(
+                        flex: 3,
+                        child: Row(
+                          children: [
+                            Expanded(
+                              flex: 2,
+                              child: _WorkAreaListEditor(
+                                job: job,
+                                onWorkAreasChanged:
+                                    (List<CustomPolygon> updatedWorkMaps) {
+                                  final updatedWorkingAreas = updatedWorkMaps
+                                      .map((polygon) => polygon.name)
+                                      .toList();
+                                  final originalJob = job;
+                                  final modifiedJob = job.copyWith(
                                     workingAreas: updatedWorkingAreas,
                                     workMaps: updatedWorkMaps,
-                                  ),
-                                );
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                Container(
-                  height: 1,
-                  color: Colors.white54,
-                  margin: const EdgeInsets.only(top: 2, bottom: 4),
-                ),
-                // Status Row
-                Flexible(
-                  flex: 1,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Tooltip(
-                        message: 'Open location in Google Maps',
-                        child: GestureDetector(
-                          onTap: () => _printMapLink(context),
-                          child: Text(
-                            'PRINT MAP',
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.left,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: scaleProvider.smallFontSize,
-                              letterSpacing: 1,
-                              fontWeight: FontWeight.w500,
+                                  );
+                                  context
+                                      .read<ScheduleProvider>()
+                                      .updateJobWithUndo(
+                                        originalJob,
+                                        modifiedJob,
+                                        job.date,
+                                      );
+                                },
+                              ),
                             ),
-                            // Make text uppercase
-                            textScaler: const TextScaler.linear(1),
-                            // The actual text is already 'Open Map', so use .toUpperCase()
-                            // But since it's a const Text, change to:
-                            // child: Text('OPEN MAP', ...)
-                            maxLines: 1,
-                          ),
+                          ],
                         ),
                       ),
-                      Tooltip(
-                        message: 'Change job status',
-                        child: Consumer<JobStatusProvider>(
-                          builder: (context, statusProvider, child) {
-                            final currentStatus =
-                                statusProvider.getStatusById(job.statusId);
-                            return TextButton(
-                              onPressed: () {
-                                showDialog(
-                                  context: context,
-                                  builder: (context) => AlertDialog(
-                                    title: const Text('Change Status'),
-                                    content: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children:
-                                          statusProvider.statuses.map((status) {
-                                        final isSelected =
-                                            status.id == job.statusId;
-                                        return ListTile(
-                                          dense: true,
-                                          title: Text(status.label),
-                                          tileColor: isSelected
-                                              ? status.color.withOpacity(0.3)
-                                              : null,
-                                          leading: Container(
-                                            width: 20,
-                                            height: 20,
-                                            decoration: BoxDecoration(
-                                              color: status.color,
-                                              shape: BoxShape.circle,
-                                            ),
-                                          ),
-                                          onTap: () {
-                                            context
-                                                .read<ScheduleProvider>()
-                                                .updateJob(
-                                                  job.copyWith(
-                                                      statusId: status.id),
-                                                );
-                                            Navigator.of(context).pop();
-                                          },
-                                        );
-                                      }).toList(),
-                                    ),
-                                  ),
-                                );
-                              },
-                              style: TextButton.styleFrom(
-                                backgroundColor: _getStatusColor(context),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 4,
-                                ),
-                                minimumSize: Size.zero,
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              ),
-                              child: Text(
-                                (currentStatus?.label ?? 'UNKNOWN')
-                                    .toUpperCase(),
-                                style: TextStyle(
+
+                !isFullscreen
+                    ? const SizedBox.shrink()
+                    : Container(
+                        height: 1,
+                        color: Colors.white54,
+                        margin: const EdgeInsets.only(top: 2, bottom: 4),
+                      ),
+                // Status Row
+                !isFullscreen
+                    ? const SizedBox.shrink()
+                    : Flexible(
+                        flex: 1,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Tooltip(
+                              message: 'Open location in Google Maps',
+                              child: GestureDetector(
+                                onTap: () => _printMapLink(context),
+                                child: Text(
+                                  'PRINT MAP',
+                                  overflow: TextOverflow.ellipsis,
+                                  textAlign: TextAlign.left,
+                                  style: TextStyle(
                                     color: Colors.white,
-                                    fontSize: scaleProvider.smallFontSize),
-                                overflow: TextOverflow.ellipsis,
-                                maxLines: 1,
+                                    fontSize: scaleProvider.smallFontSize,
+                                    letterSpacing: 1,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                  // Make text uppercase
+                                  textScaler: const TextScaler.linear(1),
+                                  // The actual text is already 'Open Map', so use .toUpperCase()
+                                  // But since it's a const Text, change to:
+                                  // child: Text('OPEN MAP', ...)
+                                  maxLines: 1,
+                                ),
                               ),
-                            );
-                          },
+                            ),
+                            Tooltip(
+                              message: 'Change job status',
+                              child: Consumer<JobStatusProvider>(
+                                builder: (context, statusProvider, child) {
+                                  final currentStatus = statusProvider
+                                      .getStatusById(job.statusId);
+                                  return TextButton(
+                                    onPressed: () {
+                                      showDialog(
+                                        context: context,
+                                        builder: (context) => AlertDialog(
+                                          title: const Text('Change Status'),
+                                          content: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: statusProvider.statuses
+                                                .map((status) {
+                                              final isSelected =
+                                                  status.id == job.statusId;
+                                              return ListTile(
+                                                dense: true,
+                                                title: Text(status.label),
+                                                tileColor: isSelected
+                                                    ? status.color
+                                                        .withOpacity(0.3)
+                                                    : null,
+                                                leading: Container(
+                                                  width: 20,
+                                                  height: 20,
+                                                  decoration: BoxDecoration(
+                                                    color: status.color,
+                                                    shape: BoxShape.circle,
+                                                  ),
+                                                ),
+                                                onTap: () {
+                                                  final originalJob = job;
+                                                  final modifiedJob =
+                                                      job.copyWith(
+                                                          statusId: status.id);
+                                                  context
+                                                      .read<ScheduleProvider>()
+                                                      .updateJobWithUndo(
+                                                        originalJob,
+                                                        modifiedJob,
+                                                        job.date,
+                                                      );
+                                                  Navigator.of(context).pop();
+                                                },
+                                              );
+                                            }).toList(),
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                    style: TextButton.styleFrom(
+                                      backgroundColor: _getStatusColor(context),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 4,
+                                      ),
+                                      minimumSize: Size.zero,
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    child: Text(
+                                      (currentStatus?.label ?? 'UNKNOWN')
+                                          .toUpperCase(),
+                                      style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize:
+                                              scaleProvider.smallFontSize),
+                                      overflow: TextOverflow.ellipsis,
+                                      maxLines: 1,
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                    ],
-                  ),
-                ),
               ],
             ),
           ),

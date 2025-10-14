@@ -15,9 +15,17 @@ class CollectionJobIntegrationHelper {
     JobListItem jobListItem, {
     required VehicleType vehicleType,
     required TrailerType trailerType,
-    required int timeSlot,
+    required String timeSlot,
     List<String>? assignedStaff,
+    int? timeSlots,
   }) {
+    // Use quantityDistributed for timeSlots if available, otherwise use passed timeSlots or default to 1
+    final effectiveTimeSlots = (jobListItem.quantityDistributed > 0)
+        ? jobListItem.quantityDistributed
+        : (timeSlots != null && timeSlots >= 1)
+            ? timeSlots
+            : 1;
+
     return CollectionJob(
       id: '', // Will be set by Firestore
       location: jobListItem.collectionAddress.isNotEmpty
@@ -27,6 +35,7 @@ class CollectionJobIntegrationHelper {
       trailerType: trailerType,
       date: jobListItem.collectionDate,
       timeSlot: timeSlot,
+      timeSlots: effectiveTimeSlots,
       assignedStaff: assignedStaff ?? [],
       staffCount: (jobListItem.manDays * 1)
           .round()
@@ -79,25 +88,25 @@ class CollectionJobIntegrationHelper {
   }
 
   /// Get suggested time slot based on job priority and type
-  static int getSuggestedTimeSlot(JobListItem jobListItem) {
+  static String getSuggestedTimeSlot(JobListItem jobListItem) {
     final client = jobListItem.client.toLowerCase();
 
     // Morning slots (8-11) for residential/priority jobs
     if (client.contains('residential') ||
         client.contains('priority') ||
         client.contains('urgent')) {
-      return 8; // 08:00
+      return '08:00'; // 08:00
     }
 
     // Afternoon slots (12-16) for commercial/large jobs
     if (client.contains('commercial') ||
         client.contains('office') ||
         jobListItem.jobType == JobType.furnitureMove) {
-      return 13; // 13:00
+      return '13:00'; // 13:00
     }
 
     // Default to mid-morning
-    return 10; // 10:00
+    return '10:00'; // 10:00
   }
 
   /// Show a dialog to configure collection job details when creating from a regular job
@@ -127,7 +136,7 @@ class _CollectionJobConfigDialogState
     extends State<_CollectionJobConfigDialog> {
   late VehicleType _selectedVehicleType;
   late TrailerType _selectedTrailerType;
-  late int _selectedTimeSlot;
+  late String _selectedTimeSlot;
   final _staffController = TextEditingController();
 
   @override
@@ -166,7 +175,11 @@ class _CollectionJobConfigDialogState
                   ),
             ),
             Text(
-              'Collection Date: ${widget.jobListItem.collectionDate.day}/${widget.jobListItem.collectionDate.month}/${widget.jobListItem.collectionDate.year}',
+              widget.jobListItem.collectionDate.year == 2000 &&
+                      widget.jobListItem.collectionDate.month == 1 &&
+                      widget.jobListItem.collectionDate.day == 1
+                  ? 'Collection Date: Not Set'
+                  : 'Collection Date: ${widget.jobListItem.collectionDate.day}/${widget.jobListItem.collectionDate.month}/${widget.jobListItem.collectionDate.year}',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 16),
@@ -214,16 +227,16 @@ class _CollectionJobConfigDialogState
               },
             ),
             const SizedBox(height: 16),
-            DropdownButtonFormField<int>(
+            DropdownButtonFormField<String>(
               initialValue: _selectedTimeSlot,
               decoration: const InputDecoration(
                 labelText: 'Time Slot',
                 border: OutlineInputBorder(),
               ),
-              items: List.generate(9, (index) => 8 + index).map((hour) {
+              items: CollectionJob.availableTimeSlots.map((slot) {
                 return DropdownMenuItem(
-                  value: hour,
-                  child: Text('${hour.toString().padLeft(2, '0')}:00'),
+                  value: slot,
+                  child: Text(slot),
                 );
               }).toList(),
               onChanged: (value) {

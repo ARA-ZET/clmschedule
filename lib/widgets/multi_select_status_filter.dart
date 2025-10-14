@@ -140,7 +140,7 @@ class MultiSelectStatusFilter extends StatelessWidget {
                   ),
                   onTap: () => onToggle(status.id),
                 );
-              }).toList(),
+              }),
             ];
           },
         );

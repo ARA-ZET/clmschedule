@@ -28,7 +28,7 @@ class CustomJobListStatus {
     return {
       'id': id,
       'label': label,
-      'color': color.value,
+      'color': color.toARGB32(),
       'isDefault': isDefault,
     };
   }

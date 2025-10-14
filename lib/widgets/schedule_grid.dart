@@ -1,3 +1,4 @@
+import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -54,18 +55,36 @@ class _ScheduleGridState extends State<ScheduleGrid> {
     return months[month - 1];
   }
 
-  // Generate list of days for the current month plus the next month (optimized for Firestore reads)
-  List<DateTime> _getDates(DateTime baseDate) {
+  // Generate list of days for the current month, plus next month if it has jobs
+  List<DateTime> _getDates(DateTime baseDate, ScheduleProvider provider) {
     // Get first day of the current month
     final firstDayOfMonth = DateTime(baseDate.year, baseDate.month, 1);
 
-    // Get last day of the next month
-    final lastDayOfNextMonth = DateTime(baseDate.year, baseDate.month + 2, 0);
+    // Get last day of the current month
+    final lastDayOfCurrentMonth =
+        DateTime(baseDate.year, baseDate.month + 1, 0);
 
-    // Calculate total days from current month start to next month end
-    final totalDays = lastDayOfNextMonth.difference(firstDayOfMonth).inDays + 1;
+    // Calculate total days in the current month
+    final currentMonthDays =
+        lastDayOfCurrentMonth.difference(firstDayOfMonth).inDays + 1;
 
-    // Generate all dates in the range (current month + next month)
+    // Check if next month has jobs
+    final includeNextMonth = provider.hasJobsInNextMonth;
+
+    DateTime lastDay;
+    int totalDays;
+
+    if (includeNextMonth) {
+      // Include next month dates
+      lastDay = DateTime(baseDate.year, baseDate.month + 2, 0);
+      totalDays = lastDay.difference(firstDayOfMonth).inDays + 1;
+    } else {
+      // Current month only
+      lastDay = lastDayOfCurrentMonth;
+      totalDays = currentMonthDays;
+    }
+
+    // Generate all dates in the range
     return List.generate(totalDays, (index) {
       return firstDayOfMonth.add(Duration(days: index));
     });
@@ -126,6 +145,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
 
   @override
   Widget build(BuildContext context) {
+    final isFullscreen = context.watch<TogglerProvider>().isFullview;
     return Consumer2<ScheduleProvider, ScaleProvider>(
       builder: (context, scheduleProvider, scaleProvider, child) {
         // Check if month changed and reset scroll position
@@ -135,10 +155,12 @@ class _ScheduleGridState extends State<ScheduleGrid> {
         }
 
         final currentMonth = scheduleProvider.currentMonth;
-        final dates = _getDates(currentMonth);
+        final dates = _getDates(currentMonth, scheduleProvider);
         final distributors = scheduleProvider.distributors;
 
-        final double rowHeight = 92.0 * scaleProvider.scale;
+        final double rowHeight = isFullscreen
+            ? 92.0 * scaleProvider.scale
+            : 40.0 * scaleProvider.scale;
 
         // Scroll to today's date when data is loaded
         _scrollToToday(dates);
@@ -417,19 +439,11 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                   if (action == null) return; // User cancelled
 
                                   if (action == DropAction.swap) {
-                                    // Swap the jobs by updating both
-                                    scheduleProvider.updateJob(
-                                      draggedJob.copyWith(
-                                        distributorId: distributor.id,
-                                        date: date,
-                                      ),
-                                    );
-
-                                    scheduleProvider.updateJob(
-                                      targetJob.copyWith(
-                                        distributorId: draggedJob.distributorId,
-                                        date: draggedJob.date,
-                                      ),
+                                    // Swap the jobs using undo/redo command
+                                    await scheduleProvider.swapJobsWithUndo(
+                                      draggedJob,
+                                      targetJob,
+                                      date,
                                     );
                                   } else if (action ==
                                       DropAction.addToExisting) {
@@ -444,40 +458,71 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                       ...draggedJob.workingAreas,
                                     }.toList(); // Remove duplicates
 
-                                    // Debug: Print the combination results
-                                    print('Combining jobs:');
-                                    print(
-                                        'Target clients: ${targetJob.clients}');
-                                    print(
-                                        'Dragged clients: ${draggedJob.clients}');
-                                    print('Combined clients: $combinedClients');
-
-                                    // Combine work area polygons if either job has custom work areas
                                     // Combine work maps from both jobs
                                     final combinedWorkMaps = <CustomPolygon>[
                                       ...targetJob.workMaps,
                                       ...draggedJob.workMaps,
                                     ];
 
-                                    // Update the target job with combined data
-                                    scheduleProvider.updateJob(
-                                      targetJob.copyWith(
-                                        clients: combinedClients,
-                                        workingAreas: combinedWorkingAreas,
-                                        workMaps: combinedWorkMaps,
-                                      ),
+                                    // Create combined job with target job's status preserved
+                                    final combinedJob = targetJob.copyWith(
+                                      clients: combinedClients,
+                                      workingAreas: combinedWorkingAreas,
+                                      workMaps: combinedWorkMaps,
                                     );
 
-                                    // Delete the dragged job since we merged it
-                                    scheduleProvider.deleteJob(draggedJob.id);
+                                    // Use undo/redo command for combine operation
+                                    await scheduleProvider.combineJobsWithUndo(
+                                      draggedJob,
+                                      targetJob,
+                                      combinedJob,
+                                      date,
+                                    );
+                                  } else if (action == DropAction.copy) {
+                                    // Copy & Combine - preserve source job, create combined job at target
+                                    final combinedClients = <String>{
+                                      ...targetJob.clients,
+                                      ...draggedJob.clients,
+                                    }.toList(); // Remove duplicates
+
+                                    final combinedWorkingAreas = <String>{
+                                      ...targetJob.workingAreas,
+                                      ...draggedJob.workingAreas,
+                                    }.toList(); // Remove duplicates
+
+                                    // Combine work maps from both jobs
+                                    final combinedWorkMaps = <CustomPolygon>[
+                                      ...targetJob.workMaps,
+                                      ...draggedJob.workMaps,
+                                    ];
+
+                                    // Create combined job with target job's status preserved
+                                    final combinedJob = targetJob.copyWith(
+                                      clients: combinedClients,
+                                      workingAreas: combinedWorkingAreas,
+                                      workMaps: combinedWorkMaps,
+                                    );
+
+                                    // Use undo/redo command for copy & combine operation
+                                    await scheduleProvider
+                                        .copyAndCombineJobsWithUndo(
+                                      targetJob,
+                                      combinedJob,
+                                      date,
+                                    );
                                   }
                                 } else {
                                   // If target cell is empty, just move the dragged job
-                                  scheduleProvider.updateJob(
-                                    draggedJob.copyWith(
-                                      distributorId: distributor.id,
-                                      date: date,
-                                    ),
+                                  final movedJob = draggedJob.copyWith(
+                                    distributorId: distributor.id,
+                                    date: date,
+                                  );
+
+                                  // Use undo/redo command for simple move operation
+                                  await scheduleProvider.updateJobWithUndo(
+                                    draggedJob,
+                                    movedJob,
+                                    date,
                                   );
                                 }
                               },
@@ -572,7 +617,9 @@ class _AddJobButtonState extends State<_AddJobButton> {
         statusId: 'scheduled', // Use default scheduled status
       );
 
-      await context.read<ScheduleProvider>().addJob(newJob);
+      await context
+          .read<ScheduleProvider>()
+          .addJobWithUndo(newJob, newJob.date);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

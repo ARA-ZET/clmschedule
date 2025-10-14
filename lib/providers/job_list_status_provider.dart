@@ -54,7 +54,7 @@ class JobListStatusProvider extends ChangeNotifier {
 
       final docRef = await _firestore.collection('customJobListStatuses').add({
         'label': label,
-        'color': color.value,
+        'color': color.toARGB32(),
         'isDefault': false,
       });
 
@@ -82,7 +82,7 @@ class JobListStatusProvider extends ChangeNotifier {
 
       await _firestore.collection('customJobListStatuses').doc(id).update({
         'label': label,
-        'color': color.value,
+        'color': color.toARGB32(),
       });
 
       final index = _statuses.indexWhere((status) => status.id == id);

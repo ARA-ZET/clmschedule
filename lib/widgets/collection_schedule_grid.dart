@@ -1,10 +1,13 @@
+import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 
 import '../models/collection_job.dart';
+import '../models/job_list_item.dart';
 import '../providers/collection_schedule_provider.dart';
+import '../providers/job_list_provider.dart';
 import '../providers/scale_provider.dart';
 import 'month_navigation_widget.dart';
 
@@ -76,20 +79,37 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
     return months[month - 1];
   }
 
-  // Generate list of days for the current month plus the next month
-  List<DateTime> _getDates(DateTime baseDate) {
+  // Generate list of days for the current month, plus next month if it has jobs
+  List<DateTime> _getDates(
+      DateTime baseDate, CollectionScheduleProvider provider) {
     // Get first day of the current month
     final firstDayOfMonth = DateTime(baseDate.year, baseDate.month, 1);
 
-    // Get last day of the current month only
+    // Get last day of the current month
     final lastDayOfCurrentMonth =
         DateTime(baseDate.year, baseDate.month + 1, 0);
 
     // Calculate total days in the current month
-    final totalDays =
+    final currentMonthDays =
         lastDayOfCurrentMonth.difference(firstDayOfMonth).inDays + 1;
 
-    // Generate all dates in the range (current month only)
+    // Check if next month has jobs
+    final includeNextMonth = provider.hasJobsInNextMonth(baseDate);
+
+    DateTime lastDay;
+    int totalDays;
+
+    if (includeNextMonth) {
+      // Include next month dates
+      lastDay = DateTime(baseDate.year, baseDate.month + 2, 0);
+      totalDays = lastDay.difference(firstDayOfMonth).inDays + 1;
+    } else {
+      // Current month only
+      lastDay = lastDayOfCurrentMonth;
+      totalDays = currentMonthDays;
+    }
+
+    // Generate all dates in the range
     return List.generate(totalDays, (index) {
       return firstDayOfMonth.add(Duration(days: index));
     });
@@ -130,11 +150,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                 _horizontalScrollController.position.maxScrollExtent;
             final scrollPosition = targetPosition.clamp(0.0, maxScrollExtent);
 
-            _horizontalScrollController.animateTo(
-              scrollPosition,
-              duration: const Duration(milliseconds: 800),
-              curve: Curves.easeInOut,
-            );
+            _horizontalScrollController.jumpTo(scrollPosition);
             _hasScrolledToToday = true;
           }
         });
@@ -142,9 +158,20 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
     }
   }
 
-  // Generate time slots from 08:00 to 16:00
-  List<int> _getTimeSlots() {
-    return List.generate(9, (index) => 8 + index); // 8, 9, 10, ..., 16
+  // Generate time slots from 07:30 to 20:00 with 30-minute intervals
+  List<String> _getTimeSlots() {
+    List<String> timeSlots = [];
+    // Start with 07:30
+    timeSlots.add('07:30');
+    // Generate from 08:00 to 20:00 with 30-minute intervals
+    for (int hour = 8; hour <= 20; hour++) {
+      timeSlots.add('${hour.toString().padLeft(2, '0')}:00');
+      if (hour < 20) {
+        // Don't add 20:30 since we end at 20:00
+        timeSlots.add('${hour.toString().padLeft(2, '0')}:30');
+      }
+    }
+    return timeSlots;
   }
 
   static const double cellWidth = 250.0;
@@ -152,6 +179,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
 
   @override
   Widget build(BuildContext context) {
+    final bool isFullview = context.watch<TogglerProvider>().isFullview;
     return Consumer2<CollectionScheduleProvider, ScaleProvider>(
       builder: (context, collectionProvider, scaleProvider, child) {
         // Check if month changed and reset scroll state
@@ -161,10 +189,12 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
         }
 
         final currentMonth = collectionProvider.currentMonth;
-        final dates = _getDates(currentMonth);
+        final dates = _getDates(currentMonth, collectionProvider);
         final timeSlots = _getTimeSlots();
 
-        final double rowHeight = 80.0 * scaleProvider.scale;
+        final double rowHeight = isFullview
+            ? 90.0 * scaleProvider.scale
+            : 32.0 * scaleProvider.scale;
 
         // Scroll to today if not done yet
         _scrollToToday(dates);
@@ -253,7 +283,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                               color: isToday
                                   ? Theme.of(context)
                                       .primaryColor
-                                      .withOpacity(0.2)
+                                      .withValues(alpha: 0.2)
                                   : null,
                               child: Padding(
                                 padding: const EdgeInsets.all(4.0),
@@ -314,7 +344,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                             child: Card(
                               child: Center(
                                 child: Text(
-                                  '${timeSlot.toString().padLeft(2, '0')}:00',
+                                  timeSlot,
                                   style: Theme.of(context)
                                       .textTheme
                                       .titleMedium
@@ -352,7 +382,8 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                                               margin: const EdgeInsets.all(1),
                                               decoration: BoxDecoration(
                                                 color: hasJob
-                                                    ? color.withOpacity(0.1)
+                                                    ? color.withValues(
+                                                        alpha: 0.1)
                                                     : Colors.grey.shade50,
                                                 border: Border.all(
                                                   color: hasJob
@@ -403,6 +434,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
   }
 
   Widget _buildCollectionJobCard(CollectionJob job, Color color) {
+    final bool isFullview = context.watch<TogglerProvider>().isFullview;
     return Tooltip(
       message: _buildJobTooltip(job),
       child: Padding(
@@ -425,61 +457,69 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
             ),
             const SizedBox(height: 1),
             // Location
-            Text(
-              job.location,
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                color: color.withOpacity(0.9),
-              ),
-              textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            if (job.clients.isNotEmpty) ...[
-              const SizedBox(height: 1),
-              // Client
-              Text(
-                job.clients.first,
-                style: TextStyle(
-                  fontSize: 8,
-                  color: color.withOpacity(0.8),
-                  fontStyle: FontStyle.italic,
-                ),
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-            // Trailer Type
-            if (job.trailerType != TrailerType.noTrailer) ...[
-              const SizedBox(height: 1),
-              Text(
-                job.trailerType.displayName,
-                style: TextStyle(
-                  fontSize: 8,
-                  color: color.withOpacity(0.7),
-                  fontWeight: FontWeight.w500,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ],
-            // Staff info
-            if (job.assignedStaff.isNotEmpty || job.staffCount > 0) ...[
-              const SizedBox(height: 1),
-              Text(
-                job.assignedStaff.isNotEmpty
-                    ? job.assignedStaff.join(', ')
-                    : '${job.staffCount} staff needed',
-                style: TextStyle(
-                  fontSize: 7,
-                  color: color.withOpacity(0.6),
-                ),
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
+
+            isFullview
+                ? Column(
+                    children: [
+                      Text(
+                        job.location,
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: color.withValues(alpha: 0.9),
+                        ),
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (job.clients.isNotEmpty) ...[
+                        const SizedBox(height: 1),
+                        // Client
+                        Text(
+                          job.clients.first,
+                          style: TextStyle(
+                            fontSize: 8,
+                            color: color.withValues(alpha: 0.8),
+                            fontStyle: FontStyle.italic,
+                          ),
+                          textAlign: TextAlign.center,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      // Trailer Type
+                      if (job.trailerType != TrailerType.noTrailer) ...[
+                        const SizedBox(height: 1),
+                        Text(
+                          job.trailerType.displayName,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: color.withValues(alpha: 0.7),
+                            fontWeight: FontWeight.bold,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                      // Staff info
+                      if (job.assignedStaff.isNotEmpty ||
+                          job.staffCount > 0) ...[
+                        const SizedBox(height: 1),
+                        Text(
+                          job.assignedStaff.isNotEmpty
+                              ? job.assignedStaff.join(', ')
+                              : '${job.staffCount} Workers',
+                          style: TextStyle(
+                              fontSize: 8,
+                              color: color.withValues(alpha: 0.6),
+                              fontWeight: FontWeight.w800),
+                          textAlign: TextAlign.center,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ],
+                  )
+                : const SizedBox.shrink(),
           ],
         ),
       ),
@@ -490,6 +530,11 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
     final buffer = StringBuffer();
     buffer.writeln('${job.jobType} - ${job.vehicleType.displayName}');
     buffer.writeln('Location: ${job.location}');
+    buffer.writeln('Time: ${job.timeRangeDisplay}');
+    if (job.timeSlots > 1) {
+      buffer.writeln(
+          'Duration: ${job.timeSlots} slots (${job.timeSlots * 0.5}h)');
+    }
     if (job.clients.isNotEmpty) {
       buffer.writeln('Client: ${job.clients.join(', ')}');
     }
@@ -507,13 +552,13 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
   }
 
   Widget _buildAddButton(
-      VehicleType vehicleType, DateTime date, int timeSlot, Color color) {
+      VehicleType vehicleType, DateTime date, String timeSlot, Color color) {
     return Center(
       child: IconButton(
         icon: Icon(
           Icons.add,
           size: 16,
-          color: color.withOpacity(0.5),
+          color: color.withValues(alpha: 0.5),
         ),
         onPressed: () {
           _showAddCollectionJobDialog(vehicleType, date, timeSlot);
@@ -524,7 +569,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
   }
 
   void _showAddCollectionJobDialog(
-      VehicleType vehicleType, DateTime date, int timeSlot) {
+      VehicleType vehicleType, DateTime date, String timeSlot) {
     showDialog(
       context: context,
       builder: (context) => _AddCollectionJobDialog(
@@ -539,7 +584,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
 class _AddCollectionJobDialog extends StatefulWidget {
   final VehicleType vehicleType;
   final DateTime date;
-  final int timeSlot;
+  final String timeSlot;
 
   const _AddCollectionJobDialog({
     required this.vehicleType,
@@ -556,6 +601,7 @@ class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
   final _locationController = TextEditingController();
   final _staffController = TextEditingController();
   TrailerType _selectedTrailerType = TrailerType.noTrailer;
+  int _selectedTimeSlots = 1;
 
   @override
   void dispose() {
@@ -572,7 +618,7 @@ class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            '${DateFormat('EEE, MMM d, y').format(widget.date)} at ${widget.timeSlot.toString().padLeft(2, '0')}:00',
+            '${DateFormat('EEE, MMM d, y').format(widget.date)} at ${widget.timeSlot}',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: Colors.grey.shade600,
                 ),
@@ -603,6 +649,31 @@ class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
               if (value != null) {
                 setState(() {
                   _selectedTrailerType = value;
+                });
+              }
+            },
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<int>(
+            initialValue: _selectedTimeSlots,
+            decoration: const InputDecoration(
+              labelText: 'Duration (30-min slots)',
+              border: OutlineInputBorder(),
+              helperText: 'How many 30-minute blocks this job will take',
+            ),
+            items: List.generate(8, (index) => index + 1).map((slots) {
+              final hours = slots * 0.5;
+              final hoursText =
+                  hours == hours.toInt() ? '${hours.toInt()}h' : '${hours}h';
+              return DropdownMenuItem(
+                value: slots,
+                child: Text('$slots slots ($hoursText)'),
+              );
+            }).toList(),
+            onChanged: (value) {
+              if (value != null) {
+                setState(() {
+                  _selectedTimeSlots = value;
                 });
               }
             },
@@ -640,22 +711,34 @@ class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
         .where((s) => s.isNotEmpty)
         .toList();
 
-    final job = CollectionJob(
+    // Create a JobListItem instead of CollectionJob (collection jobs are now derived from job list)
+    final jobListItem = JobListItem(
       id: '', // Will be set by Firestore
-      vehicleType: widget.vehicleType,
-      trailerType: _selectedTrailerType,
+      invoice:
+          'AUTO-${DateTime.now().millisecondsSinceEpoch}', // Auto-generated invoice
+      amount: 0.0, // Default amount - can be edited later
+      client: 'COLLECTION: ${_locationController.text.trim()}',
+      jobStatusId: 'scheduled', // Default status
+      jobType: JobType.junkCollection, // Collection job type
+      area: _locationController.text.trim(),
+      quantity: _getQuantityFromVehicleTrailer(
+          widget.vehicleType, _selectedTrailerType),
+      manDays: 1.0, // Default man days
       date: widget.date,
-      timeSlot: widget.timeSlot,
-      location: _locationController.text.trim(),
-      assignedStaff: staff,
-      staffCount: staff.isEmpty ? 1 : staff.length,
-      jobType: 'junk collection', // Default job type
-      statusId: 'scheduled', // Default status
-      clients: [], // Empty clients list initially
+      collectionAddress:
+          widget.timeSlot, // Store time slot in collection address
+      collectionDate: widget.date,
+      specialInstructions: staff.isNotEmpty ? 'Staff: ${staff.join(', ')}' : '',
+      quantityDistributed:
+          _selectedTimeSlots, // Use selected time slots for quantityDistributed
+      invoiceDetails: '',
+      reportAddresses: '',
+      whoToInvoice: '',
     );
 
-    final provider = context.read<CollectionScheduleProvider>();
-    provider.addCollectionJob(job);
+    // Add to job list provider instead of collection provider
+    final jobListProvider = context.read<JobListProvider>();
+    jobListProvider.addJobListItem(jobListItem);
 
     Navigator.of(context).pop();
 
@@ -666,5 +749,13 @@ class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
         backgroundColor: Colors.green,
       ),
     );
+  }
+
+  // Helper method to get quantity based on vehicle and trailer combination
+  int _getQuantityFromVehicleTrailer(
+      VehicleType vehicleType, TrailerType trailerType) {
+    // This could be expanded to match the existing quantity encoding system
+    // For now, use 1 as default quantity
+    return 1;
   }
 }

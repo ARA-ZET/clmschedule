@@ -2,9 +2,12 @@ import 'package:flutter/material.dart';
 import 'dart:async';
 import '../models/job_list_item.dart';
 import '../services/job_list_service.dart';
+import '../services/undo_redo_manager.dart';
+import '../commands/job_list_commands.dart';
 
 class JobListProvider extends ChangeNotifier {
   final JobListService _jobListService;
+  final UndoRedoManager _undoRedoManager;
   List<JobListItem> _jobListItems = [];
   bool _isLoading = false;
   bool _isInitialized = false;
@@ -29,7 +32,7 @@ class JobListProvider extends ChangeNotifier {
   // Lazy loading state
   bool _hasInitialLoad = false;
 
-  JobListProvider(this._jobListService) {
+  JobListProvider(this._jobListService, this._undoRedoManager) {
     // Initialize with postFrameCallback to avoid blocking UI
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeCurrentMonthData();
@@ -46,6 +49,7 @@ class JobListProvider extends ChangeNotifier {
   String get sortField => _sortField;
   bool get sortAscending => _sortAscending;
   DateTime get currentMonth => _currentMonth;
+  UndoRedoManager get undoRedoManager => _undoRedoManager;
   String get currentMonthDisplay =>
       _jobListService.getMonthlyDocumentId(_currentMonth);
 
@@ -653,6 +657,77 @@ class JobListProvider extends ChangeNotifier {
   Future<void> processPendingUpdatesNow() async {
     _debounceTimer?.cancel();
     await _processPendingUpdates();
+  }
+
+  // Undo/Redo functionality
+  Future<void> addJobListItemWithUndo(JobListItem jobListItem) async {
+    final command = AddJobListItemCommand(
+      service: _jobListService,
+      jobListItem: jobListItem,
+      targetDate: jobListItem.date,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
+  }
+
+  Future<void> updateJobListItemWithUndo(
+      JobListItem originalItem, JobListItem modifiedItem) async {
+    final command = EditJobListItemCommand(
+      service: _jobListService,
+      originalItem: originalItem,
+      modifiedItem: modifiedItem,
+      targetDate: modifiedItem.date,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
+  }
+
+  Future<void> deleteJobListItemWithUndo(JobListItem jobListItem) async {
+    final command = DeleteJobListItemCommand(
+      service: _jobListService,
+      jobListItem: jobListItem,
+      targetDate: jobListItem.date,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
+  }
+
+  Future<void> updateJobStatusWithUndo(String jobId, JobListStatus newStatus,
+      JobListStatus originalStatus, DateTime targetDate) async {
+    final command = UpdateJobStatusCommand(
+      service: _jobListService,
+      jobId: jobId,
+      newStatus: newStatus,
+      originalStatus: originalStatus,
+      targetDate: targetDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
+  }
+
+  Future<void> moveJobListItemWithUndo(
+      JobListItem jobListItem, DateTime fromDate, DateTime toDate) async {
+    final command = MoveJobListItemCommand(
+      service: _jobListService,
+      jobListItem: jobListItem,
+      fromDate: fromDate,
+      toDate: toDate,
+    );
+    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
+  }
+
+  // Access to job list undo/redo functionality
+  bool get canUndo =>
+      undoRedoManager.canUndoForContext(UndoRedoContext.jobList);
+  bool get canRedo =>
+      undoRedoManager.canRedoForContext(UndoRedoContext.jobList);
+  String? get nextUndoDescription =>
+      undoRedoManager.nextUndoDescriptionForContext(UndoRedoContext.jobList);
+  String? get nextRedoDescription =>
+      undoRedoManager.nextRedoDescriptionForContext(UndoRedoContext.jobList);
+
+  Future<bool> undo() async {
+    return await undoRedoManager.undo(UndoRedoContext.jobList);
+  }
+
+  Future<bool> redo() async {
+    return await undoRedoManager.redo(UndoRedoContext.jobList);
   }
 
   @override

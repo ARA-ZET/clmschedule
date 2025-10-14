@@ -3,7 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/job_list_item.dart';
+import '../models/collection_job.dart';
+import '../providers/job_list_provider.dart';
 import '../providers/schedule_provider.dart';
+import '../providers/collection_schedule_provider.dart';
 import '../services/job_assignment_service.dart';
 import 'job_assignment_preview_dialog.dart';
 
@@ -55,19 +58,19 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     // Initialize controllers with existing values or empty
     _invoiceController = TextEditingController(text: job?.invoice ?? '');
     _amountController =
-        TextEditingController(text: job?.amount.toStringAsFixed(2) ?? '0.00');
+        TextEditingController(text: job?.amount.toStringAsFixed(2) ?? '');
     _clientController = TextEditingController(text: job?.client ?? '');
     _areaController = TextEditingController(text: job?.area ?? '');
     _quantityController =
-        TextEditingController(text: job?.quantity.toString() ?? '0');
+        TextEditingController(text: job?.quantity.toString() ?? '');
     _manDaysController =
-        TextEditingController(text: job?.manDays.toStringAsFixed(1) ?? '0.0');
+        TextEditingController(text: job?.manDays.toStringAsFixed(1) ?? '');
     _collectionAddressController =
         TextEditingController(text: job?.collectionAddress ?? '');
     _specialInstructionsController =
         TextEditingController(text: job?.specialInstructions ?? '');
     _quantityDistributedController =
-        TextEditingController(text: job?.quantityDistributed.toString() ?? '0');
+        TextEditingController(text: job?.quantityDistributed.toString() ?? '');
     _invoiceDetailsController =
         TextEditingController(text: job?.invoiceDetails ?? '');
     _reportAddressesController =
@@ -85,7 +88,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
           _getVehicleTrailerComboFromQuantity(job.quantity);
     }
     // Initialize vehicle/trailer combo based on existing quantity for junk collection
-    if ((_selectedJobType == JobType.furnitureMove) && job != null) {
+    if ((_selectedJobType == JobType.furnitureMove ||
+            _selectedJobType == JobType.trailerTowing) &&
+        job != null) {
       _selectedVehicleTrailerCombo =
           _getVehicleTrailerComboFromQuantity(job.quantity);
     }
@@ -160,7 +165,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                         ),
                       ),
                       IconButton(
-                        onPressed: () => Navigator.of(context).pop(),
+                        onPressed: _isProcessing
+                            ? null
+                            : () => Navigator.of(context).pop(),
                         icon: const Icon(Icons.close),
                       ),
                     ],
@@ -359,7 +366,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                         JobType
                                                             .junkCollection ||
                                                     value ==
-                                                        JobType.furnitureMove) {
+                                                        JobType.furnitureMove ||
+                                                    value ==
+                                                        JobType.trailerTowing) {
                                                   _selectedVehicleTrailerCombo =
                                                       null;
                                                   _quantityController.text =
@@ -446,7 +455,10 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                               .junkCollection ||
                                                       value ==
                                                           JobType
-                                                              .furnitureMove) {
+                                                              .furnitureMove ||
+                                                      value ==
+                                                          JobType
+                                                              .trailerTowing) {
                                                     _selectedVehicleTrailerCombo =
                                                         null;
                                                     _quantityController.text =
@@ -472,7 +484,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                     child: (_selectedJobType ==
                                                 JobType.junkCollection ||
                                             _selectedJobType ==
-                                                JobType.furnitureMove)
+                                                JobType.furnitureMove ||
+                                            _selectedJobType ==
+                                                JobType.trailerTowing)
                                         ? DropdownButtonFormField<String>(
                                             initialValue:
                                                 _selectedVehicleTrailerCombo,
@@ -505,7 +519,10 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                               .junkCollection ||
                                                       _selectedJobType ==
                                                           JobType
-                                                              .furnitureMove) &&
+                                                              .furnitureMove ||
+                                                      _selectedJobType ==
+                                                          JobType
+                                                              .trailerTowing) &&
                                                   value == null) {
                                                 return 'Please select vehicle & trailer';
                                               }
@@ -562,123 +579,284 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                   const SizedBox(width: 16),
                                   Expanded(
                                     flex: 2,
-                                    child: FormField<DateTime>(
-                                      initialValue: _selectedDate,
-                                      validator: (value) {
-                                        if (value == null) {
-                                          return 'Distribution Date is required';
-                                        }
-                                        return null;
-                                      },
+                                    child: Consumer<CollectionScheduleProvider>(
                                       builder:
-                                          (FormFieldState<DateTime> state) {
-                                        return InkWell(
-                                          onTap: () async {
-                                            final date = await showDatePicker(
-                                              context: context,
-                                              initialDate: _selectedDate ??
-                                                  DateTime.now(),
-                                              firstDate: DateTime(2020),
-                                              lastDate: DateTime(2030),
-                                            );
-                                            if (date != null) {
-                                              DateTime finalDate = date;
+                                          (context, collectionProvider, child) {
+                                        // Check if current selection has conflicts
+                                        bool hasConflicts = false;
+                                        String conflictMessage = '';
 
-                                              // If this job type needs time selection, show time picker
-                                              if (_needsTimeSelection(
-                                                  _selectedJobType)) {
-                                                if (!mounted) return;
-                                                final timeSlots =
-                                                    _getAvailableTimeSlots();
-                                                final selectedTime =
-                                                    await showDialog<TimeOfDay>(
+                                        if (_selectedDate != null &&
+                                            _selectedVehicleTrailerCombo !=
+                                                null &&
+                                            (_selectedJobType ==
+                                                    JobType.junkCollection ||
+                                                _selectedJobType ==
+                                                    JobType.furnitureMove ||
+                                                _selectedJobType ==
+                                                    JobType.trailerTowing)) {
+                                          final quantity =
+                                              _getQuantityFromVehicleTrailerCombo(
+                                                  _selectedVehicleTrailerCombo);
+                                          final vehicleType =
+                                              _getVehicleTypeFromQuantity(
+                                                  quantity);
+
+                                          if (vehicleType != null) {
+                                            final occupiedSlots =
+                                                collectionProvider
+                                                    .getOccupiedTimeSlots(
+                                                        vehicleType,
+                                                        _selectedDate!,
+                                                        excludeJobId: widget
+                                                            .jobToEdit?.id);
+                                            if (occupiedSlots.isNotEmpty) {
+                                              hasConflicts = true;
+                                              conflictMessage =
+                                                  'Time conflicts detected for selected vehicle';
+                                            }
+                                          }
+                                        }
+
+                                        return FormField<DateTime>(
+                                          initialValue: _selectedDate,
+                                          validator: (value) {
+                                            if (value == null) {
+                                              return 'Distribution Date is required';
+                                            }
+                                            return null;
+                                          },
+                                          builder:
+                                              (FormFieldState<DateTime> state) {
+                                            return InkWell(
+                                              onTap: () async {
+                                                final date =
+                                                    await showDatePicker(
                                                   context: context,
-                                                  builder: (context) =>
-                                                      AlertDialog(
-                                                    title: const Text(
-                                                        'Select Time'),
-                                                    content: SizedBox(
-                                                      width: 300,
-                                                      height: 400,
-                                                      child: ListView.builder(
-                                                        itemCount:
-                                                            timeSlots.length,
-                                                        itemBuilder:
-                                                            (context, index) {
-                                                          final time =
-                                                              timeSlots[index];
-                                                          return ListTile(
-                                                            title: Text(
-                                                                _formatTimeOfDay(
-                                                                    time)),
-                                                            onTap: () =>
-                                                                Navigator.of(
-                                                                        context)
-                                                                    .pop(time),
-                                                          );
-                                                        },
+                                                  initialDate: _selectedDate ??
+                                                      DateTime.now(),
+                                                  firstDate: DateTime(2020),
+                                                  lastDate: DateTime(2030),
+                                                );
+                                                if (date != null) {
+                                                  DateTime finalDate = date;
+
+                                                  // If this job type needs time selection, show time picker
+                                                  if (_needsTimeSelection(
+                                                      _selectedJobType)) {
+                                                    if (!mounted) return;
+                                                    final timeSlots =
+                                                        _getAvailableTimeSlots();
+                                                    final selectedTime =
+                                                        await showDialog<
+                                                            TimeOfDay>(
+                                                      context: context,
+                                                      builder: (context) =>
+                                                          Consumer<
+                                                              CollectionScheduleProvider>(
+                                                        builder: (context,
+                                                                collectionProvider,
+                                                                child) =>
+                                                            AlertDialog(
+                                                          title: const Text(
+                                                              'Select Time'),
+                                                          content: SizedBox(
+                                                            width: 300,
+                                                            height: 400,
+                                                            child: ListView
+                                                                .builder(
+                                                              itemCount:
+                                                                  timeSlots
+                                                                      .length,
+                                                              itemBuilder:
+                                                                  (context,
+                                                                      index) {
+                                                                final time =
+                                                                    timeSlots[
+                                                                        index];
+                                                                final timeString =
+                                                                    _formatTimeOfDay(
+                                                                        time);
+
+                                                                // Check if this time slot is occupied for collection jobs
+                                                                bool
+                                                                    isOccupied =
+                                                                    false;
+
+                                                                if (_selectedJobType == JobType.junkCollection ||
+                                                                    _selectedJobType ==
+                                                                        JobType
+                                                                            .furnitureMove ||
+                                                                    _selectedJobType ==
+                                                                        JobType
+                                                                            .trailerTowing) {
+                                                                  // Get vehicle type from quantity
+                                                                  if (_selectedVehicleTrailerCombo !=
+                                                                      null) {
+                                                                    final quantity =
+                                                                        _getQuantityFromVehicleTrailerCombo(
+                                                                            _selectedVehicleTrailerCombo);
+                                                                    final vehicleType =
+                                                                        _getVehicleTypeFromQuantity(
+                                                                            quantity);
+
+                                                                    if (vehicleType !=
+                                                                        null) {
+                                                                      final occupiedSlots = collectionProvider.getOccupiedTimeSlots(
+                                                                          vehicleType,
+                                                                          date, // Use the newly selected date, not _selectedDate
+                                                                          excludeJobId: widget
+                                                                              .jobToEdit
+                                                                              ?.id);
+                                                                      isOccupied =
+                                                                          occupiedSlots
+                                                                              .contains(timeString);
+                                                                    }
+                                                                  }
+                                                                }
+
+                                                                return ListTile(
+                                                                  title: Text(
+                                                                    _formatTimeOfDay(
+                                                                        time),
+                                                                    style:
+                                                                        TextStyle(
+                                                                      color: isOccupied
+                                                                          ? Colors
+                                                                              .red
+                                                                          : null,
+                                                                      fontWeight: isOccupied
+                                                                          ? FontWeight
+                                                                              .bold
+                                                                          : null,
+                                                                    ),
+                                                                  ),
+                                                                  subtitle:
+                                                                      isOccupied
+                                                                          ? const Text(
+                                                                              'Occupied',
+                                                                              style: TextStyle(color: Colors.red, fontSize: 12),
+                                                                            )
+                                                                          : null,
+                                                                  leading:
+                                                                      isOccupied
+                                                                          ? const Icon(
+                                                                              Icons.block,
+                                                                              color: Colors.red,
+                                                                              size: 16,
+                                                                            )
+                                                                          : null,
+                                                                  enabled:
+                                                                      !isOccupied,
+                                                                  onTap: isOccupied
+                                                                      ? null
+                                                                      : () => Navigator.of(
+                                                                              context)
+                                                                          .pop(
+                                                                              time),
+                                                                );
+                                                              },
+                                                            ),
+                                                          ),
+                                                          actions: [
+                                                            TextButton(
+                                                              onPressed: () =>
+                                                                  Navigator.of(
+                                                                          context)
+                                                                      .pop(),
+                                                              child: const Text(
+                                                                  'Cancel'),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      ),
+                                                    );
+
+                                                    if (selectedTime != null) {
+                                                      finalDate = DateTime(
+                                                        date.year,
+                                                        date.month,
+                                                        date.day,
+                                                        selectedTime.hour,
+                                                        selectedTime.minute,
+                                                      );
+                                                    } else {
+                                                      return; // User cancelled time selection
+                                                    }
+                                                  }
+
+                                                  setState(() {
+                                                    _selectedDate = finalDate;
+                                                  });
+                                                  state.didChange(finalDate);
+                                                }
+                                              },
+                                              child: InputDecorator(
+                                                decoration: InputDecoration(
+                                                  labelText: _needsTimeSelection(
+                                                          _selectedJobType)
+                                                      ? 'Appointment Date & Time *'
+                                                      : 'Distribution Date *',
+                                                  border:
+                                                      const OutlineInputBorder(),
+                                                  suffixIcon: Icon(
+                                                      _needsTimeSelection(
+                                                              _selectedJobType)
+                                                          ? Icons.schedule
+                                                          : Icons
+                                                              .calendar_today,
+                                                      color: hasConflicts
+                                                          ? Colors.orange
+                                                          : null),
+                                                  errorText: state.errorText ??
+                                                      (hasConflicts
+                                                          ? conflictMessage
+                                                          : null),
+                                                  helperText: hasConflicts
+                                                      ? 'Click to view available times'
+                                                      : null,
+                                                  helperStyle: hasConflicts
+                                                      ? const TextStyle(
+                                                          color: Colors.orange)
+                                                      : null,
+                                                ),
+                                                child: Row(
+                                                  children: [
+                                                    Expanded(
+                                                      child: Text(
+                                                        _selectedDate != null
+                                                            ? _needsTimeSelection(
+                                                                    _selectedJobType)
+                                                                ? DateFormat(
+                                                                        'dd MMM, HH:mm')
+                                                                    .format(
+                                                                        _selectedDate!)
+                                                                : DateFormat(
+                                                                        'dd MMM yyyy')
+                                                                    .format(
+                                                                        _selectedDate!)
+                                                            : _needsTimeSelection(
+                                                                    _selectedJobType)
+                                                                ? 'Select Date & Time'
+                                                                : 'Select Distribution Date',
+                                                        style: TextStyle(
+                                                          color: hasConflicts
+                                                              ? Colors.orange
+                                                              : null,
+                                                        ),
                                                       ),
                                                     ),
-                                                    actions: [
-                                                      TextButton(
-                                                        onPressed: () =>
-                                                            Navigator.of(
-                                                                    context)
-                                                                .pop(),
-                                                        child: const Text(
-                                                            'Cancel'),
+                                                    if (hasConflicts)
+                                                      const Icon(
+                                                        Icons.warning,
+                                                        color: Colors.orange,
+                                                        size: 16,
                                                       ),
-                                                    ],
-                                                  ),
-                                                );
-
-                                                if (selectedTime != null) {
-                                                  finalDate = DateTime(
-                                                    date.year,
-                                                    date.month,
-                                                    date.day,
-                                                    selectedTime.hour,
-                                                    selectedTime.minute,
-                                                  );
-                                                } else {
-                                                  return; // User cancelled time selection
-                                                }
-                                              }
-
-                                              setState(() {
-                                                _selectedDate = finalDate;
-                                              });
-                                              state.didChange(finalDate);
-                                            }
+                                                  ],
+                                                ),
+                                              ),
+                                            );
                                           },
-                                          child: InputDecorator(
-                                            decoration: InputDecoration(
-                                              labelText: _needsTimeSelection(
-                                                      _selectedJobType)
-                                                  ? 'Appointment Date & Time *'
-                                                  : 'Distribution Date *',
-                                              border:
-                                                  const OutlineInputBorder(),
-                                              suffixIcon: Icon(
-                                                  _needsTimeSelection(
-                                                          _selectedJobType)
-                                                      ? Icons.schedule
-                                                      : Icons.calendar_today),
-                                              errorText: state.errorText,
-                                            ),
-                                            child: Text(_selectedDate != null
-                                                ? _needsTimeSelection(
-                                                        _selectedJobType)
-                                                    ? DateFormat(
-                                                            'dd MMM, HH:mm')
-                                                        .format(_selectedDate!)
-                                                    : DateFormat('dd MMM yyyy')
-                                                        .format(_selectedDate!)
-                                                : _needsTimeSelection(
-                                                        _selectedJobType)
-                                                    ? 'Select Date & Time'
-                                                    : 'Select Distribution Date'),
-                                          ),
                                         );
                                       },
                                     ),
@@ -768,9 +946,16 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                     child: TextFormField(
                                       controller:
                                           _quantityDistributedController,
-                                      decoration: const InputDecoration(
-                                        labelText: 'Quantity Distributed',
-                                        border: OutlineInputBorder(),
+                                      decoration: InputDecoration(
+                                        labelText: (_selectedJobType ==
+                                                    JobType.junkCollection ||
+                                                _selectedJobType ==
+                                                    JobType.furnitureMove ||
+                                                _selectedJobType ==
+                                                    JobType.trailerTowing)
+                                            ? "Time Slot"
+                                            : 'Quantity Distributed',
+                                        border: const OutlineInputBorder(),
                                       ),
                                       keyboardType: TextInputType.number,
                                       inputFormatters: [
@@ -832,7 +1017,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                       ? Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            if (!isEditing) // Only show skip allocation for new jobs
+                            if (!isEditing &&
+                                !_needsTimeSelection(
+                                    _selectedJobType)) // Only show skip allocation for new jobs that don't need time selection
                               ElevatedButton(
                                 onPressed: _isProcessing
                                     ? null
@@ -855,8 +1042,12 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                       )
                                     : const Text('Skip Allocation'),
                               ),
-                            if (!isEditing) const SizedBox(height: 8),
-                            if (isEditing) // Show automatic allocation for editing
+                            if (!isEditing &&
+                                !_needsTimeSelection(_selectedJobType))
+                              const SizedBox(height: 8),
+                            if (isEditing &&
+                                !_needsTimeSelection(
+                                    _selectedJobType)) // Show automatic allocation for editing jobs that don't need time selection
                               ElevatedButton(
                                 onPressed: _isProcessing
                                     ? null
@@ -878,7 +1069,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                       )
                                     : const Text('Automatic Allocation'),
                               ),
-                            if (isEditing) const SizedBox(height: 8),
+                            if (isEditing &&
+                                !_needsTimeSelection(_selectedJobType))
+                              const SizedBox(height: 8),
                             ElevatedButton(
                               onPressed: _isProcessing ? null : _saveJob,
                               child: _isProcessing
@@ -914,7 +1107,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                   : () => Navigator.of(context).pop(),
                               child: const Text('Cancel'),
                             ),
-                            if (!isEditing) // Only show skip allocation for new jobs
+                            if (!isEditing &&
+                                !_needsTimeSelection(
+                                    _selectedJobType)) // Only show skip allocation for new jobs that don't need time selection
                               ElevatedButton(
                                 onPressed: _isProcessing
                                     ? null
@@ -937,7 +1132,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                       )
                                     : const Text('Skip Allocation'),
                               ),
-                            if (isEditing) // Show automatic allocation for editing
+                            if (isEditing &&
+                                !_needsTimeSelection(
+                                    _selectedJobType)) // Show automatic allocation for editing jobs that don't need time selection
                               ElevatedButton(
                                 onPressed: _isProcessing
                                     ? null
@@ -1007,7 +1204,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         manDays: double.tryParse(_manDaysController.text) ?? 0.0,
         date: _selectedDate ?? DateTime.now(),
         collectionAddress: _collectionAddressController.text.trim(),
-        collectionDate: _selectedCollectionDate ?? DateTime.now(),
+        collectionDate: _selectedCollectionDate ?? DateTime(2000, 1, 1),
         specialInstructions: _specialInstructionsController.text.trim(),
         quantityDistributed:
             int.tryParse(_quantityDistributedController.text) ?? 0,
@@ -1021,7 +1218,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         if (widget.jobToEdit != null) {
           // Check if this is a collection job and if time/date changed
           if ((_selectedJobType == JobType.junkCollection ||
-                  _selectedJobType == JobType.furnitureMove) &&
+                  _selectedJobType == JobType.furnitureMove ||
+                  _selectedJobType == JobType.trailerTowing) &&
               widget.jobToEdit!.collectionJobId.isNotEmpty) {
             // Update the linked collection job if date/time changed
             // Collection job updates are now automatic via JobListProvider stream
@@ -1032,7 +1230,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
         // For new jobs, check if this is a collection job type
         if (_selectedJobType == JobType.junkCollection ||
-            _selectedJobType == JobType.furnitureMove) {
+            _selectedJobType == JobType.furnitureMove ||
+            _selectedJobType == JobType.trailerTowing) {
           // Collection jobs are automatically derived from job list data
           // Just save the job and it will appear in collection schedule
           if (mounted) {
@@ -1071,7 +1270,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         manDays: double.tryParse(_manDaysController.text) ?? 0.0,
         date: _selectedDate ?? DateTime.now(),
         collectionAddress: _collectionAddressController.text.trim(),
-        collectionDate: _selectedCollectionDate ?? DateTime.now(),
+        collectionDate: _selectedCollectionDate ?? DateTime(2000, 1, 1),
         specialInstructions: _specialInstructionsController.text.trim(),
         quantityDistributed:
             int.tryParse(_quantityDistributedController.text) ?? 0,
@@ -1081,8 +1280,20 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
       );
 
       try {
+        // Save the job to database but skip automatic schedule allocation
+        await context.read<JobListProvider>().addJobListItem(jobListItem);
+
         // Return job with a special flag to indicate skip allocation
         Navigator.of(context).pop({'job': jobListItem, 'skipAllocation': true});
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Error saving job: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       } finally {
         if (mounted) {
           setState(() {
@@ -1111,7 +1322,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         manDays: double.tryParse(_manDaysController.text) ?? 0.0,
         date: _selectedDate ?? DateTime.now(),
         collectionAddress: _collectionAddressController.text.trim(),
-        collectionDate: _selectedCollectionDate ?? DateTime.now(),
+        collectionDate: _selectedCollectionDate ?? DateTime(2000, 1, 1),
         specialInstructions: _specialInstructionsController.text.trim(),
         quantityDistributed:
             int.tryParse(_quantityDistributedController.text) ?? 0,
@@ -1206,7 +1417,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
       // Add each job to the schedule
       for (final job in jobs) {
-        await scheduleProvider.addJob(job);
+        await scheduleProvider.addJobWithUndo(job, job.date);
       }
 
       if (mounted) {
@@ -1233,6 +1444,15 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
   // Helper methods for vehicle/trailer combinations
   List<String> _getVehicleTrailerCombinations() {
+    // For trailer towing, only show no-trailer combinations
+    if (_selectedJobType == JobType.trailerTowing) {
+      return [
+        'Hyundai - No Trailer',
+        'Mahindra - No Trailer',
+        'Nissan - No Trailer',
+      ];
+    }
+
     return [
       'Hyundai - No Trailer',
       'Hyundai - Big Trailer',
@@ -1261,20 +1481,36 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     return index >= 0 ? index + 1 : 1;
   }
 
+  VehicleType? _getVehicleTypeFromQuantity(int quantity) {
+    // Mapping based on the vehicle/trailer combinations
+    // 1-3: Hyundai, 4-6: Mahindra, 7-9: Nissan
+    if (quantity >= 1 && quantity <= 3) {
+      return VehicleType.hyundai;
+    } else if (quantity >= 4 && quantity <= 6) {
+      return VehicleType.mahindra;
+    } else if (quantity >= 7 && quantity <= 9) {
+      return VehicleType.nissan;
+    }
+    return null;
+  }
+
   // Helper methods for time selection
   bool _needsTimeSelection(JobType jobType) {
     return jobType == JobType.junkCollection ||
         jobType == JobType.furnitureMove ||
+        jobType == JobType.trailerTowing ||
         jobType == JobType.windowCleaning ||
         jobType == JobType.solarPanelCleaning;
   }
 
   List<TimeOfDay> _getAvailableTimeSlots() {
     final slots = <TimeOfDay>[];
-    // Generate 30-minute intervals from 08:00 AM to 16:00 PM (4:00 PM)
-    for (int hour = 8; hour <= 16; hour++) {
+    // Start with 07:30
+    slots.add(const TimeOfDay(hour: 7, minute: 30));
+    // Generate 30-minute intervals from 08:00 AM to 20:00 PM (8:00 PM)
+    for (int hour = 8; hour <= 20; hour++) {
       slots.add(TimeOfDay(hour: hour, minute: 0));
-      if (hour < 16) {
+      if (hour < 20) {
         slots.add(TimeOfDay(hour: hour, minute: 30));
       }
     }

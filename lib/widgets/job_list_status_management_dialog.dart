@@ -116,37 +116,47 @@ class _JobListStatusManagementDialogState
   }
 
   void _showColorPicker() {
-    // Define 4 shades for each color family (lightest to darkest)
+    // Define 6 shades for each color family (lightest to darkest)
     final colorFamilies = {
       'Red': [
         const Color(0xFFFFEBEE), // Red 50
         const Color(0xFFEF9A9A), // Red 300
         const Color(0xFFE57373), // Red 400
         const Color(0xFFD32F2F), // Red 700
+        const Color(0xFFC62828), // Red 800
+        const Color.fromARGB(255, 161, 2, 2), // Red 900 (darkest)
       ],
       'Blue': [
         const Color(0xFFE3F2FD), // Blue 50
         const Color(0xFF90CAF9), // Blue 300
         const Color(0xFF64B5F6), // Blue 400
         const Color(0xFF1976D2), // Blue 700
+        const Color(0xFF1565C0), // Blue 800
+        const Color.fromARGB(255, 0, 60, 151), // Blue 900 (darkest)
       ],
       'Green': [
         const Color(0xFFE8F5E8), // Green 50
         const Color(0xFFA5D6A7), // Green 300
         const Color(0xFF81C784), // Green 400
         const Color(0xFF388E3C), // Green 700
+        const Color(0xFF2E7D32), // Green 800
+        const Color.fromARGB(255, 2, 89, 8), // Green 900 (darkest)
       ],
       'Grey': [
         const Color(0xFFFAFAFA), // Grey 50
         const Color(0xFFE0E0E0), // Grey 300
         const Color(0xFFBDBDBD), // Grey 400
         const Color(0xFF616161), // Grey 700
+        const Color(0xFF424242), // Grey 800
+        const Color.fromARGB(255, 0, 0, 0), // Grey 900 (darkest)
       ],
       'Orange': [
         const Color(0xFFFFF3E0), // Orange 50
         const Color(0xFFFFB74D), // Orange 300
         const Color(0xFFFF9800), // Orange 500
         const Color(0xFFE65100), // Orange 900
+        const Color(0xFFBF360C), // Deep Orange 800
+        const Color.fromARGB(255, 80, 43, 36), // Brown 900 (darkest)
       ],
     };
 
@@ -352,18 +362,16 @@ class _JobListStatusManagementDialogState
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      if (!status.isDefault) ...[
-                                        IconButton(
-                                          icon: const Icon(Icons.edit),
-                                          onPressed: () => _startEdit(status),
-                                        ),
-                                        IconButton(
-                                          icon: const Icon(Icons.delete,
-                                              color: Colors.red),
-                                          onPressed: () => _deleteStatus(
-                                              status.id, status.label),
-                                        ),
-                                      ],
+                                      IconButton(
+                                        icon: const Icon(Icons.edit),
+                                        onPressed: () => _startEdit(status),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.delete,
+                                            color: Colors.red),
+                                        onPressed: () => _deleteStatus(
+                                            status.id, status.label),
+                                      ),
                                     ],
                                   ),
                                 ),

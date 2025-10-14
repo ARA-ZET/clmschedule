@@ -705,7 +705,7 @@ class _PrintMapViewState extends State<PrintMapView> {
                   ),
                 ),
               );
-            }).toList(),
+            }),
 
             if (widget.job.clients.isEmpty)
               Padding(

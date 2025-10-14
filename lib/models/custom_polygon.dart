@@ -41,7 +41,7 @@ class CustomPolygon {
                 'longitude': point.longitude,
               })
           .toList(),
-      'color': color.value,
+      'color': color.toARGB32(),
     };
   }
 
