@@ -24,6 +24,7 @@ import 'widgets/undo_redo_widgets.dart';
 import 'widgets/auth_gate.dart';
 import 'widgets/chat_dialog.dart';
 import 'widgets/chat_admin_panel.dart';
+import 'widgets/schedule_tracking_view.dart';
 import 'services/keyboard_shortcuts_service.dart';
 import 'services/undo_redo_manager.dart';
 import 'utils/seed_data.dart';
@@ -75,6 +76,12 @@ void main() async {
   runApp(MultiProvider(providers: [
     // Authentication Provider (must be first for initialization)
     ChangeNotifierProvider(create: (context) => AuthProvider()),
+    ChangeNotifierProvider(
+      create: (context) => JobStatusProvider(),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => JobListStatusProvider(),
+    ),
     ChangeNotifierProvider(create: (context) => UndoRedoManager()),
     ChangeNotifierProxyProvider<UndoRedoManager, ScheduleProvider>(
       create: (context) =>
@@ -86,12 +93,7 @@ void main() async {
     ChangeNotifierProvider(
       create: (context) => TogglerProvider(),
     ),
-    ChangeNotifierProvider(
-      create: (context) => JobStatusProvider(),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => JobListStatusProvider(),
-    ),
+
     Provider(
       create: (context) => WorkAreaService(FirebaseFirestore.instance),
     ),
@@ -195,7 +197,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   void initState() {
     super.initState();
     _tabController = TabController(
-      length: 4,
+      length: 5,
       vsync: this,
       animationDuration: Duration.zero, // Remove tab animation
     );
@@ -276,6 +278,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               Tab(text: 'Job List'),
               Tab(text: 'Collection Schedule'),
               Tab(text: 'Solar Panel Schedule'),
+              Tab(text: 'Tracking'),
             ],
           ),
           actions: [
@@ -475,6 +478,7 @@ class _DashboardScreenState extends State<DashboardScreen>
             JobListTab(),
             CollectionScheduleTab(),
             SolarPanelScheduleTab(),
+            ScheduleTrackingView(),
           ],
         ),
         floatingActionButton: Consumer2<ChatProvider, AuthProvider>(
