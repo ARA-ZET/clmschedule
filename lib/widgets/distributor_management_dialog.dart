@@ -163,7 +163,8 @@ class _DistributorManagementDialogState
                                         width: 12,
                                         height: 12,
                                         decoration: BoxDecoration(
-                                          color: _getStatusColor(distributor.status),
+                                          color: _getStatusColor(
+                                              distributor.status),
                                           shape: BoxShape.circle,
                                           border: Border.all(
                                             color: Colors.white,
@@ -180,14 +181,16 @@ class _DistributorManagementDialogState
                                     Icon(
                                       _getStatusIcon(distributor.status),
                                       size: 16,
-                                      color: _getStatusColor(distributor.status),
+                                      color:
+                                          _getStatusColor(distributor.status),
                                     ),
                                     const SizedBox(width: 4),
                                     Text(
                                       distributor.status.displayName,
                                       style: TextStyle(
                                         fontSize: 12,
-                                        color: _getStatusColor(distributor.status),
+                                        color:
+                                            _getStatusColor(distributor.status),
                                         fontWeight: FontWeight.w500,
                                       ),
                                     ),
@@ -208,7 +211,8 @@ class _DistributorManagementDialogState
                                   Padding(
                                     padding: const EdgeInsets.all(16),
                                     child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
                                       children: [
                                         Row(
                                           children: [
@@ -216,28 +220,33 @@ class _DistributorManagementDialogState
                                             const SizedBox(width: 8),
                                             Text(
                                               'Phone 1: ${distributor.phone1 ?? 'Not set'}',
-                                              style: const TextStyle(fontSize: 14),
+                                              style:
+                                                  const TextStyle(fontSize: 14),
                                             ),
                                           ],
                                         ),
                                         const SizedBox(height: 8),
                                         Row(
                                           children: [
-                                            const Icon(Icons.phone_android, size: 16),
+                                            const Icon(Icons.phone_android,
+                                                size: 16),
                                             const SizedBox(width: 8),
                                             Text(
                                               'Phone 2: ${distributor.phone2 ?? 'Not set'}',
-                                              style: const TextStyle(fontSize: 14),
+                                              style:
+                                                  const TextStyle(fontSize: 14),
                                             ),
                                           ],
                                         ),
                                         const SizedBox(height: 16),
                                         Row(
-                                          mainAxisAlignment: MainAxisAlignment.end,
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.end,
                                           children: [
                                             if (distributor.index > 0)
                                               IconButton(
-                                                icon: const Icon(Icons.keyboard_arrow_up),
+                                                icon: const Icon(
+                                                    Icons.keyboard_arrow_up),
                                                 tooltip: 'Move Up',
                                                 onPressed: () =>
                                                     _swapDistributorPositions(
@@ -246,7 +255,8 @@ class _DistributorManagementDialogState
                                             if (distributor.index <
                                                 _localDistributors.length - 1)
                                               IconButton(
-                                                icon: const Icon(Icons.keyboard_arrow_down),
+                                                icon: const Icon(
+                                                    Icons.keyboard_arrow_down),
                                                 tooltip: 'Move Down',
                                                 onPressed: () =>
                                                     _swapDistributorPositions(
@@ -256,13 +266,15 @@ class _DistributorManagementDialogState
                                               icon: const Icon(Icons.edit),
                                               tooltip: 'Edit Distributor',
                                               onPressed: () =>
-                                                  _editDistributorLocal(distributor),
+                                                  _editDistributorLocal(
+                                                      distributor),
                                             ),
                                             IconButton(
                                               icon: const Icon(Icons.delete),
                                               tooltip: 'Delete Distributor',
                                               onPressed: () =>
-                                                  _deleteDistributorLocal(distributor),
+                                                  _deleteDistributorLocal(
+                                                      distributor),
                                             ),
                                           ],
                                         ),

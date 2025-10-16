@@ -1,7 +1,7 @@
 // Distributor status enum
 enum DistributorStatus {
   active,
-  inactive, 
+  inactive,
   suspended,
   onLeave;
 
@@ -94,5 +94,6 @@ class Distributor {
   }
 
   @override
-  String toString() => 'Distributor(id: $id, name: $name, index: $index, phone1: $phone1, phone2: $phone2, status: ${status.displayName})';
+  String toString() =>
+      'Distributor(id: $id, name: $name, index: $index, phone1: $phone1, phone2: $phone2, status: ${status.displayName})';
 }

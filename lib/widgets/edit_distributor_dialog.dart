@@ -30,8 +30,10 @@ class _EditDistributorDialogState extends State<EditDistributorDialog> {
     _nameController = TextEditingController(text: widget.distributor.name);
     _indexController =
         TextEditingController(text: widget.distributor.index.toString());
-    _phone1Controller = TextEditingController(text: widget.distributor.phone1 ?? '');
-    _phone2Controller = TextEditingController(text: widget.distributor.phone2 ?? '');
+    _phone1Controller =
+        TextEditingController(text: widget.distributor.phone1 ?? '');
+    _phone2Controller =
+        TextEditingController(text: widget.distributor.phone2 ?? '');
     _selectedStatus = widget.distributor.status;
   }
 
@@ -216,8 +218,12 @@ class _EditDistributorDialogState extends State<EditDistributorDialog> {
               final updatedDistributor = widget.distributor.copyWith(
                 name: _nameController.text.trim(),
                 index: int.parse(_indexController.text),
-                phone1: _phone1Controller.text.trim().isEmpty ? null : _phone1Controller.text.trim(),
-                phone2: _phone2Controller.text.trim().isEmpty ? null : _phone2Controller.text.trim(),
+                phone1: _phone1Controller.text.trim().isEmpty
+                    ? null
+                    : _phone1Controller.text.trim(),
+                phone2: _phone2Controller.text.trim().isEmpty
+                    ? null
+                    : _phone2Controller.text.trim(),
                 status: _selectedStatus,
               );
               Navigator.of(context).pop({
