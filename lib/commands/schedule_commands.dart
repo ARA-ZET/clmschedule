@@ -1,3 +1,4 @@
+import 'package:intl/intl.dart';
 import '../models/command.dart';
 import '../models/job.dart';
 import '../services/firestore_service.dart';
@@ -81,6 +82,67 @@ class EditJobCommand extends EntityCommand<Job> {
   @override
   String get description =>
       'Edit job for ${originalEntity?.clients.join(', ') ?? 'client'}';
+}
+
+/// Command for moving a job between different dates (handles cross-day/cross-month moves)
+class MoveJobBetweenDatesCommand extends EntityCommand<Job> {
+  final FirestoreService _service;
+  final DateTime originalDate;
+  final DateTime newDate;
+
+  MoveJobBetweenDatesCommand({
+    required FirestoreService service,
+    required Job originalJob,
+    required Job movedJob,
+    required this.originalDate,
+    required this.newDate,
+  })  : _service = service,
+        super(
+          operation: OperationType.edit,
+          originalEntity: originalJob,
+          modifiedEntity: movedJob,
+          context: {
+            'originalDate': originalDate,
+            'newDate': newDate,
+          },
+        );
+
+  @override
+  Future<void> execute() async {
+    if (modifiedEntity == null) {
+      throw Exception('Cannot move null job');
+    }
+
+    await _service.moveJobBetweenDates(
+      originalEntity!,
+      modifiedEntity!,
+      originalDate,
+      newDate,
+    );
+  }
+
+  @override
+  Future<void> undo() async {
+    if (originalEntity == null) {
+      throw Exception('Cannot undo: no original job recorded');
+    }
+
+    // To undo, move the job back to its original date with original properties
+    await _service.moveJobBetweenDates(
+      modifiedEntity!,
+      originalEntity!,
+      newDate,
+      originalDate,
+    );
+  }
+
+  @override
+  String get description {
+    final clientNames = originalEntity?.clients.join(', ') ?? 'client';
+    final originalDateStr = DateFormat('MMM d').format(originalDate);
+    final newDateStr = DateFormat('MMM d').format(newDate);
+    return 'Move $clientNames from $originalDateStr to $newDateStr';
+  }
 }
 
 /// Command for deleting a job from the schedule
@@ -277,16 +339,38 @@ class SwapJobsCommand extends EntityCommand<Job> {
       date: draggedJob.date,
     );
 
-    // Execute both updates
-    await _service.updateJob(updatedDraggedJob, targetDate);
-    await _service.updateJob(updatedTargetJob, targetDate);
+    // Execute both moves (handles cross-date moves properly)
+    await _service.moveJobBetweenDates(
+      draggedJob,
+      updatedDraggedJob,
+      draggedJob.date,
+      targetJob.date,
+    );
+    await _service.moveJobBetweenDates(
+      targetJob,
+      updatedTargetJob,
+      targetJob.date,
+      draggedJob.date,
+    );
   }
 
   @override
   Future<void> undo() async {
-    // Restore original positions
-    await _service.updateJob(draggedJob, targetDate);
-    await _service.updateJob(targetJob, targetDate);
+    // Restore original positions (handles cross-date moves properly)
+    await _service.moveJobBetweenDates(
+      draggedJob.copyWith(
+          distributorId: targetJob.distributorId, date: targetJob.date),
+      draggedJob,
+      targetJob.date,
+      draggedJob.date,
+    );
+    await _service.moveJobBetweenDates(
+      targetJob.copyWith(
+          distributorId: draggedJob.distributorId, date: draggedJob.date),
+      targetJob,
+      draggedJob.date,
+      targetJob.date,
+    );
   }
 
   @override
@@ -322,18 +406,28 @@ class CombineJobsCommand extends EntityCommand<Job> {
 
   @override
   Future<void> execute() async {
-    // Update target job with combined data
-    await _service.updateJob(combinedJob, targetDate);
-    // Delete the dragged job
-    await _service.deleteJob(draggedJob.id, targetDate);
+    // Update target job with combined data (handles cross-date moves)
+    await _service.moveJobBetweenDates(
+      targetJob,
+      combinedJob,
+      targetJob.date,
+      targetDate,
+    );
+    // Delete the dragged job from its original date
+    await _service.deleteJob(draggedJob.id, draggedJob.date);
   }
 
   @override
   Future<void> undo() async {
-    // Restore original target job
-    await _service.updateJob(targetJob, targetDate);
-    // Restore the deleted dragged job
-    await _service.addJob(draggedJob, targetDate);
+    // Restore original target job to its original date
+    await _service.moveJobBetweenDates(
+      combinedJob,
+      targetJob,
+      targetDate,
+      targetJob.date,
+    );
+    // Restore the deleted dragged job to its original date
+    await _service.addJob(draggedJob, draggedJob.date);
   }
 
   @override

@@ -1,9 +1,9 @@
-import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:provider/provider.dart';
+import 'providers/toggler_provider.dart';
 import 'providers/schedule_provider.dart';
 import 'providers/collection_schedule_provider.dart';
 import 'providers/job_list_provider.dart';
@@ -11,6 +11,7 @@ import 'providers/job_status_provider.dart';
 import 'providers/job_list_status_provider.dart';
 import 'providers/scale_provider.dart';
 import 'providers/auth_provider.dart';
+import 'providers/chat_provider.dart';
 import 'widgets/schedule_grid.dart';
 import 'widgets/collection_schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
@@ -21,12 +22,15 @@ import 'widgets/job_status_management_dialog.dart';
 import 'widgets/job_list_status_management_dialog.dart';
 import 'widgets/undo_redo_widgets.dart';
 import 'widgets/auth_gate.dart';
+import 'widgets/chat_dialog.dart';
+import 'widgets/chat_admin_panel.dart';
 import 'services/keyboard_shortcuts_service.dart';
 import 'services/undo_redo_manager.dart';
 import 'utils/seed_data.dart';
 import 'services/work_area_service.dart';
 import 'services/job_list_service.dart';
 import 'services/user_service.dart';
+import 'services/chat_service.dart';
 import 'models/command.dart';
 import 'firebase_options.dart';
 
@@ -97,16 +101,34 @@ void main() async {
     Provider(
       create: (context) => UserService(FirebaseFirestore.instance),
     ),
-    ChangeNotifierProxyProvider<UndoRedoManager, JobListProvider>(
+    Provider(
+      create: (context) => ChatService(FirebaseFirestore.instance),
+    ),
+    ChangeNotifierProxyProvider2<UndoRedoManager, AuthProvider,
+        JobListProvider>(
       create: (context) => JobListProvider(
         context.read<JobListService>(),
         context.read<UndoRedoManager>(),
+        context.read<AuthProvider>(),
       ),
-      update: (context, undoRedoManager, previous) =>
+      update: (context, undoRedoManager, authProvider, previous) =>
           previous ??
           JobListProvider(
             context.read<JobListService>(),
             undoRedoManager,
+            authProvider,
+          ),
+    ),
+    ChangeNotifierProxyProvider2<ChatService, AuthProvider, ChatProvider>(
+      create: (context) => ChatProvider(
+        context.read<ChatService>(),
+        context.read<AuthProvider>(),
+      ),
+      update: (context, chatService, authProvider, previous) =>
+          previous ??
+          ChatProvider(
+            chatService,
+            authProvider,
           ),
     ),
     ChangeNotifierProxyProvider<JobListProvider, CollectionScheduleProvider>(
@@ -223,238 +245,293 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color.fromARGB(255, 222, 222, 222),
-      appBar: AppBar(
-        leading: const Padding(
-          padding: EdgeInsets.only(left: 16.0),
-          child: Center(
-            child: Text(
-              'CLM DASHBOARD',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
+        backgroundColor: const Color.fromARGB(255, 222, 222, 222),
+        appBar: AppBar(
+          leading: const Padding(
+            padding: EdgeInsets.only(left: 16.0),
+            child: Center(
+              child: Text(
+                'CLM DASHBOARD',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
             ),
           ),
-        ),
-        leadingWidth: 200,
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: TabBar(
-          controller: _tabController,
-          isScrollable: false,
-          labelColor: Colors.black,
-          unselectedLabelColor: Colors.black54,
-          indicatorColor: Colors.black,
-          dividerColor: Colors.transparent,
-          splashFactory: NoSplash.splashFactory, // Remove tap animation
-          overlayColor:
-              WidgetStateProperty.all(Colors.transparent), // Remove overlay
-          tabs: const [
-            Tab(text: 'Schedule'),
-            Tab(text: 'Job List'),
-            Tab(text: 'Collection Schedule'),
-            Tab(text: 'Solar Panel Schedule'),
-          ],
-        ),
-        actions: [
-          // Test button for undo functionality
-          // IconButton(
-          //   icon: const Icon(Icons.add_circle, color: Colors.green),
-          //   tooltip: 'Test Undo (Add fake operation)',
-          //   onPressed: () async {
-          //     final undoManager =
-          //         Provider.of<UndoRedoManager>(context, listen: false);
-          //     // Add a test command to verify undo system works
-          //     final testCommand = TestCommand(
-          //         'Test Operation ${DateTime.now().millisecondsSinceEpoch}');
-          //     await undoManager.executeCommand(testCommand);
-          //     print('Undo stack size: ${undoManager.undoStackSize}');
-          //     print('Can undo: ${undoManager.canUndo}');
-          //   },
-          // ),
-          // Undo/Redo buttons
-          const UndoRedoButtons(
-            showLabels: false,
-            padding: EdgeInsets.all(4.0),
-            enabledColor: Colors.deepOrange,
-          ),
-          const VerticalDivider(
-            color: Colors.grey,
-            thickness: 1,
-            width: 20,
-          ),
-          IconButton(
-            icon: const Icon(Icons.people),
-            onPressed: () {
-              showDialog(
-                context: context,
-                builder: (context) => const DistributorManagementDialog(),
-              );
-            },
-            tooltip: 'Manage Distributors',
-          ),
-          IconButton(
-            icon: const Icon(Icons.data_array),
-            onPressed: () async {
-              // try {
-              //   await seedData();
-              //   if (context.mounted) {
-              //     ScaffoldMessenger.of(context).showSnackBar(
-              //       const SnackBar(
-              //         content: Text('Sample schedule data added successfully!'),
-              //       ),
-              //     );
-              //   }
-              // } catch (e) {
-              //   if (context.mounted) {
-              //     ScaffoldMessenger.of(context).showSnackBar(
-              //       SnackBar(content: Text('Error adding schedule data: $e')),
-              //     );
-              //   }
-              // }
-            },
-            tooltip: 'Add sample schedule data',
-          ),
-          IconButton(
-            icon: const Icon(Icons.list_alt),
-            onPressed: () async {
-              // try {
-              //   await seedJobListData();
-              //   if (context.mounted) {
-              //     ScaffoldMessenger.of(context).showSnackBar(
-              //       const SnackBar(
-              //         content: Text('Sample job list data added successfully!'),
-              //       ),
-              //     );
-              //   }
-              // } catch (e) {
-              //   if (context.mounted) {
-              //     ScaffoldMessenger.of(context).showSnackBar(
-              //       SnackBar(content: Text('Error adding job list data: $e')),
-              //     );
-              //   }
-              // }
-            },
-            tooltip: 'Add sample job list data',
-          ),
-          IconButton(
-            icon: const Icon(Icons.map),
-            onPressed: () async {
-              final workAreaService = context.read<WorkAreaService>();
-              try {
-                final workAreas = await workAreaService.createFromKml(
-                  'jl.kml',
-                );
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        'Imported ${workAreas.length} work areas from KML file',
-                      ),
-                    ),
-                  );
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error importing KML data: $e')),
-                  );
-                }
-              }
-            },
-            tooltip: 'Import KML data',
-          ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Settings',
-            onSelected: (String value) async {
-              if (value == 'scale') {
-                showDialog(
-                  context: context,
-                  builder: (context) => const ScaleSettingsDialog(),
-                );
-              } else if (value == 'status') {
-                showDialog(
-                  context: context,
-                  builder: (context) => const JobStatusManagementDialog(),
-                );
-              } else if (value == 'job_list_status') {
-                showDialog(
-                  context: context,
-                  builder: (context) => const JobListStatusManagementDialog(),
-                );
-              } else if (value == 'signout') {
-                final confirmed = await showDialog<bool>(
-                  context: context,
-                  builder: (context) => AlertDialog(
-                    title: const Text('Sign Out'),
-                    content: const Text('Are you sure you want to sign out?'),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.of(context).pop(false),
-                        child: const Text('Cancel'),
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.of(context).pop(true),
-                        child: const Text('Sign Out'),
-                      ),
-                    ],
-                  ),
-                );
-
-                if (confirmed == true && context.mounted) {
-                  await context.read<AuthProvider>().signOut();
-                }
-              }
-            },
-            itemBuilder: (BuildContext context) => [
-              const PopupMenuItem<String>(
-                value: 'scale',
-                child: ListTile(
-                  leading: Icon(Icons.zoom_in),
-                  title: Text('Interface Scale'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-              const PopupMenuItem<String>(
-                value: 'status',
-                child: ListTile(
-                  leading: Icon(Icons.label),
-                  title: Text('Job Statuses'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-              const PopupMenuItem<String>(
-                value: 'job_list_status',
-                child: ListTile(
-                  leading: Icon(Icons.list_alt),
-                  title: Text('Job List Statuses'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-              const PopupMenuDivider(),
-              const PopupMenuItem<String>(
-                value: 'signout',
-                child: ListTile(
-                  leading: Icon(Icons.logout, color: Colors.red),
-                  title: Text('Sign Out', style: TextStyle(color: Colors.red)),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
+          leadingWidth: 200,
+          backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+          title: TabBar(
+            controller: _tabController,
+            isScrollable: false,
+            labelColor: Colors.black,
+            unselectedLabelColor: Colors.black54,
+            indicatorColor: Colors.black,
+            dividerColor: Colors.transparent,
+            splashFactory: NoSplash.splashFactory, // Remove tap animation
+            overlayColor:
+                WidgetStateProperty.all(Colors.transparent), // Remove overlay
+            tabs: const [
+              Tab(text: 'Schedule'),
+              Tab(text: 'Job List'),
+              Tab(text: 'Collection Schedule'),
+              Tab(text: 'Solar Panel Schedule'),
             ],
           ),
-        ],
-      ),
-      body: IndexedStack(
-        index: _currentTabIndex,
-        children: const [
-          ScheduleTab(),
-          JobListTab(),
-          CollectionScheduleTab(),
-          SolarPanelScheduleTab(),
-        ],
-      ),
-    );
+          actions: [
+            // Test button for undo functionality
+            // IconButton(
+            //   icon: const Icon(Icons.add_circle, color: Colors.green),
+            //   tooltip: 'Test Undo (Add fake operation)',
+            //   onPressed: () async {
+            //     final undoManager =
+            //         Provider.of<UndoRedoManager>(context, listen: false);
+            //     // Add a test command to verify undo system works
+            //     final testCommand = TestCommand(
+            //         'Test Operation ${DateTime.now().millisecondsSinceEpoch}');
+            //     await undoManager.executeCommand(testCommand);
+            //     print('Undo stack size: ${undoManager.undoStackSize}');
+            //     print('Can undo: ${undoManager.canUndo}');
+            //   },
+            // ),
+            // Undo/Redo buttons
+            const UndoRedoButtons(
+              showLabels: false,
+              padding: EdgeInsets.all(4.0),
+              enabledColor: Colors.deepOrange,
+            ),
+            const VerticalDivider(
+              color: Colors.grey,
+              thickness: 1,
+              width: 20,
+            ),
+            IconButton(
+              icon: const Icon(Icons.people),
+              onPressed: () {
+                showDialog(
+                  context: context,
+                  builder: (context) => const DistributorManagementDialog(),
+                );
+              },
+              tooltip: 'Manage Distributors',
+            ),
+            IconButton(
+              icon: const Icon(Icons.data_array),
+              onPressed: () async {
+                // try {
+                //   await seedData();
+                //   if (context.mounted) {
+                //     ScaffoldMessenger.of(context).showSnackBar(
+                //       const SnackBar(
+                //         content: Text('Sample schedule data added successfully!'),
+                //       ),
+                //     );
+                //   }
+                // } catch (e) {
+                //   if (context.mounted) {
+                //     ScaffoldMessenger.of(context).showSnackBar(
+                //       SnackBar(content: Text('Error adding schedule data: $e')),
+                //     );
+                //   }
+                // }
+              },
+              tooltip: 'Add sample schedule data',
+            ),
+            IconButton(
+              icon: const Icon(Icons.list_alt),
+              onPressed: () async {
+                // try {
+                //   await seedJobListData();
+                //   if (context.mounted) {
+                //     ScaffoldMessenger.of(context).showSnackBar(
+                //       const SnackBar(
+                //         content: Text('Sample job list data added successfully!'),
+                //       ),
+                //     );
+                //   }
+                // } catch (e) {
+                //   if (context.mounted) {
+                //     ScaffoldMessenger.of(context).showSnackBar(
+                //       SnackBar(content: Text('Error adding job list data: $e')),
+                //     );
+                //   }
+                // }
+              },
+              tooltip: 'Add sample job list data',
+            ),
+            IconButton(
+              icon: const Icon(Icons.map),
+              onPressed: () async {
+                final workAreaService = context.read<WorkAreaService>();
+                try {
+                  final workAreas = await workAreaService.createFromKml(
+                    'jl.kml',
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Imported ${workAreas.length} work areas from KML file',
+                        ),
+                      ),
+                    );
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Error importing KML data: $e')),
+                    );
+                  }
+                }
+              },
+              tooltip: 'Import KML data',
+            ),
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.settings),
+              tooltip: 'Settings',
+              onSelected: (String value) async {
+                if (value == 'scale') {
+                  showDialog(
+                    context: context,
+                    builder: (context) => const ScaleSettingsDialog(),
+                  );
+                } else if (value == 'status') {
+                  showDialog(
+                    context: context,
+                    builder: (context) => const JobStatusManagementDialog(),
+                  );
+                } else if (value == 'job_list_status') {
+                  showDialog(
+                    context: context,
+                    builder: (context) => const JobListStatusManagementDialog(),
+                  );
+                } else if (value == 'signout') {
+                  final confirmed = await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('Sign Out'),
+                      content: const Text('Are you sure you want to sign out?'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(false),
+                          child: const Text('Cancel'),
+                        ),
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(true),
+                          child: const Text('Sign Out'),
+                        ),
+                      ],
+                    ),
+                  );
+
+                  if (confirmed == true && context.mounted) {
+                    await context.read<AuthProvider>().signOut();
+                  }
+                }
+              },
+              itemBuilder: (BuildContext context) => [
+                const PopupMenuItem<String>(
+                  value: 'scale',
+                  child: ListTile(
+                    leading: Icon(Icons.zoom_in),
+                    title: Text('Interface Scale'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'status',
+                  child: ListTile(
+                    leading: Icon(Icons.label),
+                    title: Text('Job Statuses'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'job_list_status',
+                  child: ListTile(
+                    leading: Icon(Icons.list_alt),
+                    title: Text('Job List Statuses'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem<String>(
+                  value: 'signout',
+                  child: ListTile(
+                    leading: Icon(Icons.logout, color: Colors.red),
+                    title:
+                        Text('Sign Out', style: TextStyle(color: Colors.red)),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        body: IndexedStack(
+          index: _currentTabIndex,
+          children: const [
+            ScheduleTab(),
+            JobListTab(),
+            CollectionScheduleTab(),
+            SolarPanelScheduleTab(),
+          ],
+        ),
+        floatingActionButton: Consumer2<ChatProvider, AuthProvider>(
+          builder: (context, chatProvider, authProvider, child) {
+            return Stack(
+              children: [
+                GestureDetector(
+                  onLongPress: authProvider.isAdmin
+                      ? () {
+                          showDialog(
+                            context: context,
+                            builder: (context) => const ChatAdminPanel(),
+                          );
+                        }
+                      : null,
+                  child: FloatingActionButton(
+                    onPressed: () {
+                      showDialog(
+                        context: context,
+                        builder: (context) => const ChatDialog(),
+                      );
+                    },
+                    tooltip: authProvider.isAdmin
+                        ? 'Chat (Long press for admin panel)'
+                        : 'Team Chat',
+                    child: const Icon(Icons.chat),
+                  ),
+                ),
+                if (chatProvider.hasUnreadMessages)
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(2),
+                      decoration: BoxDecoration(
+                        color: Colors.red,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      constraints: const BoxConstraints(
+                        minWidth: 20,
+                        minHeight: 20,
+                      ),
+                      child: Text(
+                        '${chatProvider.unreadCount}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        ));
   }
 }
 

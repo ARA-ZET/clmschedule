@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'job_list_item_update.dart';
 
 // Legacy enum for backwards compatibility during migration
 enum JobListStatus {
@@ -100,6 +101,7 @@ class JobListItem {
   final String reportAddresses;
   final String whoToInvoice;
   final String collectionJobId; // Link to collection schedule job
+  final List<JobListItemUpdate> updates; // Track all changes
 
   JobListItem({
     required this.id,
@@ -120,6 +122,7 @@ class JobListItem {
     required this.reportAddresses,
     required this.whoToInvoice,
     this.collectionJobId = '', // Optional link to collection job
+    this.updates = const [], // Default to empty list
   });
 
   // Create from Firestore
@@ -143,6 +146,16 @@ class JobListItem {
     // If still empty, use default
     if (jobStatusId.isEmpty) {
       jobStatusId = 'standby';
+    }
+
+    // Parse updates list
+    List<JobListItemUpdate> updates = [];
+    if (data['updates'] != null) {
+      final updatesData = data['updates'] as List<dynamic>? ?? [];
+      updates = updatesData
+          .map((updateData) =>
+              JobListItemUpdate.fromMap(updateData as Map<String, dynamic>))
+          .toList();
     }
 
     return JobListItem(
@@ -171,6 +184,7 @@ class JobListItem {
       reportAddresses: data['reportAddresses'] as String? ?? '',
       whoToInvoice: data['whoToInvoice'] as String? ?? '',
       collectionJobId: data['collectionJobId'] as String? ?? '',
+      updates: updates,
     );
   }
 
@@ -194,6 +208,7 @@ class JobListItem {
       'reportAddresses': reportAddresses,
       'whoToInvoice': whoToInvoice,
       'collectionJobId': collectionJobId,
+      'updates': updates.map((update) => update.toMap()).toList(),
     };
   }
 
@@ -217,6 +232,7 @@ class JobListItem {
     String? reportAddresses,
     String? whoToInvoice,
     String? collectionJobId,
+    List<JobListItemUpdate>? updates,
   }) {
     return JobListItem(
       id: id,
@@ -237,7 +253,253 @@ class JobListItem {
       reportAddresses: reportAddresses ?? this.reportAddresses,
       whoToInvoice: whoToInvoice ?? this.whoToInvoice,
       collectionJobId: collectionJobId ?? this.collectionJobId,
+      updates: updates ?? this.updates,
     );
+  }
+
+  // Create a copy with a tracked change
+  JobListItem copyWithTrackedChange({
+    required String userId,
+    required String userDisplayName,
+    String? invoice,
+    double? amount,
+    String? client,
+    String? jobStatusId,
+    JobType? jobType,
+    String? area,
+    int? quantity,
+    double? manDays,
+    DateTime? date,
+    String? collectionAddress,
+    DateTime? collectionDate,
+    String? specialInstructions,
+    int? quantityDistributed,
+    String? invoiceDetails,
+    String? reportAddresses,
+    String? whoToInvoice,
+    String? collectionJobId,
+  }) {
+    final List<JobListItemUpdate> newUpdates = List.from(updates);
+
+    // Track changes for each modified field
+    if (invoice != null && invoice != this.invoice) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'invoice',
+        oldValue: this.invoice,
+        newValue: invoice,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (amount != null && amount != this.amount) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'amount',
+        oldValue: this.amount,
+        newValue: amount,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (client != null && client != this.client) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'client',
+        oldValue: this.client,
+        newValue: client,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (jobStatusId != null && jobStatusId != this.jobStatusId) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'jobStatusId',
+        oldValue: this.jobStatusId,
+        newValue: jobStatusId,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (jobType != null && jobType != this.jobType) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'jobType',
+        oldValue: this.jobType,
+        newValue: jobType,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (area != null && area != this.area) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'area',
+        oldValue: this.area,
+        newValue: area,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (quantity != null && quantity != this.quantity) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'quantity',
+        oldValue: this.quantity,
+        newValue: quantity,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (manDays != null && manDays != this.manDays) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'manDays',
+        oldValue: this.manDays,
+        newValue: manDays,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (date != null && !_isSameDay(date, this.date)) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'date',
+        oldValue: this.date,
+        newValue: date,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (collectionAddress != null &&
+        collectionAddress != this.collectionAddress) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'collectionAddress',
+        oldValue: this.collectionAddress,
+        newValue: collectionAddress,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (collectionDate != null &&
+        !_isSameDay(collectionDate, this.collectionDate)) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'collectionDate',
+        oldValue: this.collectionDate,
+        newValue: collectionDate,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (specialInstructions != null &&
+        specialInstructions != this.specialInstructions) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'specialInstructions',
+        oldValue: this.specialInstructions,
+        newValue: specialInstructions,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (quantityDistributed != null &&
+        quantityDistributed != this.quantityDistributed) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'quantityDistributed',
+        oldValue: this.quantityDistributed,
+        newValue: quantityDistributed,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (invoiceDetails != null && invoiceDetails != this.invoiceDetails) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'invoiceDetails',
+        oldValue: this.invoiceDetails,
+        newValue: invoiceDetails,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (reportAddresses != null && reportAddresses != this.reportAddresses) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'reportAddresses',
+        oldValue: this.reportAddresses,
+        newValue: reportAddresses,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (whoToInvoice != null && whoToInvoice != this.whoToInvoice) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'whoToInvoice',
+        oldValue: this.whoToInvoice,
+        newValue: whoToInvoice,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (collectionJobId != null && collectionJobId != this.collectionJobId) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'collectionJobId',
+        oldValue: this.collectionJobId,
+        newValue: collectionJobId,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    return copyWith(
+      invoice: invoice,
+      amount: amount,
+      client: client,
+      jobStatusId: jobStatusId,
+      jobType: jobType,
+      area: area,
+      quantity: quantity,
+      manDays: manDays,
+      date: date,
+      collectionAddress: collectionAddress,
+      collectionDate: collectionDate,
+      specialInstructions: specialInstructions,
+      quantityDistributed: quantityDistributed,
+      invoiceDetails: invoiceDetails,
+      reportAddresses: reportAddresses,
+      whoToInvoice: whoToInvoice,
+      collectionJobId: collectionJobId,
+      updates: newUpdates,
+    );
+  }
+
+  // Helper method to compare dates (ignoring time)
+  bool _isSameDay(DateTime date1, DateTime date2) {
+    return date1.year == date2.year &&
+        date1.month == date2.month &&
+        date1.day == date2.day;
   }
 
   // Backwards compatibility getter - converts jobStatusId back to JobListStatus enum

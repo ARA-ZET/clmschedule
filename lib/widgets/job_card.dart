@@ -17,7 +17,7 @@ class JobCard extends StatelessWidget {
   const JobCard({super.key, required this.job});
 
   Color _getStatusColor(BuildContext context) {
-    final statusProvider = context.read<JobStatusProvider>();
+    final statusProvider = context.watch<JobStatusProvider>();
 
     // Safety check for provider loading state
     if (statusProvider.isLoading || statusProvider.statuses.isEmpty) {

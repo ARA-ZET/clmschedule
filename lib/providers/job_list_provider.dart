@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/job_list_item.dart';
+import '../models/job_list_item_update.dart';
 import '../services/job_list_service.dart';
 import '../services/undo_redo_manager.dart';
 import '../commands/job_list_commands.dart';
+import 'auth_provider.dart';
 
 class JobListProvider extends ChangeNotifier {
   final JobListService _jobListService;
   final UndoRedoManager _undoRedoManager;
+  final AuthProvider _authProvider;
   List<JobListItem> _jobListItems = [];
   bool _isLoading = false;
   bool _isInitialized = false;
@@ -15,6 +19,11 @@ class JobListProvider extends ChangeNotifier {
   String _searchQuery = '';
   Set<String> _statusFilters = {};
   DateTime _currentMonth = DateTime.now();
+
+  // Date filtering properties
+  String _dateFilter = 'all'; // 'all', 'single', 'range'
+  DateTime? _startDate;
+  DateTime? _endDate;
 
   // Subscription for job list items stream (current month only)
   StreamSubscription<List<JobListItem>>? _jobListSubscription;
@@ -32,10 +41,16 @@ class JobListProvider extends ChangeNotifier {
   // Lazy loading state
   bool _hasInitialLoad = false;
 
-  JobListProvider(this._jobListService, this._undoRedoManager) {
+  // Last checked time for updates
+  DateTime? _lastCheckedTime;
+  bool _isRefreshingLastChecked = false;
+
+  JobListProvider(
+      this._jobListService, this._undoRedoManager, this._authProvider) {
     // Initialize with postFrameCallback to avoid blocking UI
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeCurrentMonthData();
+      _loadLastCheckedTimeFromDatabase();
     });
   }
 
@@ -49,9 +64,14 @@ class JobListProvider extends ChangeNotifier {
   String get sortField => _sortField;
   bool get sortAscending => _sortAscending;
   DateTime get currentMonth => _currentMonth;
+  String get dateFilter => _dateFilter;
+  DateTime? get startDate => _startDate;
+  DateTime? get endDate => _endDate;
   UndoRedoManager get undoRedoManager => _undoRedoManager;
   String get currentMonthDisplay =>
       _jobListService.getMonthlyDocumentId(_currentMonth);
+  DateTime? get lastCheckedTime => _lastCheckedTime;
+  bool get isRefreshingLastChecked => _isRefreshingLastChecked;
 
   // Get merged data (database + pending local changes)
   List<JobListItem> _getMergedJobListItems() {
@@ -61,24 +81,56 @@ class JobListProvider extends ChangeNotifier {
     }).toList();
   }
 
-  // Get filtered job list items
+  // Cached filtered results
+  List<JobListItem>? _cachedFilteredItems;
+  final String _lastFilterHash = '';
+
+  // Get filtered job list items with caching
   List<JobListItem> _filteredJobListItems() {
+    // Create hash of current filter state
+    final currentHash =
+        '${_searchQuery}_${_statusFilters.join(',')}_${_dateFilter}_${_startDate?.millisecondsSinceEpoch}_${_endDate?.millisecondsSinceEpoch}';
+
+    // Return cached results if filters haven't changed
+    if (_cachedFilteredItems != null && _lastFilterHash == currentHash) {
+      return _cachedFilteredItems!;
+    }
+
     var filtered = _getMergedJobListItems();
 
     // Apply search filter
     if (_searchQuery.isNotEmpty) {
+      final query = _searchQuery.toLowerCase();
       filtered = filtered.where((item) {
-        return item.client.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-            item.invoice.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-            item.area.toLowerCase().contains(_searchQuery.toLowerCase());
+        return item.client.toLowerCase().contains(query) ||
+            item.invoice.toLowerCase().contains(query) ||
+            item.area.toLowerCase().contains(query);
       }).toList();
     }
 
     // Apply status filter
     if (_statusFilters.isNotEmpty) {
+      final statusSet =
+          _statusFilters.toSet(); // Convert to Set for faster lookup
       filtered = filtered
-          .where((item) => _statusFilters.contains(item.jobStatusId))
+          .where((item) => statusSet.contains(item.jobStatusId))
           .toList();
+    }
+
+    // Apply date filter
+    if (_dateFilter != 'all' && _startDate != null) {
+      filtered = filtered.where((item) {
+        if (_dateFilter == 'single') {
+          // Single day filter - check if item date matches the selected date
+          return _isSameDay(item.date, _startDate!);
+        } else if (_dateFilter == 'range' && _endDate != null) {
+          // Date range filter - check if item date is within range
+          return item.date
+                  .isAfter(_startDate!.subtract(const Duration(days: 1))) &&
+              item.date.isBefore(_endDate!.add(const Duration(days: 1)));
+        }
+        return true;
+      }).toList();
     }
 
     // Apply sorting
@@ -514,6 +566,80 @@ class JobListProvider extends ChangeNotifier {
     updateJobListItemLocal(jobListItem);
   }
 
+  // Update job list item with change tracking
+  Future<void> updateJobListItemWithTracking(
+      JobListItem originalItem, JobListItem updatedItem) async {
+    final currentUser = _authProvider.user;
+    final currentAppUser = _authProvider.appUser;
+
+    if (currentUser == null) {
+      throw Exception('User must be authenticated to make changes');
+    }
+
+    // Create item with tracked changes
+    final trackedItem = originalItem.copyWithTrackedChange(
+      userId: currentUser.uid,
+      userDisplayName:
+          currentAppUser?.displayName ?? currentUser.email ?? 'Unknown User',
+      invoice: updatedItem.invoice != originalItem.invoice
+          ? updatedItem.invoice
+          : null,
+      amount:
+          updatedItem.amount != originalItem.amount ? updatedItem.amount : null,
+      client:
+          updatedItem.client != originalItem.client ? updatedItem.client : null,
+      jobStatusId: updatedItem.jobStatusId != originalItem.jobStatusId
+          ? updatedItem.jobStatusId
+          : null,
+      jobType: updatedItem.jobType != originalItem.jobType
+          ? updatedItem.jobType
+          : null,
+      area: updatedItem.area != originalItem.area ? updatedItem.area : null,
+      quantity: updatedItem.quantity != originalItem.quantity
+          ? updatedItem.quantity
+          : null,
+      manDays: updatedItem.manDays != originalItem.manDays
+          ? updatedItem.manDays
+          : null,
+      date: !_isSameDay(updatedItem.date, originalItem.date)
+          ? updatedItem.date
+          : null,
+      collectionAddress:
+          updatedItem.collectionAddress != originalItem.collectionAddress
+              ? updatedItem.collectionAddress
+              : null,
+      collectionDate:
+          !_isSameDay(updatedItem.collectionDate, originalItem.collectionDate)
+              ? updatedItem.collectionDate
+              : null,
+      specialInstructions:
+          updatedItem.specialInstructions != originalItem.specialInstructions
+              ? updatedItem.specialInstructions
+              : null,
+      quantityDistributed:
+          updatedItem.quantityDistributed != originalItem.quantityDistributed
+              ? updatedItem.quantityDistributed
+              : null,
+      invoiceDetails: updatedItem.invoiceDetails != originalItem.invoiceDetails
+          ? updatedItem.invoiceDetails
+          : null,
+      reportAddresses:
+          updatedItem.reportAddresses != originalItem.reportAddresses
+              ? updatedItem.reportAddresses
+              : null,
+      whoToInvoice: updatedItem.whoToInvoice != originalItem.whoToInvoice
+          ? updatedItem.whoToInvoice
+          : null,
+      collectionJobId:
+          updatedItem.collectionJobId != originalItem.collectionJobId
+              ? updatedItem.collectionJobId
+              : null,
+    );
+
+    // Update locally first, then save
+    updateJobListItemLocal(trackedItem);
+  }
+
   // Delete job list item
   Future<void> deleteJobListItem(String id) async {
     try {
@@ -560,24 +686,28 @@ class JobListProvider extends ChangeNotifier {
   // Set search query
   void setSearchQuery(String query) {
     _searchQuery = query;
+    _cachedFilteredItems = null; // Clear cache
     notifyListeners();
   }
 
   // Set status filter
   void setStatusFilter(String? statusId) {
     _statusFilters = statusId != null ? {statusId} : {};
+    _cachedFilteredItems = null; // Clear cache
     notifyListeners();
   }
 
   // Add status to filter
   void addStatusFilter(String statusId) {
     _statusFilters.add(statusId);
+    _cachedFilteredItems = null; // Clear cache
     notifyListeners();
   }
 
   // Remove status from filter
   void removeStatusFilter(String statusId) {
     _statusFilters.remove(statusId);
+    _cachedFilteredItems = null; // Clear cache
     notifyListeners();
   }
 
@@ -588,6 +718,7 @@ class JobListProvider extends ChangeNotifier {
     } else {
       _statusFilters.add(statusId);
     }
+    _cachedFilteredItems = null; // Clear cache
     notifyListeners();
   }
 
@@ -595,6 +726,54 @@ class JobListProvider extends ChangeNotifier {
   void clearFilters() {
     _searchQuery = '';
     _statusFilters.clear();
+    _dateFilter = 'all';
+    _startDate = null;
+    _endDate = null;
+    notifyListeners();
+  }
+
+  // Helper method to check if two dates are the same day
+  bool _isSameDay(DateTime date1, DateTime date2) {
+    return date1.year == date2.year &&
+        date1.month == date2.month &&
+        date1.day == date2.day;
+  }
+
+  // Date filter methods
+  void setDateFilter({
+    required String filterType, // 'all', 'single', 'range'
+    DateTime? startDate,
+    DateTime? endDate,
+  }) {
+    _dateFilter = filterType;
+    _startDate = startDate;
+    _endDate = endDate;
+    _cachedFilteredItems = null; // Clear cache
+    notifyListeners();
+  }
+
+  void clearDateFilter() {
+    _dateFilter = 'all';
+    _startDate = null;
+    _endDate = null;
+    _cachedFilteredItems = null; // Clear cache
+    notifyListeners();
+  }
+
+  // Simple date filter methods for new UI
+  void setSimpleDateFilter(DateTime date) {
+    _startDate = date;
+    _endDate = null;
+    _dateFilter = 'single';
+    _cachedFilteredItems = null;
+    notifyListeners();
+  }
+
+  void setSimpleDateRangeFilter(DateTime startDate, DateTime endDate) {
+    _startDate = startDate;
+    _endDate = endDate;
+    _dateFilter = 'range';
+    _cachedFilteredItems = null;
     notifyListeners();
   }
 
@@ -728,6 +907,101 @@ class JobListProvider extends ChangeNotifier {
 
   Future<bool> redo() async {
     return await undoRedoManager.redo(UndoRedoContext.jobList);
+  }
+
+  // Load last checked time from database
+  Future<void> _loadLastCheckedTimeFromDatabase() async {
+    try {
+      final currentUser = _authProvider.user;
+      if (currentUser == null) return;
+
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(currentUser.uid)
+          .get();
+
+      if (userDoc.exists) {
+        final data = userDoc.data()!;
+        if (data.containsKey('lastCheckedTime')) {
+          _lastCheckedTime = (data['lastCheckedTime'] as Timestamp).toDate();
+          notifyListeners();
+        }
+      }
+    } catch (e) {
+      print('JobListProvider: Error loading last checked time: $e');
+    }
+  }
+
+  // Save last checked time to database
+  Future<void> _saveLastCheckedTimeToDatabase(DateTime time) async {
+    try {
+      final currentUser = _authProvider.user;
+      if (currentUser == null) return;
+
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(currentUser.uid)
+          .update({
+        'lastCheckedTime': Timestamp.fromDate(time),
+      });
+    } catch (e) {
+      // If document doesn't exist, create it
+      try {
+        final currentUser = _authProvider.user;
+        if (currentUser == null) return;
+
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(currentUser.uid)
+            .set({
+          'lastCheckedTime': Timestamp.fromDate(time),
+        }, SetOptions(merge: true));
+      } catch (e2) {
+        print('JobListProvider: Error saving last checked time: $e2');
+      }
+    }
+  }
+
+  // Refresh the last checked time for updates
+  Future<void> refreshLastCheckedTime() async {
+    _isRefreshingLastChecked = true;
+    notifyListeners();
+
+    try {
+      final now = DateTime.now();
+      _lastCheckedTime = now;
+
+      // Save to database
+      await _saveLastCheckedTimeToDatabase(now);
+
+      notifyListeners();
+    } catch (e) {
+      print('JobListProvider: Error refreshing last checked time: $e');
+    } finally {
+      _isRefreshingLastChecked = false;
+      notifyListeners();
+    }
+  }
+
+  // Check if a job has updates after the last checked time
+  bool hasUpdatesAfterLastCheck(JobListItem item) {
+    if (_lastCheckedTime == null || item.updates.isEmpty) {
+      return false;
+    }
+
+    return item.updates
+        .any((update) => update.timestamp.isAfter(_lastCheckedTime!));
+  }
+
+  // Get updates that occurred after the last checked time
+  List<JobListItemUpdate> getUpdatesAfterLastCheck(JobListItem item) {
+    if (_lastCheckedTime == null) {
+      return item.updates;
+    }
+
+    return item.updates
+        .where((update) => update.timestamp.isAfter(_lastCheckedTime!))
+        .toList();
   }
 
   @override

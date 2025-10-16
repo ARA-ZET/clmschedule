@@ -136,55 +136,138 @@ class _DistributorManagementDialogState
                               const Divider(height: 1),
                           itemBuilder: (context, index) {
                             final distributor = _localDistributors[index];
-                            return ListTile(
-                              leading: CircleAvatar(
-                                backgroundColor: Theme.of(context)
-                                    .colorScheme
-                                    .primary
-                                    .withOpacity(0.1),
-                                child: Text(
-                                  distributor.index.toString(),
-                                  style: TextStyle(
-                                    color:
-                                        Theme.of(context).colorScheme.primary,
-                                    fontWeight: FontWeight.bold,
-                                  ),
+                            return Card(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              child: ExpansionTile(
+                                leading: Stack(
+                                  children: [
+                                    CircleAvatar(
+                                      backgroundColor: Theme.of(context)
+                                          .colorScheme
+                                          .primary
+                                          .withOpacity(0.1),
+                                      child: Text(
+                                        distributor.index.toString(),
+                                        style: TextStyle(
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .primary,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                    Positioned(
+                                      right: -2,
+                                      top: -2,
+                                      child: Container(
+                                        width: 12,
+                                        height: 12,
+                                        decoration: BoxDecoration(
+                                          color: _getStatusColor(distributor.status),
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: Colors.white,
+                                            width: 1,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                              ),
-                              title: Text(distributor.name),
-                              subtitle: Text('Position: ${distributor.index}'),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
+                                title: Row(
+                                  children: [
+                                    Expanded(child: Text(distributor.name)),
+                                    Icon(
+                                      _getStatusIcon(distributor.status),
+                                      size: 16,
+                                      color: _getStatusColor(distributor.status),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      distributor.status.displayName,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: _getStatusColor(distributor.status),
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                subtitle: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text('Position: ${distributor.index}'),
+                                    if (distributor.phone1 != null)
+                                      Text(
+                                        'Phone: ${distributor.phone1}',
+                                        style: const TextStyle(fontSize: 12),
+                                      ),
+                                  ],
+                                ),
                                 children: [
-                                  if (distributor.index > 0)
-                                    IconButton(
-                                      icon: const Icon(Icons.keyboard_arrow_up),
-                                      tooltip: 'Move Up',
-                                      onPressed: () =>
-                                          _swapDistributorPositions(
-                                              distributor, true),
+                                  Padding(
+                                    padding: const EdgeInsets.all(16),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            const Icon(Icons.phone, size: 16),
+                                            const SizedBox(width: 8),
+                                            Text(
+                                              'Phone 1: ${distributor.phone1 ?? 'Not set'}',
+                                              style: const TextStyle(fontSize: 14),
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Row(
+                                          children: [
+                                            const Icon(Icons.phone_android, size: 16),
+                                            const SizedBox(width: 8),
+                                            Text(
+                                              'Phone 2: ${distributor.phone2 ?? 'Not set'}',
+                                              style: const TextStyle(fontSize: 14),
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 16),
+                                        Row(
+                                          mainAxisAlignment: MainAxisAlignment.end,
+                                          children: [
+                                            if (distributor.index > 0)
+                                              IconButton(
+                                                icon: const Icon(Icons.keyboard_arrow_up),
+                                                tooltip: 'Move Up',
+                                                onPressed: () =>
+                                                    _swapDistributorPositions(
+                                                        distributor, true),
+                                              ),
+                                            if (distributor.index <
+                                                _localDistributors.length - 1)
+                                              IconButton(
+                                                icon: const Icon(Icons.keyboard_arrow_down),
+                                                tooltip: 'Move Down',
+                                                onPressed: () =>
+                                                    _swapDistributorPositions(
+                                                        distributor, false),
+                                              ),
+                                            IconButton(
+                                              icon: const Icon(Icons.edit),
+                                              tooltip: 'Edit Distributor',
+                                              onPressed: () =>
+                                                  _editDistributorLocal(distributor),
+                                            ),
+                                            IconButton(
+                                              icon: const Icon(Icons.delete),
+                                              tooltip: 'Delete Distributor',
+                                              onPressed: () =>
+                                                  _deleteDistributorLocal(distributor),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
                                     ),
-                                  if (distributor.index <
-                                      _localDistributors.length - 1)
-                                    IconButton(
-                                      icon:
-                                          const Icon(Icons.keyboard_arrow_down),
-                                      tooltip: 'Move Down',
-                                      onPressed: () =>
-                                          _swapDistributorPositions(
-                                              distributor, false),
-                                    ),
-                                  IconButton(
-                                    icon: const Icon(Icons.edit),
-                                    tooltip: 'Edit Distributor',
-                                    onPressed: () =>
-                                        _editDistributorLocal(distributor),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.delete),
-                                    tooltip: 'Delete Distributor',
-                                    onPressed: () =>
-                                        _deleteDistributorLocal(distributor),
                                   ),
                                 ],
                               ),
@@ -443,7 +526,10 @@ class _DistributorManagementDialogState
 
         // Only update if there are actual changes
         if (currentDistributor.name != localDistributor.name ||
-            currentDistributor.index != localDistributor.index) {
+            currentDistributor.index != localDistributor.index ||
+            currentDistributor.phone1 != localDistributor.phone1 ||
+            currentDistributor.phone2 != localDistributor.phone2 ||
+            currentDistributor.status != localDistributor.status) {
           distributorsToUpdate.add(localDistributor);
         }
       }
@@ -500,6 +586,32 @@ class _DistributorManagementDialogState
           ),
         );
       }
+    }
+  }
+
+  IconData _getStatusIcon(DistributorStatus status) {
+    switch (status) {
+      case DistributorStatus.active:
+        return Icons.check_circle;
+      case DistributorStatus.inactive:
+        return Icons.cancel;
+      case DistributorStatus.suspended:
+        return Icons.block;
+      case DistributorStatus.onLeave:
+        return Icons.flight_takeoff;
+    }
+  }
+
+  Color _getStatusColor(DistributorStatus status) {
+    switch (status) {
+      case DistributorStatus.active:
+        return Colors.green;
+      case DistributorStatus.inactive:
+        return Colors.grey;
+      case DistributorStatus.suspended:
+        return Colors.red;
+      case DistributorStatus.onLeave:
+        return Colors.orange;
     }
   }
 }

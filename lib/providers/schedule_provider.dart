@@ -306,11 +306,38 @@ class ScheduleProvider extends ChangeNotifier {
 
   Future<void> updateJobWithUndo(
       Job originalJob, Job modifiedJob, DateTime targetDate) async {
-    final command = EditJobCommand(
+    // Check if we're moving the job to a different date
+    if (originalJob.date.year != modifiedJob.date.year ||
+        originalJob.date.month != modifiedJob.date.month ||
+        originalJob.date.day != modifiedJob.date.day) {
+      // Use the move command for cross-date moves
+      await moveJobBetweenDatesWithUndo(
+        originalJob,
+        modifiedJob,
+        originalJob.date,
+        modifiedJob.date,
+      );
+    } else {
+      // Use the regular edit command for same-date updates
+      final command = EditJobCommand(
+        service: _firestoreService,
+        originalJob: originalJob,
+        modifiedJob: modifiedJob,
+        targetDate: targetDate,
+      );
+      await undoRedoManager.executeCommand(
+          command, UndoRedoContext.scheduleGrid);
+    }
+  }
+
+  Future<void> moveJobBetweenDatesWithUndo(Job originalJob, Job movedJob,
+      DateTime originalDate, DateTime newDate) async {
+    final command = MoveJobBetweenDatesCommand(
       service: _firestoreService,
       originalJob: originalJob,
-      modifiedJob: modifiedJob,
-      targetDate: targetDate,
+      movedJob: movedJob,
+      originalDate: originalDate,
+      newDate: newDate,
     );
     await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
   }

@@ -9,6 +9,7 @@ import 'add_edit_job_dialog.dart';
 import 'editable_table_cell.dart';
 import 'multi_select_status_filter.dart';
 import 'month_navigation_widget.dart';
+import 'simple_date_filter.dart';
 
 // Reusable DataTable column header widget
 class DataTableHeaderWidget extends StatelessWidget {
@@ -221,13 +222,14 @@ class _JobListGridState extends State<JobListGrid> {
               availableMonths: jobListProvider.getAvailableMonths(),
             ),
 
-            // Search and Filter Bar
+            // Search and Filter Bar - Single compact row
             Container(
               padding: const EdgeInsets.all(16),
               child: Row(
                 children: [
+                  // Search field
                   Expanded(
-                    flex: 2,
+                    flex: 4,
                     child: TextField(
                       controller: _searchController,
                       decoration: InputDecoration(
@@ -243,8 +245,31 @@ class _JobListGridState extends State<JobListGrid> {
                       },
                     ),
                   ),
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 12),
+
+                  // Simple Date Filter
                   Expanded(
+                    flex: 2,
+                    child: SimpleDateFilter(
+                      startDate: jobListProvider.startDate,
+                      endDate: jobListProvider.endDate,
+                      onSingleDateSelected: (date) {
+                        jobListProvider.setSimpleDateFilter(date);
+                      },
+                      onDateRangeSelected: (startDate, endDate) {
+                        jobListProvider.setSimpleDateRangeFilter(
+                            startDate, endDate);
+                      },
+                      onClear: () {
+                        jobListProvider.clearDateFilter();
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+
+                  // Status Filter - Smaller
+                  SizedBox(
+                    width: 120,
                     child: MultiSelectStatusFilter(
                       selectedStatusIds: jobListProvider.statusFilters,
                       onToggle: jobListProvider.toggleStatusFilter,
@@ -253,65 +278,55 @@ class _JobListGridState extends State<JobListGrid> {
                       },
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  Expanded(
+                  const SizedBox(width: 12),
+
+                  // Sort dropdown - Smaller
+                  SizedBox(
+                    width: 110,
                     child: DropdownButtonFormField<String>(
                       initialValue: jobListProvider.sortField,
-                      decoration: InputDecoration(
-                        labelText: 'Sort by',
-                        border: const OutlineInputBorder(),
-                        contentPadding: const EdgeInsets.symmetric(
-                            vertical: 8, horizontal: 12),
-                        suffixIcon: IconButton(
-                          icon: Icon(
-                            jobListProvider.sortAscending
-                                ? Icons.arrow_upward
-                                : Icons.arrow_downward,
-                            size: scaleProvider.largeFontSize,
-                          ),
-                          onPressed: () {
-                            jobListProvider.setSorting(
-                              jobListProvider.sortField,
-                              !jobListProvider.sortAscending,
-                            );
-                          },
-                          tooltip: jobListProvider.sortAscending
-                              ? 'Ascending'
-                              : 'Descending',
-                        ),
+                      decoration: const InputDecoration(
+                        labelText: 'Sort',
+                        border: OutlineInputBorder(),
+                        contentPadding:
+                            EdgeInsets.symmetric(vertical: 8, horizontal: 8),
                       ),
                       items: const [
                         DropdownMenuItem(
                           value: 'date',
-                          child: Text('Date'),
+                          child: Text('Date', style: TextStyle(fontSize: 12)),
                         ),
                         DropdownMenuItem(
                           value: 'collectionDate',
-                          child: Text('Collection Date'),
+                          child:
+                              Text('Col. Date', style: TextStyle(fontSize: 12)),
                         ),
                         DropdownMenuItem(
                           value: 'client',
-                          child: Text('Client'),
+                          child: Text('Client', style: TextStyle(fontSize: 12)),
                         ),
                         DropdownMenuItem(
                           value: 'invoice',
-                          child: Text('Invoice'),
+                          child:
+                              Text('Invoice', style: TextStyle(fontSize: 12)),
                         ),
                         DropdownMenuItem(
                           value: 'amount',
-                          child: Text('Amount'),
+                          child: Text('Amount', style: TextStyle(fontSize: 12)),
                         ),
                         DropdownMenuItem(
                           value: 'area',
-                          child: Text('Area'),
+                          child: Text('Area', style: TextStyle(fontSize: 12)),
                         ),
                         DropdownMenuItem(
                           value: 'quantity',
-                          child: Text('Quantity'),
+                          child:
+                              Text('Quantity', style: TextStyle(fontSize: 12)),
                         ),
                         DropdownMenuItem(
                           value: 'manDays',
-                          child: Text('Man-Days'),
+                          child:
+                              Text('Man-Days', style: TextStyle(fontSize: 12)),
                         ),
                       ],
                       onChanged: (value) {
@@ -321,14 +336,41 @@ class _JobListGridState extends State<JobListGrid> {
                       },
                     ),
                   ),
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 12),
+
+                  // Sort order button
+                  IconButton(
+                    icon: Icon(
+                      jobListProvider.sortAscending
+                          ? Icons.arrow_upward
+                          : Icons.arrow_downward,
+                      size: scaleProvider.mediumIconSize,
+                    ),
+                    onPressed: () {
+                      jobListProvider.setSorting(
+                        jobListProvider.sortField,
+                        !jobListProvider.sortAscending,
+                      );
+                    },
+                    tooltip: jobListProvider.sortAscending
+                        ? 'Ascending'
+                        : 'Descending',
+                  ),
+                  const SizedBox(width: 12),
+
+                  // Action buttons - Clear and Add Job
                   ElevatedButton.icon(
                     onPressed: () {
                       _searchController.clear();
                       jobListProvider.clearFilters();
                     },
-                    icon: Icon(Icons.clear, size: scaleProvider.mediumIconSize),
-                    label: const Text('Clear'),
+                    icon: Icon(Icons.clear, size: scaleProvider.smallIconSize),
+                    label: const Text('Clear', style: TextStyle(fontSize: 12)),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      minimumSize: const Size(0, 36),
+                    ),
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton.icon(
@@ -336,22 +378,28 @@ class _JobListGridState extends State<JobListGrid> {
                         _isAddingJob ? null : () => _showAddJobDialog(context),
                     icon: _isAddingJob
                         ? SizedBox(
-                            width: scaleProvider.mediumIconSize,
-                            height: scaleProvider.mediumIconSize,
+                            width: scaleProvider.smallIconSize,
+                            height: scaleProvider.smallIconSize,
                             child:
                                 const CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : Icon(Icons.add, size: scaleProvider.mediumIconSize),
-                    label: Text(_isAddingJob ? 'Adding...' : 'Add Job'),
+                        : Icon(Icons.add, size: scaleProvider.smallIconSize),
+                    label: Text(_isAddingJob ? 'Adding...' : 'Add Job',
+                        style: const TextStyle(fontSize: 12)),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      minimumSize: const Size(0, 36),
+                    ),
                   ),
                   if (jobListProvider.pendingUpdatesCount > 0) ...[
                     const SizedBox(width: 8),
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
+                          horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
                         color: Colors.orange.shade100,
-                        borderRadius: BorderRadius.circular(12),
+                        borderRadius: BorderRadius.circular(8),
                         border: Border.all(color: Colors.orange.shade300),
                       ),
                       child: Row(
@@ -360,11 +408,11 @@ class _JobListGridState extends State<JobListGrid> {
                           Icon(Icons.sync,
                               size: scaleProvider.smallIconSize,
                               color: Colors.orange.shade700),
-                          const SizedBox(width: 4),
+                          const SizedBox(width: 2),
                           Text(
                             '${jobListProvider.pendingUpdatesCount}',
                             style: TextStyle(
-                              fontSize: scaleProvider.mediumFontSize,
+                              fontSize: scaleProvider.smallFontSize,
                               fontWeight: FontWeight.bold,
                               color: Colors.orange.shade700,
                             ),
@@ -532,7 +580,7 @@ class _JobListGridState extends State<JobListGrid> {
                                         color: WidgetStateProperty.all(
                                             (Provider.of<JobListStatusProvider>(
                                                             context,
-                                                            listen: false)
+                                                            listen: true)
                                                         .getStatusById(
                                                             item.jobStatusId)
                                                         ?.color ??
@@ -642,11 +690,14 @@ class _JobListGridState extends State<JobListGrid> {
                                                     }).toList(),
                                                     onChanged: (newStatusId) {
                                                       if (newStatusId != null) {
+                                                        final updatedItem =
+                                                            item.copyWith(
+                                                                jobStatusId:
+                                                                    newStatusId);
                                                         jobListProvider
-                                                            .updateJobListItemLocal(
-                                                          item.copyWith(
-                                                              jobStatusId:
-                                                                  newStatusId),
+                                                            .updateJobListItemWithTracking(
+                                                          item,
+                                                          updatedItem,
                                                         );
                                                       }
                                                     },
@@ -869,10 +920,42 @@ class _JobListGridState extends State<JobListGrid> {
                                           ),
                                           DataCell(
                                             SizedBox(
-                                              width: 80,
+                                              width: 120,
                                               child: Row(
                                                 mainAxisSize: MainAxisSize.min,
                                                 children: [
+                                                  Consumer<JobListProvider>(
+                                                    builder: (context, provider,
+                                                        child) {
+                                                      final hasRecentUpdates =
+                                                          provider
+                                                              .hasUpdatesAfterLastCheck(
+                                                                  item);
+                                                      final hasAnyUpdates = item
+                                                          .updates.isNotEmpty;
+
+                                                      return IconButton(
+                                                        icon: Icon(Icons.info,
+                                                            size: 18,
+                                                            color: !hasAnyUpdates
+                                                                ? Colors.grey
+                                                                : hasRecentUpdates
+                                                                    ? Colors.orange
+                                                                    : Colors.grey),
+                                                        onPressed: hasAnyUpdates
+                                                            ? () =>
+                                                                _showUpdateHistory(
+                                                                    context,
+                                                                    item)
+                                                            : null,
+                                                        tooltip: hasAnyUpdates
+                                                            ? (hasRecentUpdates
+                                                                ? 'New updates available!'
+                                                                : 'View update history')
+                                                            : 'No updates yet',
+                                                      );
+                                                    },
+                                                  ),
                                                   IconButton(
                                                     icon: const Icon(Icons.edit,
                                                         size: 18),
@@ -883,8 +966,10 @@ class _JobListGridState extends State<JobListGrid> {
                                                   ),
                                                   IconButton(
                                                     icon: const Icon(
-                                                        Icons.delete,
-                                                        size: 18),
+                                                      Icons.delete,
+                                                      size: 18,
+                                                      color: Colors.red,
+                                                    ),
                                                     onPressed: () =>
                                                         _showDeleteConfirmation(
                                                             context, item),
@@ -918,7 +1003,7 @@ class _JobListGridState extends State<JobListGrid> {
                                 child: SingleChildScrollView(
                                   controller: _frozenHeaderScrollController,
                                   scrollDirection: Axis.horizontal,
-                                  child: const Row(
+                                  child: Row(
                                     children: [
                                       FrozenHeaderCell(
                                         text: 'Date',
@@ -983,6 +1068,65 @@ class _JobListGridState extends State<JobListGrid> {
                                       FrozenHeaderCell(
                                         text: 'Who to Invoice',
                                         width: 120,
+                                      ),
+                                      Container(
+                                        width: 60,
+                                        height: 56,
+                                        alignment: Alignment.centerLeft,
+                                        padding: const EdgeInsets.all(8),
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          color: Colors.grey[100],
+                                          border: Border.all(
+                                            color: Colors.grey[300]!,
+                                            width: 1,
+                                          ),
+                                        ),
+                                        child: Consumer<JobListProvider>(
+                                          builder: (context, provider, child) {
+                                            return IconButton(
+                                              onPressed: provider
+                                                      .isRefreshingLastChecked
+                                                  ? null
+                                                  : () async {
+                                                      final now =
+                                                          DateTime.now();
+                                                      await provider
+                                                          .refreshLastCheckedTime();
+
+                                                      if (context.mounted) {
+                                                        ScaffoldMessenger.of(
+                                                                context)
+                                                            .showSnackBar(
+                                                          SnackBar(
+                                                            content: Text(
+                                                                'Last checked time refreshed to ${now.toString().substring(0, 19)}'),
+                                                            duration:
+                                                                const Duration(
+                                                                    seconds: 2),
+                                                          ),
+                                                        );
+                                                      }
+                                                    },
+                                              tooltip:
+                                                  'Refresh last checked time',
+                                              icon: provider
+                                                      .isRefreshingLastChecked
+                                                  ? const SizedBox(
+                                                      width: 20,
+                                                      height: 20,
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                        color: Colors.grey,
+                                                      ),
+                                                    )
+                                                  : const Icon(Icons
+                                                      .replay_circle_filled_sharp),
+                                            );
+                                          },
+                                        ),
                                       ),
                                       FrozenHeaderCell(
                                         text: 'Actions',
@@ -1153,8 +1297,10 @@ class _JobListGridState extends State<JobListGrid> {
           return;
       }
 
-      // Use debounced update system - no await needed as it updates locally first
-      context.read<JobListProvider>().updateJobListItem(updatedItem);
+      // Use debounced update system with change tracking
+      context
+          .read<JobListProvider>()
+          .updateJobListItemWithTracking(item, updatedItem);
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1244,7 +1390,9 @@ class _JobListGridState extends State<JobListGrid> {
 
     if (result != null && context.mounted) {
       try {
-        await context.read<JobListProvider>().updateJobListItem(result);
+        await context
+            .read<JobListProvider>()
+            .updateJobListItemWithTracking(item, result);
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Job updated successfully!')),
@@ -1299,5 +1447,221 @@ class _JobListGridState extends State<JobListGrid> {
         );
       },
     );
+  }
+
+  void _showUpdateHistory(BuildContext context, JobListItem item) {
+    final provider = context.read<JobListProvider>();
+    final allUpdates = item.updates;
+    final recentUpdates = provider.getUpdatesAfterLastCheck(item);
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              const Icon(Icons.history, color: Colors.blue),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Update History - ${item.client}'),
+              ),
+              if (provider.lastCheckedTime != null)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: recentUpdates.isNotEmpty
+                        ? Colors.orange.shade100
+                        : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: recentUpdates.isNotEmpty
+                          ? Colors.orange.shade300
+                          : Colors.grey.shade300,
+                    ),
+                  ),
+                  child: Text(
+                    recentUpdates.isNotEmpty
+                        ? '${recentUpdates.length} new'
+                        : 'Up to date',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: recentUpdates.isNotEmpty
+                          ? Colors.orange.shade700
+                          : Colors.grey.shade700,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          content: SizedBox(
+            width: 500,
+            height: 400,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (provider.lastCheckedTime != null) ...[
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue.shade200),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.access_time,
+                            size: 16, color: Colors.blue.shade700),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Last checked: ${_formatDateTime(provider.lastCheckedTime!)}',
+                          style: TextStyle(
+                              fontSize: 12, color: Colors.blue.shade700),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                Text(
+                  'All Updates (${allUpdates.length})',
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 16),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: allUpdates.isEmpty
+                      ? const Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.history_toggle_off,
+                                  size: 48, color: Colors.grey),
+                              SizedBox(height: 16),
+                              Text('No updates recorded yet',
+                                  style: TextStyle(color: Colors.grey)),
+                            ],
+                          ),
+                        )
+                      : ListView.builder(
+                          itemCount: allUpdates.length,
+                          itemBuilder: (context, index) {
+                            final update = allUpdates[allUpdates.length -
+                                1 -
+                                index]; // Show newest first
+                            final isRecent = provider.lastCheckedTime != null &&
+                                update.timestamp
+                                    .isAfter(provider.lastCheckedTime!);
+
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: isRecent
+                                    ? Colors.orange.shade50
+                                    : Colors.grey.shade50,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: isRecent
+                                      ? Colors.orange.shade200
+                                      : Colors.grey.shade200,
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: isRecent
+                                              ? Colors.orange.shade100
+                                              : Colors.grey.shade100,
+                                          borderRadius:
+                                              BorderRadius.circular(4),
+                                        ),
+                                        child: Text(
+                                          update.userDisplayName.isNotEmpty
+                                              ? update.userDisplayName
+                                              : 'Unknown User',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                            color: isRecent
+                                                ? Colors.orange.shade700
+                                                : Colors.grey.shade700,
+                                          ),
+                                        ),
+                                      ),
+                                      const Spacer(),
+                                      if (isRecent)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: Colors.orange.shade600,
+                                            borderRadius:
+                                                BorderRadius.circular(4),
+                                          ),
+                                          child: const Text(
+                                            'NEW',
+                                            style: TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        _formatDateTime(update.timestamp),
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    update.getChangeDescription(),
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  String _formatDateTime(DateTime dateTime) {
+    final now = DateTime.now();
+    final difference = now.difference(dateTime);
+
+    if (difference.inDays > 0) {
+      return '${difference.inDays}d ago (${dateTime.day}/${dateTime.month} ${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')})';
+    } else if (difference.inHours > 0) {
+      return '${difference.inHours}h ago (${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')})';
+    } else if (difference.inMinutes > 0) {
+      return '${difference.inMinutes}m ago';
+    } else {
+      return 'Just now';
+    }
   }
 }

@@ -1,6 +1,5 @@
 // Web-compatible test for KML service
 import 'package:flutter/material.dart';
-import 'lib/services/kml_parser_service.dart';
 
 void main() {
   runApp(const KmlTestApp());
@@ -36,9 +35,6 @@ class _KmlTestPageState extends State<KmlTestPage> {
     });
 
     try {
-      const googleMapsUrl =
-          'https://www.google.com/maps/d/viewer?mid=1-scibuyadDyoH7c_HTF8QhGRUiRGBYM&hl=en_US&ll=26.129052941791833%2C50.55854863281251&z=12';
-
       final polygons =
           // TODO: Update to use MyMapsKmlDownloader + parseKmlData
           // await KmlParserService.downloadAndParseKml(googleMapsUrl);

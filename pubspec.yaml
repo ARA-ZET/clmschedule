@@ -42,6 +42,7 @@ dependencies:
   firebase_core: ^3.4.0
   cloud_firestore: ^5.4.0
   firebase_auth: ^5.2.0 # Using compatible version
+  firebase_storage: ^12.2.0
 
   # State Management
   provider: ^6.1.1
@@ -49,6 +50,7 @@ dependencies:
   # Utilities
   intl: ^0.20.2
   url_launcher: ^6.2.3
+  image_picker: ^1.1.2
   two_dimensional_scrollables: ^0.3.7
   google_maps_flutter: ^2.9.0
   google_maps_flutter_web: 0.5.10

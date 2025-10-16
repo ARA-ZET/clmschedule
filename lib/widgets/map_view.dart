@@ -5,14 +5,12 @@ import 'dart:math' show min, max;
 import 'dart:ui' as ui;
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../services/work_area_service.dart';
 import '../services/gpx_parser_service.dart';
 import '../services/kml_parser_service.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
 import '../models/gpx_track.dart';
-import '../models/job_list_item.dart';
 import '../providers/job_list_provider.dart';
 import 'mymaps_kml_downloader.dart';
 
@@ -70,8 +68,6 @@ class _MapViewState extends State<MapView> {
 
   // Client Maps state
   final TextEditingController _clientMapsController = TextEditingController();
-  bool _isDownloadingMaps = false;
-  bool _showSuggestions = false;
 
   @override
   void initState() {
@@ -1347,54 +1343,6 @@ class _MapViewState extends State<MapView> {
     );
   }
 
-  Widget _buildClientSuggestions(JobListProvider jobListProvider) {
-    final query = _clientMapsController.text.toLowerCase();
-    final suggestions = jobListProvider.jobListItems
-        .where((item) =>
-            item.client.toLowerCase().contains(query) &&
-            item.client.toLowerCase() != query)
-        .take(5)
-        .toList();
-
-    if (suggestions.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Container(
-      margin: const EdgeInsets.only(top: 4),
-      decoration: BoxDecoration(
-        border: Border.all(color: Colors.grey.shade300),
-        borderRadius: BorderRadius.circular(4),
-        color: Colors.white,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: suggestions.map((item) {
-          return ListTile(
-            dense: true,
-            title: Text(item.client),
-            subtitle: item.area.isNotEmpty
-                ? Text(
-                    item.area,
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  )
-                : null,
-            onTap: () {
-              setState(() {
-                _clientMapsController.text =
-                    item.area.isNotEmpty ? item.area : item.client;
-                _showSuggestions = false;
-              });
-              _navigateToJob(item);
-            },
-          );
-        }).toList(),
-      ),
-    );
-  }
-
   Widget _buildTrackListItem(GpxTrack track, int index) {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -1604,40 +1552,6 @@ class _MapViewState extends State<MapView> {
   }
 
   // Client Maps functionality
-  void _navigateToJob(JobListItem jobItem) {
-    // Show a snackbar with job information
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Selected Job: ${jobItem.client}',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              Text('Invoice: ${jobItem.invoice}'),
-              Text('Area: ${jobItem.area}'),
-              Text(
-                  'Date: ${jobItem.date.day}/${jobItem.date.month}/${jobItem.date.year}'),
-            ],
-          ),
-          backgroundColor: Colors.orange,
-          duration: const Duration(seconds: 4),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-  }
-
-  /// Check if URL is a valid KML or Google My Maps URL
-  bool _isValidKmlUrl(String url) {
-    return url.toLowerCase().contains('.kml') ||
-        url.contains('google.com/maps') ||
-        url.contains('drive.google.com') ||
-        url.contains('mymaps.google.com');
-  }
 
   /// Handle KML data retrieved from MyMapsKmlDownloader
   void _handleKmlData(Uint8List kmlBytes, String fileName) async {
@@ -1689,85 +1603,6 @@ class _MapViewState extends State<MapView> {
             duration: const Duration(seconds: 5),
           ),
         );
-      }
-    }
-  }
-
-  Future<void> _downloadMaps() async {
-    if (_clientMapsController.text.isEmpty) return;
-
-    setState(() {
-      _isDownloadingMaps = true;
-    });
-
-    try {
-      final text = _clientMapsController.text.trim();
-
-      if (text.contains('google.com/maps') || text.contains('goo.gl')) {
-        // Launch the URL in external app for Google Maps URLs
-        final uri = Uri.parse(text);
-        if (await canLaunchUrl(uri)) {
-          await launchUrl(uri, mode: LaunchMode.externalApplication);
-
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Opening Google My Maps in external app...'),
-                backgroundColor: Colors.blue,
-              ),
-            );
-          }
-        } else {
-          throw Exception('Could not launch URL');
-        }
-      } else {
-        // Check if it's a selected job with area URL
-        final jobListProvider =
-            Provider.of<JobListProvider>(context, listen: false);
-        final selectedJob = jobListProvider.jobListItems
-            .where((job) => job.client == text)
-            .firstOrNull;
-
-        if (selectedJob != null && selectedJob.area.isNotEmpty) {
-          // For job areas, just open in external app since we can't download without user interaction
-          if (_isValidKmlUrl(selectedJob.area)) {
-            final uri = Uri.parse(selectedJob.area);
-            if (await canLaunchUrl(uri)) {
-              await launchUrl(uri, mode: LaunchMode.externalApplication);
-
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                        'Opening ${selectedJob.client} area in external app...'),
-                    backgroundColor: Colors.blue,
-                  ),
-                );
-              }
-            }
-          } else {
-            throw Exception('Invalid KML URL in job area field');
-          }
-        } else {
-          throw Exception(
-              'No job found with that client name, or use the KML downloader below for URLs');
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: ${e.toString()}'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isDownloadingMaps = false;
-        });
       }
     }
   }
