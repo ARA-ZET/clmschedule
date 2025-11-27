@@ -50,7 +50,11 @@ app.*.map.json
 .env.development
 .env.production
 !.env.example
+!.env.template
 web/maps_config.js
+web/maps_config.js.backup
+.firebase/**/maps_config.js
+.firebase/**/maps_config.js.backup
 lib/firebase_options.dart
 lib/env.dart
 lib/env.g.dart
@@ -63,3 +67,6 @@ google-services.json
 GoogleService-Info.plist
 firebase_options.dart
 firebase_app_id_file.json
+
+# Firebase hosting cache
+.firebase/

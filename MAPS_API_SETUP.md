@@ -11,7 +11,7 @@
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Navigate to **APIs & Services > Credentials**
-3. Find your API key: `AIzaSyBcY9Z77L3oE3Cuw-2trlyM5N2IuRh7S6k`
+3. Find your API key: `YOUR_GOOGLE_MAPS_API_KEY`
 4. Click on it to view details
 
 ### 2. Check API Restrictions
@@ -82,7 +82,7 @@ When deploying to production:
 
 ## Current Configuration
 
-- API Key: `AIzaSyBcY9Z77L3oE3Cuw-2trlyM5N2IuRh7S6k`
+- API Key: `YOUR_GOOGLE_MAPS_API_KEY`
 - Configuration file: `web/maps_config.js`
 - Environment file: `.env`
 - Update tool: `tools/replace_maps_key.dart`
