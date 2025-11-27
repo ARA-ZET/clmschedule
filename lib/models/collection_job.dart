@@ -166,7 +166,14 @@ class CollectionJob {
       if (parts.length != 2) return false;
       final hour = int.parse(parts[0]);
       final minute = int.parse(parts[1]);
-      return hour >= 8 && hour <= 16 && (minute == 0 || minute == 30);
+
+      // Valid hours: 7 (only :30) and 8-20 (both :00 and :30)
+      if (hour == 7) {
+        return minute == 30; // Only 07:30 is valid for hour 7
+      } else if (hour >= 8 && hour <= 20) {
+        return minute == 0 || minute == 30;
+      }
+      return false;
     } catch (e) {
       return false;
     }
@@ -181,15 +188,34 @@ class CollectionJob {
 
   // Static helper methods
   static List<String> get availableTimeSlots {
-    final List<String> slots = [];
-    for (int hour = 8; hour <= 16; hour++) {
-      slots.add('${hour.toString().padLeft(2, '0')}:00');
-      if (hour < 16) {
-        // Don't add :30 for the last hour (16:00)
-        slots.add('${hour.toString().padLeft(2, '0')}:30');
-      }
-    }
-    return slots;
+    return [
+      "07:30", // Start from 07:30
+      "08:00",
+      "08:30",
+      "09:00",
+      "09:30",
+      "10:00",
+      "10:30",
+      "11:00",
+      "11:30",
+      "12:00",
+      "12:30",
+      "13:00",
+      "13:30",
+      "14:00",
+      "14:30",
+      "15:00",
+      "15:30",
+      "16:00",
+      "16:30",
+      "17:00",
+      "17:30",
+      "18:00",
+      "18:30",
+      "19:00",
+      "19:30",
+      "20:00"
+    ];
   }
 
   // Get the end time slot for this job

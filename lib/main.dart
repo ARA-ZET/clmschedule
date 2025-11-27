@@ -9,9 +9,11 @@ import 'providers/collection_schedule_provider.dart';
 import 'providers/job_list_provider.dart';
 import 'providers/job_status_provider.dart';
 import 'providers/job_list_status_provider.dart';
-import 'providers/scale_provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
+import 'providers/vehicle_driver_provider.dart';
+import 'providers/scale_provider.dart';
+import 'providers/map_view_provider.dart';
 import 'widgets/schedule_grid.dart';
 import 'widgets/collection_schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
@@ -24,7 +26,7 @@ import 'widgets/undo_redo_widgets.dart';
 import 'widgets/auth_gate.dart';
 import 'widgets/chat_dialog.dart';
 import 'widgets/chat_admin_panel.dart';
-import 'widgets/schedule_tracking_view.dart';
+import 'widgets/google_sheets_tracking_view.dart';
 import 'services/keyboard_shortcuts_service.dart';
 import 'services/undo_redo_manager.dart';
 import 'utils/seed_data.dart';
@@ -76,12 +78,7 @@ void main() async {
   runApp(MultiProvider(providers: [
     // Authentication Provider (must be first for initialization)
     ChangeNotifierProvider(create: (context) => AuthProvider()),
-    ChangeNotifierProvider(
-      create: (context) => JobStatusProvider(),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => JobListStatusProvider(),
-    ),
+
     ChangeNotifierProvider(create: (context) => UndoRedoManager()),
     ChangeNotifierProxyProvider<UndoRedoManager, ScheduleProvider>(
       create: (context) =>
@@ -90,6 +87,8 @@ void main() async {
           previous ?? ScheduleProvider(undoRedoManager: undoRedoManager),
     ),
     ChangeNotifierProvider(create: (context) => ScaleProvider()),
+    ChangeNotifierProvider(create: (context) => VehicleDriverProvider()),
+    ChangeNotifierProvider(create: (context) => MapViewProvider()),
     ChangeNotifierProvider(
       create: (context) => TogglerProvider(),
     ),
@@ -105,6 +104,12 @@ void main() async {
     ),
     Provider(
       create: (context) => ChatService(FirebaseFirestore.instance),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => JobStatusProvider(),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => JobListStatusProvider(),
     ),
     ChangeNotifierProxyProvider2<UndoRedoManager, AuthProvider,
         JobListProvider>(
@@ -278,7 +283,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               Tab(text: 'Job List'),
               Tab(text: 'Collection Schedule'),
               Tab(text: 'Solar Panel Schedule'),
-              Tab(text: 'Tracking'),
+              Tab(text: 'Dropsheet'),
             ],
           ),
           actions: [
@@ -368,7 +373,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                 final workAreaService = context.read<WorkAreaService>();
                 try {
                   final workAreas = await workAreaService.createFromKml(
-                    'jl.kml',
+                    'craig.kml',
                   );
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -473,12 +478,12 @@ class _DashboardScreenState extends State<DashboardScreen>
         ),
         body: IndexedStack(
           index: _currentTabIndex,
-          children: const [
-            ScheduleTab(),
-            JobListTab(),
-            CollectionScheduleTab(),
-            SolarPanelScheduleTab(),
-            ScheduleTrackingView(),
+          children: [
+            const ScheduleTab(),
+            const JobListTab(),
+            const CollectionScheduleTab(),
+            const SolarPanelScheduleTab(),
+            const GoogleSheetsTrackingView(),
           ],
         ),
         floatingActionButton: Consumer2<ChatProvider, AuthProvider>(
@@ -817,7 +822,7 @@ class ScheduleScreen extends StatelessWidget {
               final workAreaService = context.read<WorkAreaService>();
               try {
                 final workAreas = await workAreaService.createFromKml(
-                  'maps.kml',
+                  'craig.kml',
                 );
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(

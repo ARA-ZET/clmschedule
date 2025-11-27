@@ -263,13 +263,25 @@ class _ChatDialogState extends State<ChatDialog> {
       final chatProvider = context.read<ChatProvider>();
       final users = await chatProvider.searchUsers(query);
       print('ChatDialog: Got ${users.length} users from search');
+
+      // Debug: Print each user found
+      for (final user in users) {
+        print('ChatDialog: Found user: ${user['displayName']} (${user['id']})');
+      }
+
       setState(() {
         _mentionSuggestions = users;
+        _showMentionDropdown =
+            users.isNotEmpty; // Ensure dropdown shows if we have users
       });
       print(
-          'ChatDialog: Updated _mentionSuggestions with ${_mentionSuggestions.length} users');
+          'ChatDialog: Updated _mentionSuggestions with ${_mentionSuggestions.length} users, showDropdown: $_showMentionDropdown');
     } catch (e) {
       print('Error searching users: $e');
+      setState(() {
+        _mentionSuggestions = [];
+        _showMentionDropdown = false;
+      });
     }
   }
 
@@ -729,16 +741,8 @@ class MessageBubble extends StatelessWidget {
                           color: Colors.black.withOpacity(0.1),
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        child: Text(
-                          'Replying to message...', // In a real app, you'd fetch the original message
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontStyle: FontStyle.italic,
-                            color: isOwnMessage
-                                ? Colors.white70
-                                : Colors.grey[600],
-                          ),
-                        ),
+                        child: _buildReplyPreview(
+                            context, message.replyToMessageId!, isOwnMessage),
                       ),
                     ],
                     _buildMessageContent(context, isOwnMessage),
@@ -1067,6 +1071,46 @@ class MessageBubble extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildReplyPreview(
+      BuildContext context, String replyToMessageId, bool isOwnMessage) {
+    final chatProvider = context.read<ChatProvider>();
+    final originalMessage = chatProvider.messages.firstWhere(
+      (msg) => msg.id == replyToMessageId,
+      orElse: () => ChatMessage(
+        id: '',
+        senderId: '',
+        senderName: 'Unknown User',
+        content: 'Message not found',
+        timestamp: DateTime.now(),
+      ),
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Replying to ${originalMessage.senderName}',
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.bold,
+            color: isOwnMessage ? Colors.white70 : Colors.grey[700],
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          originalMessage.content.length > 50
+              ? '${originalMessage.content.substring(0, 50)}...'
+              : originalMessage.content,
+          style: TextStyle(
+            fontSize: 11,
+            fontStyle: FontStyle.italic,
+            color: isOwnMessage ? Colors.white70 : Colors.grey[600],
+          ),
+        ),
+      ],
     );
   }
 

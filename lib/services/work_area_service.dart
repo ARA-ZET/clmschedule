@@ -17,7 +17,9 @@ class WorkAreaService {
 
     try {
       // Load KML file from assets
-      print('Loading KML file: maps/$kmlFileName');
+      if (kDebugMode) {
+        print('Loading KML file: maps/$kmlFileName');
+      }
       String kmlString = await rootBundle.loadString('maps/$kmlFileName');
       if (kDebugMode) {
         print('KML file loaded, length: ${kmlString.length}');
@@ -34,25 +36,35 @@ class WorkAreaService {
         kmlString = '<?xml version="1.0" encoding="UTF-8"?>\n$kmlString';
       }
 
-      print(
-        'Cleaned KML content. First 100 chars: ${kmlString.substring(0, kmlString.length > 100 ? 100 : kmlString.length)}',
-      );
+      if (kDebugMode) {
+        print(
+          'Cleaned KML content. First 100 chars: ${kmlString.substring(0, kmlString.length > 100 ? 100 : kmlString.length)}',
+        );
+      }
 
       XmlDocument? document;
       try {
         document = XmlDocument.parse(kmlString);
-        print('Successfully parsed XML document');
+        if (kDebugMode) {
+          print('Successfully parsed XML document');
+        }
       } catch (e) {
-        print('XML parsing error: $e');
-        print(
-          'First 100 characters of KML: ${kmlString.substring(0, kmlString.length > 100 ? 100 : kmlString.length)}',
-        );
+        if (kDebugMode) {
+          print('XML parsing error: $e');
+        }
+        if (kDebugMode) {
+          print(
+            'First 100 characters of KML: ${kmlString.substring(0, kmlString.length > 100 ? 100 : kmlString.length)}',
+          );
+        }
         rethrow;
       }
 
       // Find all Placemarks
       final placemarks = document.findAllElements('Placemark');
-      print('Found ${placemarks.length} placemarks');
+      if (kDebugMode) {
+        print('Found ${placemarks.length} placemarks');
+      }
 
       for (final placemark in placemarks) {
         try {
@@ -60,15 +72,21 @@ class WorkAreaService {
           var nameElement = placemark.findElements('n').firstOrNull ??
               placemark.findElements('name').firstOrNull;
           if (nameElement == null) {
-            print('Skipping placemark: no name element found');
+            if (kDebugMode) {
+              print('Skipping placemark: no name element found');
+            }
             continue;
           }
           final name = nameElement.text.trim();
           if (name.isEmpty) {
-            print('Skipping placemark: empty name');
+            if (kDebugMode) {
+              print('Skipping placemark: empty name');
+            }
             continue;
           }
-          print('Processing placemark: $name');
+          if (kDebugMode) {
+            print('Processing placemark: $name');
+          }
 
           // Extract description if available
           final description =
@@ -97,8 +115,12 @@ class WorkAreaService {
           if (coordinates == null) continue;
 
           // Parse coordinates into points
-          print('Parsing coordinates for area: $name');
-          print('Raw coordinates: $coordinates');
+          if (kDebugMode) {
+            print('Parsing coordinates for area: $name');
+          }
+          if (kDebugMode) {
+            print('Raw coordinates: $coordinates');
+          }
 
           final points = coordinates
               .trim()
@@ -108,7 +130,9 @@ class WorkAreaService {
                 try {
                   final parts = coord.split(',');
                   if (parts.length < 2) {
-                    print('Invalid coordinate format: $coord');
+                    if (kDebugMode) {
+                      print('Invalid coordinate format: $coord');
+                    }
                     return null;
                   }
 
@@ -116,19 +140,25 @@ class WorkAreaService {
                   final lng = double.tryParse(parts[0].trim());
 
                   if (lat == null || lng == null) {
-                    print('Invalid coordinate numbers: $coord');
+                    if (kDebugMode) {
+                      print('Invalid coordinate numbers: $coord');
+                    }
                     return null;
                   }
 
                   // Validate coordinate ranges
                   if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-                    print('Coordinate out of range: lat=$lat, lng=$lng');
+                    if (kDebugMode) {
+                      print('Coordinate out of range: lat=$lat, lng=$lng');
+                    }
                     return null;
                   }
 
                   return LatLng(lat, lng);
                 } catch (e) {
-                  print('Failed to parse coordinate: $coord, error: $e');
+                  if (kDebugMode) {
+                    print('Failed to parse coordinate: $coord, error: $e');
+                  }
                   return null;
                 }
               })
@@ -137,17 +167,23 @@ class WorkAreaService {
               .toList();
 
           if (points.isEmpty) {
-            print('No valid coordinates found for area: $name');
+            if (kDebugMode) {
+              print('No valid coordinates found for area: $name');
+            }
             continue;
           }
-          print(
-            'Successfully parsed ${points.length} coordinates for area: $name',
-          );
+          if (kDebugMode) {
+            print(
+              'Successfully parsed ${points.length} coordinates for area: $name',
+            );
+          }
 
           if (points.isEmpty) continue;
 
           try {
-            print('Creating WorkArea object for: $name');
+            if (kDebugMode) {
+              print('Creating WorkArea object for: $name');
+            }
             // Create new WorkArea
             final workArea = WorkArea(
               id: '', // Will be set by Firestore
@@ -159,21 +195,29 @@ class WorkAreaService {
               updatedAt: DateTime.now(),
             );
 
-            print('Saving to Firestore: $name');
+            if (kDebugMode) {
+              print('Saving to Firestore: $name');
+            }
             // Save to Firestore
             final docRef = await _firestore
                 .collection(collectionName)
                 .add(workArea.toFirestore());
-            print(
-              'Successfully saved to Firestore: $name with ID: ${docRef.id}',
-            );
+            if (kDebugMode) {
+              print(
+                'Successfully saved to Firestore: $name with ID: ${docRef.id}',
+              );
+            }
             workAreas.add(workArea.copyWith(id: docRef.id));
           } catch (e) {
-            print('Failed to save area to Firestore: $name, error: $e');
+            if (kDebugMode) {
+              print('Failed to save area to Firestore: $name, error: $e');
+            }
             continue;
           }
         } catch (e) {
-          print('Failed to parse placemark: $e');
+          if (kDebugMode) {
+            print('Failed to parse placemark: $e');
+          }
           // Continue with next placemark
         }
       }
@@ -188,32 +232,42 @@ class WorkAreaService {
     try {
       final outerBoundary = polygon.findElements('outerBoundaryIs').firstOrNull;
       if (outerBoundary == null) {
-        print('No outerBoundaryIs element found');
+        if (kDebugMode) {
+          print('No outerBoundaryIs element found');
+        }
         return null;
       }
 
       final linearRing = outerBoundary.findElements('LinearRing').firstOrNull;
       if (linearRing == null) {
-        print('No LinearRing element found');
+        if (kDebugMode) {
+          print('No LinearRing element found');
+        }
         return null;
       }
 
       final coordinatesElement =
           linearRing.findElements('coordinates').firstOrNull;
       if (coordinatesElement == null) {
-        print('No coordinates element found');
+        if (kDebugMode) {
+          print('No coordinates element found');
+        }
         return null;
       }
 
       final coordinates = coordinatesElement.text.trim();
       if (coordinates.isEmpty) {
-        print('Coordinates element is empty');
+        if (kDebugMode) {
+          print('Coordinates element is empty');
+        }
         return null;
       }
 
       return coordinates;
     } catch (e) {
-      print('Error extracting coordinates: $e');
+      if (kDebugMode) {
+        print('Error extracting coordinates: $e');
+      }
       return null;
     }
   }

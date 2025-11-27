@@ -88,6 +88,20 @@ class CollectionScheduleProvider extends ChangeNotifier {
         ? jobListItem.quantityDistributed
         : 1;
 
+    // Extract time slot from the job's date - this handles the properly formatted DateTime
+    final timeSlot =
+        '${jobListItem.date.hour.toString().padLeft(2, '0')}:${jobListItem.date.minute.toString().padLeft(2, '0')}';
+
+    // Use collectionDate if it has a meaningful time, otherwise fall back to the main date
+    final effectiveDate = (jobListItem.collectionDate.year != 2000 &&
+            jobListItem.collectionDate.month != 1 &&
+            jobListItem.collectionDate.day != 1)
+        ? jobListItem.collectionDate
+        : jobListItem.date;
+
+    print(
+        'Converting job ${jobListItem.id}: timeSlot=$timeSlot, timeSlots=$timeSlots, date=$effectiveDate');
+
     return CollectionJob(
       id: jobListItem.id,
       location: jobListItem.collectionAddress.isNotEmpty
@@ -95,9 +109,8 @@ class CollectionScheduleProvider extends ChangeNotifier {
           : jobListItem.area,
       vehicleType: vehicleTrailer?.vehicleType ?? VehicleType.hyundai,
       trailerType: vehicleTrailer?.trailerType ?? TrailerType.noTrailer,
-      date: jobListItem.date,
-      timeSlot:
-          '${jobListItem.date.hour.toString().padLeft(2, '0')}:${jobListItem.date.minute.toString().padLeft(2, '0')}',
+      date: effectiveDate,
+      timeSlot: timeSlot,
       timeSlots: timeSlots,
       assignedStaff: [], // Can be populated later
       staffCount: jobListItem.manDays.ceil(),
@@ -334,8 +347,15 @@ class CollectionScheduleProvider extends ChangeNotifier {
     }
 
     // Check if the timeSlot falls within the job's duration
-    return checkIndex >= jobStartIndex &&
+    final isOccupied = checkIndex >= jobStartIndex &&
         checkIndex < (jobStartIndex + job.timeSlots);
+
+    if (isOccupied) {
+      print(
+          'Job ${job.id} occupies slot $timeSlot (job starts at ${job.timeSlot} for ${job.timeSlots} slots)');
+    }
+
+    return isOccupied;
   }
 
   List<CollectionJob> getJobsForDate(DateTime date) {

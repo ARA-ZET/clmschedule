@@ -250,101 +250,223 @@ class EditableDateCell extends StatelessWidget {
                   final selectedTime = await showDialog<TimeOfDay>(
                     context: context,
                     builder: (context) => Consumer<CollectionScheduleProvider>(
-                      builder: (context, collectionProvider, child) =>
-                          AlertDialog(
-                        title: const Text('Select Time'),
-                        content: SizedBox(
-                          width: 300,
-                          height: 400,
-                          child: ListView.builder(
-                            itemCount: timeSlots.length,
-                            itemBuilder: (context, index) {
-                              final time = timeSlots[index];
-                              final timeString = _formatTimeOfDay(time);
+                      builder: (context, collectionProvider, child) {
+                        // Get occupied time slots for conflict info
+                        final occupiedSlots = <String>[];
+                        if (jobData != null &&
+                            (jobType == JobType.junkCollection ||
+                                jobType == JobType.furnitureMove ||
+                                jobType == JobType.trailerTowing)) {
+                          VehicleType? vehicleType;
 
-                              // Check if this time slot is occupied for collection jobs
-                              bool isOccupied = false;
+                          if (jobData!.containsKey('vehicleType')) {
+                            final vehicleTypeString = jobData!['vehicleType'];
+                            if (vehicleTypeString == 'hyundai') {
+                              vehicleType = VehicleType.hyundai;
+                            } else if (vehicleTypeString == 'mahindra') {
+                              vehicleType = VehicleType.mahindra;
+                            } else if (vehicleTypeString == 'nissan') {
+                              vehicleType = VehicleType.nissan;
+                            }
+                          }
 
-                              if (jobType == JobType.junkCollection ||
-                                  jobType == JobType.furnitureMove ||
-                                  jobType == JobType.trailerTowing) {
-                                // Try to get vehicle type from the job data
-                                if (jobData != null) {
-                                  VehicleType? vehicleType;
+                          if (vehicleType != null) {
+                            occupiedSlots.addAll(collectionProvider
+                                .getOccupiedTimeSlots(vehicleType, date,
+                                    excludeJobId: jobData!['id']));
+                          }
+                        }
 
-                                  // Extract vehicle type from existing job data
-                                  if (jobData!.containsKey('vehicleType')) {
-                                    final vehicleTypeString =
-                                        jobData!['vehicleType'];
-                                    if (vehicleTypeString == 'hyundai') {
-                                      vehicleType = VehicleType.hyundai;
-                                    } else if (vehicleTypeString ==
-                                        'mahindra') {
-                                      vehicleType = VehicleType.mahindra;
-                                    } else if (vehicleTypeString == 'nissan') {
-                                      vehicleType = VehicleType.nissan;
-                                    }
-                                  } else if (jobData!.containsKey('quantity')) {
-                                    // Fallback: get vehicle type from quantity
-                                    final quantity =
-                                        jobData!['quantity'] as int? ?? 1;
-                                    if (quantity >= 1 && quantity <= 3) {
-                                      vehicleType = VehicleType.hyundai;
-                                    } else if (quantity >= 4 && quantity <= 6) {
-                                      vehicleType = VehicleType.mahindra;
-                                    } else if (quantity >= 7 && quantity <= 9) {
-                                      vehicleType = VehicleType.nissan;
-                                    }
-                                  }
-
-                                  if (vehicleType != null) {
-                                    final occupiedSlots = collectionProvider
-                                        .getOccupiedTimeSlots(vehicleType, date,
-                                            excludeJobId: jobData!['id']);
-                                    isOccupied =
-                                        occupiedSlots.contains(timeString);
-                                  }
-                                }
-                              }
-
-                              return ListTile(
-                                title: Text(
-                                  _formatTimeOfDay(time),
+                        return AlertDialog(
+                          title: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('Select Time'),
+                              if (jobData != null &&
+                                  (jobType == JobType.junkCollection ||
+                                      jobType == JobType.furnitureMove ||
+                                      jobType == JobType.trailerTowing)) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  '${jobData!['vehicleType']?.toString().toUpperCase() ?? 'VEHICLE'} - ${DateFormat('dd MMM yyyy').format(date)}',
                                   style: TextStyle(
-                                    color: isOccupied ? Colors.red : null,
-                                    fontWeight:
-                                        isOccupied ? FontWeight.bold : null,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.normal,
+                                    color: Colors.grey[600],
                                   ),
                                 ),
-                                subtitle: isOccupied
-                                    ? const Text(
-                                        'Occupied',
-                                        style: TextStyle(
-                                            color: Colors.red, fontSize: 12),
-                                      )
-                                    : null,
-                                leading: isOccupied
-                                    ? const Icon(
-                                        Icons.block,
-                                        color: Colors.red,
-                                        size: 16,
-                                      )
-                                    : null,
-                                enabled: !isOccupied,
-                                onTap: isOccupied
-                                    ? null
-                                    : () => Navigator.of(context).pop(time),
-                              );
-                            },
+                                if (occupiedSlots.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    '⚠️ ${occupiedSlots.length} time slot${occupiedSlots.length > 1 ? 's' : ''} have conflicts',
+                                    style: const TextStyle(
+                                        fontSize: 12, color: Colors.orange),
+                                  ),
+                                ],
+                              ],
+                            ],
                           ),
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.of(context).pop(),
-                            child: const Text('Cancel'),
+                          content: SizedBox(
+                            width: 300,
+                            height: 400,
+                            child: ListView.builder(
+                              itemCount: timeSlots.length,
+                              itemBuilder: (context, index) {
+                                final time = timeSlots[index];
+                                final timeString = _formatTimeOfDay(time);
+
+                                // Check if this time slot is occupied for collection jobs
+                                bool isOccupied = false;
+                                String conflictDetails = '';
+                                Color conflictColor = Colors.red;
+
+                                if (jobType == JobType.junkCollection ||
+                                    jobType == JobType.furnitureMove ||
+                                    jobType == JobType.trailerTowing) {
+                                  // Try to get vehicle type from the job data
+                                  if (jobData != null) {
+                                    VehicleType? vehicleType;
+
+                                    // Extract vehicle type from existing job data
+                                    if (jobData!.containsKey('vehicleType')) {
+                                      final vehicleTypeString =
+                                          jobData!['vehicleType'];
+                                      if (vehicleTypeString == 'hyundai') {
+                                        vehicleType = VehicleType.hyundai;
+                                      } else if (vehicleTypeString ==
+                                          'mahindra') {
+                                        vehicleType = VehicleType.mahindra;
+                                      } else if (vehicleTypeString ==
+                                          'nissan') {
+                                        vehicleType = VehicleType.nissan;
+                                      }
+                                    } else if (jobData!
+                                        .containsKey('quantity')) {
+                                      // Fallback: get vehicle type from quantity
+                                      final quantity =
+                                          jobData!['quantity'] as int? ?? 1;
+                                      if (quantity >= 1 && quantity <= 3) {
+                                        vehicleType = VehicleType.hyundai;
+                                      } else if (quantity >= 4 &&
+                                          quantity <= 6) {
+                                        vehicleType = VehicleType.mahindra;
+                                      } else if (quantity >= 7 &&
+                                          quantity <= 9) {
+                                        vehicleType = VehicleType.nissan;
+                                      }
+                                    }
+
+                                    if (vehicleType != null) {
+                                      final occupiedSlots = collectionProvider
+                                          .getOccupiedTimeSlots(
+                                              vehicleType, date,
+                                              excludeJobId: jobData!['id']);
+                                      isOccupied =
+                                          occupiedSlots.contains(timeString);
+
+                                      // Get details about the conflicting job
+                                      if (isOccupied) {
+                                        final conflictingJobs =
+                                            collectionProvider
+                                                .getJobsForDate(date)
+                                                .where((job) =>
+                                                    job.vehicleType ==
+                                                        vehicleType &&
+                                                    _jobOccupiesTimeSlot(
+                                                        job, timeString))
+                                                .toList();
+
+                                        if (conflictingJobs.isNotEmpty) {
+                                          final job = conflictingJobs.first;
+                                          final clientName =
+                                              job.clients.isNotEmpty
+                                                  ? job.clients.first
+                                                  : 'Unknown Client';
+                                          conflictDetails =
+                                              'Booked by $clientName';
+
+                                          // Different colors for different job types
+                                          switch (job.jobType) {
+                                            case 'junk collection':
+                                              conflictColor = Colors.red;
+                                              break;
+                                            case 'furniture move':
+                                              conflictColor = Colors.orange;
+                                              break;
+                                            case 'trailer towing':
+                                              conflictColor = Colors.purple;
+                                              break;
+                                            default:
+                                              conflictColor = Colors.red;
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+
+                                return Container(
+                                  decoration: BoxDecoration(
+                                    color: isOccupied
+                                        ? conflictColor.withOpacity(0.1)
+                                        : null,
+                                    borderRadius: BorderRadius.circular(4),
+                                    border: isOccupied
+                                        ? Border.all(
+                                            color:
+                                                conflictColor.withOpacity(0.3))
+                                        : null,
+                                  ),
+                                  child: ListTile(
+                                    title: Text(
+                                      _formatTimeOfDay(time),
+                                      style: TextStyle(
+                                        color:
+                                            isOccupied ? conflictColor : null,
+                                        fontWeight:
+                                            isOccupied ? FontWeight.bold : null,
+                                      ),
+                                    ),
+                                    subtitle: isOccupied
+                                        ? Text(
+                                            '⚠️ ${conflictDetails.isNotEmpty ? conflictDetails : 'Occupied'} (Click to override)',
+                                            style: TextStyle(
+                                                color: conflictColor,
+                                                fontSize: 12),
+                                          )
+                                        : const Text(
+                                            'Available',
+                                            style: TextStyle(
+                                                color: Colors.green,
+                                                fontSize: 12),
+                                          ),
+                                    leading: isOccupied
+                                        ? Icon(
+                                            Icons.warning,
+                                            color: conflictColor,
+                                            size: 16,
+                                          )
+                                        : const Icon(
+                                            Icons.schedule,
+                                            color: Colors.green,
+                                            size: 16,
+                                          ),
+                                    onTap: () =>
+                                        Navigator.of(context).pop(time),
+                                  ),
+                                );
+                              },
+                            ),
                           ),
-                        ],
-                      ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(),
+                              child: const Text('Cancel'),
+                            ),
+                          ],
+                        );
+                      },
                     ),
                   );
 
@@ -423,6 +545,49 @@ class EditableDateCell extends StatelessWidget {
         );
       },
     );
+  }
+
+  // Helper method to check if a job occupies a specific time slot
+  bool _jobOccupiesTimeSlot(CollectionJob job, String timeSlot) {
+    const availableTimeSlots = [
+      "07:30",
+      "08:00",
+      "08:30",
+      "09:00",
+      "09:30",
+      "10:00",
+      "10:30",
+      "11:00",
+      "11:30",
+      "12:00",
+      "12:30",
+      "13:00",
+      "13:30",
+      "14:00",
+      "14:30",
+      "15:00",
+      "15:30",
+      "16:00",
+      "16:30",
+      "17:00",
+      "17:30",
+      "18:00",
+      "18:30",
+      "19:00",
+      "19:30",
+      "20:00"
+    ];
+
+    final jobStartIndex = availableTimeSlots.indexOf(job.timeSlot);
+    final checkIndex = availableTimeSlots.indexOf(timeSlot);
+
+    if (jobStartIndex == -1 || checkIndex == -1) {
+      return job.timeSlot == timeSlot; // Fallback to exact match
+    }
+
+    // Check if the timeSlot falls within the job's duration
+    return checkIndex >= jobStartIndex &&
+        checkIndex < (jobStartIndex + job.timeSlots);
   }
 }
 

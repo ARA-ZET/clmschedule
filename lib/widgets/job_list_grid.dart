@@ -592,6 +592,13 @@ class _JobListGridState extends State<JobListGrid> {
                                               value: item.date,
                                               width: 80,
                                               jobType: item.jobType,
+                                              jobData: {
+                                                'id': item.id,
+                                                'quantity': item.quantity,
+                                                'vehicleType':
+                                                    _getVehicleTypeStringFromQuantity(
+                                                        item.quantity),
+                                              },
                                               onSave: (date) => _updateJobField(
                                                   item, 'date', date),
                                             ),
@@ -811,6 +818,14 @@ class _JobListGridState extends State<JobListGrid> {
                                             EditableDateCell(
                                               value: item.collectionDate,
                                               width: 80,
+                                              jobType: item.jobType,
+                                              jobData: {
+                                                'id': item.id,
+                                                'quantity': item.quantity,
+                                                'vehicleType':
+                                                    _getVehicleTypeStringFromQuantity(
+                                                        item.quantity),
+                                              },
                                               onSave: (date) => _updateJobField(
                                                   item, 'collectionDate', date),
                                             ),
@@ -1185,6 +1200,13 @@ class _JobListGridState extends State<JobListGrid> {
                                                   value: item.date,
                                                   width: 80,
                                                   jobType: item.jobType,
+                                                  jobData: {
+                                                    'id': item.id,
+                                                    'quantity': item.quantity,
+                                                    'vehicleType':
+                                                        _getVehicleTypeStringFromQuantity(
+                                                            item.quantity),
+                                                  },
                                                   onSave: (date) =>
                                                       _updateJobField(
                                                           item, 'date', date),
@@ -1627,7 +1649,8 @@ class _JobListGridState extends State<JobListGrid> {
                                   ),
                                   const SizedBox(height: 6),
                                   Text(
-                                    update.getChangeDescription(),
+                                    update.getChangeDescription(
+                                        jobType: item.jobType),
                                     style: const TextStyle(fontSize: 13),
                                   ),
                                 ],
@@ -1663,5 +1686,19 @@ class _JobListGridState extends State<JobListGrid> {
     } else {
       return 'Just now';
     }
+  }
+
+  // Helper method to convert quantity to vehicle type string for time slot conflict detection
+  String? _getVehicleTypeStringFromQuantity(int quantity) {
+    // Mapping based on the vehicle/trailer combinations
+    // 1-3: Hyundai, 4-6: Mahindra, 7-9: Nissan
+    if (quantity >= 1 && quantity <= 3) {
+      return 'hyundai';
+    } else if (quantity >= 4 && quantity <= 6) {
+      return 'mahindra';
+    } else if (quantity >= 7 && quantity <= 9) {
+      return 'nissan';
+    }
+    return null;
   }
 }

@@ -353,14 +353,38 @@ class JobListProvider extends ChangeNotifier {
         item1.area == item2.area &&
         item1.quantity == item2.quantity &&
         item1.manDays == item2.manDays &&
-        item1.date.isAtSameMomentAs(item2.date) &&
+        _areDatesEqual(item1.date, item2.date, item1.jobType) &&
         item1.collectionAddress == item2.collectionAddress &&
-        item1.collectionDate.isAtSameMomentAs(item2.collectionDate) &&
+        _areDatesEqual(
+            item1.collectionDate, item2.collectionDate, item1.jobType) &&
         item1.specialInstructions == item2.specialInstructions &&
         item1.quantityDistributed == item2.quantityDistributed &&
         item1.invoiceDetails == item2.invoiceDetails &&
         item1.reportAddresses == item2.reportAddresses &&
         item1.whoToInvoice == item2.whoToInvoice;
+  }
+
+  // Helper method to compare dates based on job type requirements
+  bool _areDatesEqual(DateTime date1, DateTime date2, JobType jobType) {
+    // For job types that need time slots, compare full date-time but ignore milliseconds
+    if (_needsTimeDisplay(jobType)) {
+      return date1.year == date2.year &&
+          date1.month == date2.month &&
+          date1.day == date2.day &&
+          date1.hour == date2.hour &&
+          date1.minute == date2.minute;
+    }
+    // For other job types, just compare the date
+    return _isSameDay(date1, date2);
+  }
+
+  // Helper method to check if job type needs time display
+  bool _needsTimeDisplay(JobType jobType) {
+    return jobType == JobType.junkCollection ||
+        jobType == JobType.furnitureMove ||
+        jobType == JobType.trailerTowing ||
+        jobType == JobType.windowCleaning ||
+        jobType == JobType.solarPanelCleaning;
   }
 
   // Process all pending updates as batch to database
@@ -601,17 +625,18 @@ class JobListProvider extends ChangeNotifier {
       manDays: updatedItem.manDays != originalItem.manDays
           ? updatedItem.manDays
           : null,
-      date: !_isSameDay(updatedItem.date, originalItem.date)
+      date: !_areDatesEqual(
+              updatedItem.date, originalItem.date, updatedItem.jobType)
           ? updatedItem.date
           : null,
       collectionAddress:
           updatedItem.collectionAddress != originalItem.collectionAddress
               ? updatedItem.collectionAddress
               : null,
-      collectionDate:
-          !_isSameDay(updatedItem.collectionDate, originalItem.collectionDate)
-              ? updatedItem.collectionDate
-              : null,
+      collectionDate: !_areDatesEqual(updatedItem.collectionDate,
+              originalItem.collectionDate, updatedItem.jobType)
+          ? updatedItem.collectionDate
+          : null,
       specialInstructions:
           updatedItem.specialInstructions != originalItem.specialInstructions
               ? updatedItem.specialInstructions

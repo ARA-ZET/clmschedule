@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/job_list_item.dart';
 import '../services/job_list_service.dart';
@@ -126,14 +127,20 @@ Future<void> seedJobListData() async {
   // Add sample jobs to Firestore (they will be added to the appropriate month based on their date)
   for (final job in sampleJobs) {
     try {
-      print(
-          'Adding job ${job.invoice} with date ${job.date} to month ${jobListService.getMonthlyDocumentId(job.date)}');
+      if (kDebugMode) {
+        print(
+            'Adding job ${job.invoice} with date ${job.date} to month ${jobListService.getMonthlyDocumentId(job.date)}');
+      }
       await jobListService.addJobListItem(job, job.date);
-      print('Successfully added job ${job.invoice}');
+      if (kDebugMode) {
+        print('Successfully added job ${job.invoice}');
+      }
     } catch (e) {
       print('Error adding job ${job.invoice}: $e');
     }
   }
 
-  print('Sample job list data has been seeded successfully!');
+  if (kDebugMode) {
+    print('Sample job list data has been seeded successfully!');
+  }
 }

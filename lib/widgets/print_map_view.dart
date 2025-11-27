@@ -7,6 +7,17 @@ import 'package:flutter/services.dart';
 import '../models/job.dart';
 import 'package:intl/intl.dart';
 
+// Class to store polygon override settings
+class PolygonOverride {
+  final Color strokeColor;
+  final int strokeWidth;
+
+  const PolygonOverride({
+    required this.strokeColor,
+    required this.strokeWidth,
+  });
+}
+
 class PrintMapView extends StatefulWidget {
   final Job job;
   final String? distributorName;
@@ -26,9 +37,15 @@ class _PrintMapViewState extends State<PrintMapView> {
   final Set<Polygon> _polygons = {};
   LatLng _center = const LatLng(-33.925, 18.425); // Cape Town city center
   bool _isLoading = true;
-  bool _isPortrait = true;
   bool _isDraggingInfoBox = false; // Track when dragging info box
   bool _isResizingInfoBox = false; // Track when resizing info box
+
+  // Polygon override settings
+  final Map<String, PolygonOverride> _polygonOverrides = {};
+
+  // Global polygon settings
+  bool _useBlackBorders = false;
+  int _globalBorderWidth = 3;
 
   // Position and size of the movable info box
   Offset _infoBoxPosition = const Offset(20, 20);
@@ -73,15 +90,37 @@ class _PrintMapViewState extends State<PrintMapView> {
     if (widget.job.workMaps.isNotEmpty) {
       for (int i = 0; i < widget.job.workMaps.length; i++) {
         final workMap = widget.job.workMaps[i];
+        final polygonId = 'workmap_$i';
+
+        // Check if there's an override for this polygon
+        final override = _polygonOverrides[polygonId];
+
+        // Determine stroke color: individual override > global setting > original color
+        Color strokeColor;
+        if (override?.strokeColor != null) {
+          strokeColor = override!.strokeColor;
+        } else if (_useBlackBorders) {
+          strokeColor = Colors.black;
+        } else {
+          strokeColor = workMap.color;
+        }
+
+        // Determine stroke width: individual override > global setting
+        int strokeWidth = override?.strokeWidth ?? _globalBorderWidth;
 
         _polygons.add(
           Polygon(
-            polygonId: PolygonId('workmap_$i'),
+            polygonId: PolygonId(polygonId),
             points: workMap.points,
-            fillColor: workMap.color
-                .withOpacity(0), // Semi-transparent fill with original color
-            strokeColor: workMap.color, // Use the polygon's original color
-            strokeWidth: 3,
+            fillColor:
+                workMap.color.withOpacity(0), // Slight fill to make tappable
+            strokeColor: strokeColor,
+            strokeWidth: strokeWidth,
+            onTap: () {
+              print(
+                  'Polygon tapped: $polygonId (${workMap.name})'); // Debug print
+              _showPolygonOverrideDialog(polygonId, workMap.name);
+            },
           ),
         );
       }
@@ -206,7 +245,7 @@ class _PrintMapViewState extends State<PrintMapView> {
         fileName: fileName,
         job: widget.job,
         distributorName: widget.distributorName,
-        isPortrait: _isPortrait,
+        isPortrait: true, // Always use portrait for print
       ),
     );
   }
@@ -216,73 +255,169 @@ class _PrintMapViewState extends State<PrintMapView> {
     final screenHeight = MediaQuery.of(context).size.height;
     final screenWidth = MediaQuery.of(context).size.width;
 
-    // Calculate available dimensions (account for app bar and margins)
+    // Use full screen dimensions
     final appBarHeight = AppBar().preferredSize.height;
-    final availableHeight =
-        screenHeight - appBarHeight - 50; // 25px top + 25px bottom
-    final availableWidth = screenWidth - 50; // 25px left + 25px right margins
-
-    // Calculate map dimensions based on A4 aspect ratio and available space
-    double mapWidth, mapHeight;
-
-    if (_isPortrait) {
-      // Portrait A4: height > width (ratio = 1:1.414, so height = width * 1.414)
-      final maxWidthBasedHeight = availableWidth * 1.414;
-      final maxHeightBasedWidth = availableHeight / 1.414;
-
-      if (maxWidthBasedHeight <= availableHeight) {
-        // Limited by width
-        mapWidth = availableWidth;
-        mapHeight = maxWidthBasedHeight;
-      } else {
-        // Limited by height
-        mapHeight = availableHeight;
-        mapWidth = maxHeightBasedWidth;
-      }
-    } else {
-      // Landscape A4: width > height (ratio = 1.414:1, so width = height * 1.414)
-      final maxHeightBasedWidth = availableHeight * 1.414;
-      final maxWidthBasedHeight = availableWidth / 1.414;
-
-      if (maxHeightBasedWidth <= availableWidth) {
-        // Limited by height
-        mapHeight = availableHeight;
-        mapWidth = maxHeightBasedWidth;
-      } else {
-        // Limited by width
-        mapWidth = availableWidth;
-        mapHeight = maxWidthBasedHeight;
-      }
-    }
-
-    // Center the map container horizontally and vertically
-    final mapLeft = (screenWidth - mapWidth) / 2;
-    final mapTop = (screenHeight - appBarHeight - mapHeight) / 2;
+    final mapWidth = screenWidth;
+    final mapHeight = screenHeight - appBarHeight;
+    final mapLeft = 0.0;
+    final mapTop = 0.0;
 
     return Scaffold(
-      backgroundColor: Colors.grey[300],
+      backgroundColor: Colors.white,
       appBar: AppBar(
-        title: const Text('Print Map View'),
+        title: Row(
+          children: [
+            const Text('Print Map View'),
+            if (_polygonOverrides.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.orange,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  '${_polygonOverrides.length} customized',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
         actions: [
-          // Orientation toggle
+          // Reset overrides button (only show when overrides exist)
+          if (_polygonOverrides.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Reset All Polygon Customizations',
+              onPressed: () {
+                setState(() {
+                  _polygonOverrides.clear();
+                  _useBlackBorders = false;
+                  _globalBorderWidth = 3;
+                  _updateMapView();
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                        'All polygon customizations and global settings reset'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              },
+            ),
+          // Border width dropdown
+          Tooltip(
+            message: 'Global Border Width',
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: DropdownButton<int>(
+                value: _globalBorderWidth,
+                icon: const Icon(Icons.line_weight),
+                underline: Container(),
+                items: [3, 4, 5, 6, 7, 8].map((int value) {
+                  return DropdownMenuItem<int>(
+                    value: value,
+                    child: Text('${value}px'),
+                  );
+                }).toList(),
+                onChanged: (int? newValue) {
+                  if (newValue != null) {
+                    setState(() {
+                      _globalBorderWidth = newValue;
+                      _updateMapView();
+                    });
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content:
+                            Text('Global border width set to ${newValue}px'),
+                        duration: const Duration(seconds: 2),
+                      ),
+                    );
+                  }
+                },
+              ),
+            ),
+          ),
+          // Color toggle button
           IconButton(
-            icon: Icon(_isPortrait
-                ? Icons.stay_current_portrait
-                : Icons.stay_current_landscape),
-            tooltip: _isPortrait ? 'Switch to Landscape' : 'Switch to Portrait',
+            icon: Icon(
+              _useBlackBorders ? Icons.palette : Icons.palette_outlined,
+              color: _useBlackBorders ? Colors.black : null,
+            ),
+            tooltip: _useBlackBorders
+                ? 'Switch to Original Colors'
+                : 'Switch to Black Borders',
             onPressed: () {
               setState(() {
-                _isPortrait = !_isPortrait;
-                // Reset info box position and size when orientation changes
-                _infoBoxPosition = const Offset(20, 20);
-                _infoBoxSize = const Size(250, 160);
-                _fontScale = 1.0;
-                _workAreasBoxPosition = const Offset(20, 200);
-                _workAreasBoxSize = const Size(250, 100);
-                _workAreasFontScale = 1.0;
+                _useBlackBorders = !_useBlackBorders;
+                _updateMapView();
               });
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(_useBlackBorders
+                      ? 'All borders set to black'
+                      : 'Borders restored to original colors'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
             },
           ),
+          // Help button
+          IconButton(
+            icon: const Icon(Icons.help_outline),
+            tooltip: 'Help - How to customize polygons',
+            onPressed: () {
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('Polygon Customization'),
+                  content: const Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Global Controls:',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      SizedBox(height: 4),
+                      Text(
+                          '• Dropdown: Set border width for all polygons (3-8px)'),
+                      Text(
+                          '• Palette icon: Toggle between black and original colors'),
+                      SizedBox(height: 12),
+                      Text('Individual Customization:',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      SizedBox(height: 4),
+                      Text(
+                          '1. Click/tap on any colored polygon area on the map'),
+                      Text(
+                          '2. A dialog will appear with customization options'),
+                      Text('3. Choose border width (3-8 pixels)'),
+                      Text('4. Border color is automatically set to black'),
+                      Text('5. Click "Apply" to save changes'),
+                      SizedBox(height: 12),
+                      Text(
+                          'Priority: Individual overrides > Global settings > Original style'),
+                      SizedBox(height: 8),
+                      Text(
+                          '• Use "Reset" in dialog to restore original styling'),
+                      Text('• Use refresh button in toolbar to reset all'),
+                    ],
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('Got it'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+
           // Print button
           IconButton(
             icon: const Icon(Icons.print),
@@ -293,7 +428,7 @@ class _PrintMapViewState extends State<PrintMapView> {
       ),
       body: Stack(
         children: [
-          // Center the A4 map container
+          // Full screen map container
           Positioned(
             left: mapLeft,
             top: mapTop,
@@ -302,16 +437,7 @@ class _PrintMapViewState extends State<PrintMapView> {
               child: Container(
                 width: mapWidth,
                 height: mapHeight,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.3),
-                      blurRadius: 10,
-                      offset: const Offset(0, 5),
-                    ),
-                  ],
-                ),
+                color: Colors.white,
                 child: Stack(
                   children: [
                     // Google Map
@@ -832,7 +958,132 @@ class _PrintMapViewState extends State<PrintMapView> {
     );
   }
 
-  @override
+  // Show dialog to override polygon border properties
+  void _showPolygonOverrideDialog(String polygonId, String polygonName) {
+    final currentOverride = _polygonOverrides[polygonId];
+    int selectedWidth = currentOverride?.strokeWidth ?? 3;
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (BuildContext dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Customize Polygon Border'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Polygon: $polygonName',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Border Color: Black (fixed)',
+                    style: TextStyle(fontSize: 16),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    width: 40,
+                    height: 20,
+                    decoration: BoxDecoration(
+                      color: Colors.black,
+                      border: Border.all(color: Colors.grey),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Border Width: $selectedWidth',
+                    style: const TextStyle(fontSize: 16),
+                  ),
+                  const SizedBox(height: 8),
+                  Slider(
+                    value: selectedWidth.toDouble(),
+                    min: 3,
+                    max: 8,
+                    divisions: 5,
+                    label: selectedWidth.toString(),
+                    onChanged: (double value) {
+                      setDialogState(() {
+                        selectedWidth = value.round();
+                      });
+                    },
+                  ),
+                  const Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('3', style: TextStyle(fontSize: 12)),
+                      Text('8', style: TextStyle(fontSize: 12)),
+                    ],
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    // Close dialog first, then update state
+                    Navigator.of(dialogContext).pop();
+                    // Use Future.microtask to ensure dialog is closed before state update
+                    Future.microtask(() {
+                      if (mounted) {
+                        setState(() {
+                          _polygonOverrides.remove(polygonId);
+                          _updateMapView();
+                        });
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content:
+                                Text('$polygonName border reset to original'),
+                            duration: const Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    });
+                  },
+                  child: const Text('Reset'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(dialogContext).pop();
+                  },
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    // Close dialog first, then update state
+                    Navigator.of(dialogContext).pop();
+                    // Use Future.microtask to ensure dialog is closed before state update
+                    Future.microtask(() {
+                      if (mounted) {
+                        setState(() {
+                          _polygonOverrides[polygonId] = PolygonOverride(
+                            strokeColor: Colors.black,
+                            strokeWidth: selectedWidth,
+                          );
+                          _updateMapView();
+                        });
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                                '$polygonName border customized (width: $selectedWidth)'),
+                            duration: const Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    });
+                  },
+                  child: const Text('Apply'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   void dispose() {
     try {

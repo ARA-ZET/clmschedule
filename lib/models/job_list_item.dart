@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'job_list_item_update.dart';
+import 'custom_polygon.dart';
 
 // Legacy enum for backwards compatibility during migration
 enum JobListStatus {
@@ -102,6 +103,7 @@ class JobListItem {
   final String whoToInvoice;
   final String collectionJobId; // Link to collection schedule job
   final List<JobListItemUpdate> updates; // Track all changes
+  final List<CustomPolygon> customPolygons; // Custom polygons for map areas
 
   JobListItem({
     required this.id,
@@ -123,6 +125,7 @@ class JobListItem {
     required this.whoToInvoice,
     this.collectionJobId = '', // Optional link to collection job
     this.updates = const [], // Default to empty list
+    this.customPolygons = const [], // Default to empty list
   });
 
   // Create from Firestore
@@ -148,13 +151,23 @@ class JobListItem {
       jobStatusId = 'standby';
     }
 
-    // Parse updates list
+    // Parse updates
     List<JobListItemUpdate> updates = [];
     if (data['updates'] != null) {
-      final updatesData = data['updates'] as List<dynamic>? ?? [];
+      final updatesData = data['updates'] as List<dynamic>;
       updates = updatesData
           .map((updateData) =>
               JobListItemUpdate.fromMap(updateData as Map<String, dynamic>))
+          .toList();
+    }
+
+    // Parse custom polygons
+    List<CustomPolygon> customPolygons = [];
+    if (data['customPolygons'] != null) {
+      final polygonsData = data['customPolygons'] as List<dynamic>;
+      customPolygons = polygonsData
+          .map((polygonData) =>
+              CustomPolygon.fromMap(polygonData as Map<String, dynamic>))
           .toList();
     }
 
@@ -185,6 +198,7 @@ class JobListItem {
       whoToInvoice: data['whoToInvoice'] as String? ?? '',
       collectionJobId: data['collectionJobId'] as String? ?? '',
       updates: updates,
+      customPolygons: customPolygons,
     );
   }
 
@@ -209,6 +223,8 @@ class JobListItem {
       'whoToInvoice': whoToInvoice,
       'collectionJobId': collectionJobId,
       'updates': updates.map((update) => update.toMap()).toList(),
+      'customPolygons':
+          customPolygons.map((polygon) => polygon.toMap()).toList(),
     };
   }
 
@@ -233,6 +249,7 @@ class JobListItem {
     String? whoToInvoice,
     String? collectionJobId,
     List<JobListItemUpdate>? updates,
+    List<CustomPolygon>? customPolygons,
   }) {
     return JobListItem(
       id: id,
@@ -254,6 +271,7 @@ class JobListItem {
       whoToInvoice: whoToInvoice ?? this.whoToInvoice,
       collectionJobId: collectionJobId ?? this.collectionJobId,
       updates: updates ?? this.updates,
+      customPolygons: customPolygons ?? this.customPolygons,
     );
   }
 
@@ -278,6 +296,7 @@ class JobListItem {
     String? reportAddresses,
     String? whoToInvoice,
     String? collectionJobId,
+    List<CustomPolygon>? customPolygons,
   }) {
     final List<JobListItemUpdate> newUpdates = List.from(updates);
 
@@ -370,7 +389,7 @@ class JobListItem {
       ));
     }
 
-    if (date != null && !_isSameDay(date, this.date)) {
+    if (date != null && !_isSameDateAndTime(date, this.date)) {
       newUpdates.add(JobListItemUpdate(
         userId: userId,
         fieldName: 'date',
@@ -394,7 +413,7 @@ class JobListItem {
     }
 
     if (collectionDate != null &&
-        !_isSameDay(collectionDate, this.collectionDate)) {
+        !_isSameDateAndTime(collectionDate, this.collectionDate)) {
       newUpdates.add(JobListItemUpdate(
         userId: userId,
         fieldName: 'collectionDate',
@@ -492,6 +511,7 @@ class JobListItem {
       whoToInvoice: whoToInvoice,
       collectionJobId: collectionJobId,
       updates: newUpdates,
+      customPolygons: customPolygons,
     );
   }
 
@@ -500,6 +520,29 @@ class JobListItem {
     return date1.year == date2.year &&
         date1.month == date2.month &&
         date1.day == date2.day;
+  }
+
+  // Helper method to compare dates and times appropriately for tracking changes
+  bool _isSameDateAndTime(DateTime date1, DateTime date2) {
+    // For job types that need time slots, compare both date AND time (but ignore seconds/milliseconds)
+    if (_needsTimeDisplay()) {
+      return date1.year == date2.year &&
+          date1.month == date2.month &&
+          date1.day == date2.day &&
+          date1.hour == date2.hour &&
+          date1.minute == date2.minute;
+    }
+    // For other job types, just compare the date (ignore time completely)
+    return _isSameDay(date1, date2);
+  }
+
+  // Helper method to check if job type needs time display
+  bool _needsTimeDisplay() {
+    return jobType == JobType.junkCollection ||
+        jobType == JobType.furnitureMove ||
+        jobType == JobType.trailerTowing ||
+        jobType == JobType.windowCleaning ||
+        jobType == JobType.solarPanelCleaning;
   }
 
   // Backwards compatibility getter - converts jobStatusId back to JobListStatus enum

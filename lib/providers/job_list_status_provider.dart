@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/custom_job_list_status.dart';
 
@@ -40,7 +41,9 @@ class JobListStatusProvider extends ChangeNotifier {
       }
     } catch (e) {
       _error = 'Error loading job list statuses: $e';
-      print(_error);
+      if (kDebugMode) {
+        print(_error);
+      }
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -70,7 +73,9 @@ class JobListStatusProvider extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       _error = 'Error adding status: $e';
-      print(_error);
+      if (kDebugMode) {
+        print(_error);
+      }
       notifyListeners();
     }
   }
@@ -96,7 +101,9 @@ class JobListStatusProvider extends ChangeNotifier {
       }
     } catch (e) {
       _error = 'Error updating status: $e';
-      print(_error);
+      if (kDebugMode) {
+        print(_error);
+      }
       notifyListeners();
     }
   }
@@ -124,7 +131,9 @@ class JobListStatusProvider extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       _error = 'Error deleting status: $e';
-      print(_error);
+      if (kDebugMode) {
+        print(_error);
+      }
       notifyListeners();
     }
   }
@@ -268,11 +277,15 @@ class JobListStatusProvider extends ChangeNotifier {
       await batch.commit();
       _statuses = defaultStatuses;
       _statuses.sort((a, b) => a.label.compareTo(b.label));
-      print(
-          'JobListStatusProvider: Initialized ${defaultStatuses.length} default statuses');
+      if (kDebugMode) {
+        print(
+            'JobListStatusProvider: Initialized ${defaultStatuses.length} default statuses');
+      }
     } catch (e) {
       _error = 'Error initializing default statuses: $e';
-      print(_error);
+      if (kDebugMode) {
+        print(_error);
+      }
     }
 
     notifyListeners();

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'dart:convert';
 import 'dart:html' as html;
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -109,9 +110,13 @@ class JobCacheService {
       };
 
       html.window.localStorage[key] = jsonEncode(jsonData);
-      print('Cached ${jobs.length} jobs for ${month.year}-${month.month}');
+      if (kDebugMode) {
+        print('Cached ${jobs.length} jobs for ${month.year}-${month.month}');
+      }
     } catch (e) {
-      print('Error caching jobs for ${month.year}-${month.month}: $e');
+      if (kDebugMode) {
+        print('Error caching jobs for ${month.year}-${month.month}: $e');
+      }
     }
   }
 
@@ -134,12 +139,16 @@ class JobCacheService {
         return Job.fromArrayElement(convertedJobMap);
       }).toList();
 
-      print(
-          'Retrieved ${jobs.length} cached jobs for ${month.year}-${month.month}');
+      if (kDebugMode) {
+        print(
+            'Retrieved ${jobs.length} cached jobs for ${month.year}-${month.month}');
+      }
       return jobs;
     } catch (e) {
-      print(
-          'Error retrieving cached jobs for ${month.year}-${month.month}: $e');
+      if (kDebugMode) {
+        print(
+            'Error retrieving cached jobs for ${month.year}-${month.month}: $e');
+      }
       return null;
     }
   }
@@ -167,7 +176,9 @@ class JobCacheService {
         'jobCount': (jsonData['jobs'] as List).length,
       };
     } catch (e) {
-      print('Error getting cache info for ${month.year}-${month.month}: $e');
+      if (kDebugMode) {
+        print('Error getting cache info for ${month.year}-${month.month}: $e');
+      }
       return null;
     }
   }
@@ -176,7 +187,9 @@ class JobCacheService {
   static Future<void> clearMonth(DateTime month) async {
     final key = _getCacheKey(month);
     html.window.localStorage.remove(key);
-    print('Cleared cache for ${month.year}-${month.month}');
+    if (kDebugMode) {
+      print('Cleared cache for ${month.year}-${month.month}');
+    }
   }
 
   /// Clear all cached data
@@ -187,7 +200,9 @@ class JobCacheService {
     for (final key in keys) {
       html.window.localStorage.remove(key);
     }
-    print('Cleared all job cache data');
+    if (kDebugMode) {
+      print('Cleared all job cache data');
+    }
   }
 
   /// Get all cached months

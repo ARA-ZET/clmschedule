@@ -71,9 +71,9 @@ class JobListItemUpdate {
   }
 
   // Get formatted display text for the change
-  String getChangeDescription() {
-    final oldValueText = _getValueDisplayText(oldValue);
-    final newValueText = _getValueDisplayText(newValue);
+  String getChangeDescription({JobType? jobType}) {
+    final oldValueText = _getValueDisplayText(oldValue, jobType: jobType);
+    final newValueText = _getValueDisplayText(newValue, jobType: jobType);
 
     switch (fieldName) {
       case 'jobStatusId':
@@ -90,11 +90,24 @@ class JobListItemUpdate {
     }
   }
 
-  String _getValueDisplayText(dynamic value) {
+  // Backwards compatibility - keep the original method
+  String getChangeDescriptionLegacy() {
+    return getChangeDescription();
+  }
+
+  String _getValueDisplayText(dynamic value, {JobType? jobType}) {
     if (value == null || value == '') return 'empty';
 
     if (value is DateTime) {
-      return '${value.day}/${value.month}/${value.year}';
+      // For date fields, check if we should show time based on job type
+      if (fieldName == 'date' || fieldName == 'collectionDate') {
+        final shouldShowTime =
+            _shouldShowTime(jobType) && (value.hour != 0 || value.minute != 0);
+        if (shouldShowTime) {
+          return _formatDateTimeReadable(value);
+        }
+      }
+      return _formatDateOnly(value);
     } else if (value is JobType) {
       return value.displayName;
     } else if (value is double) {
@@ -102,6 +115,81 @@ class JobListItemUpdate {
     } else {
       return value.toString();
     }
+  }
+
+  // Format date and time in readable format: "16 Oct 2025 10:00 AM"
+  String _formatDateTimeReadable(DateTime dateTime) {
+    final months = [
+      '',
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
+    ];
+
+    final day = dateTime.day;
+    final month = months[dateTime.month];
+    final year = dateTime.year;
+
+    // Convert to 12-hour format
+    int hour12 = dateTime.hour;
+    String period = 'AM';
+
+    if (hour12 == 0) {
+      hour12 = 12; // Midnight
+    } else if (hour12 > 12) {
+      hour12 = hour12 - 12;
+      period = 'PM';
+    } else if (hour12 == 12) {
+      period = 'PM';
+    }
+
+    final minute = dateTime.minute.toString().padLeft(2, '0');
+
+    return '$day $month $year $hour12:$minute $period';
+  }
+
+  // Format date only: "16 Oct 2025"
+  String _formatDateOnly(DateTime dateTime) {
+    final months = [
+      '',
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
+    ];
+
+    final day = dateTime.day;
+    final month = months[dateTime.month];
+    final year = dateTime.year;
+
+    return '$day $month $year';
+  }
+
+  // Helper method to determine if time should be shown for this job type
+  bool _shouldShowTime(JobType? jobType) {
+    if (jobType == null) return false;
+    return jobType == JobType.junkCollection ||
+        jobType == JobType.furnitureMove ||
+        jobType == JobType.trailerTowing ||
+        jobType == JobType.windowCleaning ||
+        jobType == JobType.solarPanelCleaning;
   }
 
   String _getFieldDisplayName(String fieldName) {

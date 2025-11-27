@@ -1,8 +1,11 @@
+import 'package:flutter/foundation.dart';
 // Test script to verify quantityDistributed integration
 import 'lib/models/job_list_item.dart';
 
 void main() {
-  print('Testing quantityDistributed integration...');
+  if (kDebugMode) {
+    print('Testing quantityDistributed integration...');
+  }
   
   // Test time slot conversion
   testTimeSlotConversion();
@@ -10,11 +13,15 @@ void main() {
   // Test job type logic
   testJobTypeLogic();
   
-  print('All tests passed!');
+  if (kDebugMode) {
+    print('All tests passed!');
+  }
 }
 
 void testTimeSlotConversion() {
-  print('\n=== Testing Time Slot Conversion ===');
+  if (kDebugMode) {
+    print('\n=== Testing Time Slot Conversion ===');
+  }
   
   // Test various time slots
   final testCases = [
@@ -31,15 +38,21 @@ void testTimeSlotConversion() {
     
     final timeSlotInt = hour * 100 + minute;
     
-    print('Time ${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')} -> $timeSlotInt (expected: $expected)');
+    if (kDebugMode) {
+      print('Time ${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')} -> $timeSlotInt (expected: $expected)');
+    }
     assert(timeSlotInt == expected, 'Time slot conversion failed');
   }
   
-  print('✓ Time slot conversion tests passed');
+  if (kDebugMode) {
+    print('✓ Time slot conversion tests passed');
+  }
 }
 
 void testJobTypeLogic() {
-  print('\n=== Testing Job Type Logic ===');
+  if (kDebugMode) {
+    print('\n=== Testing Job Type Logic ===');
+  }
   
   // Test which job types should trigger quantityDistributed update
   final collectionJobTypes = [
@@ -55,15 +68,21 @@ void testJobTypeLogic() {
   
   for (final jobType in collectionJobTypes) {
     final shouldUpdate = (jobType == JobType.junkCollection || jobType == JobType.furnitureMove);
-    print('${jobType.displayName}: Should update quantityDistributed = $shouldUpdate');
+    if (kDebugMode) {
+      print('${jobType.displayName}: Should update quantityDistributed = $shouldUpdate');
+    }
     assert(shouldUpdate, 'Collection job type should update quantityDistributed');
   }
   
   for (final jobType in nonCollectionJobTypes) {
     final shouldUpdate = (jobType == JobType.junkCollection || jobType == JobType.furnitureMove);
-    print('${jobType.displayName}: Should update quantityDistributed = $shouldUpdate');
+    if (kDebugMode) {
+      print('${jobType.displayName}: Should update quantityDistributed = $shouldUpdate');
+    }
     assert(!shouldUpdate, 'Non-collection job type should NOT update quantityDistributed');
   }
   
-  print('✓ Job type logic tests passed');
+  if (kDebugMode) {
+    print('✓ Job type logic tests passed');
+  }
 }

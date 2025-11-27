@@ -39,7 +39,10 @@ class _MyMapsKmlDownloaderState extends State<MyMapsKmlDownloader> {
 
   // Modified to also call the onKmlDataRetrieved callback
   void _triggerWebDownloadAndCallback(
-      Uint8List data, String mimeType, String targetFileName) {
+    Uint8List data,
+    String mimeType,
+    String targetFileName,
+  ) {
     final String finalFileName = targetFileName.endsWith('.kml')
         ? targetFileName
         : '$targetFileName.kml';
@@ -90,35 +93,48 @@ class _MyMapsKmlDownloaderState extends State<MyMapsKmlDownloader> {
         debugPrint("Interpreted main MIME type: $mainMimeType");
 
         if (mainMimeType == expectedKmlMimeType) {
-          _triggerWebDownloadAndCallback(response.bodyBytes,
-              '$expectedKmlMimeType;charset=utf-8', fileName);
+          _triggerWebDownloadAndCallback(
+            response.bodyBytes,
+            '$expectedKmlMimeType;charset=utf-8',
+            fileName,
+          );
         } else if (mainMimeType == 'text/html') {
           throw Exception(
-              'Failed to download KML. Server returned HTML. Map might not be public or link is invalid.');
+            'Failed to download KML. Server returned HTML. Map might not be public or link is invalid.',
+          );
         } else {
           bool looksLikeKml = false;
           if (response.bodyBytes.isNotEmpty) {
             try {
               String bodyStartSample = utf8
-                  .decode(response.bodyBytes.take(150).toList(),
-                      allowMalformed: true)
+                  .decode(
+                    response.bodyBytes.take(150).toList(),
+                    allowMalformed: true,
+                  )
                   .trim()
                   .toLowerCase();
               if (bodyStartSample.startsWith('<?xml') ||
                   bodyStartSample.startsWith('<kml')) {
                 looksLikeKml = true;
               }
-            } catch (e) {/* ignore */}
+            } catch (e) {
+              /* ignore */
+            }
           }
 
           if (looksLikeKml) {
             debugPrint(
-                "Warning: Content-Type was '$contentTypeHeader', but body appears to be KML. Proceeding.");
-            _triggerWebDownloadAndCallback(response.bodyBytes,
-                '$expectedKmlMimeType;charset=utf-8', fileName);
+              "Warning: Content-Type was '$contentTypeHeader', but body appears to be KML. Proceeding.",
+            );
+            _triggerWebDownloadAndCallback(
+              response.bodyBytes,
+              '$expectedKmlMimeType;charset=utf-8',
+              fileName,
+            );
           } else {
             throw Exception(
-                'Failed to download KML. Unexpected Content-Type: "$contentTypeHeader". Expected "$expectedKmlMimeType" and content did not appear to be KML.');
+              'Failed to download KML. Unexpected Content-Type: "$contentTypeHeader". Expected "$expectedKmlMimeType" and content did not appear to be KML.',
+            );
           }
         }
       } else {
@@ -130,7 +146,8 @@ class _MyMapsKmlDownloaderState extends State<MyMapsKmlDownloader> {
           errorReason = "Map Not Found (404). Check link/Map ID.";
         }
         throw Exception(
-            'Failed to download KML. Status: ${response.statusCode} ($errorReason)');
+          'Failed to download KML. Status: ${response.statusCode} ($errorReason)',
+        );
       }
     } catch (e) {
       setState(() {
@@ -221,11 +238,14 @@ class _MyMapsKmlDownloaderState extends State<MyMapsKmlDownloader> {
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
-                          color: Colors.white, strokeWidth: 2),
+                        color: Colors.white,
+                        strokeWidth: 2,
+                      ),
                     )
                   : const Icon(Icons.download_rounded, size: 20),
               label: Text(
-                  _isLoading ? "Downloading..." : "Download & Process KML"),
+                _isLoading ? "Downloading..." : "Download & Process KML",
+              ),
               onPressed: _isLoading ? null : _handleDownloadButtonPressed,
             ),
           ],

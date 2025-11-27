@@ -201,7 +201,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                         TextFormField(
                                           controller: _amountController,
                                           decoration: const InputDecoration(
-                                            labelText: 'Amount *',
+                                            labelText: 'Amount',
                                             border: OutlineInputBorder(),
                                             prefixText: 'R ',
                                           ),
@@ -212,13 +212,12 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                 RegExp(r'^\d+\.?\d{0,2}')),
                                           ],
                                           validator: (value) {
-                                            if (value == null ||
-                                                value.isEmpty) {
-                                              return 'Amount is required';
-                                            }
-                                            if (double.tryParse(value) ==
-                                                null) {
-                                              return 'Please enter a valid amount';
+                                            if (value != null &&
+                                                value.isNotEmpty) {
+                                              if (double.tryParse(value) ==
+                                                  null) {
+                                                return 'Please enter a valid amount';
+                                              }
                                             }
                                             return null;
                                           },
@@ -256,7 +255,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                           child: TextFormField(
                                             controller: _amountController,
                                             decoration: const InputDecoration(
-                                              labelText: 'Amount *',
+                                              labelText: 'Amount',
                                               border: OutlineInputBorder(),
                                               prefixText: 'R ',
                                             ),
@@ -268,13 +267,12 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                   RegExp(r'^\d+\.?\d{0,2}')),
                                             ],
                                             validator: (value) {
-                                              if (value == null ||
-                                                  value.isEmpty) {
-                                                return 'Amount is required';
-                                              }
-                                              if (double.tryParse(value) ==
-                                                  null) {
-                                                return 'Please enter a valid amount';
+                                              if (value != null &&
+                                                  value.isNotEmpty) {
+                                                if (double.tryParse(value) ==
+                                                    null) {
+                                                  return 'Please enter a valid amount';
+                                                }
                                               }
                                               return null;
                                             },
@@ -612,8 +610,13 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                             .jobToEdit?.id);
                                             if (occupiedSlots.isNotEmpty) {
                                               hasConflicts = true;
+                                              final vehicleName = vehicleType
+                                                  .name
+                                                  .toUpperCase();
+                                              final slotCount =
+                                                  occupiedSlots.length;
                                               conflictMessage =
-                                                  'Time conflicts detected for selected vehicle';
+                                                  '⚠️ $vehicleName has $slotCount time conflict${slotCount > 1 ? 's' : ''} - can still be booked';
                                             }
                                           }
                                         }
@@ -655,120 +658,245 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                           Consumer<
                                                               CollectionScheduleProvider>(
                                                         builder: (context,
-                                                                collectionProvider,
-                                                                child) =>
-                                                            AlertDialog(
-                                                          title: const Text(
-                                                              'Select Time'),
-                                                          content: SizedBox(
-                                                            width: 300,
-                                                            height: 400,
-                                                            child: ListView
-                                                                .builder(
-                                                              itemCount:
-                                                                  timeSlots
-                                                                      .length,
-                                                              itemBuilder:
-                                                                  (context,
-                                                                      index) {
-                                                                final time =
-                                                                    timeSlots[
-                                                                        index];
-                                                                final timeString =
-                                                                    _formatTimeOfDay(
-                                                                        time);
+                                                            collectionProvider,
+                                                            child) {
+                                                          // Get vehicle type and count occupied slots for header info
+                                                          VehicleType?
+                                                              vehicleType;
+                                                          List<String>
+                                                              occupiedSlots =
+                                                              [];
 
-                                                                // Check if this time slot is occupied for collection jobs
-                                                                bool
-                                                                    isOccupied =
-                                                                    false;
+                                                          if (_selectedVehicleTrailerCombo !=
+                                                              null) {
+                                                            final quantity =
+                                                                _getQuantityFromVehicleTrailerCombo(
+                                                                    _selectedVehicleTrailerCombo);
+                                                            vehicleType =
+                                                                _getVehicleTypeFromQuantity(
+                                                                    quantity);
 
-                                                                if (_selectedJobType == JobType.junkCollection ||
-                                                                    _selectedJobType ==
-                                                                        JobType
-                                                                            .furnitureMove ||
-                                                                    _selectedJobType ==
-                                                                        JobType
-                                                                            .trailerTowing) {
-                                                                  // Get vehicle type from quantity
-                                                                  if (_selectedVehicleTrailerCombo !=
-                                                                      null) {
-                                                                    final quantity =
-                                                                        _getQuantityFromVehicleTrailerCombo(
-                                                                            _selectedVehicleTrailerCombo);
-                                                                    final vehicleType =
-                                                                        _getVehicleTypeFromQuantity(
-                                                                            quantity);
+                                                            if (vehicleType !=
+                                                                null) {
+                                                              occupiedSlots =
+                                                                  collectionProvider
+                                                                      .getOccupiedTimeSlots(
+                                                                vehicleType,
+                                                                date,
+                                                                excludeJobId:
+                                                                    widget
+                                                                        .jobToEdit
+                                                                        ?.id,
+                                                              );
+                                                            }
+                                                          }
 
-                                                                    if (vehicleType !=
-                                                                        null) {
-                                                                      final occupiedSlots = collectionProvider.getOccupiedTimeSlots(
-                                                                          vehicleType,
-                                                                          date, // Use the newly selected date, not _selectedDate
-                                                                          excludeJobId: widget
-                                                                              .jobToEdit
-                                                                              ?.id);
+                                                          return AlertDialog(
+                                                            title: Column(
+                                                              crossAxisAlignment:
+                                                                  CrossAxisAlignment
+                                                                      .start,
+                                                              mainAxisSize:
+                                                                  MainAxisSize
+                                                                      .min,
+                                                              children: [
+                                                                const Text(
+                                                                    'Select Time'),
+                                                                if (vehicleType !=
+                                                                    null) ...[
+                                                                  const SizedBox(
+                                                                      height:
+                                                                          4),
+                                                                  Text(
+                                                                    '${vehicleType.name.toUpperCase()} - ${DateFormat('dd MMM yyyy').format(date)}',
+                                                                    style: const TextStyle(
+                                                                        fontSize:
+                                                                            14,
+                                                                        fontWeight:
+                                                                            FontWeight.normal),
+                                                                  ),
+                                                                  if (occupiedSlots
+                                                                      .isNotEmpty) ...[
+                                                                    const SizedBox(
+                                                                        height:
+                                                                            2),
+                                                                    Text(
+                                                                      '⚠️ ${occupiedSlots.length} time slot${occupiedSlots.length > 1 ? 's' : ''} have conflicts',
+                                                                      style: const TextStyle(
+                                                                          fontSize:
+                                                                              12,
+                                                                          color:
+                                                                              Colors.orange),
+                                                                    ),
+                                                                  ],
+                                                                ],
+                                                              ],
+                                                            ),
+                                                            content: SizedBox(
+                                                              width: 300,
+                                                              height: 400,
+                                                              child: ListView
+                                                                  .builder(
+                                                                itemCount:
+                                                                    timeSlots
+                                                                        .length,
+                                                                itemBuilder:
+                                                                    (context,
+                                                                        index) {
+                                                                  final time =
+                                                                      timeSlots[
+                                                                          index];
+                                                                  final timeString =
+                                                                      _formatTimeOfDay(
+                                                                          time);
+
+                                                                  // Check if this time slot is occupied for collection jobs
+                                                                  bool
                                                                       isOccupied =
-                                                                          occupiedSlots
-                                                                              .contains(timeString);
+                                                                      false;
+                                                                  String
+                                                                      conflictDetails =
+                                                                      '';
+                                                                  Color
+                                                                      conflictColor =
+                                                                      Colors
+                                                                          .red;
+
+                                                                  if (_selectedJobType == JobType.junkCollection ||
+                                                                      _selectedJobType ==
+                                                                          JobType
+                                                                              .furnitureMove ||
+                                                                      _selectedJobType ==
+                                                                          JobType
+                                                                              .trailerTowing) {
+                                                                    // Get vehicle type from quantity
+                                                                    if (_selectedVehicleTrailerCombo !=
+                                                                        null) {
+                                                                      final quantity =
+                                                                          _getQuantityFromVehicleTrailerCombo(
+                                                                              _selectedVehicleTrailerCombo);
+                                                                      final vehicleType =
+                                                                          _getVehicleTypeFromQuantity(
+                                                                              quantity);
+
+                                                                      if (vehicleType !=
+                                                                          null) {
+                                                                        final occupiedSlots = collectionProvider.getOccupiedTimeSlots(
+                                                                            vehicleType,
+                                                                            date, // Use the newly selected date, not _selectedDate
+                                                                            excludeJobId:
+                                                                                widget.jobToEdit?.id);
+                                                                        isOccupied =
+                                                                            occupiedSlots.contains(timeString);
+
+                                                                        // Get details about the conflicting job
+                                                                        if (isOccupied) {
+                                                                          final conflictingJobs = collectionProvider
+                                                                              .getJobsForDate(date)
+                                                                              .where((job) => job.vehicleType == vehicleType && _jobOccupiesTimeSlot(job, timeString))
+                                                                              .toList();
+
+                                                                          if (conflictingJobs
+                                                                              .isNotEmpty) {
+                                                                            final job =
+                                                                                conflictingJobs.first;
+                                                                            final clientName = job.clients.isNotEmpty
+                                                                                ? job.clients.first
+                                                                                : 'Unknown Client';
+                                                                            conflictDetails =
+                                                                                'Booked by $clientName';
+
+                                                                            // Different colors for different job types
+                                                                            switch (job.jobType) {
+                                                                              case 'junk collection':
+                                                                                conflictColor = Colors.red;
+                                                                                break;
+                                                                              case 'furniture move':
+                                                                                conflictColor = Colors.orange;
+                                                                                break;
+                                                                              case 'trailer towing':
+                                                                                conflictColor = Colors.purple;
+                                                                                break;
+                                                                              default:
+                                                                                conflictColor = Colors.red;
+                                                                            }
+                                                                          }
+                                                                        }
+                                                                      }
                                                                     }
                                                                   }
-                                                                }
 
-                                                                return ListTile(
-                                                                  title: Text(
-                                                                    _formatTimeOfDay(
-                                                                        time),
-                                                                    style:
-                                                                        TextStyle(
+                                                                  return Container(
+                                                                    decoration:
+                                                                        BoxDecoration(
                                                                       color: isOccupied
-                                                                          ? Colors
-                                                                              .red
+                                                                          ? conflictColor
+                                                                              .withOpacity(0.1)
                                                                           : null,
-                                                                      fontWeight: isOccupied
-                                                                          ? FontWeight
-                                                                              .bold
+                                                                      borderRadius:
+                                                                          BorderRadius.circular(
+                                                                              4),
+                                                                      border: isOccupied
+                                                                          ? Border.all(
+                                                                              color: conflictColor.withOpacity(0.3))
                                                                           : null,
                                                                     ),
-                                                                  ),
-                                                                  subtitle:
-                                                                      isOccupied
-                                                                          ? const Text(
-                                                                              'Occupied',
-                                                                              style: TextStyle(color: Colors.red, fontSize: 12),
+                                                                    child:
+                                                                        ListTile(
+                                                                      title:
+                                                                          Text(
+                                                                        _formatTimeOfDay(
+                                                                            time),
+                                                                        style:
+                                                                            TextStyle(
+                                                                          color: isOccupied
+                                                                              ? conflictColor
+                                                                              : null,
+                                                                          fontWeight: isOccupied
+                                                                              ? FontWeight.bold
+                                                                              : null,
+                                                                        ),
+                                                                      ),
+                                                                      subtitle: isOccupied
+                                                                          ? Text(
+                                                                              '⚠️ ${conflictDetails.isNotEmpty ? conflictDetails : 'Occupied'} (Click to override)',
+                                                                              style: TextStyle(color: conflictColor, fontSize: 12),
                                                                             )
-                                                                          : null,
-                                                                  leading:
-                                                                      isOccupied
-                                                                          ? const Icon(
-                                                                              Icons.block,
-                                                                              color: Colors.red,
+                                                                          : const Text(
+                                                                              'Available',
+                                                                              style: TextStyle(color: Colors.green, fontSize: 12),
+                                                                            ),
+                                                                      leading: isOccupied
+                                                                          ? Icon(
+                                                                              Icons.warning,
+                                                                              color: conflictColor,
                                                                               size: 16,
                                                                             )
-                                                                          : null,
-                                                                  enabled:
-                                                                      !isOccupied,
-                                                                  onTap: isOccupied
-                                                                      ? null
-                                                                      : () => Navigator.of(
-                                                                              context)
-                                                                          .pop(
-                                                                              time),
-                                                                );
-                                                              },
+                                                                          : const Icon(
+                                                                              Icons.schedule,
+                                                                              color: Colors.green,
+                                                                              size: 16,
+                                                                            ),
+                                                                      onTap: () =>
+                                                                          Navigator.of(context)
+                                                                              .pop(time),
+                                                                    ),
+                                                                  );
+                                                                },
+                                                              ),
                                                             ),
-                                                          ),
-                                                          actions: [
-                                                            TextButton(
-                                                              onPressed: () =>
-                                                                  Navigator.of(
-                                                                          context)
-                                                                      .pop(),
-                                                              child: const Text(
-                                                                  'Cancel'),
-                                                            ),
-                                                          ],
-                                                        ),
+                                                            actions: [
+                                                              TextButton(
+                                                                onPressed: () =>
+                                                                    Navigator.of(
+                                                                            context)
+                                                                        .pop(),
+                                                                child: const Text(
+                                                                    'Cancel'),
+                                                              ),
+                                                            ],
+                                                          );
+                                                        },
                                                       ),
                                                     );
 
@@ -813,7 +941,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                           ? conflictMessage
                                                           : null),
                                                   helperText: hasConflicts
-                                                      ? 'Click to view available times'
+                                                      ? 'Click to view times (conflicts can be overridden)'
                                                       : null,
                                                   helperStyle: hasConflicts
                                                       ? const TextStyle(
@@ -1522,5 +1650,48 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     final dateTime =
         DateTime(now.year, now.month, now.day, time.hour, time.minute);
     return DateFormat('HH:mm').format(dateTime);
+  }
+
+  // Helper method to check if a job occupies a specific time slot
+  bool _jobOccupiesTimeSlot(CollectionJob job, String timeSlot) {
+    const availableTimeSlots = [
+      "07:30",
+      "08:00",
+      "08:30",
+      "09:00",
+      "09:30",
+      "10:00",
+      "10:30",
+      "11:00",
+      "11:30",
+      "12:00",
+      "12:30",
+      "13:00",
+      "13:30",
+      "14:00",
+      "14:30",
+      "15:00",
+      "15:30",
+      "16:00",
+      "16:30",
+      "17:00",
+      "17:30",
+      "18:00",
+      "18:30",
+      "19:00",
+      "19:30",
+      "20:00"
+    ];
+
+    final jobStartIndex = availableTimeSlots.indexOf(job.timeSlot);
+    final checkIndex = availableTimeSlots.indexOf(timeSlot);
+
+    if (jobStartIndex == -1 || checkIndex == -1) {
+      return job.timeSlot == timeSlot; // Fallback to exact match
+    }
+
+    // Check if the timeSlot falls within the job's duration
+    return checkIndex >= jobStartIndex &&
+        checkIndex < (jobStartIndex + job.timeSlots);
   }
 }

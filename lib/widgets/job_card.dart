@@ -1,11 +1,11 @@
 import 'package:clmschedule/providers/toggler_provider.dart';
+import 'package:clmschedule/widgets/updated_map_view.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
 import '../providers/job_status_provider.dart';
-import 'map_view.dart';
 import 'print_map_view.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/job_list_provider.dart';
@@ -763,7 +763,7 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                       await Navigator.of(context).push<List<CustomPolygon>>(
                     MaterialPageRoute(
                       fullscreenDialog: true,
-                      builder: (BuildContext context) => MapView(
+                      builder: (BuildContext context) => UpdatedMapView(
                         jobId: widget.job.id,
                         customPolygons: _localWorkMaps,
                         title: widget.job.clientsDisplay,

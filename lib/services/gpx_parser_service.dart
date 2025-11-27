@@ -1,5 +1,5 @@
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:xml/xml.dart';
 import '../models/gpx_track.dart';
 
@@ -98,7 +98,9 @@ class GpxParserService {
         fileName: fileName,
       );
     } catch (e) {
-      print('Error parsing track in $fileName: $e');
+      if (kDebugMode) {
+        print('Error parsing track in $fileName: $e');
+      }
       return null;
     }
   }
@@ -118,7 +120,9 @@ class GpxParserService {
 
       return points.isNotEmpty ? GpxTrackSegment(points: points) : null;
     } catch (e) {
-      print('Error parsing track segment: $e');
+      if (kDebugMode) {
+        print('Error parsing track segment: $e');
+      }
       return null;
     }
   }
@@ -174,7 +178,9 @@ class GpxParserService {
         time: time,
       );
     } catch (e) {
-      print('Error parsing track point: $e');
+      if (kDebugMode) {
+        print('Error parsing track point: $e');
+      }
       return null;
     }
   }
@@ -234,7 +240,9 @@ class GpxParserService {
       }
       metadata['pointCount'] = totalPoints.toString();
     } catch (e) {
-      print('Error extracting GPX metadata: $e');
+      if (kDebugMode) {
+        print('Error extracting GPX metadata: $e');
+      }
     }
 
     return metadata;

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/job_list_item.dart';
 import 'monthly_service.dart';
@@ -16,9 +17,13 @@ class JobListService {
   // Get all job list items for current month
   Stream<List<JobListItem>> getJobListItems([DateTime? date]) {
     final targetDate = date ?? DateTime.now();
-    print('JobListService: Getting job list items for date: $targetDate');
-    print(
-        'JobListService: Monthly doc ID: ${_monthlyService.getMonthlyDocumentId(targetDate)}');
+    if (kDebugMode) {
+      print('JobListService: Getting job list items for date: $targetDate');
+    }
+    if (kDebugMode) {
+      print(
+          'JobListService: Monthly doc ID: ${_monthlyService.getMonthlyDocumentId(targetDate)}');
+    }
 
     // Ensure monthly document exists when streaming
     _monthlyService.ensureJobListMonthlyDocExists(targetDate);
@@ -27,10 +32,14 @@ class JobListService {
         .orderBy('date', descending: true)
         .snapshots()
         .map((snapshot) {
-      print(
-          'JobListService: Firestore snapshot received with ${snapshot.docs.length} documents');
+      if (kDebugMode) {
+        print(
+            'JobListService: Firestore snapshot received with ${snapshot.docs.length} documents');
+      }
       return snapshot.docs.map((doc) {
-        print('JobListService: Processing doc ID: ${doc.id}');
+        if (kDebugMode) {
+          print('JobListService: Processing doc ID: ${doc.id}');
+        }
         return JobListItem.fromMap(doc.id, doc.data() as Map<String, dynamic>);
       }).toList();
     });
@@ -183,8 +192,10 @@ class JobListService {
       return;
     }
 
-    print(
-        'JobListService: Moving job ${jobListItem.id} from $oldMonthId to $newMonthId');
+    if (kDebugMode) {
+      print(
+          'JobListService: Moving job ${jobListItem.id} from $oldMonthId to $newMonthId');
+    }
 
     // Ensure both monthly documents exist
     await _monthlyService.ensureJobListMonthlyDocExists(oldDate);
@@ -203,7 +214,9 @@ class JobListService {
       await _getJobListItemsCollection(oldDate).doc(jobListItem.id).delete();
     }
 
-    print(
-        'JobListService: Successfully moved job ${jobListItem.id} to $newMonthId');
+    if (kDebugMode) {
+      print(
+          'JobListService: Successfully moved job ${jobListItem.id} to $newMonthId');
+    }
   }
 }

@@ -37,6 +37,21 @@ extension TrailerTypeExtension on TrailerType {
   }
 }
 
+// Helper class to encapsulate visual styling information for a job
+class _JobVisualStyling {
+  final Color fillColor;
+  final Color borderColor;
+  final Color textColor;
+  final double borderWidth;
+
+  const _JobVisualStyling({
+    required this.fillColor,
+    required this.borderColor,
+    required this.textColor,
+    required this.borderWidth,
+  });
+}
+
 class CollectionScheduleGrid extends StatefulWidget {
   const CollectionScheduleGrid({super.key});
 
@@ -52,6 +67,11 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
   // Scroll controllers for horizontal and vertical scrolling
   final ScrollController _horizontalScrollController = ScrollController();
   final ScrollController _verticalScrollController = ScrollController();
+
+  // Cache expensive calculations to improve performance
+  List<DateTime>? _cachedDates;
+  DateTime? _cachedCurrentMonth;
+  List<String>? _cachedTimeSlots;
 
   @override
   void dispose() {
@@ -160,6 +180,11 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
 
   // Generate time slots from 07:30 to 20:00 with 30-minute intervals
   List<String> _getTimeSlots() {
+    // Cache time slots since they never change
+    if (_cachedTimeSlots != null) {
+      return _cachedTimeSlots!;
+    }
+
     List<String> timeSlots = [];
     // Start with 07:30
     timeSlots.add('07:30');
@@ -171,7 +196,30 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
         timeSlots.add('${hour.toString().padLeft(2, '0')}:30');
       }
     }
+
+    _cachedTimeSlots = timeSlots;
     return timeSlots;
+  }
+
+  // Get cached vehicle color to avoid repeated calculations
+  Color _getCachedVehicleColor(VehicleType vehicleType) {
+    return _getVehicleColor(vehicleType);
+  }
+
+  // Cached version of _getDates with memoization
+  List<DateTime> _getCachedDates(
+      DateTime baseDate, CollectionScheduleProvider provider) {
+    // Only recalculate if month changed
+    if (_cachedDates != null &&
+        _cachedCurrentMonth != null &&
+        _cachedCurrentMonth!.year == baseDate.year &&
+        _cachedCurrentMonth!.month == baseDate.month) {
+      return _cachedDates!;
+    }
+
+    _cachedCurrentMonth = baseDate;
+    _cachedDates = _getDates(baseDate, provider);
+    return _cachedDates!;
   }
 
   static const double cellWidth = 250.0;
@@ -186,10 +234,13 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
         if (_currentMonthDisplay != collectionProvider.currentMonthDisplay) {
           _currentMonthDisplay = collectionProvider.currentMonthDisplay;
           _hasScrolledToToday = false;
+          // Clear cache when month changes
+          _cachedDates = null;
+          _cachedCurrentMonth = null;
         }
 
         final currentMonth = collectionProvider.currentMonth;
-        final dates = _getDates(currentMonth, collectionProvider);
+        final dates = _getCachedDates(currentMonth, collectionProvider);
         final timeSlots = _getTimeSlots();
 
         final double rowHeight = isFullview
@@ -316,7 +367,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                                       children:
                                           VehicleType.values.map((vehicleType) {
                                         final color =
-                                            _getVehicleColor(vehicleType);
+                                            _getCachedVehicleColor(vehicleType);
                                         return Expanded(
                                           child: Text(
                                             vehicleType.name.toUpperCase(),
@@ -374,31 +425,81 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                                               .getJobsForVehicleAndTimeSlot(
                                                   vehicleType, date, timeSlot);
                                           final hasJob = vehicleJobs.isNotEmpty;
-                                          final color =
-                                              _getVehicleColor(vehicleType);
+                                          final color = _getCachedVehicleColor(
+                                              vehicleType);
+
+                                          // Check if job status requires special color highlighting instead of vehicle color
+                                          Color effectiveColor = color;
+                                          if (hasJob) {
+                                            final status =
+                                                vehicleJobs.first.statusId;
+                                            if (status == 'job_done') {
+                                              // Job done: green highlight
+                                              effectiveColor =
+                                                  Colors.green.shade600;
+                                            } else if (status == 'standby' ||
+                                                status == 'cancelled' ||
+                                                status
+                                                    .toLowerCase()
+                                                    .contains('cancelled')) {
+                                              // Standby/cancelled: red highlight
+                                              effectiveColor =
+                                                  Colors.red.shade600;
+                                            } else if (status == 'paid') {
+                                              // Paid jobs: grey highlight
+                                              effectiveColor =
+                                                  Colors.grey.shade600;
+                                            }
+                                          }
+
+                                          // Get visual styling for this job considering consecutive jobs and overlaps
+                                          final jobStyling = hasJob
+                                              ? _getJobVisualStyling(
+                                                  vehicleJobs.first,
+                                                  vehicleType,
+                                                  date,
+                                                  timeSlot,
+                                                  effectiveColor,
+                                                  collectionProvider)
+                                              : null;
 
                                           return Expanded(
                                             child: Container(
                                               margin: const EdgeInsets.all(1),
                                               decoration: BoxDecoration(
                                                 color: hasJob
-                                                    ? color.withValues(
-                                                        alpha: 0.1)
+                                                    ? (jobStyling?.fillColor ??
+                                                        effectiveColor
+                                                            .withValues(
+                                                                alpha: 0.1))
                                                     : Colors.grey.shade50,
                                                 border: Border.all(
                                                   color: hasJob
-                                                      ? color
+                                                      ? (jobStyling
+                                                              ?.borderColor ??
+                                                          effectiveColor)
                                                       : Colors.grey.shade300,
-                                                  width: hasJob ? 2 : 1,
+                                                  width: hasJob
+                                                      ? (jobStyling
+                                                              ?.borderWidth ??
+                                                          2)
+                                                      : 1,
                                                 ),
                                                 borderRadius:
                                                     BorderRadius.circular(4),
                                               ),
                                               child: hasJob
                                                   ? _buildCollectionJobCard(
-                                                      vehicleJobs.first, color)
-                                                  : _buildAddButton(vehicleType,
-                                                      date, timeSlot, color),
+                                                      context,
+                                                      vehicleJobs.first,
+                                                      jobStyling?.textColor ??
+                                                          effectiveColor)
+                                                  : _buildAddButton(
+                                                      context,
+                                                      vehicleType,
+                                                      date,
+                                                      timeSlot,
+                                                      effectiveColor),
                                             ),
                                           );
                                         }).toList(),
@@ -422,163 +523,204 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
     );
   }
 
-  Color _getVehicleColor(VehicleType vehicleType) {
-    switch (vehicleType) {
-      case VehicleType.hyundai:
-        return Colors.blue.shade700;
-      case VehicleType.mahindra:
-        return Colors.green.shade700;
-      case VehicleType.nissan:
-        return Colors.orange.shade700;
+  // Get visual styling for a job considering consecutive jobs and overlaps
+  _JobVisualStyling _getJobVisualStyling(
+    CollectionJob job,
+    VehicleType vehicleType,
+    DateTime date,
+    String timeSlot,
+    Color baseColor,
+    CollectionScheduleProvider collectionProvider,
+  ) {
+    // Simplified styling to improve performance
+    // Check for overlapping jobs (multiple jobs at the same time slot)
+    final overlappingJobs = collectionProvider.getJobsForVehicleAndTimeSlot(
+        vehicleType, date, timeSlot);
+
+    final hasOverlap = overlappingJobs.length > 1;
+
+    // Determine colors and styling based on overlap
+    Color fillColor;
+    Color borderColor;
+    Color textColor = baseColor;
+    double borderWidth = 2.0;
+
+    if (hasOverlap) {
+      // Overlapping jobs: red border, same fill color
+      fillColor = baseColor.withValues(alpha: 0.1);
+      borderColor = Colors.red.shade700;
+      borderWidth = 3.0;
+    } else {
+      // Regular single job
+      fillColor = baseColor.withValues(alpha: 0.1);
+      borderColor = baseColor;
     }
+
+    return _JobVisualStyling(
+      fillColor: fillColor,
+      borderColor: borderColor,
+      textColor: textColor,
+      borderWidth: borderWidth,
+    );
   }
+}
 
-  Widget _buildCollectionJobCard(CollectionJob job, Color color) {
-    final bool isFullview = context.watch<TogglerProvider>().isFullview;
-    return Tooltip(
-      message: _buildJobTooltip(job),
-      child: Padding(
-        padding: const EdgeInsets.all(2),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            // Job Type
-            Text(
-              job.jobType,
-              style: TextStyle(
-                fontSize: 9,
-                fontWeight: FontWeight.bold,
-                color: color,
-              ),
-              textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+// Cache for vehicle colors to avoid repeated calculations
+final Map<VehicleType, Color> _globalVehicleColorCache = {
+  VehicleType.hyundai: Colors.blue.shade700,
+  VehicleType.mahindra: Colors.green.shade700,
+  VehicleType.nissan: Colors.orange.shade700,
+};
+
+Color _getVehicleColor(VehicleType vehicleType) {
+  return _globalVehicleColorCache[vehicleType]!;
+}
+
+Widget _buildCollectionJobCard(
+    BuildContext context, CollectionJob job, Color color) {
+  final bool isFullview = context.watch<TogglerProvider>().isFullview;
+  return Tooltip(
+    message: _buildJobTooltip(job),
+    child: Padding(
+      padding: const EdgeInsets.all(2),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // Job Type
+          Text(
+            job.jobType,
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.bold,
+              color: color,
             ),
-            const SizedBox(height: 1),
-            // Location
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 1),
+          // Location
 
-            isFullview
-                ? Column(
-                    children: [
+          isFullview
+              ? Column(
+                  children: [
+                    Text(
+                      job.location,
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: color.withValues(alpha: 0.9),
+                      ),
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (job.clients.isNotEmpty) ...[
+                      const SizedBox(height: 1),
+                      // Client
                       Text(
-                        job.location,
+                        job.clients.first,
                         style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: color.withValues(alpha: 0.9),
+                          fontSize: 8,
+                          color: color.withValues(alpha: 0.8),
+                          fontStyle: FontStyle.italic,
                         ),
                         textAlign: TextAlign.center,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      if (job.clients.isNotEmpty) ...[
-                        const SizedBox(height: 1),
-                        // Client
-                        Text(
-                          job.clients.first,
-                          style: TextStyle(
-                            fontSize: 8,
-                            color: color.withValues(alpha: 0.8),
-                            fontStyle: FontStyle.italic,
-                          ),
-                          textAlign: TextAlign.center,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                      // Trailer Type
-                      if (job.trailerType != TrailerType.noTrailer) ...[
-                        const SizedBox(height: 1),
-                        Text(
-                          job.trailerType.displayName,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: color.withValues(alpha: 0.7),
-                            fontWeight: FontWeight.bold,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
-                      // Staff info
-                      if (job.assignedStaff.isNotEmpty ||
-                          job.staffCount > 0) ...[
-                        const SizedBox(height: 1),
-                        Text(
-                          job.assignedStaff.isNotEmpty
-                              ? job.assignedStaff.join(', ')
-                              : '${job.staffCount} Workers',
-                          style: TextStyle(
-                              fontSize: 8,
-                              color: color.withValues(alpha: 0.6),
-                              fontWeight: FontWeight.w800),
-                          textAlign: TextAlign.center,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
                     ],
-                  )
-                : const SizedBox.shrink(),
-          ],
-        ),
+                    // Trailer Type
+                    if (job.trailerType != TrailerType.noTrailer) ...[
+                      const SizedBox(height: 1),
+                      Text(
+                        job.trailerType.displayName,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: color.withValues(alpha: 0.7),
+                          fontWeight: FontWeight.bold,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                    // Staff info
+                    if (job.assignedStaff.isNotEmpty || job.staffCount > 0) ...[
+                      const SizedBox(height: 1),
+                      Text(
+                        job.assignedStaff.isNotEmpty
+                            ? job.assignedStaff.join(', ')
+                            : '${job.staffCount} Workers',
+                        style: TextStyle(
+                            fontSize: 8,
+                            color: color.withValues(alpha: 0.6),
+                            fontWeight: FontWeight.w800),
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ],
+                )
+              : const SizedBox.shrink(),
+        ],
       ),
-    );
-  }
+    ),
+  );
+}
 
-  String _buildJobTooltip(CollectionJob job) {
-    final buffer = StringBuffer();
-    buffer.writeln('${job.jobType} - ${job.vehicleType.displayName}');
-    buffer.writeln('Location: ${job.location}');
-    buffer.writeln('Time: ${job.timeRangeDisplay}');
-    if (job.timeSlots > 1) {
-      buffer.writeln(
-          'Duration: ${job.timeSlots} slots (${job.timeSlots * 0.5}h)');
-    }
-    if (job.clients.isNotEmpty) {
-      buffer.writeln('Client: ${job.clients.join(', ')}');
-    }
-    buffer.writeln('Trailer: ${job.trailerType.displayName}');
-    if (job.assignedStaff.isNotEmpty) {
-      buffer.writeln('Staff: ${job.assignedStaff.join(', ')}');
-    } else if (job.staffCount > 0) {
-      buffer.writeln('Staff needed: ${job.staffCount}');
-    }
-    if (job.notes.isNotEmpty) {
-      buffer.writeln('Notes: ${job.notes}');
-    }
-    buffer.writeln('Status: ${job.statusId}');
-    return buffer.toString().trim();
+String _buildJobTooltip(CollectionJob job) {
+  final buffer = StringBuffer();
+  buffer.writeln('${job.jobType} - ${job.vehicleType.displayName}');
+  buffer.writeln('Location: ${job.location}');
+  buffer.writeln('Time: ${job.timeRangeDisplay}');
+  if (job.timeSlots > 1) {
+    buffer
+        .writeln('Duration: ${job.timeSlots} slots (${job.timeSlots * 0.5}h)');
   }
+  if (job.clients.isNotEmpty) {
+    buffer.writeln('Client: ${job.clients.join(', ')}');
+  }
+  buffer.writeln('Trailer: ${job.trailerType.displayName}');
+  if (job.assignedStaff.isNotEmpty) {
+    buffer.writeln('Staff: ${job.assignedStaff.join(', ')}');
+  } else if (job.staffCount > 0) {
+    buffer.writeln('Staff needed: ${job.staffCount}');
+  }
+  if (job.notes.isNotEmpty) {
+    buffer.writeln('Notes: ${job.notes}');
+  }
+  buffer.writeln('Status: ${job.statusId}');
+  return buffer.toString().trim();
+}
 
-  Widget _buildAddButton(
-      VehicleType vehicleType, DateTime date, String timeSlot, Color color) {
-    return Center(
-      child: IconButton(
-        icon: Icon(
-          Icons.add,
-          size: 16,
-          color: color.withValues(alpha: 0.5),
-        ),
-        onPressed: () {
-          _showAddCollectionJobDialog(vehicleType, date, timeSlot);
-        },
-        tooltip: 'Add ${vehicleType.displayName} collection job',
+Widget _buildAddButton(BuildContext context, VehicleType vehicleType,
+    DateTime date, String timeSlot, Color color) {
+  return Center(
+    child: IconButton(
+      icon: Icon(
+        Icons.add,
+        size: 16,
+        color: color.withValues(alpha: 0.5),
       ),
-    );
-  }
+      onPressed: () {
+        _showAddCollectionJobDialog(context, vehicleType, date, timeSlot);
+      },
+      tooltip: 'Add ${vehicleType.displayName} collection job',
+    ),
+  );
+}
 
-  void _showAddCollectionJobDialog(
-      VehicleType vehicleType, DateTime date, String timeSlot) {
-    showDialog(
-      context: context,
-      builder: (context) => _AddCollectionJobDialog(
-        vehicleType: vehicleType,
-        date: date,
-        timeSlot: timeSlot,
-      ),
-    );
-  }
+void _showAddCollectionJobDialog(BuildContext context, VehicleType vehicleType,
+    DateTime date, String timeSlot) {
+  showDialog(
+    context: context,
+    builder: (context) => _AddCollectionJobDialog(
+      vehicleType: vehicleType,
+      date: date,
+      timeSlot: timeSlot,
+    ),
+  );
 }
 
 class _AddCollectionJobDialog extends StatefulWidget {
@@ -711,6 +853,20 @@ class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
         .where((s) => s.isNotEmpty)
         .toList();
 
+    // Parse the time slot to create a proper DateTime with the specified time
+    final timeParts = widget.timeSlot.split(':');
+    final hour = int.tryParse(timeParts[0]) ?? 8;
+    final minute = int.tryParse(timeParts[1]) ?? 0;
+
+    // Create a DateTime with the specified time for the collection
+    final collectionDateTime = DateTime(
+      widget.date.year,
+      widget.date.month,
+      widget.date.day,
+      hour,
+      minute,
+    );
+
     // Create a JobListItem instead of CollectionJob (collection jobs are now derived from job list)
     final jobListItem = JobListItem(
       id: '', // Will be set by Firestore
@@ -724,10 +880,10 @@ class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
       quantity: _getQuantityFromVehicleTrailer(
           widget.vehicleType, _selectedTrailerType),
       manDays: 1.0, // Default man days
-      date: widget.date,
+      date: collectionDateTime, // Use the proper DateTime with time
       collectionAddress:
-          widget.timeSlot, // Store time slot in collection address
-      collectionDate: widget.date,
+          _locationController.text.trim(), // Use location as address
+      collectionDate: collectionDateTime, // Use the proper DateTime with time
       specialInstructions: staff.isNotEmpty ? 'Staff: ${staff.join(', ')}' : '',
       quantityDistributed:
           _selectedTimeSlots, // Use selected time slots for quantityDistributed

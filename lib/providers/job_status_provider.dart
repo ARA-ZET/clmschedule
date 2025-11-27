@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import '../models/custom_job_status.dart';
 
 class JobStatusProvider extends ChangeNotifier {
@@ -33,7 +34,9 @@ class JobStatusProvider extends ChangeNotifier {
             .toList();
       }
     } catch (e) {
-      print('Error loading job statuses: $e');
+      if (kDebugMode) {
+        print('Error loading job statuses: $e');
+      }
       // Fallback to default statuses
       _statuses = CustomJobStatus.getDefaultStatuses();
     }
@@ -68,7 +71,9 @@ class JobStatusProvider extends ChangeNotifier {
       _sortStatuses();
       notifyListeners();
     } catch (e) {
-      print('Error adding job status: $e');
+      if (kDebugMode) {
+        print('Error adding job status: $e');
+      }
       throw Exception('Failed to add job status');
     }
   }
@@ -88,7 +93,9 @@ class JobStatusProvider extends ChangeNotifier {
         notifyListeners();
       }
     } catch (e) {
-      print('Error updating job status: $e');
+      if (kDebugMode) {
+        print('Error updating job status: $e');
+      }
       throw Exception('Failed to update job status');
     }
   }
@@ -106,7 +113,9 @@ class JobStatusProvider extends ChangeNotifier {
       _statuses.removeWhere((s) => s.id == statusId);
       notifyListeners();
     } catch (e) {
-      print('Error deleting job status: $e');
+      if (kDebugMode) {
+        print('Error deleting job status: $e');
+      }
       throw Exception('Failed to delete job status');
     }
   }
@@ -120,7 +129,9 @@ class JobStatusProvider extends ChangeNotifier {
       }
       return null;
     } catch (e) {
-      print('Error getting status by ID $id: $e');
+      if (kDebugMode) {
+        print('Error getting status by ID $id: $e');
+      }
       return null;
     }
   }
@@ -188,7 +199,9 @@ class JobStatusProvider extends ChangeNotifier {
           newOrder.map((s) => s.copyWith(order: newOrder.indexOf(s))).toList();
       notifyListeners();
     } catch (e) {
-      print('Error reordering job statuses: $e');
+      if (kDebugMode) {
+        print('Error reordering job statuses: $e');
+      }
       throw Exception('Failed to reorder job statuses');
     }
   }

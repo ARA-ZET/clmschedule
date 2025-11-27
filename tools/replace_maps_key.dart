@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'dart:io';
 
 void main() async {
@@ -5,7 +6,9 @@ void main() async {
     // Read the API key from .env file
     final envFile = File('.env');
     if (!await envFile.exists()) {
-      print('Error: .env file not found');
+      if (kDebugMode) {
+        print('Error: .env file not found');
+      }
       exit(1);
     }
 
@@ -13,14 +16,18 @@ void main() async {
     final apiKeyMatch = RegExp(r'GOOGLE_MAPS_API_KEY=(.+)').firstMatch(envContents);
     
     if (apiKeyMatch == null) {
-      print('Error: Could not find GOOGLE_MAPS_API_KEY in .env file');
+      if (kDebugMode) {
+        print('Error: Could not find GOOGLE_MAPS_API_KEY in .env file');
+      }
       exit(1);
     }
 
     final apiKey = apiKeyMatch.group(1)?.trim();
     
     if (apiKey == null || apiKey.isEmpty) {
-      print('Error: GOOGLE_MAPS_API_KEY is empty in .env file');
+      if (kDebugMode) {
+        print('Error: GOOGLE_MAPS_API_KEY is empty in .env file');
+      }
       exit(1);
     }
 
@@ -32,9 +39,13 @@ window.GOOGLE_MAPS_API_KEY = '$apiKey';''';
     final configFile = File('web/maps_config.js');
     await configFile.writeAsString(configContent);
     
-    print('Successfully updated Google Maps API key in web/maps_config.js');
+    if (kDebugMode) {
+      print('Successfully updated Google Maps API key in web/maps_config.js');
+    }
   } catch (e) {
-    print('Error updating Google Maps API key: $e');
+    if (kDebugMode) {
+      print('Error updating Google Maps API key: $e');
+    }
     exit(1);
   }
 }
