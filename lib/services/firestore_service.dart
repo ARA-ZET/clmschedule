@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
@@ -183,12 +184,26 @@ class FirestoreService {
   }
 
   // Stream of all jobs for current month (optimized for monthly view)
+  // In debug mode: loads only this week's jobs for faster development
+  // In release mode: loads full month
   Stream<List<Job>> streamJobs([DateTime? date]) {
     final targetDate = date ?? DateTime.now();
-    final monthStart = DateTime(targetDate.year, targetDate.month, 1);
-    final monthEnd = DateTime(targetDate.year, targetDate.month + 1, 0);
-
-    return streamJobsForDateRange(monthStart, monthEnd);
+    
+    if (kDebugMode) {
+      // Debug mode: Load only this week (Monday to Sunday)
+      final now = targetDate;
+      final weekday = now.weekday; // Monday = 1, Sunday = 7
+      final weekStart = now.subtract(Duration(days: weekday - 1)); // Go back to Monday
+      final weekEnd = weekStart.add(const Duration(days: 6)); // Go to Sunday
+      
+      print('DEBUG MODE: Loading jobs for this week only (${weekStart.toString().split(' ')[0]} to ${weekEnd.toString().split(' ')[0]})');
+      return streamJobsForDateRange(weekStart, weekEnd);
+    } else {
+      // Release mode: Load full month
+      final monthStart = DateTime(targetDate.year, targetDate.month, 1);
+      final monthEnd = DateTime(targetDate.year, targetDate.month + 1, 0);
+      return streamJobsForDateRange(monthStart, monthEnd);
+    }
   }
 
   // Stream jobs for optimized range (current month + next month only)

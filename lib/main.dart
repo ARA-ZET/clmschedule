@@ -9,6 +9,7 @@ import 'providers/collection_schedule_provider.dart';
 import 'providers/job_list_provider.dart';
 import 'providers/job_status_provider.dart';
 import 'providers/job_list_status_provider.dart';
+import 'providers/invoice_status_provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/vehicle_driver_provider.dart';
@@ -22,13 +23,16 @@ import 'widgets/lazy_loading_indicator.dart';
 import 'widgets/scale_settings_dialog.dart';
 import 'widgets/job_status_management_dialog.dart';
 import 'widgets/job_list_status_management_dialog.dart';
+import 'widgets/invoice_status_management_dialog.dart';
 import 'widgets/undo_redo_widgets.dart';
 import 'widgets/auth_gate.dart';
 import 'widgets/chat_dialog.dart';
 import 'widgets/chat_admin_panel.dart';
 import 'widgets/google_sheets_tracking_view.dart';
+import 'widgets/new_version_dialog.dart';
 import 'services/keyboard_shortcuts_service.dart';
 import 'services/undo_redo_manager.dart';
+import 'services/version_service.dart';
 import 'utils/seed_data.dart';
 import 'services/work_area_service.dart';
 import 'services/job_list_service.dart';
@@ -111,6 +115,9 @@ void main() async {
     ChangeNotifierProvider(
       create: (context) => JobListStatusProvider(),
     ),
+    ChangeNotifierProvider(
+      create: (context) => InvoiceStatusProvider(),
+    ),
     ChangeNotifierProxyProvider2<UndoRedoManager, AuthProvider,
         JobListProvider>(
       create: (context) => JobListProvider(
@@ -159,13 +166,44 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
+  late final VersionService _versionService;
+
   @override
   void initState() {
     super.initState();
     // Initialize authentication after first frame
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<AuthProvider>().initialize();
+      
+      // Initialize version checking for web only
+      if (kIsWeb) {
+        _initializeVersionCheck();
+      }
     });
+  }
+
+  void _initializeVersionCheck() {
+    _versionService = VersionService(FirebaseFirestore.instance);
+    _versionService.initialize(
+      onNewVersionAvailable: (String newVersion) {
+        // Show dialog to user
+        if (mounted) {
+          showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (context) => NewVersionDialog(newVersion: newVersion),
+          );
+        }
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    if (kIsWeb) {
+      _versionService.dispose();
+    }
+    super.dispose();
   }
 
   @override
@@ -413,6 +451,11 @@ class _DashboardScreenState extends State<DashboardScreen>
                     context: context,
                     builder: (context) => const JobListStatusManagementDialog(),
                   );
+                } else if (value == 'invoice_status') {
+                  showDialog(
+                    context: context,
+                    builder: (context) => const InvoiceStatusManagementDialog(),
+                  );
                 } else if (value == 'signout') {
                   final confirmed = await showDialog<bool>(
                     context: context,
@@ -459,6 +502,14 @@ class _DashboardScreenState extends State<DashboardScreen>
                   child: ListTile(
                     leading: Icon(Icons.list_alt),
                     title: Text('Job List Statuses'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'invoice_status',
+                  child: ListTile(
+                    leading: Icon(Icons.receipt),
+                    title: Text('Invoice Statuses'),
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),

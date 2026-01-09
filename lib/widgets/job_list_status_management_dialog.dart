@@ -356,9 +356,6 @@ class _JobListStatusManagementDialogState
                                     ),
                                   ),
                                   title: Text(status.label),
-                                  subtitle: status.isDefault
-                                      ? const Text('Default Status')
-                                      : null,
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [

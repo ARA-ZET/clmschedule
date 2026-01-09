@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/job_list_item.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/job_list_status_provider.dart';
+import '../providers/invoice_status_provider.dart';
 import '../providers/scale_provider.dart';
 import 'add_edit_job_dialog.dart';
 import 'editable_table_cell.dart';
@@ -520,6 +521,10 @@ class _JobListGridState extends State<JobListGrid> {
                                       )),
                                       DataColumn(
                                           label: DataTableHeaderWidget(
+                                        text: 'Invoice Status',
+                                      )),
+                                      DataColumn(
+                                          label: DataTableHeaderWidget(
                                         text: 'Job Type',
                                       )),
                                       DataColumn(
@@ -700,6 +705,106 @@ class _JobListGridState extends State<JobListGrid> {
                                                         final updatedItem =
                                                             item.copyWith(
                                                                 jobStatusId:
+                                                                    newStatusId);
+                                                        jobListProvider
+                                                            .updateJobListItemWithTracking(
+                                                          item,
+                                                          updatedItem,
+                                                        );
+                                                      }
+                                                    },
+                                                  ),
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                          DataCell(
+                                            Consumer<InvoiceStatusProvider>(
+                                              builder: (context, invoiceStatusProvider,
+                                                  child) {
+                                                final currentStatus =
+                                                    invoiceStatusProvider
+                                                        .getStatusById(
+                                                            item.invoiceStatusId);
+                                                return Container(
+                                                  width: 180,
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                    horizontal: 8,
+                                                    vertical: 4,
+                                                  ),
+                                                  decoration: BoxDecoration(
+                                                    color:
+                                                        (currentStatus?.color ??
+                                                            Colors.grey),
+                                                    border: Border.all(
+                                                      color: (currentStatus
+                                                              ?.color ??
+                                                          Colors.grey),
+                                                      width: 1,
+                                                    ),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            4),
+                                                  ),
+                                                  child: DropdownButton<String>(
+                                                    value: invoiceStatusProvider
+                                                            .statuses
+                                                            .any((s) =>
+                                                                s.id ==
+                                                                item.invoiceStatusId)
+                                                        ? item.invoiceStatusId
+                                                        : null,
+                                                    underline:
+                                                        const SizedBox.shrink(),
+                                                    isDense: true,
+                                                    items: invoiceStatusProvider
+                                                        .statuses
+                                                        .map((status) {
+                                                      return DropdownMenuItem<
+                                                          String>(
+                                                        value: status.id,
+                                                        child: Row(
+                                                          mainAxisSize:
+                                                              MainAxisSize.min,
+                                                          children: [
+                                                            Container(
+                                                              width: 12,
+                                                              height: 12,
+                                                              margin:
+                                                                  const EdgeInsets
+                                                                      .only(
+                                                                      right: 8),
+                                                              decoration:
+                                                                  BoxDecoration(
+                                                                color: status
+                                                                    .color,
+                                                                shape: BoxShape
+                                                                    .circle,
+                                                              ),
+                                                            ),
+                                                            Flexible(
+                                                              child: Text(
+                                                                status.label,
+                                                                style: TextStyle(
+                                                                    fontSize:
+                                                                        scaleProvider
+                                                                            .mediumFontSize,
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .bold),
+                                                                overflow: TextOverflow.ellipsis,
+                                                              ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      );
+                                                    }).toList(),
+                                                    onChanged: (newStatusId) {
+                                                      if (newStatusId != null) {
+                                                        final updatedItem =
+                                                            item.copyWith(
+                                                                invoiceStatusId:
                                                                     newStatusId);
                                                         jobListProvider
                                                             .updateJobListItemWithTracking(
@@ -935,7 +1040,7 @@ class _JobListGridState extends State<JobListGrid> {
                                           ),
                                           DataCell(
                                             SizedBox(
-                                              width: 120,
+                                              width: 160,
                                               child: Row(
                                                 mainAxisSize: MainAxisSize.min,
                                                 children: [
@@ -980,6 +1085,15 @@ class _JobListGridState extends State<JobListGrid> {
                                                     tooltip: 'Edit',
                                                   ),
                                                   IconButton(
+                                                    icon: const Icon(Icons.copy,
+                                                        size: 18,
+                                                        color: Colors.blue),
+                                                    onPressed: () =>
+                                                        _showCopyJobDialog(
+                                                            context, item),
+                                                    tooltip: 'Copy Job',
+                                                  ),
+                                                  IconButton(
                                                     icon: const Icon(
                                                       Icons.delete,
                                                       size: 18,
@@ -1014,7 +1128,7 @@ class _JobListGridState extends State<JobListGrid> {
                               child: ConstrainedBox(
                                 constraints: const BoxConstraints(
                                     minWidth:
-                                        2416), // Dynamic width based on sum of all FrozenHeaderCell widths
+                                        2636), // Dynamic width based on sum of all FrozenHeaderCell widths (added 180 for Invoice Status + 40 for Copy button)
                                 child: SingleChildScrollView(
                                   controller: _frozenHeaderScrollController,
                                   scrollDirection: Axis.horizontal,
@@ -1031,6 +1145,10 @@ class _JobListGridState extends State<JobListGrid> {
                                       FrozenHeaderCell(
                                         text: 'Job Status',
                                         width: 226,
+                                      ),
+                                      FrozenHeaderCell(
+                                        text: 'Invoice Status',
+                                        width: 180,
                                       ),
                                       FrozenHeaderCell(
                                         text: 'Job Type',
@@ -1145,7 +1263,7 @@ class _JobListGridState extends State<JobListGrid> {
                                       ),
                                       FrozenHeaderCell(
                                         text: 'Actions',
-                                        width: 80,
+                                        width: 120,
                                       ),
                                     ],
                                   ),
@@ -1424,6 +1542,90 @@ class _JobListGridState extends State<JobListGrid> {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Error updating job: $e')),
+          );
+        }
+      }
+    }
+  }
+
+  void _showCopyJobDialog(BuildContext context, JobListItem item) async {
+    // Create a new job with all fields copied but empty ID (so dialog treats it as new)
+    final copiedJob = JobListItem(
+      id: '', // Empty ID so dialog treats it as a new job
+      invoice: item.invoice,
+      amount: item.amount,
+      client: item.client,
+      jobStatusId: item.jobStatusId,
+      invoiceStatusId: item.invoiceStatusId,
+      jobType: item.jobType,
+      area: item.area,
+      quantity: item.quantity,
+      manDays: item.manDays,
+      date: item.date,
+      collectionAddress: item.collectionAddress,
+      collectionDate: item.collectionDate,
+      specialInstructions: item.specialInstructions,
+      quantityDistributed: item.quantityDistributed,
+      invoiceDetails: item.invoiceDetails,
+      reportAddresses: item.reportAddresses,
+      whoToInvoice: item.whoToInvoice,
+      collectionJobId: '', // Don't copy the collection job link
+      updates: const [], // Start with empty update history
+      customPolygons: item.customPolygons,
+    );
+
+    final result = await showDialog<dynamic>(
+      context: context,
+      builder: (context) => AddEditJobDialog(jobToEdit: copiedJob),
+    );
+
+    if (result != null && context.mounted) {
+      JobListItem job;
+      bool skipAllocation = false;
+
+      // Handle different return types from dialog
+      if (result is Map<String, dynamic>) {
+        job = result['job'] as JobListItem;
+        skipAllocation = result['skipAllocation'] == true;
+      } else if (result is JobListItem) {
+        job = result;
+        skipAllocation = false;
+      } else {
+        return; // Invalid result
+      }
+
+      try {
+        // Use appropriate method based on whether allocation is skipped
+        if (skipAllocation) {
+          // Job is already saved in database, just show success message
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                    'Job copied and added successfully without schedule allocation!'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        } else {
+          // Add job to database
+          await context.read<JobListProvider>().addJobListItem(job);
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Job copied and added successfully!'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Error copying job: $e'),
+              backgroundColor: Colors.red,
+            ),
           );
         }
       }

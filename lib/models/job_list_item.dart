@@ -89,6 +89,7 @@ class JobListItem {
   final double amount;
   final String client;
   final String jobStatusId; // Changed from JobListStatus enum to String
+  final String invoiceStatusId; // Invoice status (separate from job status)
   final JobType jobType;
   final String area;
   final int quantity;
@@ -111,6 +112,7 @@ class JobListItem {
     required this.amount,
     required this.client,
     required this.jobStatusId,
+    this.invoiceStatusId = 'pending', // Default to pending invoice status
     required this.jobType,
     required this.area,
     required this.quantity,
@@ -151,6 +153,9 @@ class JobListItem {
       jobStatusId = 'standby';
     }
 
+    // Handle invoice status with backwards compatibility
+    String invoiceStatusId = data['invoiceStatusId'] as String? ?? 'pending';
+
     // Parse updates
     List<JobListItemUpdate> updates = [];
     if (data['updates'] != null) {
@@ -177,6 +182,7 @@ class JobListItem {
       amount: (data['amount'] as num?)?.toDouble() ?? 0.0,
       client: data['client'] as String? ?? '',
       jobStatusId: jobStatusId,
+      invoiceStatusId: invoiceStatusId,
       jobType: JobType.values.firstWhere(
         (e) => e.name == data['jobType'],
         orElse: () => JobType.flyersPrintingOnly,
@@ -209,6 +215,7 @@ class JobListItem {
       'amount': amount,
       'client': client,
       'jobStatusId': jobStatusId, // Changed from jobStatus.name to jobStatusId
+      'invoiceStatusId': invoiceStatusId,
       'jobType': jobType.name,
       'area': area,
       'quantity': quantity,
@@ -235,6 +242,7 @@ class JobListItem {
     String? client,
     String?
         jobStatusId, // Changed from JobListStatus? jobStatus to String? jobStatusId
+    String? invoiceStatusId,
     JobType? jobType,
     String? area,
     int? quantity,
@@ -257,6 +265,7 @@ class JobListItem {
       amount: amount ?? this.amount,
       client: client ?? this.client,
       jobStatusId: jobStatusId ?? this.jobStatusId,
+      invoiceStatusId: invoiceStatusId ?? this.invoiceStatusId,
       jobType: jobType ?? this.jobType,
       area: area ?? this.area,
       quantity: quantity ?? this.quantity,
@@ -283,6 +292,7 @@ class JobListItem {
     double? amount,
     String? client,
     String? jobStatusId,
+    String? invoiceStatusId,
     JobType? jobType,
     String? area,
     int? quantity,
@@ -340,6 +350,17 @@ class JobListItem {
         fieldName: 'jobStatusId',
         oldValue: this.jobStatusId,
         newValue: jobStatusId,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (invoiceStatusId != null && invoiceStatusId != this.invoiceStatusId) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'invoiceStatusId',
+        oldValue: this.invoiceStatusId,
+        newValue: invoiceStatusId,
         timestamp: DateTime.now(),
         userDisplayName: userDisplayName,
       ));
@@ -497,6 +518,7 @@ class JobListItem {
       amount: amount,
       client: client,
       jobStatusId: jobStatusId,
+      invoiceStatusId: invoiceStatusId,
       jobType: jobType,
       area: area,
       quantity: quantity,

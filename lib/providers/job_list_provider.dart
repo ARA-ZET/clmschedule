@@ -349,6 +349,7 @@ class JobListProvider extends ChangeNotifier {
         item1.amount == item2.amount &&
         item1.client == item2.client &&
         item1.jobStatusId == item2.jobStatusId &&
+        item1.invoiceStatusId == item2.invoiceStatusId &&
         item1.jobType == item2.jobType &&
         item1.area == item2.area &&
         item1.quantity == item2.quantity &&
@@ -614,6 +615,9 @@ class JobListProvider extends ChangeNotifier {
           updatedItem.client != originalItem.client ? updatedItem.client : null,
       jobStatusId: updatedItem.jobStatusId != originalItem.jobStatusId
           ? updatedItem.jobStatusId
+          : null,
+      invoiceStatusId: updatedItem.invoiceStatusId != originalItem.invoiceStatusId
+          ? updatedItem.invoiceStatusId
           : null,
       jobType: updatedItem.jobType != originalItem.jobType
           ? updatedItem.jobType

@@ -15,10 +15,13 @@ class JobListService {
   }
 
   // Get all job list items for current month
+  // In debug mode: limits to 20 items for faster development
+  // In release mode: loads all items
   Stream<List<JobListItem>> getJobListItems([DateTime? date]) {
     final targetDate = date ?? DateTime.now();
     if (kDebugMode) {
       print('JobListService: Getting job list items for date: $targetDate');
+      print('DEBUG MODE: Limiting to 20 job list items');
     }
     if (kDebugMode) {
       print(
@@ -28,10 +31,16 @@ class JobListService {
     // Ensure monthly document exists when streaming
     _monthlyService.ensureJobListMonthlyDocExists(targetDate);
 
-    return _getJobListItemsCollection(targetDate)
-        .orderBy('date', descending: true)
-        .snapshots()
-        .map((snapshot) {
+    // Build query with optional limit for debug mode
+    Query query = _getJobListItemsCollection(targetDate)
+        .orderBy('date', descending: true);
+    
+    // In debug mode, limit to 20 items
+    if (kDebugMode) {
+      query = query.limit(20);
+    }
+
+    return query.snapshots().map((snapshot) {
       if (kDebugMode) {
         print(
             'JobListService: Firestore snapshot received with ${snapshot.docs.length} documents');

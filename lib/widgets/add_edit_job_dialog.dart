@@ -120,7 +120,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final isEditing = widget.jobToEdit != null;
+    final isEditing = widget.jobToEdit != null && widget.jobToEdit!.id.isNotEmpty;
     final screenWidth = MediaQuery.of(context).size.width;
     final isMobile = screenWidth < 768;
 

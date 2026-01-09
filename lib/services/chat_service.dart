@@ -391,6 +391,9 @@ class ChatService {
       final staleThreshold =
           now.subtract(const Duration(minutes: 10)); // 10 minutes threshold
 
+      // Note: This query requires a composite index in Firestore
+      // Query: isOnline (ascending), lastSeen (ascending)
+      // If index doesn't exist, the cleanup will be skipped gracefully
       final staleUsers = await _firestore
           .collection(_userStatusCollection)
           .where('isOnline', isEqualTo: true)
@@ -409,7 +412,13 @@ class ChatService {
             'ChatService: Cleaned up ${staleUsers.docs.length} stale online statuses');
       }
     } catch (e) {
-      print('ChatService: Error cleaning up stale online statuses: $e');
+      // If this fails due to missing index, it's not critical - online statuses will still work
+      // Users can create the index by clicking the link in the error message if needed
+      if (e.toString().contains('requires an index')) {
+        print('ChatService: Composite index required for stale status cleanup. Feature disabled until index is created.');
+      } else {
+        print('ChatService: Error cleaning up stale online statuses: $e');
+      }
     }
   }
 

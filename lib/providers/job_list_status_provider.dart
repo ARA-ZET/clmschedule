@@ -108,7 +108,7 @@ class JobListStatusProvider extends ChangeNotifier {
     }
   }
 
-  // Delete a status (only non-default statuses can be deleted)
+  // Delete a status
   Future<void> deleteStatus(String id) async {
     try {
       _error = null;
@@ -116,12 +116,6 @@ class JobListStatusProvider extends ChangeNotifier {
       final status = getStatusById(id);
       if (status == null) {
         _error = 'Status not found';
-        notifyListeners();
-        return;
-      }
-
-      if (status.isDefault) {
-        _error = 'Cannot delete default status';
         notifyListeners();
         return;
       }
