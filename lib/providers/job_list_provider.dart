@@ -214,6 +214,9 @@ class JobListProvider extends ChangeNotifier {
         _jobListItems = jobListItems;
         _isLoading = false;
         _error = null;
+        // Invalidate cache when new data arrives
+        _cachedFilteredItems = null;
+        _lastFilterHash = '';
         notifyListeners();
       },
       onError: (error) {
