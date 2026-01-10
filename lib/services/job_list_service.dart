@@ -34,7 +34,7 @@ class JobListService {
     // Build query with optional limit for debug mode
     Query query = _getJobListItemsCollection(targetDate)
         .orderBy('date', descending: true);
-    
+
     // In debug mode, limit to 20 items
     if (kDebugMode) {
       query = query.limit(20);

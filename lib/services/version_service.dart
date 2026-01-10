@@ -16,12 +16,12 @@ class VersionService {
   /// [onNewVersionAvailable] callback is called when a new version is detected
   Future<void> initialize({Function? onNewVersionAvailable}) async {
     _onNewVersionAvailable = onNewVersionAvailable;
-    
+
     try {
       // Get current app version from package info
       final packageInfo = await PackageInfo.fromPlatform();
       _currentVersion = packageInfo.version;
-      
+
       if (kDebugMode) {
         print('Current app version: $_currentVersion');
       }
@@ -50,7 +50,8 @@ class VersionService {
 
           if (serverVersion != null && serverVersion != _currentVersion) {
             if (kDebugMode) {
-              print('New version available: $serverVersion (current: $_currentVersion)');
+              print(
+                  'New version available: $serverVersion (current: $_currentVersion)');
             }
 
             if (forceUpdate) {
@@ -65,7 +66,8 @@ class VersionService {
 
   /// Update the version in Firestore (call this after deploying)
   /// This should be called from your deployment script or manually after deploy
-  static Future<void> updateServerVersion(String version, {bool forceUpdate = true}) async {
+  static Future<void> updateServerVersion(String version,
+      {bool forceUpdate = true}) async {
     try {
       await FirebaseFirestore.instance
           .collection('appConfig')

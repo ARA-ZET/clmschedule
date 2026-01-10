@@ -415,7 +415,8 @@ class ChatService {
       // If this fails due to missing index, it's not critical - online statuses will still work
       // Users can create the index by clicking the link in the error message if needed
       if (e.toString().contains('requires an index')) {
-        print('ChatService: Composite index required for stale status cleanup. Feature disabled until index is created.');
+        print(
+            'ChatService: Composite index required for stale status cleanup. Feature disabled until index is created.');
       } else {
         print('ChatService: Error cleaning up stale online statuses: $e');
       }

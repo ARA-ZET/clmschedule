@@ -174,7 +174,7 @@ class _MyAppState extends State<MyApp> {
     // Initialize authentication after first frame
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<AuthProvider>().initialize();
-      
+
       // Initialize version checking for web only
       if (kIsWeb) {
         _initializeVersionCheck();
@@ -240,7 +240,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   void initState() {
     super.initState();
     _tabController = TabController(
-      length: 5,
+      length: 4,
       vsync: this,
       animationDuration: Duration.zero, // Remove tab animation
     );
@@ -289,154 +289,126 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   Widget build(BuildContext context) {
+    final isSmallScreen = MediaQuery.of(context).size.width < 600;
+    final isMediumScreen = MediaQuery.of(context).size.width < 900;
+    
     return Scaffold(
         backgroundColor: const Color.fromARGB(255, 222, 222, 222),
         appBar: AppBar(
-          leading: const Padding(
-            padding: EdgeInsets.only(left: 16.0),
-            child: Center(
-              child: Text(
-                'CLM DASHBOARD',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
+          leading: isSmallScreen
+              ? null
+              : const Padding(
+                  padding: EdgeInsets.only(left: 16.0),
+                  child: Center(
+                    child: Text(
+                      'CLM DASHBOARD',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          ),
-          leadingWidth: 200,
+          leadingWidth: isSmallScreen ? 0 : 200,
+          automaticallyImplyLeading: false,
           backgroundColor: Theme.of(context).colorScheme.inversePrimary,
           title: TabBar(
             controller: _tabController,
-            isScrollable: false,
+            isScrollable: isSmallScreen, // Scrollable on mobile
             labelColor: Colors.black,
             unselectedLabelColor: Colors.black54,
             indicatorColor: Colors.black,
             dividerColor: Colors.transparent,
-            splashFactory: NoSplash.splashFactory, // Remove tap animation
-            overlayColor:
-                WidgetStateProperty.all(Colors.transparent), // Remove overlay
-            tabs: const [
-              Tab(text: 'Schedule'),
-              Tab(text: 'Job List'),
-              Tab(text: 'Collection Schedule'),
-              Tab(text: 'Solar Panel Schedule'),
-              Tab(text: 'Dropsheet'),
+            splashFactory: NoSplash.splashFactory,
+            overlayColor: WidgetStateProperty.all(Colors.transparent),
+            tabAlignment: isSmallScreen ? TabAlignment.start : TabAlignment.fill,
+            labelPadding: EdgeInsets.symmetric(
+              horizontal: isSmallScreen ? 12 : 16,
+            ),
+            tabs: [
+              Tab(text: isSmallScreen ? 'Schedule' : 'Schedule'),
+              Tab(text: isSmallScreen ? 'Jobs' : 'Job List'),
+              Tab(text: isSmallScreen ? 'Collection' : 'Collection Schedule'),
+              Tab(text: isSmallScreen ? 'Solar' : 'Solar Panel Schedule'),
             ],
           ),
           actions: [
-            // Test button for undo functionality
-            // IconButton(
-            //   icon: const Icon(Icons.add_circle, color: Colors.green),
-            //   tooltip: 'Test Undo (Add fake operation)',
-            //   onPressed: () async {
-            //     final undoManager =
-            //         Provider.of<UndoRedoManager>(context, listen: false);
-            //     // Add a test command to verify undo system works
-            //     final testCommand = TestCommand(
-            //         'Test Operation ${DateTime.now().millisecondsSinceEpoch}');
-            //     await undoManager.executeCommand(testCommand);
-            //     print('Undo stack size: ${undoManager.undoStackSize}');
-            //     print('Can undo: ${undoManager.canUndo}');
-            //   },
-            // ),
-            // Undo/Redo buttons
-            const UndoRedoButtons(
-              showLabels: false,
-              padding: EdgeInsets.all(4.0),
-              enabledColor: Colors.deepOrange,
-            ),
-            const VerticalDivider(
-              color: Colors.grey,
-              thickness: 1,
-              width: 20,
-            ),
-            IconButton(
-              icon: const Icon(Icons.people),
-              onPressed: () {
-                showDialog(
-                  context: context,
-                  builder: (context) => const DistributorManagementDialog(),
-                );
-              },
-              tooltip: 'Manage Distributors',
-            ),
-            IconButton(
-              icon: const Icon(Icons.data_array),
-              onPressed: () async {
-                // try {
-                //   await seedData();
-                //   if (context.mounted) {
-                //     ScaffoldMessenger.of(context).showSnackBar(
-                //       const SnackBar(
-                //         content: Text('Sample schedule data added successfully!'),
-                //       ),
-                //     );
-                //   }
-                // } catch (e) {
-                //   if (context.mounted) {
-                //     ScaffoldMessenger.of(context).showSnackBar(
-                //       SnackBar(content: Text('Error adding schedule data: $e')),
-                //     );
-                //   }
-                // }
-              },
-              tooltip: 'Add sample schedule data',
-            ),
-            IconButton(
-              icon: const Icon(Icons.list_alt),
-              onPressed: () async {
-                // try {
-                //   await seedJobListData();
-                //   if (context.mounted) {
-                //     ScaffoldMessenger.of(context).showSnackBar(
-                //       const SnackBar(
-                //         content: Text('Sample job list data added successfully!'),
-                //       ),
-                //     );
-                //   }
-                // } catch (e) {
-                //   if (context.mounted) {
-                //     ScaffoldMessenger.of(context).showSnackBar(
-                //       SnackBar(content: Text('Error adding job list data: $e')),
-                //     );
-                //   }
-                // }
-              },
-              tooltip: 'Add sample job list data',
-            ),
-            IconButton(
-              icon: const Icon(Icons.map),
-              onPressed: () async {
-                final workAreaService = context.read<WorkAreaService>();
-                try {
-                  final workAreas = await workAreaService.createFromKml(
-                    'craig.kml',
+            // Show Undo/Redo only on larger screens
+            if (!isSmallScreen)
+              const UndoRedoButtons(
+                showLabels: false,
+                padding: EdgeInsets.all(4.0),
+                enabledColor: Colors.deepOrange,
+              ),
+            if (!isSmallScreen)
+              const VerticalDivider(
+                color: Colors.grey,
+                thickness: 1,
+                width: 20,
+              ),
+            // Distributor management - always visible
+            if (!isMediumScreen)
+              IconButton(
+                icon: const Icon(Icons.people),
+                onPressed: () {
+                  showDialog(
+                    context: context,
+                    builder: (context) => const DistributorManagementDialog(),
                   );
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Imported ${workAreas.length} work areas from KML file',
+                },
+                tooltip: 'Manage Distributors',
+              ),
+            // Hide debug/seed buttons on mobile
+            if (!isSmallScreen) ...[
+              IconButton(
+                icon: const Icon(Icons.data_array),
+                onPressed: () async {},
+                tooltip: 'Add sample schedule data',
+              ),
+              IconButton(
+                icon: const Icon(Icons.list_alt),
+                onPressed: () async {},
+                tooltip: 'Add sample job list data',
+              ),
+              IconButton(
+                icon: const Icon(Icons.map),
+                onPressed: () async {
+                  final workAreaService = context.read<WorkAreaService>();
+                  try {
+                    final workAreas = await workAreaService.createFromKml(
+                      'craig.kml',
+                    );
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'Imported ${workAreas.length} work areas from KML file',
+                          ),
                         ),
-                      ),
-                    );
+                      );
+                    }
+                  } catch (e) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Error importing KML data: $e')),
+                      );
+                    }
                   }
-                } catch (e) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Error importing KML data: $e')),
-                    );
-                  }
-                }
-              },
-              tooltip: 'Import KML data',
-            ),
+                },
+                tooltip: 'Import KML data',
+              ),
+            ],
+            // Settings menu - always visible
             PopupMenuButton<String>(
               icon: const Icon(Icons.settings),
               tooltip: 'Settings',
               onSelected: (String value) async {
-                if (value == 'scale') {
+                if (value == 'distributors' && isMediumScreen) {
+                  showDialog(
+                    context: context,
+                    builder: (context) => const DistributorManagementDialog(),
+                  );
+                } else if (value == 'scale') {
                   showDialog(
                     context: context,
                     builder: (context) => const ScaleSettingsDialog(),
@@ -481,6 +453,17 @@ class _DashboardScreenState extends State<DashboardScreen>
                 }
               },
               itemBuilder: (BuildContext context) => [
+                // Add Distributors to menu on mobile/tablet
+                if (isMediumScreen)
+                  const PopupMenuItem<String>(
+                    value: 'distributors',
+                    child: ListTile(
+                      leading: Icon(Icons.people),
+                      title: Text('Manage Distributors'),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                if (isMediumScreen) const PopupMenuDivider(),
                 const PopupMenuItem<String>(
                   value: 'scale',
                   child: ListTile(
@@ -534,7 +517,6 @@ class _DashboardScreenState extends State<DashboardScreen>
             const JobListTab(),
             const CollectionScheduleTab(),
             const SolarPanelScheduleTab(),
-            const GoogleSheetsTrackingView(),
           ],
         ),
         floatingActionButton: Consumer2<ChatProvider, AuthProvider>(

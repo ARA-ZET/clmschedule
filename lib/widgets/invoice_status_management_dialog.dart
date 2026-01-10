@@ -58,8 +58,7 @@ class _InvoiceStatusManagementDialogState
       return;
     }
 
-    final provider =
-        Provider.of<InvoiceStatusProvider>(context, listen: false);
+    final provider = Provider.of<InvoiceStatusProvider>(context, listen: false);
 
     try {
       if (_isAdding) {
@@ -372,10 +371,10 @@ class _InvoiceStatusManagementDialogState
                                 onPressed: () => _startEdit(status),
                               ),
                               IconButton(
-                                icon: const Icon(Icons.delete,
-                                    color: Colors.red),
-                                onPressed: () => _deleteStatus(
-                                    status.id, status.label),
+                                icon:
+                                    const Icon(Icons.delete, color: Colors.red),
+                                onPressed: () =>
+                                    _deleteStatus(status.id, status.label),
                               ),
                             ],
                           ),

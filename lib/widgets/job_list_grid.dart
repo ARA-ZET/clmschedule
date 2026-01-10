@@ -720,12 +720,13 @@ class _JobListGridState extends State<JobListGrid> {
                                           ),
                                           DataCell(
                                             Consumer<InvoiceStatusProvider>(
-                                              builder: (context, invoiceStatusProvider,
+                                              builder: (context,
+                                                  invoiceStatusProvider,
                                                   child) {
                                                 final currentStatus =
                                                     invoiceStatusProvider
-                                                        .getStatusById(
-                                                            item.invoiceStatusId);
+                                                        .getStatusById(item
+                                                            .invoiceStatusId);
                                                 return Container(
                                                   width: 180,
                                                   padding: const EdgeInsets
@@ -793,7 +794,9 @@ class _JobListGridState extends State<JobListGrid> {
                                                                     fontWeight:
                                                                         FontWeight
                                                                             .bold),
-                                                                overflow: TextOverflow.ellipsis,
+                                                                overflow:
+                                                                    TextOverflow
+                                                                        .ellipsis,
                                                               ),
                                                             ),
                                                           ],

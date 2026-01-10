@@ -1,11 +1,12 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'dart:html' as html;
 
 /// Dialog to notify users about a new version and reload the app
 class NewVersionDialog extends StatelessWidget {
   final String newVersion;
 
-  const NewVersionDialog({Key? key, required this.newVersion}) : super(key: key);
+  const NewVersionDialog({Key? key, required this.newVersion})
+      : super(key: key);
 
   @override
   Widget build(BuildContext context) {
@@ -26,20 +27,18 @@ class NewVersionDialog extends StatelessWidget {
             style: const TextStyle(fontSize: 16),
           ),
           const SizedBox(height: 8),
-          const Text(
-            'Please reload the page to get the latest features and bug fixes.',
-            style: TextStyle(fontSize: 14),
+          Text(
+            kIsWeb
+                ? 'Please reload the page to get the latest features and bug fixes.'
+                : 'Please update the app from your app store.',
+            style: const TextStyle(fontSize: 14),
           ),
         ],
       ),
       actions: [
-        ElevatedButton.icon(
-          onPressed: () {
-            // Force reload the page and clear cache
-            html.window.location.reload();
-          },
-          icon: const Icon(Icons.refresh),
-          label: const Text('Reload Now'),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('OK'),
         ),
       ],
     );

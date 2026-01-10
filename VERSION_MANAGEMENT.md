@@ -14,21 +14,25 @@ This system ensures users always get the latest version of your web app by check
 ### Option 1: Automated Deployment (Recommended)
 
 1. Update version in `pubspec.yaml`:
+
    ```yaml
    version: 1.2.3+1
    ```
 
 2. Make the deployment script executable (first time only):
+
    ```bash
    chmod +x deploy_web.sh
    ```
 
 3. Run the deployment script:
+
    ```bash
    ./deploy_web.sh
    ```
 
    This script will:
+
    - Build the web app
    - Deploy to Firebase Hosting
    - Update the version in Firestore automatically
@@ -38,6 +42,7 @@ This system ensures users always get the latest version of your web app by check
 1. Update version in `pubspec.yaml`
 
 2. Build and deploy:
+
    ```bash
    flutter clean
    flutter pub get
@@ -72,6 +77,7 @@ If the script fails, you can manually update in Firebase Console:
 If you want to allow users to continue using the old version:
 
 In `tools/update_firestore_version.dart`, change:
+
 ```dart
 'forceUpdate': false,  // Users won't be forced to reload immediately
 ```
@@ -102,11 +108,13 @@ To test the version checking system:
 ## Troubleshooting
 
 **Users still see old version after deployment:**
+
 - Check if version was updated in Firestore
 - Clear browser cache manually (Ctrl+Shift+R or Cmd+Shift+R)
 - Check browser console for errors
 
 **Version script fails:**
+
 - Ensure Firebase is initialized properly
 - Check if you have write permissions to Firestore
 - Verify firebase_options.dart is up to date

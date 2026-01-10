@@ -616,9 +616,10 @@ class JobListProvider extends ChangeNotifier {
       jobStatusId: updatedItem.jobStatusId != originalItem.jobStatusId
           ? updatedItem.jobStatusId
           : null,
-      invoiceStatusId: updatedItem.invoiceStatusId != originalItem.invoiceStatusId
-          ? updatedItem.invoiceStatusId
-          : null,
+      invoiceStatusId:
+          updatedItem.invoiceStatusId != originalItem.invoiceStatusId
+              ? updatedItem.invoiceStatusId
+              : null,
       jobType: updatedItem.jobType != originalItem.jobType
           ? updatedItem.jobType
           : null,

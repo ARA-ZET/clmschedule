@@ -39,7 +39,8 @@ void main(List<String> args) async {
     print('You can manually update it in Firebase Console:');
     print('Collection: appConfig');
     print('Document: version');
-    print('Fields: {version: "$version", forceUpdate: true, lastUpdated: <timestamp>}');
+    print(
+        'Fields: {version: "$version", forceUpdate: true, lastUpdated: <timestamp>}');
     exit(1);
   }
 }

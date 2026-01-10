@@ -188,15 +188,17 @@ class FirestoreService {
   // In release mode: loads full month
   Stream<List<Job>> streamJobs([DateTime? date]) {
     final targetDate = date ?? DateTime.now();
-    
+
     if (kDebugMode) {
       // Debug mode: Load only this week (Monday to Sunday)
       final now = targetDate;
       final weekday = now.weekday; // Monday = 1, Sunday = 7
-      final weekStart = now.subtract(Duration(days: weekday - 1)); // Go back to Monday
+      final weekStart =
+          now.subtract(Duration(days: weekday - 1)); // Go back to Monday
       final weekEnd = weekStart.add(const Duration(days: 6)); // Go to Sunday
-      
-      print('DEBUG MODE: Loading jobs for this week only (${weekStart.toString().split(' ')[0]} to ${weekEnd.toString().split(' ')[0]})');
+
+      print(
+          'DEBUG MODE: Loading jobs for this week only (${weekStart.toString().split(' ')[0]} to ${weekEnd.toString().split(' ')[0]})');
       return streamJobsForDateRange(weekStart, weekEnd);
     } else {
       // Release mode: Load full month
