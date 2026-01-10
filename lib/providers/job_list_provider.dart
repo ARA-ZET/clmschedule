@@ -83,7 +83,7 @@ class JobListProvider extends ChangeNotifier {
 
   // Cached filtered results
   List<JobListItem>? _cachedFilteredItems;
-  final String _lastFilterHash = '';
+  String _lastFilterHash = ''; // Made mutable to enable caching
 
   // Get filtered job list items with caching
   List<JobListItem> _filteredJobListItems() {
@@ -170,6 +170,10 @@ class JobListProvider extends ChangeNotifier {
       return _sortAscending ? comparison : -comparison;
     });
 
+    // Update cache after filtering
+    _lastFilterHash = currentHash;
+    _cachedFilteredItems = filtered;
+    
     return filtered;
   }
 
