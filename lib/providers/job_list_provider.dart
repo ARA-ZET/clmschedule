@@ -181,19 +181,18 @@ class JobListProvider extends ChangeNotifier {
   Future<void> _initializeCurrentMonthData() async {
     if (_hasInitialLoad) return;
 
-    _isLoading = true;
-    notifyListeners();
+    // Don't set loading to true initially - let stream handle it
+    // This prevents showing loading indicator if cache has data
+    _isInitialized = true;
+    _hasInitialLoad = true;
 
     try {
       // Set up snapshot listener for current month only
+      // The listener will handle loading state based on data availability
       await _setupCurrentMonthListener();
-      _hasInitialLoad = true;
-      _isInitialized = true;
     } catch (error) {
       _error = 'Failed to initialize data: $error';
       print('JobListProvider: Initialization error: $error');
-    } finally {
-      _isLoading = false;
       notifyListeners();
     }
   }

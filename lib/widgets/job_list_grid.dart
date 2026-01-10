@@ -196,8 +196,9 @@ class _JobListGridState extends State<JobListGrid> {
           );
         }
 
-        // Empty state for first load
-        if (isLoading && jobListItems.isEmpty) {
+        // Show loading only if truly empty (no cached data)
+        // This allows cached data to display immediately while fresh data loads
+        if (isLoading && jobListItems.isEmpty && !jobListProvider.isInitialized) {
           return const Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -213,14 +214,50 @@ class _JobListGridState extends State<JobListGrid> {
         // Main content
         return Column(
           children: [
-            // Month navigation
-            MonthNavigationWidget(
-              currentMonthDisplay: jobListProvider.currentMonthDisplay,
-              onPreviousMonth: jobListProvider.goToPreviousMonth,
-              onNextMonth: jobListProvider.goToNextMonth,
-              onCurrentMonth: jobListProvider.goToCurrentMonth,
-              onMonthSelected: jobListProvider.goToMonth,
-              availableMonths: jobListProvider.getAvailableMonths(),
+            // Month navigation with loading indicator
+            Row(
+              children: [
+                Expanded(
+                  child: MonthNavigationWidget(
+                    currentMonthDisplay: jobListProvider.currentMonthDisplay,
+                    onPreviousMonth: jobListProvider.goToPreviousMonth,
+                    onNextMonth: jobListProvider.goToNextMonth,
+                    onCurrentMonth: jobListProvider.goToCurrentMonth,
+                    onMonthSelected: jobListProvider.goToMonth,
+                    availableMonths: jobListProvider.getAvailableMonths(),
+                  ),
+                ),
+                // Subtle loading indicator when data is loading but items exist (refreshing)
+                if (isLoading && jobListItems.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 16.0),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              Theme.of(context).primaryColor.withOpacity(0.6),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Refreshing...',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.color
+                                    ?.withOpacity(0.6),
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
             ),
 
             // Search and Filter Bar - Single compact row
