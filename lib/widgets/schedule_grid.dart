@@ -10,6 +10,42 @@ import '../providers/scale_provider.dart';
 import 'month_navigation_widget.dart';
 import 'schedule_job_cell.dart';
 
+/// Data class to optimize grid rebuilds with Selector pattern
+class _ScheduleGridData {
+  final List<Distributor> distributors;
+  final DateTime currentMonth;
+  final bool hasJobsInNextMonth;
+  final String currentMonthDisplay;
+  final double scale;
+
+  const _ScheduleGridData({
+    required this.distributors,
+    required this.currentMonth,
+    required this.hasJobsInNextMonth,
+    required this.currentMonthDisplay,
+    required this.scale,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is _ScheduleGridData &&
+          runtimeType == other.runtimeType &&
+          distributors.length == other.distributors.length &&
+          currentMonth == other.currentMonth &&
+          hasJobsInNextMonth == other.hasJobsInNextMonth &&
+          currentMonthDisplay == other.currentMonthDisplay &&
+          scale == other.scale;
+
+  @override
+  int get hashCode =>
+      distributors.length.hashCode ^
+      currentMonth.hashCode ^
+      hasJobsInNextMonth.hashCode ^
+      currentMonthDisplay.hashCode ^
+      scale.hashCode;
+}
+
 class ScheduleGrid extends StatefulWidget {
   const ScheduleGrid({super.key});
 
@@ -143,21 +179,32 @@ class _ScheduleGridState extends State<ScheduleGrid> {
   @override
   Widget build(BuildContext context) {
     final isFullscreen = context.watch<TogglerProvider>().isFullview;
-    return Consumer2<ScheduleProvider, ScaleProvider>(
-      builder: (context, scheduleProvider, scaleProvider, child) {
+    
+    // Use Selector to only rebuild when specific data changes
+    return Selector<ScheduleProvider, _ScheduleGridData>(
+      selector: (_, scheduleProvider) => _ScheduleGridData(
+        distributors: scheduleProvider.distributors,
+        currentMonth: scheduleProvider.currentMonth,
+        hasJobsInNextMonth: scheduleProvider.hasJobsInNextMonth,
+        currentMonthDisplay: scheduleProvider.currentMonthDisplay,
+        scale: context.read<ScaleProvider>().scale,
+      ),
+      builder: (context, gridData, child) {
+        final scheduleProvider = context.read<ScheduleProvider>();
+        final scaleProvider = context.read<ScaleProvider>();
+        
         // Check if month changed and reset scroll position
-        if (_currentMonthDisplay != scheduleProvider.currentMonthDisplay) {
-          _currentMonthDisplay = scheduleProvider.currentMonthDisplay;
+        if (_currentMonthDisplay != gridData.currentMonthDisplay) {
+          _currentMonthDisplay = gridData.currentMonthDisplay;
           _hasScrolledToToday = false; // Reset scroll flag for new month
         }
 
-        final currentMonth = scheduleProvider.currentMonth;
-        final dates = _getDates(currentMonth, scheduleProvider);
-        final distributors = scheduleProvider.distributors;
+        final dates = _getDates(gridData.currentMonth, scheduleProvider);
+        final distributors = gridData.distributors;
 
         final double rowHeight = isFullscreen
-            ? 92.0 * scaleProvider.scale
-            : 40.0 * scaleProvider.scale;
+            ? 92.0 * gridData.scale
+            : 40.0 * gridData.scale;
 
         // Scroll to today's date when data is loaded
         _scrollToToday(dates);
