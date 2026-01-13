@@ -18,7 +18,7 @@ class _ScheduleGridData {
   final String currentMonthDisplay;
   final double scale;
   final int jobsCount; // Track job count to trigger rebuilds
-  final int jobsHash;  // Track job modifications
+  final int jobsHash; // Track job modifications
 
   const _ScheduleGridData({
     required this.distributors,
@@ -193,10 +193,15 @@ class _ScheduleGridState extends State<ScheduleGrid> {
       selector: (_, scheduleProvider) {
         final jobs = scheduleProvider.jobs;
         // Create a hash from job IDs and their key properties to detect changes
-        final jobsHash = jobs.fold<int>(0, (hash, job) => 
-          hash ^ job.id.hashCode ^ job.distributorId.hashCode ^ 
-          job.date.hashCode ^ job.statusId.hashCode);
-        
+        final jobsHash = jobs.fold<int>(
+            0,
+            (hash, job) =>
+                hash ^
+                job.id.hashCode ^
+                job.distributorId.hashCode ^
+                job.date.hashCode ^
+                job.statusId.hashCode);
+
         return _ScheduleGridData(
           distributors: scheduleProvider.distributors,
           currentMonth: scheduleProvider.currentMonth,
