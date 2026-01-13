@@ -17,6 +17,8 @@ class _ScheduleGridData {
   final bool hasJobsInNextMonth;
   final String currentMonthDisplay;
   final double scale;
+  final int jobsCount; // Track job count to trigger rebuilds
+  final int jobsHash;  // Track job modifications
 
   const _ScheduleGridData({
     required this.distributors,
@@ -24,6 +26,8 @@ class _ScheduleGridData {
     required this.hasJobsInNextMonth,
     required this.currentMonthDisplay,
     required this.scale,
+    required this.jobsCount,
+    required this.jobsHash,
   });
 
   @override
@@ -35,7 +39,9 @@ class _ScheduleGridData {
           currentMonth == other.currentMonth &&
           hasJobsInNextMonth == other.hasJobsInNextMonth &&
           currentMonthDisplay == other.currentMonthDisplay &&
-          scale == other.scale;
+          scale == other.scale &&
+          jobsCount == other.jobsCount &&
+          jobsHash == other.jobsHash;
 
   @override
   int get hashCode =>
@@ -43,7 +49,9 @@ class _ScheduleGridData {
       currentMonth.hashCode ^
       hasJobsInNextMonth.hashCode ^
       currentMonthDisplay.hashCode ^
-      scale.hashCode;
+      scale.hashCode ^
+      jobsCount.hashCode ^
+      jobsHash.hashCode;
 }
 
 class ScheduleGrid extends StatefulWidget {
@@ -182,13 +190,23 @@ class _ScheduleGridState extends State<ScheduleGrid> {
 
     // Use Selector to only rebuild when specific data changes
     return Selector<ScheduleProvider, _ScheduleGridData>(
-      selector: (_, scheduleProvider) => _ScheduleGridData(
-        distributors: scheduleProvider.distributors,
-        currentMonth: scheduleProvider.currentMonth,
-        hasJobsInNextMonth: scheduleProvider.hasJobsInNextMonth,
-        currentMonthDisplay: scheduleProvider.currentMonthDisplay,
-        scale: context.read<ScaleProvider>().scale,
-      ),
+      selector: (_, scheduleProvider) {
+        final jobs = scheduleProvider.jobs;
+        // Create a hash from job IDs and their key properties to detect changes
+        final jobsHash = jobs.fold<int>(0, (hash, job) => 
+          hash ^ job.id.hashCode ^ job.distributorId.hashCode ^ 
+          job.date.hashCode ^ job.statusId.hashCode);
+        
+        return _ScheduleGridData(
+          distributors: scheduleProvider.distributors,
+          currentMonth: scheduleProvider.currentMonth,
+          hasJobsInNextMonth: scheduleProvider.hasJobsInNextMonth,
+          currentMonthDisplay: scheduleProvider.currentMonthDisplay,
+          scale: context.read<ScaleProvider>().scale,
+          jobsCount: jobs.length,
+          jobsHash: jobsHash,
+        );
+      },
       builder: (context, gridData, child) {
         final scheduleProvider = context.read<ScheduleProvider>();
         final scaleProvider = context.read<ScaleProvider>();
