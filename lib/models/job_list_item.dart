@@ -130,7 +130,7 @@ class JobListItem {
     this.collectionJobId = '', // Optional link to collection job
     this.updates = const [], // Default to empty list
     this.customPolygons = const [], // Default to empty list
-    this.reminders = const [], // List of reminders
+    this.reminders = const [], // Default to empty list
   });
 
   // Create from Firestore

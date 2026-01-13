@@ -27,9 +27,10 @@ class _ReminderDialogState extends State<ReminderDialog> {
     super.initState();
     _notesController = TextEditingController();
     _selectedDate = DateTime.now().add(const Duration(days: 7));
-
+    
     // Auto-show form if no active reminders
     _showNewReminderForm = !widget.existingReminders.any((r) => r.isActive);
+  }
   }
 
   @override
@@ -61,11 +62,9 @@ class _ReminderDialogState extends State<ReminderDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final activeReminders =
-        widget.existingReminders.where((r) => r.isActive).toList();
-    final inactiveReminders =
-        widget.existingReminders.where((r) => !r.isActive).toList();
-
+    final activeReminders = widget.existingReminders.where((r) => r.isActive).toList();
+    final inactiveReminders = widget.existingReminders.where((r) => !r.isActive).toList();
+    
     return Dialog(
       child: Container(
         width: 600,
@@ -99,12 +98,11 @@ class _ReminderDialogState extends State<ReminderDialog> {
                 Text(
                   'Active Reminders',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 const SizedBox(height: 8),
-                ...activeReminders
-                    .map((reminder) => _buildReminderCard(reminder, true)),
+                ...activeReminders.map((reminder) => _buildReminderCard(reminder, true)),
                 const SizedBox(height: 16),
               ],
 
@@ -113,12 +111,9 @@ class _ReminderDialogState extends State<ReminderDialog> {
                 ExpansionTile(
                   title: Text(
                     'Reminder History (${inactiveReminders.length})',
-                    style: const TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w500),
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
                   ),
-                  children: inactiveReminders
-                      .map((reminder) => _buildReminderCard(reminder, false))
-                      .toList(),
+                  children: inactiveReminders.map((reminder) => _buildReminderCard(reminder, false)).toList(),
                 ),
                 const SizedBox(height: 16),
               ],
@@ -353,6 +348,68 @@ class _ReminderDialogState extends State<ReminderDialog> {
       ),
     );
   }
+
+              // Quick date buttons
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _buildQuickDateButton('3 days', 3),
+                  _buildQuickDateButton('7 days', 7),
+                  _buildQuickDateButton('14 days', 14),
+                  _buildQuickDateButton('30 days', 30),
+                ],
+              ),
+              const SizedBox(height: 12),
+
+              // Custom date picker
+              InkWell(
+                onTap: _selectDate,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade400),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.calendar_today, size: 20),
+                      const SizedBox(width: 12),
+                      Text(
+                        DateFormat('MMM dd, yyyy').format(_selectedDate),
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      const Spacer(),
+                      const Icon(Icons.arrow_drop_down),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              // Notes Section
+              Text(
+                'Notes',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _notesController,
+                maxLines: 4,
+                decoration: InputDecoration(
+                  hintText: 'Add notes about this reminder...',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'Please add notes for this reminder';
+                  }
+                  return null;
+                },
+              ),
 
   Widget _buildQuickDateButton(String label, int days) {
     final isSelected = _selectedDate.difference(DateTime.now()).inDays == days;

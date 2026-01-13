@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/job_list_item.dart';
 import '../models/job_list_item_update.dart';
+import '../models/job_reminder.dart';
 import '../services/job_list_service.dart';
 import '../services/undo_redo_manager.dart';
 import '../commands/job_list_commands.dart';
@@ -18,7 +19,7 @@ class JobListProvider extends ChangeNotifier {
   String? _error;
   String _searchQuery = '';
   Set<String> _statusFilters = {};
-  final Set<String> _invoiceStatusFilters = {};
+  Set<String> _invoiceStatusFilters = {};
   DateTime _currentMonth = DateTime.now();
 
   // Date filtering properties
@@ -392,7 +393,24 @@ class JobListProvider extends ChangeNotifier {
         item1.quantityDistributed == item2.quantityDistributed &&
         item1.invoiceDetails == item2.invoiceDetails &&
         item1.reportAddresses == item2.reportAddresses &&
-        item1.whoToInvoice == item2.whoToInvoice;
+        item1.whoToInvoice == item2.whoToInvoice &&
+        _areRemindersEqual(item1.reminders, item2.reminders);
+  }
+
+  // Helper method to compare reminders lists
+  bool _areRemindersEqual(List<JobReminder> list1, List<JobReminder> list2) {
+    if (list1.length != list2.length) return false;
+    for (int i = 0; i < list1.length; i++) {
+      final r1 = list1[i];
+      final r2 = list2[i];
+      if (r1.dueDate != r2.dueDate ||
+          r1.notes != r2.notes ||
+          r1.status != r2.status ||
+          r1.completedAt != r2.completedAt) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // Helper method to compare dates based on job type requirements

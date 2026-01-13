@@ -187,8 +187,8 @@ class JobListFrozenHeaders extends StatelessWidget {
     'date',
     'client',
     'jobStatus',
-    'invoiceStatus',
     'reminder',
+    'invoiceStatus',
     'jobType',
     'area',
     'quantity',
@@ -483,112 +483,6 @@ class JobListDataCellsBuilder extends StatelessWidget {
       ));
     }
 
-    // Invoice Status
-    if (prefsProvider.isColumnVisible('invoiceStatus')) {
-      cells.add(DataCell(
-        Consumer<InvoiceStatusProvider>(
-          builder: (context, statusProvider, child) {
-            final currentStatus =
-                statusProvider.getStatusById(item.invoiceStatusId);
-            return Container(
-              width: JobListColumnConfig.getWidth('invoiceStatus'),
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-              margin: const EdgeInsets.only(right: 4),
-              decoration: BoxDecoration(
-                color: (currentStatus?.color ?? Colors.grey),
-                border: Border.all(
-                  color: (currentStatus?.color ?? Colors.grey),
-                  width: 1,
-                ),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: DropdownButton<String>(
-                value: statusProvider.statuses
-                        .any((s) => s.id == item.invoiceStatusId)
-                    ? item.invoiceStatusId
-                    : null,
-                underline: const SizedBox.shrink(),
-                isDense: true,
-                items: statusProvider.statuses.map((status) {
-                  return DropdownMenuItem<String>(
-                    value: status.id,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 12,
-                          height: 12,
-                          margin: const EdgeInsets.only(right: 8),
-                          decoration: BoxDecoration(
-                            color: status.color,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        Text(
-                          status.label,
-                          style: TextStyle(
-                            fontSize: scaleProvider.mediumFontSize,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                }).toList(),
-                onChanged: (newStatusId) {
-                  if (newStatusId != null) {
-                    // Check if the new status is "paid" - auto-complete active reminders
-                    List<JobReminder> updatedReminders = item.reminders;
-                    final paidStatusIds = [
-                      'paid',
-                      'payment_received',
-                      'invoice_paid'
-                    ]; // Common paid status IDs
-
-                    if (paidStatusIds.contains(newStatusId.toLowerCase())) {
-                      updatedReminders = item.reminders.map((reminder) {
-                        if (reminder.isActive) {
-                          return reminder.copyWith(
-                            status: ReminderStatus.completed,
-                            completedAt: DateTime.now(),
-                          );
-                        }
-                        return reminder;
-                      }).toList();
-                    }
-
-                    final updatedItem = item.copyWith(
-                      invoiceStatusId: newStatusId,
-                      reminders: updatedReminders,
-                    );
-                    final jobListStatusProvider =
-                        context.read<JobListStatusProvider>();
-                    final invoiceStatusProvider =
-                        context.read<InvoiceStatusProvider>();
-                    Future.microtask(
-                        () => jobListProvider.updateJobListItemWithTracking(
-                              item,
-                              updatedItem,
-                              resolveJobStatusLabel: (statusId) =>
-                                  jobListStatusProvider
-                                      .getStatusById(statusId)
-                                      ?.label,
-                              resolveInvoiceStatusLabel: (statusId) =>
-                                  invoiceStatusProvider
-                                      .getStatusById(statusId)
-                                      ?.label,
-                              resolveQuantityLabel:
-                                  getVehicleTrailerComboFromQuantity,
-                            ));
-                  }
-                },
-              ),
-            );
-          },
-        ),
-      ));
-    }
-
     // Reminder
     if (prefsProvider.isColumnVisible('reminder')) {
       final activeReminders = item.reminders.where((r) => r.isActive).toList();
@@ -665,6 +559,114 @@ class JobListDataCellsBuilder extends StatelessWidget {
                 ? 'Active reminders: ${activeReminders.length}'
                 : 'Add reminder',
           ),
+        ),
+      ));
+    }
+
+    // Invoice Status
+    if (prefsProvider.isColumnVisible('invoiceStatus')) {
+      cells.add(DataCell(
+        Consumer<InvoiceStatusProvider>(
+          builder: (context, statusProvider, child) {
+            final currentStatus =
+                statusProvider.getStatusById(item.invoiceStatusId);
+            return Container(
+              width: JobListColumnConfig.getWidth('invoiceStatus'),
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              margin: const EdgeInsets.only(right: 4),
+              decoration: BoxDecoration(
+                color: (currentStatus?.color ?? Colors.grey),
+                border: Border.all(
+                  color: (currentStatus?.color ?? Colors.grey),
+                  width: 1,
+                ),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: DropdownButton<String>(
+                value: statusProvider.statuses
+                        .any((s) => s.id == item.invoiceStatusId)
+                    ? item.invoiceStatusId
+                    : null,
+                underline: const SizedBox.shrink(),
+                isDense: true,
+                items: statusProvider.statuses.map((status) {
+                  return DropdownMenuItem<String>(
+                    value: status.id,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 12,
+                          height: 12,
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            color: status.color,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        Text(
+                          status.label,
+                          style: TextStyle(
+                            fontSize: scaleProvider.mediumFontSize,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+                onChanged: (newStatusId) {
+                  if (newStatusId != null) {
+                    // Check if the new status is "paid" - auto-complete active reminders
+                    List<JobReminder> updatedReminders = item.reminders;
+                    final invoiceStatusProvider =
+                        context.read<InvoiceStatusProvider>();
+                    final newStatus =
+                        invoiceStatusProvider.getStatusById(newStatusId);
+
+                    // Check if status label indicates payment received
+                    if (newStatus != null &&
+                        (newStatus.label.toLowerCase().contains('paid') ||
+                            newStatus.label
+                                .toLowerCase()
+                                .contains('payment'))) {
+                      updatedReminders = item.reminders.map((reminder) {
+                        if (reminder.isActive) {
+                          return reminder.copyWith(
+                            status: ReminderStatus.completed,
+                            completedAt: DateTime.now(),
+                          );
+                        }
+                        return reminder;
+                      }).toList();
+                    }
+
+                    final updatedItem = item.copyWith(
+                      invoiceStatusId: newStatusId,
+                      reminders: updatedReminders,
+                    );
+                    final jobListStatusProvider =
+                        context.read<JobListStatusProvider>();
+                    Future.microtask(
+                        () => jobListProvider.updateJobListItemWithTracking(
+                              item,
+                              updatedItem,
+                              resolveJobStatusLabel: (statusId) =>
+                                  jobListStatusProvider
+                                      .getStatusById(statusId)
+                                      ?.label,
+                              resolveInvoiceStatusLabel: (statusId) =>
+                                  invoiceStatusProvider
+                                      .getStatusById(statusId)
+                                      ?.label,
+                              resolveQuantityLabel:
+                                  getVehicleTrailerComboFromQuantity,
+                            ));
+                  }
+                },
+              ),
+            );
+          },
         ),
       ));
     }

@@ -22,16 +22,22 @@ class JobReminder {
   });
 
   factory JobReminder.fromMap(Map<String, dynamic> data) {
+    ReminderStatus status = ReminderStatus.active;
+    if (data['status'] != null) {
+      final statusString = data['status'] as String;
+      status = ReminderStatus.values.firstWhere(
+        (e) => e.name == statusString,
+        orElse: () => ReminderStatus.active,
+      );
+    }
+
     return JobReminder(
       dueDate: (data['dueDate'] as Timestamp).toDate(),
       notes: data['notes'] as String? ?? '',
       createdAt: data['createdAt'] != null
           ? (data['createdAt'] as Timestamp).toDate()
           : DateTime.now(),
-      status: ReminderStatus.values.firstWhere(
-        (e) => e.name == (data['status'] as String? ?? 'active'),
-        orElse: () => ReminderStatus.active,
-      ),
+      status: status,
       completedAt: data['completedAt'] != null
           ? (data['completedAt'] as Timestamp).toDate()
           : null,
@@ -49,12 +55,10 @@ class JobReminder {
     };
   }
 
-  bool get isOverdue {
-    return status == ReminderStatus.active && DateTime.now().isAfter(dueDate);
-  }
+  bool get isActive => status == ReminderStatus.active;
 
-  bool get isActive {
-    return status == ReminderStatus.active;
+  bool get isOverdue {
+    return isActive && DateTime.now().isAfter(dueDate);
   }
 
   JobReminder copyWith({
