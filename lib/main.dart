@@ -29,7 +29,6 @@ import 'widgets/undo_redo_widgets.dart';
 import 'widgets/auth_gate.dart';
 import 'widgets/chat_dialog.dart';
 import 'widgets/chat_admin_panel.dart';
-import 'widgets/google_sheets_tracking_view.dart';
 import 'widgets/new_version_dialog.dart';
 import 'services/keyboard_shortcuts_service.dart';
 import 'services/undo_redo_manager.dart';

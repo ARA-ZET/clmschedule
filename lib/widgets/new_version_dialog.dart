@@ -5,8 +5,7 @@ import 'package:flutter/material.dart';
 class NewVersionDialog extends StatelessWidget {
   final String newVersion;
 
-  const NewVersionDialog({Key? key, required this.newVersion})
-      : super(key: key);
+  const NewVersionDialog({super.key, required this.newVersion});
 
   @override
   Widget build(BuildContext context) {

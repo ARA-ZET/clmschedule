@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/job_list_preferences_provider.dart';
-import '../models/job_list_preferences.dart';
 
 /// Dialog for managing job list column visibility preferences
 class JobListColumnsDialog extends StatefulWidget {
