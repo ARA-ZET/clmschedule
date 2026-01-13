@@ -1228,16 +1228,41 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
         return Scaffold(
           appBar: AppBar(
             leading: CloseButton(onPressed: () async {
+              print('UpdatedMapView: CloseButton pressed');
+
               // Check for unsaved changes before closing
               if (mapViewProvider.hasUnsavedChanges) {
+                print(
+                    'UpdatedMapView: Has unsaved changes, showing discard dialog');
                 final shouldDiscard = await _showDiscardDialog();
-                if (!shouldDiscard) return;
+                if (!shouldDiscard) {
+                  print('UpdatedMapView: User chose to keep editing');
+                  return;
+                }
+                print('UpdatedMapView: User chose to discard changes');
               }
 
+              // Store the polygons to return before clearing
+              final polygonsToReturn = mapViewProvider.customPolygons.isNotEmpty
+                  ? List<CustomPolygon>.from(mapViewProvider.customPolygons)
+                  : null;
+
+              print(
+                  'UpdatedMapView: Polygons to return: ${polygonsToReturn?.length ?? 0}');
+
+              // Always clear the provider state before closing
+              print('UpdatedMapView: Clearing provider state');
+              mapViewProvider.resetMapState();
+              print('UpdatedMapView: Provider state cleared');
+
               // Return updated CustomPolygons if available
-              if (mapViewProvider.customPolygons.isNotEmpty) {
-                Navigator.of(context).pop(mapViewProvider.customPolygons);
+              if (polygonsToReturn != null) {
+                print(
+                    'UpdatedMapView: Returning ${polygonsToReturn.length} polygons');
+                Navigator.of(context).pop(polygonsToReturn);
               } else {
+                print(
+                    'UpdatedMapView: No polygons to return, popping without data');
                 Navigator.of(context).pop();
               }
             }),
@@ -2105,6 +2130,12 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
     } catch (e) {
       print('Error disposing map controller: $e');
     }
+
+    // Clear the provider state when the widget is disposed
+    final mapViewProvider =
+        Provider.of<MapViewProvider>(context, listen: false);
+    mapViewProvider.resetMapState();
+
     super.dispose();
   }
 }

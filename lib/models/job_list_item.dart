@@ -324,6 +324,7 @@ class JobListItem {
     String? whoToInvoice,
     String? collectionJobId,
     List<CustomPolygon>? customPolygons,
+    List<JobReminder>? reminders,
     // Helper functions to resolve display labels
     String? Function(String statusId)? resolveJobStatusLabel,
     String? Function(String statusId)? resolveInvoiceStatusLabel,
@@ -563,6 +564,7 @@ class JobListItem {
       collectionJobId: collectionJobId,
       updates: newUpdates,
       customPolygons: customPolygons,
+      reminders: reminders ?? this.reminders,
     );
   }
 

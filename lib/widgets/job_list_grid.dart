@@ -16,7 +16,7 @@ import 'month_navigation_widget.dart';
 import 'simple_date_filter.dart';
 import 'job_list_columns_dialog.dart';
 import 'job_list_column_config.dart';
-import 'reminder_dialog.dart';
+import 'reminder_dialog.dart' as reminder;
 
 // Reusable DataTable column header widget
 class DataTableHeaderWidget extends StatelessWidget {
@@ -136,8 +136,8 @@ class JobListDataColumns extends StatelessWidget {
     'date',
     'client',
     'jobStatus',
-    'reminder',
     'invoiceStatus',
+    'reminder',
     'jobType',
     'area',
     'quantity',
@@ -187,8 +187,8 @@ class JobListFrozenHeaders extends StatelessWidget {
     'date',
     'client',
     'jobStatus',
-    'reminder',
     'invoiceStatus',
+    'reminder',
     'jobType',
     'area',
     'quantity',
@@ -483,86 +483,6 @@ class JobListDataCellsBuilder extends StatelessWidget {
       ));
     }
 
-    // Reminder
-    if (prefsProvider.isColumnVisible('reminder')) {
-      final activeReminders = item.reminders.where((r) => r.isActive).toList();
-      final hasActiveReminder = activeReminders.isNotEmpty;
-      final isOverdue = activeReminders.any((r) => r.isOverdue);
-
-      cells.add(DataCell(
-        Center(
-          child: IconButton(
-            icon: Icon(
-              hasActiveReminder ? Icons.alarm_on : Icons.alarm_add,
-              size: 20,
-              color: isOverdue
-                  ? Colors.orange
-                  : (hasActiveReminder ? Colors.blue : Colors.grey),
-            ),
-            onPressed: () async {
-              final result = await showDialog<Map<String, dynamic>>(
-                context: context,
-                builder: (context) => ReminderDialog(
-                  existingReminders: item.reminders,
-                  invoiceStatus: item.invoiceStatusId,
-                ),
-              );
-
-              if (result != null && result['action'] != null) {
-                List<JobReminder> updatedReminders = List.from(item.reminders);
-
-                switch (result['action']) {
-                  case 'add':
-                    // Add new reminder
-                    updatedReminders.add(result['reminder'] as JobReminder);
-                    break;
-                  case 'complete':
-                    // Mark reminder as completed
-                    final reminderToComplete =
-                        result['reminder'] as JobReminder;
-                    final index = updatedReminders.indexWhere(
-                      (r) => r.createdAt == reminderToComplete.createdAt,
-                    );
-                    if (index != -1) {
-                      updatedReminders[index] = reminderToComplete.copyWith(
-                        status: ReminderStatus.completed,
-                        completedAt: DateTime.now(),
-                      );
-                    }
-                    break;
-                  case 'cancel':
-                    // Mark reminder as cancelled
-                    final reminderToCancel = result['reminder'] as JobReminder;
-                    final index = updatedReminders.indexWhere(
-                      (r) => r.createdAt == reminderToCancel.createdAt,
-                    );
-                    if (index != -1) {
-                      updatedReminders[index] = reminderToCancel.copyWith(
-                        status: ReminderStatus.cancelled,
-                        completedAt: DateTime.now(),
-                      );
-                    }
-                    break;
-                }
-
-                final updatedItem = item.copyWith(reminders: updatedReminders);
-                jobListProvider.updateJobListItemWithTracking(
-                  item,
-                  updatedItem,
-                  resolveJobStatusLabel: (_) => null,
-                  resolveInvoiceStatusLabel: (_) => null,
-                  resolveQuantityLabel: getVehicleTrailerComboFromQuantity,
-                );
-              }
-            },
-            tooltip: hasActiveReminder
-                ? 'Active reminders: ${activeReminders.length}'
-                : 'Add reminder',
-          ),
-        ),
-      ));
-    }
-
     // Invoice Status
     if (prefsProvider.isColumnVisible('invoiceStatus')) {
       cells.add(DataCell(
@@ -667,6 +587,86 @@ class JobListDataCellsBuilder extends StatelessWidget {
               ),
             );
           },
+        ),
+      ));
+    }
+
+    // Reminder
+    if (prefsProvider.isColumnVisible('reminder')) {
+      final activeReminders = item.reminders.where((r) => r.isActive).toList();
+      final hasActiveReminder = activeReminders.isNotEmpty;
+      final isOverdue = activeReminders.any((r) => r.isOverdue);
+
+      cells.add(DataCell(
+        Center(
+          child: IconButton(
+            icon: Icon(
+              hasActiveReminder ? Icons.alarm_on : Icons.alarm_add,
+              size: 20,
+              color: isOverdue
+                  ? Colors.orange
+                  : (hasActiveReminder ? Colors.blue : Colors.grey),
+            ),
+            onPressed: () async {
+              final result = await showDialog<Map<String, dynamic>>(
+                context: context,
+                builder: (context) => reminder.ReminderDialog(
+                  existingReminders: item.reminders,
+                  invoiceStatus: item.invoiceStatusId,
+                ),
+              );
+
+              if (result != null && result['action'] != null) {
+                List<JobReminder> updatedReminders = List.from(item.reminders);
+
+                switch (result['action']) {
+                  case 'add':
+                    // Add new reminder
+                    updatedReminders.add(result['reminder'] as JobReminder);
+                    break;
+                  case 'complete':
+                    // Mark reminder as completed
+                    final reminderToComplete =
+                        result['reminder'] as JobReminder;
+                    final index = updatedReminders.indexWhere(
+                      (r) => r.createdAt == reminderToComplete.createdAt,
+                    );
+                    if (index != -1) {
+                      updatedReminders[index] = reminderToComplete.copyWith(
+                        status: ReminderStatus.completed,
+                        completedAt: DateTime.now(),
+                      );
+                    }
+                    break;
+                  case 'cancel':
+                    // Mark reminder as cancelled
+                    final reminderToCancel = result['reminder'] as JobReminder;
+                    final index = updatedReminders.indexWhere(
+                      (r) => r.createdAt == reminderToCancel.createdAt,
+                    );
+                    if (index != -1) {
+                      updatedReminders[index] = reminderToCancel.copyWith(
+                        status: ReminderStatus.cancelled,
+                        completedAt: DateTime.now(),
+                      );
+                    }
+                    break;
+                }
+
+                final updatedItem = item.copyWith(reminders: updatedReminders);
+                jobListProvider.updateJobListItemWithTracking(
+                  item,
+                  updatedItem,
+                  resolveJobStatusLabel: (_) => null,
+                  resolveInvoiceStatusLabel: (_) => null,
+                  resolveQuantityLabel: getVehicleTrailerComboFromQuantity,
+                );
+              }
+            },
+            tooltip: hasActiveReminder
+                ? 'Active reminders: ${activeReminders.length}'
+                : 'Add reminder',
+          ),
         ),
       ));
     }

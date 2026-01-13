@@ -354,6 +354,14 @@ class JobListProvider extends ChangeNotifier {
       return;
     }
 
+    // Debug reminder changes
+    if (currentItem != null &&
+        !_areRemindersEqual(currentItem.reminders, jobListItem.reminders)) {
+      print('JobListProvider: Reminders changed for item ${jobListItem.id}');
+      print('  Old reminders count: ${currentItem.reminders.length}');
+      print('  New reminders count: ${jobListItem.reminders.length}');
+    }
+
     print(
         'JobListProvider: Changes detected for item ${jobListItem.id}, processing update');
 
@@ -400,13 +408,26 @@ class JobListProvider extends ChangeNotifier {
   // Helper method to compare reminders lists
   bool _areRemindersEqual(List<JobReminder> list1, List<JobReminder> list2) {
     if (list1.length != list2.length) return false;
-    for (int i = 0; i < list1.length; i++) {
-      final r1 = list1[i];
-      final r2 = list2[i];
-      if (r1.dueDate != r2.dueDate ||
+
+    // Sort by createdAt for consistent comparison
+    final sorted1 = List<JobReminder>.from(list1)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final sorted2 = List<JobReminder>.from(list2)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    for (int i = 0; i < sorted1.length; i++) {
+      final r1 = sorted1[i];
+      final r2 = sorted2[i];
+
+      // Compare dates by milliseconds to avoid precision issues
+      if (r1.dueDate.millisecondsSinceEpoch !=
+              r2.dueDate.millisecondsSinceEpoch ||
           r1.notes != r2.notes ||
           r1.status != r2.status ||
-          r1.completedAt != r2.completedAt) {
+          r1.createdAt.millisecondsSinceEpoch !=
+              r2.createdAt.millisecondsSinceEpoch ||
+          (r1.completedAt?.millisecondsSinceEpoch ?? 0) !=
+              (r2.completedAt?.millisecondsSinceEpoch ?? 0)) {
         return false;
       }
     }
@@ -716,6 +737,10 @@ class JobListProvider extends ChangeNotifier {
       collectionJobId:
           updatedItem.collectionJobId != originalItem.collectionJobId
               ? updatedItem.collectionJobId
+              : null,
+      reminders:
+          !_areRemindersEqual(updatedItem.reminders, originalItem.reminders)
+              ? updatedItem.reminders
               : null,
       resolveJobStatusLabel: resolveJobStatusLabel,
       resolveInvoiceStatusLabel: resolveInvoiceStatusLabel,
