@@ -38,6 +38,9 @@
       }
     }
   },
+  "firestore": {
+    "indexes": "firestore.indexes.json"
+  },
   "hosting": {
     "source": ".",
     "ignore": [

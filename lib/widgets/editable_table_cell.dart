@@ -965,7 +965,9 @@ class _EditableVehicleComboCellState extends State<EditableVehicleComboCell> {
                     value: combo,
                     child: Text(
                       combo,
-                      style: TextStyle(fontSize: scaleProvider.mediumFontSize),
+                      style: TextStyle(
+                          fontSize: scaleProvider.mediumFontSize,
+                          fontWeight: FontWeight.bold),
                       overflow: TextOverflow.ellipsis,
                     ),
                   );

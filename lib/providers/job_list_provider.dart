@@ -18,6 +18,7 @@ class JobListProvider extends ChangeNotifier {
   String? _error;
   String _searchQuery = '';
   Set<String> _statusFilters = {};
+  final Set<String> _invoiceStatusFilters = {};
   DateTime _currentMonth = DateTime.now();
 
   // Date filtering properties
@@ -38,6 +39,12 @@ class JobListProvider extends ChangeNotifier {
   final Map<String, DateTime> _updateTimestamps = {};
   static const Duration _debounceDelay = Duration(seconds: 5);
 
+  // Search debouncing
+  Timer? _searchDebounceTimer;
+  String _pendingSearchQuery = '';
+  final ValueNotifier<bool> _isSearchingNotifier = ValueNotifier<bool>(false);
+  static const Duration _searchDebounceDelay = Duration(seconds: 2);
+
   // Lazy loading state
   bool _hasInitialLoad = false;
 
@@ -46,21 +53,28 @@ class JobListProvider extends ChangeNotifier {
   bool _isRefreshingLastChecked = false;
 
   JobListProvider(
-      this._jobListService, this._undoRedoManager, this._authProvider) {
-    // Initialize with postFrameCallback to avoid blocking UI
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeCurrentMonthData();
-      _loadLastCheckedTimeFromDatabase();
-    });
+      this._jobListService, this._undoRedoManager, this._authProvider);
+
+  // Async initialization method - call explicitly for concurrent loading
+  Future<void> initialize() async {
+    if (_hasInitialLoad) return;
+
+    // Run initialization tasks concurrently
+    await Future.wait([
+      _initializeCurrentMonthData(),
+      _loadLastCheckedTimeFromDatabase(),
+    ]);
   }
 
   // Getters
   List<JobListItem> get jobListItems => _filteredJobListItems();
+  List<JobListItem> get allJobListItems => _getMergedJobListItems();
   bool get isLoading => _isLoading;
   bool get isInitialized => _isInitialized;
   String? get error => _error;
   String get searchQuery => _searchQuery;
   Set<String> get statusFilters => _statusFilters;
+  Set<String> get invoiceStatusFilters => _invoiceStatusFilters;
   String get sortField => _sortField;
   bool get sortAscending => _sortAscending;
   DateTime get currentMonth => _currentMonth;
@@ -72,6 +86,7 @@ class JobListProvider extends ChangeNotifier {
       _jobListService.getMonthlyDocumentId(_currentMonth);
   DateTime? get lastCheckedTime => _lastCheckedTime;
   bool get isRefreshingLastChecked => _isRefreshingLastChecked;
+  ValueNotifier<bool> get isSearchingNotifier => _isSearchingNotifier;
 
   // Get merged data (database + pending local changes)
   List<JobListItem> _getMergedJobListItems() {
@@ -89,7 +104,7 @@ class JobListProvider extends ChangeNotifier {
   List<JobListItem> _filteredJobListItems() {
     // Create hash of current filter state
     final currentHash =
-        '${_searchQuery}_${_statusFilters.join(',')}_${_dateFilter}_${_startDate?.millisecondsSinceEpoch}_${_endDate?.millisecondsSinceEpoch}';
+        '${_searchQuery}_${_statusFilters.join(',')}_${_invoiceStatusFilters.join(',')}_${_dateFilter}_${_startDate?.millisecondsSinceEpoch}_${_endDate?.millisecondsSinceEpoch}';
 
     // Return cached results if filters haven't changed
     if (_cachedFilteredItems != null && _lastFilterHash == currentHash) {
@@ -114,6 +129,15 @@ class JobListProvider extends ChangeNotifier {
           _statusFilters.toSet(); // Convert to Set for faster lookup
       filtered = filtered
           .where((item) => statusSet.contains(item.jobStatusId))
+          .toList();
+    }
+
+    // Apply invoice status filter
+    if (_invoiceStatusFilters.isNotEmpty) {
+      final invoiceStatusSet =
+          _invoiceStatusFilters.toSet(); // Convert to Set for faster lookup
+      filtered = filtered
+          .where((item) => invoiceStatusSet.contains(item.invoiceStatusId))
           .toList();
     }
 
@@ -173,7 +197,7 @@ class JobListProvider extends ChangeNotifier {
     // Update cache after filtering
     _lastFilterHash = currentHash;
     _cachedFilteredItems = filtered;
-    
+
     return filtered;
   }
 
@@ -599,7 +623,12 @@ class JobListProvider extends ChangeNotifier {
 
   // Update job list item with change tracking
   Future<void> updateJobListItemWithTracking(
-      JobListItem originalItem, JobListItem updatedItem) async {
+    JobListItem originalItem,
+    JobListItem updatedItem, {
+    String? Function(String statusId)? resolveJobStatusLabel,
+    String? Function(String statusId)? resolveInvoiceStatusLabel,
+    String? Function(int quantity, JobType jobType)? resolveQuantityLabel,
+  }) async {
     final currentUser = _authProvider.user;
     final currentAppUser = _authProvider.appUser;
 
@@ -670,6 +699,9 @@ class JobListProvider extends ChangeNotifier {
           updatedItem.collectionJobId != originalItem.collectionJobId
               ? updatedItem.collectionJobId
               : null,
+      resolveJobStatusLabel: resolveJobStatusLabel,
+      resolveInvoiceStatusLabel: resolveInvoiceStatusLabel,
+      resolveQuantityLabel: resolveQuantityLabel,
     );
 
     // Update locally first, then save
@@ -719,11 +751,45 @@ class JobListProvider extends ChangeNotifier {
     }
   }
 
-  // Set search query
+  // Set search query with debouncing
   void setSearchQuery(String query) {
-    _searchQuery = query;
-    _cachedFilteredItems = null; // Clear cache
+    _pendingSearchQuery = query;
+
+    // Cancel existing timer
+    _searchDebounceTimer?.cancel();
+
+    // If query is empty, apply immediately
+    if (query.isEmpty) {
+      _searchQuery = query;
+      _isSearchingNotifier.value = false;
+      _cachedFilteredItems = null;
+      notifyListeners();
+      return;
+    }
+
+    // Show searching indicator without rebuilding entire tree
+    _isSearchingNotifier.value = true;
+
+    // Start new timer for debounced search
+    _searchDebounceTimer = Timer(_searchDebounceDelay, () {
+      _applySearchQuery();
+    });
+  }
+
+  // Apply the pending search query
+  void _applySearchQuery() {
+    _searchQuery = _pendingSearchQuery;
+    _isSearchingNotifier.value = false;
+    _cachedFilteredItems = null;
     notifyListeners();
+  }
+
+  // Force apply search immediately (for manual triggers)
+  void applySearchNow() {
+    _searchDebounceTimer?.cancel();
+    if (_pendingSearchQuery.isNotEmpty) {
+      _applySearchQuery();
+    }
   }
 
   // Set status filter
@@ -758,10 +824,22 @@ class JobListProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // Toggle invoice status filter
+  void toggleInvoiceStatusFilter(String statusId) {
+    if (_invoiceStatusFilters.contains(statusId)) {
+      _invoiceStatusFilters.remove(statusId);
+    } else {
+      _invoiceStatusFilters.add(statusId);
+    }
+    _cachedFilteredItems = null; // Clear cache
+    notifyListeners();
+  }
+
   // Clear filters
   void clearFilters() {
     _searchQuery = '';
     _statusFilters.clear();
+    _invoiceStatusFilters.clear();
     _dateFilter = 'all';
     _startDate = null;
     _endDate = null;
@@ -1043,7 +1121,9 @@ class JobListProvider extends ChangeNotifier {
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    _searchDebounceTimer?.cancel();
     _jobListSubscription?.cancel();
+    _isSearchingNotifier.dispose();
     super.dispose();
   }
 }

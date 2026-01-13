@@ -8,6 +8,8 @@ class JobListItemUpdate {
   final dynamic newValue;
   final DateTime timestamp;
   final String userDisplayName; // Optional display name for UI
+  final String? oldValueDisplay; // Optional readable label for oldValue
+  final String? newValueDisplay; // Optional readable label for newValue
 
   JobListItemUpdate({
     required this.userId,
@@ -16,6 +18,8 @@ class JobListItemUpdate {
     required this.newValue,
     required this.timestamp,
     this.userDisplayName = '',
+    this.oldValueDisplay,
+    this.newValueDisplay,
   });
 
   // Create from Firestore
@@ -29,6 +33,8 @@ class JobListItemUpdate {
           ? (data['timestamp'] as Timestamp).toDate()
           : DateTime.now(),
       userDisplayName: data['userDisplayName'] as String? ?? '',
+      oldValueDisplay: data['oldValueDisplay'] as String?,
+      newValueDisplay: data['newValueDisplay'] as String?,
     );
   }
 
@@ -41,6 +47,8 @@ class JobListItemUpdate {
       'newValue': _serializeValue(newValue),
       'timestamp': Timestamp.fromDate(timestamp),
       'userDisplayName': userDisplayName,
+      'oldValueDisplay': oldValueDisplay,
+      'newValueDisplay': newValueDisplay,
     };
   }
 
@@ -97,6 +105,14 @@ class JobListItemUpdate {
 
   String _getValueDisplayText(dynamic value, {JobType? jobType}) {
     if (value == null || value == '') return 'empty';
+
+    // Use stored display labels if available (for status IDs and quantity)
+    if (value == oldValue && oldValueDisplay != null) {
+      return oldValueDisplay!;
+    }
+    if (value == newValue && newValueDisplay != null) {
+      return newValueDisplay!;
+    }
 
     if (value is DateTime) {
       // For date fields, check if we should show time based on job type

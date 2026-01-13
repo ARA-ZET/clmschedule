@@ -9,6 +9,7 @@ class MonthNavigationWidget extends StatelessWidget {
   final VoidCallback onCurrentMonth;
   final Function(String monthId) onMonthSelected;
   final Future<List<String>> availableMonths;
+  final VoidCallback? onRefresh; // Optional refresh callback
 
   const MonthNavigationWidget({
     super.key,
@@ -18,6 +19,7 @@ class MonthNavigationWidget extends StatelessWidget {
     required this.onCurrentMonth,
     required this.onMonthSelected,
     required this.availableMonths,
+    this.onRefresh, // Optional parameter
   });
 
   /// Generate a list of month IDs (2 before current, current, 2 after current)
@@ -164,6 +166,20 @@ class MonthNavigationWidget extends StatelessWidget {
           ),
 
           const Spacer(),
+
+          // Refresh Button (if callback provided)
+          if (onRefresh != null) ...[
+            IconButton(
+              onPressed: onRefresh,
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Refresh',
+              style: IconButton.styleFrom(
+                backgroundColor: Colors.orange.shade50,
+                foregroundColor: Colors.orange.shade700,
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
 
           // Available Months Dropdown
           Row(

@@ -73,7 +73,7 @@ class JobCard extends StatelessWidget {
       builder: (context, scaleProvider, child) {
         final isFullscreen = context.watch<TogglerProvider>().isFullview;
         final statusColor = _getStatusColor(context);
-        
+
         return Card(
           margin: const EdgeInsets.all(1),
           color: statusColor,
@@ -85,7 +85,7 @@ class JobCard extends StatelessWidget {
               children: [
                 // Client section
                 _JobClientSection(job: job),
-                
+
                 if (isFullscreen) ...[
                   const _JobDivider(),
                   // Work area section
@@ -207,7 +207,7 @@ class _JobActionsSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scaleProvider = context.read<ScaleProvider>();
-    
+
     return Flexible(
       flex: 1,
       child: Row(
@@ -254,7 +254,7 @@ class _JobStatusButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scaleProvider = context.read<ScaleProvider>();
-    
+
     return Tooltip(
       message: 'Change job status',
       child: Consumer<JobStatusProvider>(

@@ -179,7 +179,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
   @override
   Widget build(BuildContext context) {
     final isFullscreen = context.watch<TogglerProvider>().isFullview;
-    
+
     // Use Selector to only rebuild when specific data changes
     return Selector<ScheduleProvider, _ScheduleGridData>(
       selector: (_, scheduleProvider) => _ScheduleGridData(
@@ -192,7 +192,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
       builder: (context, gridData, child) {
         final scheduleProvider = context.read<ScheduleProvider>();
         final scaleProvider = context.read<ScaleProvider>();
-        
+
         // Check if month changed and reset scroll position
         if (_currentMonthDisplay != gridData.currentMonthDisplay) {
           _currentMonthDisplay = gridData.currentMonthDisplay;
@@ -202,9 +202,8 @@ class _ScheduleGridState extends State<ScheduleGrid> {
         final dates = _getDates(gridData.currentMonth, scheduleProvider);
         final distributors = gridData.distributors;
 
-        final double rowHeight = isFullscreen
-            ? 92.0 * gridData.scale
-            : 40.0 * gridData.scale;
+        final double rowHeight =
+            isFullscreen ? 92.0 * gridData.scale : 40.0 * gridData.scale;
 
         // Scroll to today's date when data is loaded
         _scrollToToday(dates);

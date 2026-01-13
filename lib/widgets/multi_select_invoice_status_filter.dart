@@ -1,14 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../providers/job_list_status_provider.dart';
+import '../providers/invoice_status_provider.dart';
 
-class MultiSelectStatusFilter extends StatelessWidget {
-  final Set<String>
-      selectedStatusIds; // Changed from JobListStatus to String IDs
-  final Function(String) onToggle; // Changed to work with String IDs
+class MultiSelectInvoiceStatusFilter extends StatelessWidget {
+  final Set<String> selectedStatusIds;
+  final Function(String) onToggle;
   final VoidCallback onClear;
 
-  const MultiSelectStatusFilter({
+  const MultiSelectInvoiceStatusFilter({
     super.key,
     required this.selectedStatusIds,
     required this.onToggle,
@@ -17,7 +16,7 @@ class MultiSelectStatusFilter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<JobListStatusProvider>(
+    return Consumer<InvoiceStatusProvider>(
       builder: (context, statusProvider, child) {
         return PopupMenuButton<void>(
           child: Container(
@@ -33,7 +32,7 @@ class MultiSelectStatusFilter extends StatelessWidget {
                 Expanded(
                   child: Text(
                     selectedStatusIds.isEmpty
-                        ? 'Job Status'
+                        ? 'Invoice Status'
                         : selectedStatusIds.length == 1
                             ? statusProvider
                                     .getStatusById(selectedStatusIds.first)

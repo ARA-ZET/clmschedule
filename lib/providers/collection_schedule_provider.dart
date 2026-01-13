@@ -13,6 +13,12 @@ class CollectionScheduleProvider extends ChangeNotifier {
   List<CollectionJob> _collectionJobs = [];
   List<WorkArea> _workAreas = [];
   DateTime _currentMonth = DateTime.now();
+  bool _isInitialized = false;
+  bool _isLoading = false;
+
+  // Cache for time slot occupation checks to avoid expensive filtering during UI renders
+  // Key: "vehicleType_yyyy-MM-dd_timeSlot", Value: List of jobs occupying that slot
+  final Map<String, List<CollectionJob>> _timeSlotCache = {};
 
   // Stream subscriptions
   StreamSubscription<List<WorkArea>>? _workAreasSubscription;
@@ -26,43 +32,52 @@ class CollectionScheduleProvider extends ChangeNotifier {
   DateTime get currentMonth => _currentMonth;
   String get currentMonthDisplay =>
       _firestoreService.getMonthlyDocumentId(_currentMonth);
+  bool get isInitialized => _isInitialized;
+  bool get isLoading => _isLoading;
 
   CollectionScheduleProvider({
     FirestoreService? firestoreService,
     required JobListProvider jobListProvider,
   })  : _firestoreService = firestoreService ?? FirestoreService(),
-        _jobListProvider = jobListProvider {
-    _initStreams();
-  }
+        _jobListProvider = jobListProvider;
+  // Don't initialize streams in constructor - let it be lazy loaded
 
-  void _initStreams() {
-    _loadDataForMonth(_currentMonth);
-  }
+  // Manual initialization - call this when the tab is opened
+  Future<void> initialize() async {
+    if (_isInitialized) return;
 
-  // Load data for a specific month
-  void _loadDataForMonth(DateTime month) {
-    // Cancel existing subscriptions
-    _jobListSubscription?.cancel();
-    _workAreasSubscription?.cancel();
+    _isLoading = true;
+    notifyListeners();
 
-    print(
-        'CollectionScheduleProvider: Starting streams for current month: ${_firestoreService.getMonthlyDocumentId(month)}');
-
-    // Listen to job list changes and transform collection jobs
-    _jobListProvider.addListener(_onJobListChanged);
-    _onJobListChanged(); // Initial load
-
-    // Listen to work areas stream from root collection (not monthly)
-    _workAreasSubscription =
-        _firestoreService.streamWorkAreas().listen((workAreas) {
-      _workAreas = workAreas;
+    try {
+      await _loadDataForMonth(_currentMonth);
+      _isInitialized = true;
+    } finally {
+      _isLoading = false;
       notifyListeners();
-    });
+    }
   }
 
-  // Convert job list items to collection jobs
-  void _onJobListChanged() {
-    final jobListItems = _jobListProvider.jobListItems;
+  // Load data for a specific month - now does one-time load instead of streaming
+  Future<void> _loadDataForMonth(DateTime month) async {
+    print(
+        'CollectionScheduleProvider: Loading data for month: ${_firestoreService.getMonthlyDocumentId(month)}');
+
+    // Filter and convert job list items to collection jobs (one-time operation)
+    _buildCollectionJobs();
+
+    // Load work areas (one-time fetch)
+    await _loadWorkAreas();
+
+    // Pre-compute time slot cache asynchronously (non-blocking)
+    await _rebuildTimeSlotCache();
+
+    notifyListeners();
+  }
+
+  // Build collection jobs from job list provider (one-time operation)
+  void _buildCollectionJobs() {
+    final jobListItems = _jobListProvider.allJobListItems;
     _collectionJobs = jobListItems
         .where((job) =>
             job.jobType == JobType.junkCollection ||
@@ -72,8 +87,74 @@ class CollectionScheduleProvider extends ChangeNotifier {
         .toList();
 
     print(
-        'CollectionScheduleProvider: Received ${_collectionJobs.length} collection jobs from job list');
+        'CollectionScheduleProvider: Built ${_collectionJobs.length} collection jobs from job list');
+  }
+
+  // Pre-compute which jobs occupy which time slots - async to not block UI
+  Future<void> _rebuildTimeSlotCache() async {
+    _timeSlotCache.clear();
+
+    // Process in batches to avoid blocking the UI thread
+    const batchSize = 10;
+    for (var i = 0; i < _collectionJobs.length; i += batchSize) {
+      final end = (i + batchSize < _collectionJobs.length)
+          ? i + batchSize
+          : _collectionJobs.length;
+      final batch = _collectionJobs.sublist(i, end);
+
+      for (final job in batch) {
+        final availableTimeSlots = CollectionJob.availableTimeSlots;
+        final jobStartIndex = availableTimeSlots.indexOf(job.timeSlot);
+
+        if (jobStartIndex == -1) continue;
+
+        // For each time slot this job occupies
+        for (int j = 0; j < job.timeSlots; j++) {
+          final slotIndex = jobStartIndex + j;
+          if (slotIndex >= availableTimeSlots.length) break;
+
+          final timeSlot = availableTimeSlots[slotIndex];
+          final dateStr =
+              '${job.date.year}-${job.date.month.toString().padLeft(2, '0')}-${job.date.day.toString().padLeft(2, '0')}';
+          final cacheKey = '${job.vehicleType.name}_${dateStr}_$timeSlot';
+
+          _timeSlotCache.putIfAbsent(cacheKey, () => []).add(job);
+        }
+      }
+
+      // Yield to the UI thread after each batch
+      if (i + batchSize < _collectionJobs.length) {
+        await Future.delayed(Duration.zero);
+      }
+    }
+
+    print(
+        'CollectionScheduleProvider: Pre-computed time slot cache with ${_timeSlotCache.length} entries');
+  }
+
+  // Load work areas (one-time fetch)
+  Future<void> _loadWorkAreas() async {
+    try {
+      // Get the first emission from the stream for one-time fetch
+      _workAreas = await _firestoreService.streamWorkAreas().first;
+      print(
+          'CollectionScheduleProvider: Loaded ${_workAreas.length} work areas');
+    } catch (e) {
+      print('CollectionScheduleProvider: Error loading work areas: $e');
+    }
+  }
+
+  // Refresh data manually when needed
+  Future<void> refresh() async {
+    _isLoading = true;
     notifyListeners();
+
+    try {
+      await _loadDataForMonth(_currentMonth);
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
   }
 
   // Convert JobListItem to CollectionJob
@@ -98,9 +179,6 @@ class CollectionScheduleProvider extends ChangeNotifier {
             jobListItem.collectionDate.day != 1)
         ? jobListItem.collectionDate
         : jobListItem.date;
-
-    print(
-        'Converting job ${jobListItem.id}: timeSlot=$timeSlot, timeSlots=$timeSlots, date=$effectiveDate');
 
     return CollectionJob(
       id: jobListItem.id,
@@ -326,14 +404,12 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   List<CollectionJob> getJobsForVehicleAndTimeSlot(
       VehicleType vehicleType, DateTime date, String timeSlot) {
-    return collectionJobs
-        .where((job) =>
-            job.vehicleType == vehicleType &&
-            job.date.year == date.year &&
-            job.date.month == date.month &&
-            job.date.day == date.day &&
-            _jobOccupiesTimeSlot(job, timeSlot))
-        .toList();
+    // Use pre-computed cache for instant lookup instead of filtering
+    final dateStr =
+        '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+    final cacheKey = '${vehicleType.name}_${dateStr}_$timeSlot';
+
+    return _timeSlotCache[cacheKey] ?? [];
   }
 
   // Helper method to check if a job occupies a specific time slot
@@ -349,11 +425,6 @@ class CollectionScheduleProvider extends ChangeNotifier {
     // Check if the timeSlot falls within the job's duration
     final isOccupied = checkIndex >= jobStartIndex &&
         checkIndex < (jobStartIndex + job.timeSlots);
-
-    if (isOccupied) {
-      print(
-          'Job ${job.id} occupies slot $timeSlot (job starts at ${job.timeSlot} for ${job.timeSlots} slots)');
-    }
 
     return isOccupied;
   }
@@ -376,12 +447,13 @@ class CollectionScheduleProvider extends ChangeNotifier {
   // Check if a specific time slot is available for a vehicle on a date
   bool isTimeSlotAvailable(
       VehicleType vehicleType, DateTime date, String timeSlot) {
-    return !collectionJobs.any((job) =>
-        job.vehicleType == vehicleType &&
-        job.date.year == date.year &&
-        job.date.month == date.month &&
-        job.date.day == date.day &&
-        _jobOccupiesTimeSlot(job, timeSlot));
+    // Use cache for instant lookup
+    final dateStr =
+        '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+    final cacheKey = '${vehicleType.name}_${dateStr}_$timeSlot';
+
+    return !_timeSlotCache.containsKey(cacheKey) ||
+        _timeSlotCache[cacheKey]!.isEmpty;
   }
 
   // Get all occupied time slots for a vehicle on a specific date
@@ -537,8 +609,8 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    _jobListProvider.removeListener(_onJobListChanged);
     _workAreasSubscription?.cancel();
+    _jobListSubscription?.cancel();
     super.dispose();
   }
 }

@@ -99,7 +99,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
     return months[month - 1];
   }
 
-  // Generate list of days for the current month, plus next month if it has jobs
+  // Generate list of days from current month up to last date with collection jobs (plus buffer)
   List<DateTime> _getDates(
       DateTime baseDate, CollectionScheduleProvider provider) {
     // Get first day of the current month
@@ -109,25 +109,35 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
     final lastDayOfCurrentMonth =
         DateTime(baseDate.year, baseDate.month + 1, 0);
 
-    // Calculate total days in the current month
-    final currentMonthDays =
-        lastDayOfCurrentMonth.difference(firstDayOfMonth).inDays + 1;
+    // Find the last date with collection jobs
+    final allJobs = provider.collectionJobs;
+    DateTime? lastJobDate;
 
-    // Check if next month has jobs
-    final includeNextMonth = provider.hasJobsInNextMonth(baseDate);
+    if (allJobs.isNotEmpty) {
+      // Find the maximum date among all jobs
+      lastJobDate =
+          allJobs.map((job) => job.date).reduce((a, b) => a.isAfter(b) ? a : b);
 
-    DateTime lastDay;
-    int totalDays;
+      // Normalize to date only (remove time component)
+      lastJobDate =
+          DateTime(lastJobDate.year, lastJobDate.month, lastJobDate.day);
 
-    if (includeNextMonth) {
-      // Include next month dates
-      lastDay = DateTime(baseDate.year, baseDate.month + 2, 0);
-      totalDays = lastDay.difference(firstDayOfMonth).inDays + 1;
-    } else {
-      // Current month only
-      lastDay = lastDayOfCurrentMonth;
-      totalDays = currentMonthDays;
+      // Add 3 days buffer for adding new jobs
+      lastJobDate = lastJobDate.add(const Duration(days: 3));
     }
+
+    // Determine the last day to display
+    DateTime lastDay;
+    if (lastJobDate != null && lastJobDate.isAfter(lastDayOfCurrentMonth)) {
+      // If last job is in next month, use that date (with buffer)
+      lastDay = lastJobDate;
+    } else {
+      // Otherwise, use at least the current month end
+      lastDay = lastDayOfCurrentMonth;
+    }
+
+    // Calculate total days to generate
+    final totalDays = lastDay.difference(firstDayOfMonth).inDays + 1;
 
     // Generate all dates in the range
     return List.generate(totalDays, (index) {
@@ -160,9 +170,8 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
             final viewportWidth = MediaQuery.of(context).size.width;
             const pinnedColumnWidth = 150.0; // Width of time slot column
             final availableWidth = viewportWidth - pinnedColumnWidth;
-            const cellWidth = 200.0;
 
-            // Calculate position to center today's column
+            // Calculate position to center today's column (using actual cellWidth constant)
             final targetPosition = (todayIndex * cellWidth) -
                 (availableWidth / 2) +
                 (cellWidth / 2);
@@ -260,6 +269,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
               onCurrentMonth: collectionProvider.goToCurrentMonth,
               onMonthSelected: collectionProvider.goToMonth,
               availableMonths: collectionProvider.getAvailableMonths(),
+              onRefresh: collectionProvider.refresh, // Add refresh callback
             ),
 
             // Grid
@@ -308,6 +318,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                           // Top-left corner cell
                           return TableViewCell(
                             child: Card(
+                              key: const ValueKey('header_corner'),
                               child: Center(
                                 child: Text(
                                   'Time',
@@ -324,6 +335,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                         } else {
                           // Date headers
                           final date = dates[vicinity.column - 1];
+                          final dateKey = 'header_${date.toIso8601String()}';
                           final today = DateTime.now();
                           final isToday = date.year == today.year &&
                               date.month == today.month &&
@@ -331,6 +343,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
 
                           return TableViewCell(
                             child: Card(
+                              key: ValueKey(dateKey),
                               color: isToday
                                   ? Theme.of(context)
                                       .primaryColor
@@ -393,6 +406,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                           // Time slot column
                           return TableViewCell(
                             child: Card(
+                              key: ValueKey('timeslot_$timeSlot'),
                               child: Center(
                                 child: Text(
                                   timeSlot,
@@ -409,9 +423,12 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                         } else {
                           // Collection job cells
                           final date = dates[vicinity.column - 1];
+                          final cellKey =
+                              'cell_${date.toIso8601String()}_$timeSlot';
 
                           return TableViewCell(
                             child: Card(
+                              key: ValueKey(cellKey),
                               child: SizedBox(
                                 height: rowHeight - 8,
                                 child: Column(

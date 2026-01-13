@@ -29,16 +29,11 @@ class InvoiceStatusProvider extends ChangeNotifier {
           .orderBy('label')
           .get();
 
-      if (snapshot.docs.isEmpty) {
-        // Initialize with default statuses if none exist
-        await initializeDefaultStatuses();
-      } else {
-        _statuses = snapshot.docs.map((doc) {
-          final data = doc.data();
-          data['id'] = doc.id; // Ensure the document ID is set
-          return CustomInvoiceStatus.fromMap(data);
-        }).toList();
-      }
+      _statuses = snapshot.docs.map((doc) {
+        final data = doc.data();
+        data['id'] = doc.id; // Ensure the document ID is set
+        return CustomInvoiceStatus.fromMap(data);
+      }).toList();
     } catch (e) {
       _error = 'Error loading invoice statuses: $e';
       if (kDebugMode) {
@@ -150,68 +145,6 @@ class InvoiceStatusProvider extends ChangeNotifier {
       }
     }
     return null;
-  }
-
-  // Initialize default invoice statuses
-  Future<void> initializeDefaultStatuses() async {
-    final defaultStatuses = [
-      const CustomInvoiceStatus(
-        id: 'pending',
-        label: 'Pending',
-        color: Colors.orange,
-        isDefault: true,
-      ),
-      const CustomInvoiceStatus(
-        id: 'sent',
-        label: 'Sent',
-        color: Colors.blue,
-        isDefault: true,
-      ),
-      const CustomInvoiceStatus(
-        id: 'paid',
-        label: 'Paid',
-        color: Colors.green,
-        isDefault: true,
-      ),
-      const CustomInvoiceStatus(
-        id: 'overdue',
-        label: 'Overdue',
-        color: Colors.red,
-        isDefault: true,
-      ),
-      const CustomInvoiceStatus(
-        id: 'cancelled',
-        label: 'Cancelled',
-        color: Colors.grey,
-        isDefault: true,
-      ),
-      const CustomInvoiceStatus(
-        id: 'partial',
-        label: 'Partially Paid',
-        color: Colors.teal,
-        isDefault: true,
-      ),
-    ];
-
-    try {
-      final batch = _firestore.batch();
-
-      for (final status in defaultStatuses) {
-        final docRef =
-            _firestore.collection('customInvoiceStatuses').doc(status.id);
-        batch.set(docRef, status.toMap());
-      }
-
-      await batch.commit();
-      _statuses = defaultStatuses;
-      notifyListeners();
-    } catch (e) {
-      _error = 'Error initializing default statuses: $e';
-      if (kDebugMode) {
-        print(_error);
-      }
-      notifyListeners();
-    }
   }
 
   // Clear error message

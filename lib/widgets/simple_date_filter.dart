@@ -38,12 +38,12 @@ class _SimpleDateFilterState extends State<SimpleDateFilter> {
       onTap: _showDatePicker,
       child: Container(
         height: 48,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         decoration: BoxDecoration(
           border: Border.all(color: Colors.grey.shade400),
           borderRadius: BorderRadius.circular(4),
           color: (_tempStartDate != null)
-              ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.1)
+              ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.05)
               : null,
         ),
         child: Row(
@@ -61,9 +61,12 @@ class _SimpleDateFilterState extends State<SimpleDateFilter> {
                 _getDisplayText(),
                 style: TextStyle(
                   fontSize: 14,
+                  fontWeight: (_tempStartDate != null)
+                      ? FontWeight.w500
+                      : FontWeight.normal,
                   color: (_tempStartDate != null)
-                      ? Theme.of(context).colorScheme.primary
-                      : Colors.grey.shade700,
+                      ? Colors.black
+                      : Colors.grey.shade600,
                 ),
                 overflow: TextOverflow.ellipsis,
               ),
@@ -80,11 +83,12 @@ class _SimpleDateFilterState extends State<SimpleDateFilter> {
                 },
                 child: Icon(
                   Icons.clear,
-                  size: 16,
-                  color: Colors.grey.shade600,
+                  size: 18,
+                  color: Colors.grey.shade700,
                 ),
               ),
-            ],
+            ] else
+              Icon(Icons.arrow_drop_down, color: Colors.grey[700]),
           ],
         ),
       ),

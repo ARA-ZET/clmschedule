@@ -39,11 +39,11 @@ class ScheduleJobCell extends StatelessWidget {
         final draggedJob = jobDetails.data;
 
         // Check if dropping on the same day and distributor (no changes)
-        final isSameDayAndDistributor = draggedJob.distributorId ==
-                distributor.id &&
-            draggedJob.date.year == date.year &&
-            draggedJob.date.month == date.month &&
-            draggedJob.date.day == date.day;
+        final isSameDayAndDistributor =
+            draggedJob.distributorId == distributor.id &&
+                draggedJob.date.year == date.year &&
+                draggedJob.date.month == date.month &&
+                draggedJob.date.day == date.day;
 
         if (isSameDayAndDistributor) {
           // Show feedback that no changes will be made

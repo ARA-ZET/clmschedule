@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'job_list_item_update.dart';
 import 'custom_polygon.dart';
+import 'job_reminder.dart';
 
 // Legacy enum for backwards compatibility during migration
 enum JobListStatus {
@@ -105,6 +106,7 @@ class JobListItem {
   final String collectionJobId; // Link to collection schedule job
   final List<JobListItemUpdate> updates; // Track all changes
   final List<CustomPolygon> customPolygons; // Custom polygons for map areas
+  final List<JobReminder> reminders; // List of reminders for invoice chase
 
   JobListItem({
     required this.id,
@@ -128,6 +130,7 @@ class JobListItem {
     this.collectionJobId = '', // Optional link to collection job
     this.updates = const [], // Default to empty list
     this.customPolygons = const [], // Default to empty list
+    this.reminders = const [], // List of reminders
   });
 
   // Create from Firestore
@@ -176,6 +179,16 @@ class JobListItem {
           .toList();
     }
 
+    // Parse reminders
+    List<JobReminder> reminders = [];
+    if (data['reminders'] != null) {
+      final remindersData = data['reminders'] as List<dynamic>;
+      reminders = remindersData
+          .map((reminderData) =>
+              JobReminder.fromMap(reminderData as Map<String, dynamic>))
+          .toList();
+    }
+
     return JobListItem(
       id: id,
       invoice: data['invoice'] as String? ?? '',
@@ -205,6 +218,7 @@ class JobListItem {
       collectionJobId: data['collectionJobId'] as String? ?? '',
       updates: updates,
       customPolygons: customPolygons,
+      reminders: reminders,
     );
   }
 
@@ -232,6 +246,7 @@ class JobListItem {
       'updates': updates.map((update) => update.toMap()).toList(),
       'customPolygons':
           customPolygons.map((polygon) => polygon.toMap()).toList(),
+      'reminders': reminders.map((reminder) => reminder.toMap()).toList(),
     };
   }
 
@@ -258,6 +273,7 @@ class JobListItem {
     String? collectionJobId,
     List<JobListItemUpdate>? updates,
     List<CustomPolygon>? customPolygons,
+    List<JobReminder>? reminders,
   }) {
     return JobListItem(
       id: id,
@@ -281,6 +297,7 @@ class JobListItem {
       collectionJobId: collectionJobId ?? this.collectionJobId,
       updates: updates ?? this.updates,
       customPolygons: customPolygons ?? this.customPolygons,
+      reminders: reminders ?? this.reminders,
     );
   }
 
@@ -307,6 +324,10 @@ class JobListItem {
     String? whoToInvoice,
     String? collectionJobId,
     List<CustomPolygon>? customPolygons,
+    // Helper functions to resolve display labels
+    String? Function(String statusId)? resolveJobStatusLabel,
+    String? Function(String statusId)? resolveInvoiceStatusLabel,
+    String? Function(int quantity, JobType jobType)? resolveQuantityLabel,
   }) {
     final List<JobListItemUpdate> newUpdates = List.from(updates);
 
@@ -352,6 +373,8 @@ class JobListItem {
         newValue: jobStatusId,
         timestamp: DateTime.now(),
         userDisplayName: userDisplayName,
+        oldValueDisplay: resolveJobStatusLabel?.call(this.jobStatusId),
+        newValueDisplay: resolveJobStatusLabel?.call(jobStatusId),
       ));
     }
 
@@ -363,6 +386,8 @@ class JobListItem {
         newValue: invoiceStatusId,
         timestamp: DateTime.now(),
         userDisplayName: userDisplayName,
+        oldValueDisplay: resolveInvoiceStatusLabel?.call(this.invoiceStatusId),
+        newValueDisplay: resolveInvoiceStatusLabel?.call(invoiceStatusId),
       ));
     }
 
@@ -396,6 +421,10 @@ class JobListItem {
         newValue: quantity,
         timestamp: DateTime.now(),
         userDisplayName: userDisplayName,
+        oldValueDisplay:
+            resolveQuantityLabel?.call(this.quantity, jobType ?? this.jobType),
+        newValueDisplay:
+            resolveQuantityLabel?.call(quantity, jobType ?? this.jobType),
       ));
     }
 

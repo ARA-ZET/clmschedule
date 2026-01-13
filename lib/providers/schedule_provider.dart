@@ -42,16 +42,21 @@ class ScheduleProvider extends ChangeNotifier {
   ScheduleProvider(
       {FirestoreService? firestoreService, UndoRedoManager? undoRedoManager})
       : _firestoreService = firestoreService ?? FirestoreService(),
-        _undoRedoManager = undoRedoManager ?? UndoRedoManager() {
-    _initStreams();
+        _undoRedoManager = undoRedoManager ?? UndoRedoManager();
+  // Don't initialize streams in constructor - let it be done async
+
+  // Initialize streams asynchronously without blocking
+  Future<void> initialize() async {
+    await _initStreamsAsync();
   }
 
-  void _initStreams() {
-    _loadDataForMonth(_currentMonth);
+  // Load data streams asynchronously and concurrently
+  Future<void> _initStreamsAsync() async {
+    await _loadDataForMonthAsync(_currentMonth);
   }
 
-  // Load data for a specific month (and next month)
-  void _loadDataForMonth(DateTime month) {
+  // Load data for a specific month (and next month) - async version
+  Future<void> _loadDataForMonthAsync(DateTime month) async {
     // Cancel existing subscriptions
     _distributorsSubscription?.cancel();
     _currentMonthJobsSubscription?.cancel();
@@ -64,38 +69,42 @@ class ScheduleProvider extends ChangeNotifier {
     print(
         'ScheduleProvider: Starting streams for current month: ${_firestoreService.getMonthlyDocumentId(month)} and next month: ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
 
-    // Listen to distributors stream from root collection (not monthly)
-    _distributorsSubscription = _firestoreService.streamDistributors().listen((
-      distributors,
-    ) {
-      _distributors = distributors;
-      notifyListeners();
-    });
+    // Start all streams concurrently without blocking
+    await Future.microtask(() {
+      // Listen to distributors stream from root collection (not monthly)
+      _distributorsSubscription =
+          _firestoreService.streamDistributors().listen((
+        distributors,
+      ) {
+        _distributors = distributors;
+        notifyListeners();
+      });
 
-    // Listen to jobs stream for the current month
-    _currentMonthJobsSubscription =
-        _firestoreService.streamJobs(month).listen((jobs) {
-      _currentMonthJobs = jobs;
-      print(
-          'ScheduleProvider: Received ${jobs.length} jobs for current month ${_firestoreService.getMonthlyDocumentId(month)}');
-      notifyListeners();
-    });
+      // Listen to jobs stream for the current month
+      _currentMonthJobsSubscription =
+          _firestoreService.streamJobs(month).listen((jobs) {
+        _currentMonthJobs = jobs;
+        print(
+            'ScheduleProvider: Received ${jobs.length} jobs for current month ${_firestoreService.getMonthlyDocumentId(month)}');
+        notifyListeners();
+      });
 
-    // Listen to jobs stream for the next month
-    _nextMonthJobsSubscription =
-        _firestoreService.streamJobs(nextMonth).listen((jobs) {
-      _nextMonthJobs = jobs;
-      print(
-          'ScheduleProvider: Received ${jobs.length} jobs for next month ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
-      notifyListeners();
-    });
+      // Listen to jobs stream for the next month
+      _nextMonthJobsSubscription =
+          _firestoreService.streamJobs(nextMonth).listen((jobs) {
+        _nextMonthJobs = jobs;
+        print(
+            'ScheduleProvider: Received ${jobs.length} jobs for next month ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
+        notifyListeners();
+      });
 
-    // Listen to work areas stream from root collection (not monthly)
-    _workAreasSubscription = _firestoreService.streamWorkAreas().listen((
-      workAreas,
-    ) {
-      _workAreas = workAreas;
-      notifyListeners();
+      // Listen to work areas stream from root collection (not monthly)
+      _workAreasSubscription = _firestoreService.streamWorkAreas().listen((
+        workAreas,
+      ) {
+        _workAreas = workAreas;
+        notifyListeners();
+      });
     });
   }
 
@@ -103,7 +112,7 @@ class ScheduleProvider extends ChangeNotifier {
   void setCurrentMonth(DateTime month) {
     if (_currentMonth != month) {
       _currentMonth = month;
-      _loadDataForMonth(_currentMonth);
+      _loadDataForMonthAsync(_currentMonth);
       notifyListeners();
     }
   }

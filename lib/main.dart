@@ -10,6 +10,7 @@ import 'providers/job_list_provider.dart';
 import 'providers/job_status_provider.dart';
 import 'providers/job_list_status_provider.dart';
 import 'providers/invoice_status_provider.dart';
+import 'providers/job_list_preferences_provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/vehicle_driver_provider.dart';
@@ -36,6 +37,7 @@ import 'services/version_service.dart';
 import 'utils/seed_data.dart';
 import 'services/work_area_service.dart';
 import 'services/job_list_service.dart';
+import 'services/job_list_preferences_service.dart';
 import 'services/user_service.dart';
 import 'services/chat_service.dart';
 import 'models/command.dart';
@@ -104,6 +106,10 @@ void main() async {
       create: (context) => JobListService(FirebaseFirestore.instance),
     ),
     Provider(
+      create: (context) =>
+          JobListPreferencesService(FirebaseFirestore.instance),
+    ),
+    Provider(
       create: (context) => UserService(FirebaseFirestore.instance),
     ),
     Provider(
@@ -117,6 +123,18 @@ void main() async {
     ),
     ChangeNotifierProvider(
       create: (context) => InvoiceStatusProvider(),
+    ),
+    ChangeNotifierProxyProvider<AuthProvider, JobListPreferencesProvider>(
+      create: (context) => JobListPreferencesProvider(
+        context.read<JobListPreferencesService>(),
+        context.read<AuthProvider>(),
+      ),
+      update: (context, authProvider, previous) =>
+          previous ??
+          JobListPreferencesProvider(
+            context.read<JobListPreferencesService>(),
+            authProvider,
+          ),
     ),
     ChangeNotifierProxyProvider2<UndoRedoManager, AuthProvider,
         JobListProvider>(
@@ -145,15 +163,17 @@ void main() async {
             authProvider,
           ),
     ),
+    // CollectionScheduleProvider no longer automatically updates with JobListProvider changes
+    // It uses lazy loading - only loads data when tab is opened
     ChangeNotifierProxyProvider<JobListProvider, CollectionScheduleProvider>(
       create: (context) => CollectionScheduleProvider(
         jobListProvider: context.read<JobListProvider>(),
       ),
-      update: (context, jobListProvider, previous) =>
-          previous ??
-          CollectionScheduleProvider(
-            jobListProvider: jobListProvider,
-          ),
+      update: (context, jobListProvider, previous) {
+        // Always return the existing instance to prevent rebuilds on every JobListProvider change
+        // Collection schedule will manually refresh when needed via refresh() method
+        return previous!;
+      },
     ),
   ], child: const MyApp()));
 }
@@ -167,19 +187,38 @@ class MyApp extends StatefulWidget {
 
 class _MyAppState extends State<MyApp> {
   late final VersionService _versionService;
+  bool _isInitialized = false;
 
   @override
   void initState() {
     super.initState();
-    // Initialize authentication after first frame
+    // Initialize all providers asynchronously in parallel
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<AuthProvider>().initialize();
-
-      // Initialize version checking for web only
-      if (kIsWeb) {
-        _initializeVersionCheck();
-      }
+      _initializeProvidersAsync();
     });
+  }
+
+  Future<void> _initializeProvidersAsync() async {
+    if (_isInitialized) return;
+
+    // Run all provider initializations in parallel for fast startup
+    await Future.wait([
+      context.read<AuthProvider>().initialize(),
+      context.read<ScheduleProvider>().initialize(),
+      context.read<JobListProvider>().initialize(),
+      // CollectionScheduleProvider loads lazily when tab opens (depends on JobListProvider data)
+    ]);
+
+    // Initialize version checking for web only
+    if (kIsWeb && mounted) {
+      _initializeVersionCheck();
+    }
+
+    if (mounted) {
+      setState(() {
+        _isInitialized = true;
+      });
+    }
   }
 
   void _initializeVersionCheck() {
@@ -215,11 +254,27 @@ class _MyAppState extends State<MyApp> {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
-      home: AuthGate(
-        child: KeyboardShortcutsService.initializeShortcuts(
-          child: const DashboardScreen(),
-        ),
-      ),
+      home: _isInitialized
+          ? AuthGate(
+              child: KeyboardShortcutsService.initializeShortcuts(
+                child: const DashboardScreen(),
+              ),
+            )
+          : const Scaffold(
+              body: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 16),
+                    Text(
+                      'Loading CLM Dashboard...',
+                      style: TextStyle(fontSize: 16),
+                    ),
+                  ],
+                ),
+              ),
+            ),
     );
   }
 }
@@ -291,7 +346,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   Widget build(BuildContext context) {
     final isSmallScreen = MediaQuery.of(context).size.width < 600;
     final isMediumScreen = MediaQuery.of(context).size.width < 900;
-    
+
     return Scaffold(
         backgroundColor: const Color.fromARGB(255, 222, 222, 222),
         appBar: AppBar(
@@ -321,7 +376,8 @@ class _DashboardScreenState extends State<DashboardScreen>
             dividerColor: Colors.transparent,
             splashFactory: NoSplash.splashFactory,
             overlayColor: WidgetStateProperty.all(Colors.transparent),
-            tabAlignment: isSmallScreen ? TabAlignment.start : TabAlignment.fill,
+            tabAlignment:
+                isSmallScreen ? TabAlignment.start : TabAlignment.fill,
             labelPadding: EdgeInsets.symmetric(
               horizontal: isSmallScreen ? 12 : 16,
             ),
@@ -592,14 +648,16 @@ class _ScheduleTabState extends State<ScheduleTab>
   @override
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
-    return Stack(
-      children: [
-        Consumer<ScheduleProvider>(
-          builder: (context, scheduleProvider, child) {
-            final isLoading = scheduleProvider.distributors.isEmpty &&
-                scheduleProvider.jobs.isEmpty;
 
-            return LazyLoadingIndicator(
+    return Consumer<ScheduleProvider>(
+      builder: (context, scheduleProvider, child) {
+        // No initialization needed - provider is preloaded in main.dart
+        final isLoading = scheduleProvider.distributors.isEmpty &&
+            scheduleProvider.jobs.isEmpty;
+
+        return Stack(
+          children: [
+            LazyLoadingIndicator(
               isLoading: isLoading,
               message: 'Loading Schedule...',
               child: isLoading
@@ -608,16 +666,16 @@ class _ScheduleTabState extends State<ScheduleTab>
                       child: const SizedBox.expand(),
                     )
                   : const ScheduleGrid(),
-            );
-          },
-        ),
-        // Floating undo/redo button for Schedule tab
-        const Positioned(
-          bottom: 16,
-          right: 16,
-          child: UndoRedoFAB(heroTag: "schedule"),
-        ),
-      ],
+            ),
+            // Floating undo/redo button for Schedule tab
+            const Positioned(
+              bottom: 16,
+              right: 16,
+              child: UndoRedoFAB(heroTag: "schedule"),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -631,27 +689,8 @@ class JobListTab extends StatefulWidget {
 
 class _JobListTabState extends State<JobListTab>
     with AutomaticKeepAliveClientMixin {
-  bool _isInitialized = false;
-
   @override
   bool get wantKeepAlive => true;
-
-  @override
-  void initState() {
-    super.initState();
-    // Initialize JobList data asynchronously
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeJobListData();
-    });
-  }
-
-  Future<void> _initializeJobListData() async {
-    if (!_isInitialized && mounted) {
-      setState(() {
-        _isInitialized = true;
-      });
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -660,7 +699,7 @@ class _JobListTabState extends State<JobListTab>
     return Consumer<JobListProvider>(
       builder: (context, jobListProvider, child) {
         // Show error state if there's an error
-        if (jobListProvider.error != null && _isInitialized) {
+        if (jobListProvider.error != null && jobListProvider.isInitialized) {
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -684,11 +723,8 @@ class _JobListTabState extends State<JobListTab>
                 const SizedBox(height: 16),
                 ElevatedButton(
                   onPressed: () {
-                    // Retry loading
-                    setState(() {
-                      _isInitialized = false;
-                    });
-                    _initializeJobListData();
+                    // Retry by reinitializing
+                    jobListProvider.initialize();
                   },
                   child: const Text('Retry'),
                 ),
@@ -697,13 +733,11 @@ class _JobListTabState extends State<JobListTab>
           );
         }
 
-        // Show loading state
-        if (!_isInitialized || jobListProvider.isLoading) {
+        // Show loading state only if not initialized yet
+        if (!jobListProvider.isInitialized) {
           return LazyLoadingIndicator(
             isLoading: true,
-            message: _isInitialized
-                ? 'Loading Job List Data...'
-                : 'Initializing Job List...',
+            message: 'Initializing Job List...',
             child: Container(
               color: Theme.of(context).scaffoldBackgroundColor,
               child: const SizedBox.expand(),
@@ -739,13 +773,25 @@ class _CollectionScheduleTabState extends State<CollectionScheduleTab>
   @override
   bool get wantKeepAlive => true;
 
+  bool _hasInitialized = false;
+
   @override
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
     return Consumer<CollectionScheduleProvider>(
       builder: (context, collectionProvider, child) {
-        final isLoading = collectionProvider.collectionJobs.isEmpty &&
-            collectionProvider.workAreas.isEmpty;
+        // Initialize the provider when the tab is first opened
+        if (!_hasInitialized) {
+          _hasInitialized = true;
+          // Call initialize after the current frame to avoid calling during build
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            collectionProvider.initialize();
+          });
+        }
+
+        final isLoading = collectionProvider.isLoading ||
+            (!collectionProvider.isInitialized &&
+                collectionProvider.collectionJobs.isEmpty);
 
         return Stack(
           children: [
