@@ -6,13 +6,9 @@ import '../models/schedule.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
 import '../services/firestore_service.dart';
-import '../services/undo_redo_manager.dart';
-import '../commands/schedule_commands.dart';
-import '../commands/map_commands.dart';
 
 class ScheduleProvider extends ChangeNotifier {
   final FirestoreService _firestoreService;
-  final UndoRedoManager _undoRedoManager;
 
   List<Distributor> _distributors = [];
   List<Job> _currentMonthJobs = [];
@@ -37,12 +33,9 @@ class ScheduleProvider extends ChangeNotifier {
 
   // Helper method to check if the next month has any jobs
   bool get hasJobsInNextMonth => _nextMonthJobs.isNotEmpty;
-  UndoRedoManager get undoRedoManager => _undoRedoManager;
 
-  ScheduleProvider(
-      {FirestoreService? firestoreService, UndoRedoManager? undoRedoManager})
-      : _firestoreService = firestoreService ?? FirestoreService(),
-        _undoRedoManager = undoRedoManager ?? UndoRedoManager();
+  ScheduleProvider({FirestoreService? firestoreService})
+      : _firestoreService = firestoreService ?? FirestoreService();
   // Don't initialize streams in constructor - let it be done async
 
   // Initialize streams asynchronously without blocking
@@ -262,15 +255,30 @@ class ScheduleProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> deleteJob(String jobId) async {
+  Future<void> deleteJob(String jobId, [DateTime? targetDate]) async {
     try {
       // Find the job to get its date for proper monthly context
       final job = jobs.where((j) => j.id == jobId).firstOrNull;
-      final jobDate = job?.date ?? _currentMonth;
+      final jobDate = targetDate ?? job?.date ?? _currentMonth;
       await _firestoreService.deleteJob(jobId, jobDate);
       print('Successfully deleted job $jobId');
     } catch (e) {
       print('Error deleting job: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> moveJobBetweenDates(Job originalJob, Job movedJob) async {
+    try {
+      await _firestoreService.moveJobBetweenDates(
+        originalJob,
+        movedJob,
+        originalJob.date,
+        movedJob.date,
+      );
+      print('Successfully moved job ${originalJob.id}');
+    } catch (e) {
+      print('Error moving job: $e');
       rethrow;
     }
   }
@@ -303,160 +311,200 @@ class ScheduleProvider extends ChangeNotifier {
   String get nextMonthDisplay =>
       _firestoreService.getMonthlyDocumentId(nextMonth);
 
-  // Undo/Redo functionality for schedule operations
+  // Undo/Redo functionality for schedule operations - DISABLED
+  // Direct operations without command pattern to avoid state corruption
   Future<void> addJobWithUndo(Job job, DateTime targetDate) async {
-    final command = AddJobCommand(
-      service: _firestoreService,
-      job: job,
-      targetDate: targetDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    // Bypass command pattern - add job directly
+    await addJob(job);
   }
 
   Future<void> updateJobWithUndo(
       Job originalJob, Job modifiedJob, DateTime targetDate) async {
+    // Bypass command pattern - update job directly
+    print('=== UPDATE JOB WITH UNDO DEBUG ===');
+    print('OriginalJob:');
+    print('  ID: ${originalJob.id}');
+    print('  Clients: ${originalJob.clients}');
+    print('  WorkingAreas: ${originalJob.workingAreas}');
+    print('  WorkMaps: ${originalJob.workMaps.length}');
+    print('  Date: ${originalJob.date}');
+    print('ModifiedJob:');
+    print('  ID: ${modifiedJob.id}');
+    print('  Clients: ${modifiedJob.clients}');
+    print('  WorkingAreas: ${modifiedJob.workingAreas}');
+    print('  WorkMaps: ${modifiedJob.workMaps.length}');
+    print('  Date: ${modifiedJob.date}');
+    print('==================================');
+
     // Check if we're moving the job to a different date
     if (originalJob.date.year != modifiedJob.date.year ||
         originalJob.date.month != modifiedJob.date.month ||
         originalJob.date.day != modifiedJob.date.day) {
-      // Use the move command for cross-date moves
-      await moveJobBetweenDatesWithUndo(
-        originalJob,
-        modifiedJob,
-        originalJob.date,
-        modifiedJob.date,
-      );
+      // Move between dates
+      print('Moving job between dates');
+      await moveJobBetweenDates(originalJob, modifiedJob);
     } else {
-      // Use the regular edit command for same-date updates
-      final command = EditJobCommand(
-        service: _firestoreService,
-        originalJob: originalJob,
-        modifiedJob: modifiedJob,
-        targetDate: targetDate,
-      );
-      await undoRedoManager.executeCommand(
-          command, UndoRedoContext.scheduleGrid);
+      // Regular update
+      print('Regular update (same date)');
+      await updateJob(modifiedJob);
     }
   }
 
   Future<void> moveJobBetweenDatesWithUndo(Job originalJob, Job movedJob,
       DateTime originalDate, DateTime newDate) async {
-    final command = MoveJobBetweenDatesCommand(
-      service: _firestoreService,
-      originalJob: originalJob,
-      movedJob: movedJob,
-      originalDate: originalDate,
-      newDate: newDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    // Bypass command pattern - move job directly
+    await moveJobBetweenDates(originalJob, movedJob);
   }
 
   Future<void> deleteJobWithUndo(Job job, DateTime targetDate) async {
-    final command = DeleteJobCommand(
-      service: _firestoreService,
-      job: job,
-      targetDate: targetDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    // Bypass command pattern - delete job directly
+    await deleteJob(job.id, targetDate);
   }
 
   Future<void> updateJobStatusWithUndo(String jobId, String newStatusId,
       String originalStatusId, DateTime targetDate) async {
-    final command = UpdateJobStatusCommand(
-      service: _firestoreService,
-      jobId: jobId,
-      newStatusId: newStatusId,
-      originalStatusId: originalStatusId,
-      targetDate: targetDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    // Bypass command pattern - update status directly
+    final job = jobs.firstWhere((j) => j.id == jobId);
+
+    // Debug logging
+    print('=== UPDATE JOB STATUS DEBUG ===');
+    print('Original job:');
+    print('  ID: ${job.id}');
+    print('  StatusId: ${job.statusId}');
+    print('  Clients: ${job.clients}');
+    print('  WorkingAreas: ${job.workingAreas}');
+    print('  WorkMaps count: ${job.workMaps.length}');
+
+    final updatedJob = job.copyWith(statusId: newStatusId);
+
+    print('Updated job after copyWith:');
+    print('  ID: ${updatedJob.id}');
+    print('  StatusId: ${updatedJob.statusId}');
+    print('  Clients: ${updatedJob.clients}');
+    print('  WorkingAreas: ${updatedJob.workingAreas}');
+    print('  WorkMaps count: ${updatedJob.workMaps.length}');
+    print('===============================');
+
+    await updateJob(updatedJob);
   }
 
   Future<void> swapJobsWithUndo(
       Job draggedJob, Job targetJob, DateTime targetDate) async {
-    final command = SwapJobsCommand(
-      service: _firestoreService,
-      draggedJob: draggedJob,
-      targetJob: targetJob,
-      targetDate: targetDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    // Bypass command pattern - swap jobs directly
+    print('=== SWAP JOBS PROVIDER DEBUG ===');
+    print('DraggedJob before swap:');
+    print('  ID: ${draggedJob.id}');
+    print('  Clients: ${draggedJob.clients}');
+    print('  WorkMaps: ${draggedJob.workMaps.length}');
+    print('  DistributorId: ${draggedJob.distributorId}');
+    print('TargetJob before swap:');
+    print('  ID: ${targetJob.id}');
+    print('  Clients: ${targetJob.clients}');
+    print('  WorkMaps: ${targetJob.workMaps.length}');
+    print('  DistributorId: ${targetJob.distributorId}');
+
+    // Swap distributor IDs
+    final swappedDraggedJob =
+        draggedJob.copyWith(distributorId: targetJob.distributorId);
+    final swappedTargetJob =
+        targetJob.copyWith(distributorId: draggedJob.distributorId);
+
+    print('After copyWith:');
+    print('SwappedDraggedJob:');
+    print('  Clients: ${swappedDraggedJob.clients}');
+    print('  WorkMaps: ${swappedDraggedJob.workMaps.length}');
+    print('  DistributorId: ${swappedDraggedJob.distributorId}');
+    print('SwappedTargetJob:');
+    print('  Clients: ${swappedTargetJob.clients}');
+    print('  WorkMaps: ${swappedTargetJob.workMaps.length}');
+    print('  DistributorId: ${swappedTargetJob.distributorId}');
+    print('===============================');
+
+    await updateJob(swappedDraggedJob);
+    await updateJob(swappedTargetJob);
   }
 
   Future<void> combineJobsWithUndo(Job draggedJob, Job targetJob,
       Job combinedJob, DateTime targetDate) async {
-    final command = CombineJobsCommand(
-      service: _firestoreService,
-      draggedJob: draggedJob,
-      targetJob: targetJob,
-      combinedJob: combinedJob,
-      targetDate: targetDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    // Bypass command pattern - combine jobs directly
+    print('=== COMBINE JOBS PROVIDER DEBUG ===');
+    print('DraggedJob to delete:');
+    print('  ID: ${draggedJob.id}');
+    print('  Clients: ${draggedJob.clients}');
+    print('  WorkMaps: ${draggedJob.workMaps.length}');
+    print('CombinedJob to save:');
+    print('  ID: ${combinedJob.id}');
+    print('  Clients: ${combinedJob.clients}');
+    print('  WorkingAreas: ${combinedJob.workingAreas}');
+    print('  WorkMaps: ${combinedJob.workMaps.length}');
+    print('===================================');
+
+    await deleteJob(draggedJob.id, targetDate);
+    await updateJob(combinedJob);
   }
 
   Future<void> copyAndCombineJobsWithUndo(
       Job targetJob, Job combinedJob, DateTime targetDate) async {
-    final command = CopyAndCombineJobsCommand(
-      service: _firestoreService,
-      targetJob: targetJob,
-      combinedJob: combinedJob,
-      targetDate: targetDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    // Bypass command pattern - copy and combine jobs directly
+    print('=== COPY & COMBINE PROVIDER DEBUG ===');
+    print('TargetJob (will keep in place):');
+    print('  ID: ${targetJob.id}');
+    print('  Clients: ${targetJob.clients}');
+    print('  WorkMaps: ${targetJob.workMaps.length}');
+    print('CombinedJob (to save):');
+    print('  ID: ${combinedJob.id}');
+    print('  Clients: ${combinedJob.clients}');
+    print('  WorkingAreas: ${combinedJob.workingAreas}');
+    print('  WorkMaps: ${combinedJob.workMaps.length}');
+    print('=====================================');
+
+    await updateJob(combinedJob);
   }
 
-  // Undo/Redo functionality for map operations
+  // Undo/Redo functionality for map operations - DISABLED
   Future<void> addPolygonWithUndo(
       String jobId, CustomPolygon polygon, DateTime targetDate) async {
-    final command = AddPolygonToJobCommand(
-      service: _firestoreService,
-      jobId: jobId,
-      polygon: polygon,
-      targetDate: targetDate,
+    // Bypass command pattern - add polygon directly
+    final job = jobs.firstWhere((j) => j.id == jobId);
+    final updatedJob = job.copyWith(
+      workMaps: [...job.workMaps, polygon],
     );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    await updateJob(updatedJob);
   }
 
   Future<void> editPolygonWithUndo(String jobId, CustomPolygon originalPolygon,
       CustomPolygon modifiedPolygon, DateTime targetDate) async {
-    final command = EditPolygonInJobCommand(
-      service: _firestoreService,
-      jobId: jobId,
-      originalPolygon: originalPolygon,
-      modifiedPolygon: modifiedPolygon,
-      targetDate: targetDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    // Bypass command pattern - edit polygon directly
+    final job = jobs.firstWhere((j) => j.id == jobId);
+    final updatedMaps = job.workMaps
+        .map((p) => p.name == originalPolygon.name ? modifiedPolygon : p)
+        .toList();
+    final updatedJob = job.copyWith(workMaps: updatedMaps);
+    await updateJob(updatedJob);
   }
 
   Future<void> deletePolygonWithUndo(
       String jobId, CustomPolygon polygon, DateTime targetDate) async {
-    final command = DeletePolygonFromJobCommand(
-      service: _firestoreService,
-      jobId: jobId,
-      polygon: polygon,
-      targetDate: targetDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.scheduleGrid);
+    // Bypass command pattern - delete polygon directly
+    final job = jobs.firstWhere((j) => j.id == jobId);
+    final updatedMaps =
+        job.workMaps.where((p) => p.name != polygon.name).toList();
+    final updatedJob = job.copyWith(workMaps: updatedMaps);
+    await updateJob(updatedJob);
   }
 
-  // Access to schedule grid undo/redo functionality (includes map operations)
-  bool get canUndo =>
-      undoRedoManager.canUndoForContext(UndoRedoContext.scheduleGrid);
-  bool get canRedo =>
-      undoRedoManager.canRedoForContext(UndoRedoContext.scheduleGrid);
-  String? get nextUndoDescription => undoRedoManager
-      .nextUndoDescriptionForContext(UndoRedoContext.scheduleGrid);
-  String? get nextRedoDescription => undoRedoManager
-      .nextRedoDescriptionForContext(UndoRedoContext.scheduleGrid);
+  // Undo/Redo no longer available - stubs for compatibility
+  bool get canUndo => false;
+  bool get canRedo => false;
+  String? get nextUndoDescription => null;
+  String? get nextRedoDescription => null;
 
   Future<bool> undo() async {
-    return await undoRedoManager.undo(UndoRedoContext.scheduleGrid);
+    return false;
   }
 
   Future<bool> redo() async {
-    return await undoRedoManager.redo(UndoRedoContext.scheduleGrid);
+    return false;
   }
 
   @override

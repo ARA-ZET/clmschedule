@@ -1,0 +1,240 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../models/inventory_tool.dart';
+import '../providers/inventory_provider.dart';
+import 'qr_code_display_dialog.dart';
+import 'add_tool_dialog.dart';
+
+class ToolDetailsDialog extends StatelessWidget {
+  final InventoryTool tool;
+
+  const ToolDetailsDialog({super.key, required this.tool});
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      child: Container(
+        width: 600,
+        constraints: const BoxConstraints(maxHeight: 700),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Header
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Theme.of(context).primaryColor,
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(4)),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      tool.name,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+            ),
+            // Content
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Image
+                    Center(
+                      child: Container(
+                        width: 200,
+                        height: 200,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[200],
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: tool.imageUrl != null
+                            ? ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.network(
+                                  tool.imageUrl!,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (context, error, stackTrace) {
+                                    return const Icon(Icons.construction,
+                                        size: 80, color: Colors.grey);
+                                  },
+                                ),
+                              )
+                            : const Icon(Icons.construction,
+                                size: 80, color: Colors.grey),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    // Details
+                    _buildDetailRow('Tool ID', tool.toolId),
+                    _buildDetailRow('Category', tool.category),
+                    _buildDetailRow(
+                        'Status', tool.isAvailable ? 'Available' : 'In Use'),
+                    if (!tool.isAvailable && tool.currentProject != null)
+                      _buildDetailRow('Current Project', tool.currentProject!),
+                    if (tool.description.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Description',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(tool.description),
+                    ],
+                    if (tool.lastUsed != null) ...[
+                      const SizedBox(height: 16),
+                      _buildDetailRow('Last Used', _formatDate(tool.lastUsed!)),
+                    ],
+                    const SizedBox(height: 24),
+                    // QR Code
+                    Center(
+                      child: Column(
+                        children: [
+                          const Text(
+                            'QR Code',
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 16),
+                          ),
+                          const SizedBox(height: 8),
+                          ElevatedButton.icon(
+                            onPressed: () {
+                              showDialog(
+                                context: context,
+                                builder: (context) =>
+                                    QrCodeDisplayDialog(tool: tool),
+                              );
+                            },
+                            icon: const Icon(Icons.qr_code),
+                            label: const Text('View & Print QR Code'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Actions
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.grey[100],
+                borderRadius:
+                    const BorderRadius.vertical(bottom: Radius.circular(4)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Close'),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      // Open edit dialog
+                      showDialog(
+                        context: context,
+                        builder: (context) => AddToolDialog(tool: tool),
+                      );
+                    },
+                    child: const Text('Edit'),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: () async {
+                      final confirmed = await showDialog<bool>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('Delete Tool'),
+                          content: Text(
+                              'Are you sure you want to delete ${tool.name}?'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(false),
+                              child: const Text('Cancel'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(true),
+                              style: TextButton.styleFrom(
+                                  foregroundColor: Colors.red),
+                              child: const Text('Delete'),
+                            ),
+                          ],
+                        ),
+                      );
+
+                      if (confirmed == true && context.mounted) {
+                        try {
+                          await context
+                              .read<InventoryProvider>()
+                              .deleteTool(tool.id);
+                          if (context.mounted) {
+                            Navigator.of(context).pop();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('Tool deleted successfully')),
+                            );
+                          }
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                  content: Text('Error deleting tool: $e')),
+                            );
+                          }
+                        }
+                      }
+                    },
+                    style:
+                        ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                    child: const Text('Delete'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 120,
+            child: Text(
+              label,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+          Expanded(child: Text(value)),
+        ],
+      ),
+    );
+  }
+
+  String _formatDate(DateTime date) {
+    return '${date.day}/${date.month}/${date.year}';
+  }
+}

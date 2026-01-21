@@ -86,6 +86,7 @@ class Job {
   }
 
   // Create a copy of job with some fields updated
+  // Deep copies lists to prevent mutation issues
   Job copyWith({
     List<String>? clients,
     List<String>? workingAreas,
@@ -96,9 +97,30 @@ class Job {
   }) {
     return Job(
       id: id,
-      clients: clients ?? this.clients,
-      workingAreas: workingAreas ?? this.workingAreas,
-      workMaps: workMaps ?? this.workMaps,
+      clients: clients != null
+          ? List<String>.from(clients)
+          : List<String>.from(this.clients),
+      workingAreas: workingAreas != null
+          ? List<String>.from(workingAreas)
+          : List<String>.from(this.workingAreas),
+      workMaps: workMaps != null
+          ? workMaps
+              .map((wm) => CustomPolygon(
+                    name: wm.name,
+                    description: wm.description,
+                    points: List.from(wm.points),
+                    color: wm.color,
+                  ))
+              .toList()
+          : this
+              .workMaps
+              .map((wm) => CustomPolygon(
+                    name: wm.name,
+                    description: wm.description,
+                    points: List.from(wm.points),
+                    color: wm.color,
+                  ))
+              .toList(),
       distributorId: distributorId ?? this.distributorId,
       date: date ?? this.date,
       statusId: statusId ?? this.statusId,

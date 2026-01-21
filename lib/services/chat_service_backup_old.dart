@@ -35,11 +35,11 @@
 //     // Try current month first
 //     final currentMonth = _getCurrentMonthDocument();
 //     final currentSnapshot = await currentMonth.get();
-    
+
 //     if (currentSnapshot.exists) {
 //       final data = currentSnapshot.data() as Map<String, dynamic>?;
 //       final messages = data?['messages'] as List<dynamic>? ?? [];
-      
+
 //       for (var messageData in messages) {
 //         if (messageData['id'] == messageId) {
 //           return {
@@ -56,11 +56,11 @@
 //       final pastDate = DateTime(now.year, now.month - i, 1);
 //       final pastMonth = _getMonthDocument(pastDate);
 //       final pastSnapshot = await pastMonth.get();
-      
+
 //       if (pastSnapshot.exists) {
 //         final data = pastSnapshot.data() as Map<String, dynamic>?;
 //         final messages = data?['messages'] as List<dynamic>? ?? [];
-        
+
 //         for (var messageData in messages) {
 //           if (messageData['id'] == messageId) {
 //             return {
@@ -87,15 +87,15 @@
 //       if (!snapshot.exists) {
 //         return <ChatMessage>[];
 //       }
-      
+
 //       final data = snapshot.data() as Map<String, dynamic>?;
 //       final messagesData = data?['messages'] as List<dynamic>? ?? [];
-      
+
 //       // Convert to ChatMessage objects and sort by timestamp (newest first, then reverse for display)
 //       final messages = messagesData
 //           .map((messageData) => ChatMessage.fromMap(messageData as Map<String, dynamic>))
 //           .toList();
-      
+
 //       // Sort by timestamp descending, then take limit, then reverse for chronological order
 //       messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
 //       final limitedMessages = messages.take(limit).toList();
@@ -126,7 +126,7 @@
 //     try {
 //       // Parse mentions from content
 //       final mentions = parseMentions(content);
-      
+
 //       final message = ChatMessage(
 //         id: '', // Will be set by Firestore
 //         senderId: senderId,
@@ -144,12 +144,12 @@
 
 //       // Generate unique ID for the message
 //       final messageId = _firestore.collection('temp').doc().id;
-      
+
 //       // Create message with ID
 //       final messageWithId = message.copyWith(id: messageId);
-      
+
 //       final monthDoc = _getCurrentMonthDocument();
-      
+
 //       // Add message to the messages array using arrayUnion
 //       await monthDoc.set({
 //         'messages': FieldValue.arrayUnion([messageWithId.toMap()]),
@@ -388,16 +388,16 @@
 //         .map((snapshot) {
 //       final now = DateTime.now();
 //       final onlineThreshold = now.subtract(const Duration(minutes: 5)); // 5 minutes threshold
-      
+
 //       return snapshot.docs.where((doc) {
 //         final data = doc.data() as Map<String, dynamic>?;
 //         if (data == null) return false;
-        
+
 //         final isOnline = data['isOnline'] == true;
 //         final lastSeen = data['lastSeen'] as Timestamp?;
-        
+
 //         if (!isOnline || lastSeen == null) return false;
-        
+
 //         // Check if lastSeen is within the threshold
 //         return lastSeen.toDate().isAfter(onlineThreshold);
 //       }).map((doc) => doc.id).toList();
@@ -409,19 +409,19 @@
 //     try {
 //       final now = DateTime.now();
 //       final staleThreshold = now.subtract(const Duration(minutes: 10)); // 10 minutes threshold
-      
+
 //       final staleUsers = await _firestore
 //           .collection(_userStatusCollection)
 //           .where('isOnline', isEqualTo: true)
 //           .where('lastSeen', isLessThan: Timestamp.fromDate(staleThreshold))
 //           .get();
-          
+
 //       final batch = _firestore.batch();
-      
+
 //       for (var doc in staleUsers.docs) {
 //         batch.update(doc.reference, {'isOnline': false});
 //       }
-      
+
 //       if (staleUsers.docs.isNotEmpty) {
 //         await batch.commit();
 //         print('ChatService: Cleaned up ${staleUsers.docs.length} stale online statuses');
@@ -514,11 +514,11 @@
 //           .get();
 
 //       List<Map<String, String>> users = [];
-      
+
 //       for (var doc in userStatusSnapshot.docs) {
 //         final data = doc.data();
 //         final displayName = data['displayName'] ?? data['email'] ?? 'User';
-        
+
 //         // Filter by query if provided
 //         if (query.isEmpty || displayName.toLowerCase().contains(query.toLowerCase())) {
 //           users.add({

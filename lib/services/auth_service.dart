@@ -16,7 +16,7 @@
 //   // final GoogleSignIn _googleSignIn = GoogleSignIn(
 //   //   scopes: ['email', 'profile'],
 //   // ); // Removed - not using Google Sign-In directly
-  
+
 //   late final UserService _userService;
 
 //   /// Get the current authenticated user
@@ -33,12 +33,12 @@
 //     try {
 //       // Initialize UserService
 //       _userService = UserService(FirebaseFirestore.instance);
-      
+
 //       // For web platforms, set persistence to LOCAL to maintain login across browser sessions
 //       if (kIsWeb) {
 //         await _auth.setPersistence(Persistence.LOCAL);
 //       }
-      
+
 //       // Firebase Auth automatically handles persistence on mobile platforms
 //       debugPrint('AuthService initialized. Current user: ${currentUser?.email ?? 'None'}');
 //     } catch (e) {
@@ -56,12 +56,12 @@
 //         email: email.trim(),
 //         password: password,
 //       );
-      
+
 //       // Create or update user in database
 //       if (result.user != null) {
 //         await _createOrUpdateUserInDatabase(result.user!);
 //       }
-      
+
 //       debugPrint('User signed in: ${result.user?.email}');
 //       return result;
 //     } on FirebaseAuthException catch (e) {
@@ -83,12 +83,12 @@
 //         email: email.trim(),
 //         password: password,
 //       );
-      
+
 //       // Create user in database
 //       if (result.user != null) {
 //         await _createOrUpdateUserInDatabase(result.user!);
 //       }
-      
+
 //       debugPrint('User account created: ${result.user?.email}');
 //       return result;
 //     } on FirebaseAuthException catch (e) {
@@ -104,31 +104,31 @@
 //   Future<UserCredential?> signInWithGoogle() async {
 //     try {
 //       debugPrint('Starting Google Sign-In process...');
-      
+
 //       // Trigger the Google Sign-In flow
 //       throw UnimplementedError('Google Sign-In removed. Use FirebaseAuthService instead.');
 //       // final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
-      
+
 //       if (googleUser == null) {
 //         // User canceled the sign-in
 //         debugPrint('Google Sign-In canceled by user');
 //         return null;
 //       }
-      
+
 //       debugPrint('Google Sign-In account obtained: ${googleUser.email}');
-      
+
 //       // Obtain the auth details from the request
 //       final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
-      
+
 //       // Create a new credential
 //       final credential = GoogleAuthProvider.credential(
 //         accessToken: googleAuth.accessToken,
 //         idToken: googleAuth.idToken,
 //       );
-      
+
 //       // Sign in to Firebase with the Google credential
 //       final UserCredential result = await _auth.signInWithCredential(credential);
-      
+
 //       // Create or update user in database with Google profile info
 //       if (result.user != null) {
 //         await _createOrUpdateUserInDatabase(
@@ -137,10 +137,10 @@
 //           photoUrl: googleUser.photoUrl,
 //         );
 //       }
-      
+
 //       debugPrint('Google Sign-In successful: ${result.user?.email}');
 //       return result;
-      
+
 //     } on FirebaseAuthException catch (e) {
 //       debugPrint('Firebase Auth error during Google Sign-In: ${e.code} - ${e.message}');
 //       throw _handleAuthException(e);
@@ -158,7 +158,7 @@
 //       // if (await _googleSignIn.isSignedIn()) {
 //       //   await _googleSignIn.signOut();
 //       // }
-      
+
 //       // Sign out from Firebase
 //       await _auth.signOut();
 //       debugPrint('User signed out successfully');
@@ -187,7 +187,7 @@
 //     try {
 //       await currentUser?.updateDisplayName(displayName);
 //       await currentUser?.reload();
-      
+
 //       // Update in database as well
 //       if (currentUser != null) {
 //         await _createOrUpdateUserInDatabase(
@@ -195,7 +195,7 @@
 //           displayName: displayName,
 //         );
 //       }
-      
+
 //       debugPrint('Display name updated to: $displayName');
 //     } catch (e) {
 //       debugPrint('Error updating display name: $e');
@@ -207,15 +207,15 @@
 //   Future<void> deleteAccount() async {
 //     try {
 //       final userId = currentUser?.uid;
-      
+
 //       // Delete from Firebase Auth
 //       await currentUser?.delete();
-      
+
 //       // Soft delete from database
 //       if (userId != null) {
 //         await _userService.deleteUser(userId);
 //       }
-      
+
 //       debugPrint('User account deleted');
 //     } on FirebaseAuthException catch (e) {
 //       debugPrint('Error deleting account: ${e.code} - ${e.message}');
@@ -236,9 +236,9 @@
 //       final user = await _userService.createOrUpdateUser(
 //         userId: firebaseUser.uid,
 //         email: firebaseUser.email ?? '',
-//         name: displayName ?? 
-//               firebaseUser.displayName ?? 
-//               firebaseUser.email?.split('@').first ?? 
+//         name: displayName ??
+//               firebaseUser.displayName ??
+//               firebaseUser.email?.split('@').first ??
 //               'User',
 //         photoUrl: photoUrl ?? firebaseUser.photoURL,
 //         role: _getDefaultRole(firebaseUser.email ?? ''),
@@ -299,7 +299,7 @@
 //   Map<String, dynamic> getUserInfo() {
 //     final user = currentUser;
 //     if (user == null) return {'authenticated': false};
-    
+
 //     return {
 //       'authenticated': true,
 //       'uid': user.uid,
@@ -323,7 +323,7 @@
 //   bool get isSignedInWithGoogle {
 //     final user = currentUser;
 //     if (user == null) return false;
-    
+
 //     return user.providerData.any((info) => info.providerId == 'google.com');
 //   }
 
@@ -331,7 +331,7 @@
 //   Future<app_user.User?> getCurrentUserFromDatabase() async {
 //     final firebaseUser = currentUser;
 //     if (firebaseUser == null) return null;
-    
+
 //     try {
 //       return await _userService.getUserById(firebaseUser.uid);
 //     } catch (e) {

@@ -69,8 +69,14 @@ class JobCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ScaleProvider>(
-      builder: (context, scaleProvider, child) {
+    return Consumer2<ScaleProvider, ScheduleProvider>(
+      builder: (context, scaleProvider, scheduleProvider, child) {
+        // Get fresh job data from provider to ensure we have latest changes
+        final freshJob = scheduleProvider.jobs.firstWhere(
+          (j) => j.id == job.id,
+          orElse: () => job, // Fallback to original if not found
+        );
+
         final isFullscreen = context.watch<TogglerProvider>().isFullview;
         final statusColor = _getStatusColor(context);
 
@@ -83,17 +89,17 @@ class JobCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Client section
-                _JobClientSection(job: job),
+                // Client section - use fresh job data
+                _JobClientSection(job: freshJob),
 
                 if (isFullscreen) ...[
                   const _JobDivider(),
-                  // Work area section
-                  _JobWorkAreaSection(job: job),
+                  // Work area section - use fresh job data
+                  _JobWorkAreaSection(job: freshJob),
                   const _JobDivider(),
-                  // Status and actions section
+                  // Status and actions section - use fresh job data
                   _JobActionsSection(
-                    job: job,
+                    job: freshJob,
                     statusColor: statusColor,
                     onPrintMap: () => _printMapLink(context),
                   ),
@@ -138,13 +144,19 @@ class _JobClientSection extends StatelessWidget {
             child: _ClientListEditor(
               job: job,
               onClientsChanged: (List<String> updatedClients) {
-                final originalJob = job;
-                final modifiedJob = job.copyWith(clients: updatedClients);
-                context.read<ScheduleProvider>().updateJobWithUndo(
-                      originalJob,
-                      modifiedJob,
-                      job.date,
-                    );
+                // Get fresh job data from provider to avoid stale state
+                final scheduleProvider = context.read<ScheduleProvider>();
+                final freshJob = scheduleProvider.jobs.firstWhere(
+                  (j) => j.id == job.id,
+                  orElse: () => job,
+                );
+                final originalJob = freshJob;
+                final modifiedJob = freshJob.copyWith(clients: updatedClients);
+                scheduleProvider.updateJobWithUndo(
+                  originalJob,
+                  modifiedJob,
+                  freshJob.date,
+                );
               },
             ),
           ),
@@ -171,18 +183,24 @@ class _JobWorkAreaSection extends StatelessWidget {
             child: _WorkAreaListEditor(
               job: job,
               onWorkAreasChanged: (List<CustomPolygon> updatedWorkMaps) {
+                // Get fresh job data from provider to avoid stale state
+                final scheduleProvider = context.read<ScheduleProvider>();
+                final freshJob = scheduleProvider.jobs.firstWhere(
+                  (j) => j.id == job.id,
+                  orElse: () => job,
+                );
                 final updatedWorkingAreas =
                     updatedWorkMaps.map((polygon) => polygon.name).toList();
-                final originalJob = job;
-                final modifiedJob = job.copyWith(
+                final originalJob = freshJob;
+                final modifiedJob = freshJob.copyWith(
                   workingAreas: updatedWorkingAreas,
                   workMaps: updatedWorkMaps,
                 );
-                context.read<ScheduleProvider>().updateJobWithUndo(
-                      originalJob,
-                      modifiedJob,
-                      job.date,
-                    );
+                scheduleProvider.updateJobWithUndo(
+                  originalJob,
+                  modifiedJob,
+                  freshJob.date,
+                );
               },
             ),
           ),
@@ -309,13 +327,19 @@ class _JobStatusButton extends StatelessWidget {
                 ),
               ),
               onTap: () {
-                final originalJob = job;
-                final modifiedJob = job.copyWith(statusId: status.id);
-                context.read<ScheduleProvider>().updateJobWithUndo(
-                      originalJob,
-                      modifiedJob,
-                      job.date,
-                    );
+                // Get fresh job data from provider to avoid stale state
+                final scheduleProvider = context.read<ScheduleProvider>();
+                final freshJob = scheduleProvider.jobs.firstWhere(
+                  (j) => j.id == job.id,
+                  orElse: () => job,
+                );
+                final originalJob = freshJob;
+                final modifiedJob = freshJob.copyWith(statusId: status.id);
+                scheduleProvider.updateJobWithUndo(
+                  originalJob,
+                  modifiedJob,
+                  freshJob.date,
+                );
                 Navigator.of(context).pop();
               },
             );

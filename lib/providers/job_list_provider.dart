@@ -5,13 +5,10 @@ import '../models/job_list_item.dart';
 import '../models/job_list_item_update.dart';
 import '../models/job_reminder.dart';
 import '../services/job_list_service.dart';
-import '../services/undo_redo_manager.dart';
-import '../commands/job_list_commands.dart';
 import 'auth_provider.dart';
 
 class JobListProvider extends ChangeNotifier {
   final JobListService _jobListService;
-  final UndoRedoManager _undoRedoManager;
   final AuthProvider _authProvider;
   List<JobListItem> _jobListItems = [];
   bool _isLoading = false;
@@ -53,8 +50,20 @@ class JobListProvider extends ChangeNotifier {
   DateTime? _lastCheckedTime;
   bool _isRefreshingLastChecked = false;
 
-  JobListProvider(
-      this._jobListService, this._undoRedoManager, this._authProvider);
+  // Callback for Happy Sun job syncing
+  Function(JobListItem)? _onJobListItemAdded;
+  Function(JobListItem oldItem, JobListItem newItem)? _onJobListItemUpdated;
+
+  JobListProvider(this._jobListService, this._authProvider);
+
+  // Set callbacks for Happy Sun job syncing
+  void setHappySunCallbacks({
+    Function(JobListItem)? onAdded,
+    Function(JobListItem oldItem, JobListItem newItem)? onUpdated,
+  }) {
+    _onJobListItemAdded = onAdded;
+    _onJobListItemUpdated = onUpdated;
+  }
 
   // Async initialization method - call explicitly for concurrent loading
   Future<void> initialize() async {
@@ -82,7 +91,6 @@ class JobListProvider extends ChangeNotifier {
   String get dateFilter => _dateFilter;
   DateTime? get startDate => _startDate;
   DateTime? get endDate => _endDate;
-  UndoRedoManager get undoRedoManager => _undoRedoManager;
   String get currentMonthDisplay =>
       _jobListService.getMonthlyDocumentId(_currentMonth);
   DateTime? get lastCheckedTime => _lastCheckedTime;
@@ -560,6 +568,13 @@ class JobListProvider extends ChangeNotifier {
   Future<void> addJobListItem(JobListItem jobListItem) async {
     try {
       await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+
+      // Trigger Happy Sun sync if job is window/solar cleaning
+      if (_onJobListItemAdded != null &&
+          (jobListItem.jobType == JobType.windowCleaning ||
+              jobListItem.jobType == JobType.solarPanelCleaning)) {
+        _onJobListItemAdded!(jobListItem);
+      }
     } catch (error) {
       _error = error.toString();
       notifyListeners();
@@ -572,7 +587,7 @@ class JobListProvider extends ChangeNotifier {
     try {
       final generatedId =
           await _jobListService.addJobListItem(jobListItem, jobListItem.date);
-      return JobListItem(
+      final savedJob = JobListItem(
         id: generatedId,
         invoice: jobListItem.invoice,
         amount: jobListItem.amount,
@@ -592,6 +607,15 @@ class JobListProvider extends ChangeNotifier {
         whoToInvoice: jobListItem.whoToInvoice,
         collectionJobId: jobListItem.collectionJobId,
       );
+
+      // Trigger Happy Sun sync if job is window/solar cleaning
+      if (_onJobListItemAdded != null &&
+          (savedJob.jobType == JobType.windowCleaning ||
+              savedJob.jobType == JobType.solarPanelCleaning)) {
+        _onJobListItemAdded!(savedJob);
+      }
+
+      return savedJob;
     } catch (error) {
       _error = error.toString();
       notifyListeners();
@@ -603,6 +627,13 @@ class JobListProvider extends ChangeNotifier {
   Future<void> addJobListItemWithoutAllocation(JobListItem jobListItem) async {
     try {
       await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+
+      // Trigger Happy Sun sync if job is window/solar cleaning
+      if (_onJobListItemAdded != null &&
+          (jobListItem.jobType == JobType.windowCleaning ||
+              jobListItem.jobType == JobType.solarPanelCleaning)) {
+        _onJobListItemAdded!(jobListItem);
+      }
     } catch (error) {
       _error = error.toString();
       notifyListeners();
@@ -749,6 +780,14 @@ class JobListProvider extends ChangeNotifier {
 
     // Update locally first, then save
     updateJobListItemLocal(trackedItem);
+
+    // Trigger Happy Sun tools update if manDays changed for window/solar cleaning
+    if (_onJobListItemUpdated != null &&
+        updatedItem.manDays != originalItem.manDays &&
+        (updatedItem.jobType == JobType.windowCleaning ||
+            updatedItem.jobType == JobType.solarPanelCleaning)) {
+      _onJobListItemUpdated!(originalItem, updatedItem);
+    }
   }
 
   // Delete job list item
@@ -993,77 +1032,6 @@ class JobListProvider extends ChangeNotifier {
   Future<void> processPendingUpdatesNow() async {
     _debounceTimer?.cancel();
     await _processPendingUpdates();
-  }
-
-  // Undo/Redo functionality
-  Future<void> addJobListItemWithUndo(JobListItem jobListItem) async {
-    final command = AddJobListItemCommand(
-      service: _jobListService,
-      jobListItem: jobListItem,
-      targetDate: jobListItem.date,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
-  }
-
-  Future<void> updateJobListItemWithUndo(
-      JobListItem originalItem, JobListItem modifiedItem) async {
-    final command = EditJobListItemCommand(
-      service: _jobListService,
-      originalItem: originalItem,
-      modifiedItem: modifiedItem,
-      targetDate: modifiedItem.date,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
-  }
-
-  Future<void> deleteJobListItemWithUndo(JobListItem jobListItem) async {
-    final command = DeleteJobListItemCommand(
-      service: _jobListService,
-      jobListItem: jobListItem,
-      targetDate: jobListItem.date,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
-  }
-
-  Future<void> updateJobStatusWithUndo(String jobId, JobListStatus newStatus,
-      JobListStatus originalStatus, DateTime targetDate) async {
-    final command = UpdateJobStatusCommand(
-      service: _jobListService,
-      jobId: jobId,
-      newStatus: newStatus,
-      originalStatus: originalStatus,
-      targetDate: targetDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
-  }
-
-  Future<void> moveJobListItemWithUndo(
-      JobListItem jobListItem, DateTime fromDate, DateTime toDate) async {
-    final command = MoveJobListItemCommand(
-      service: _jobListService,
-      jobListItem: jobListItem,
-      fromDate: fromDate,
-      toDate: toDate,
-    );
-    await undoRedoManager.executeCommand(command, UndoRedoContext.jobList);
-  }
-
-  // Access to job list undo/redo functionality
-  bool get canUndo =>
-      undoRedoManager.canUndoForContext(UndoRedoContext.jobList);
-  bool get canRedo =>
-      undoRedoManager.canRedoForContext(UndoRedoContext.jobList);
-  String? get nextUndoDescription =>
-      undoRedoManager.nextUndoDescriptionForContext(UndoRedoContext.jobList);
-  String? get nextRedoDescription =>
-      undoRedoManager.nextRedoDescriptionForContext(UndoRedoContext.jobList);
-
-  Future<bool> undo() async {
-    return await undoRedoManager.undo(UndoRedoContext.jobList);
-  }
-
-  Future<bool> redo() async {
-    return await undoRedoManager.redo(UndoRedoContext.jobList);
   }
 
   // Load last checked time from database

@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:provider/provider.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'providers/toggler_provider.dart';
 import 'providers/schedule_provider.dart';
 import 'providers/collection_schedule_provider.dart';
@@ -16,6 +17,12 @@ import 'providers/chat_provider.dart';
 import 'providers/vehicle_driver_provider.dart';
 import 'providers/scale_provider.dart';
 import 'providers/map_view_provider.dart';
+import 'providers/inventory_provider.dart';
+import 'providers/happy_sun_project_provider.dart';
+import 'providers/happy_sun_job_provider.dart';
+import 'providers/app_version_provider.dart';
+import 'providers/tool_settings_provider.dart';
+import 'models/job_list_item.dart';
 import 'widgets/schedule_grid.dart';
 import 'widgets/collection_schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
@@ -25,13 +32,12 @@ import 'widgets/scale_settings_dialog.dart';
 import 'widgets/job_status_management_dialog.dart';
 import 'widgets/job_list_status_management_dialog.dart';
 import 'widgets/invoice_status_management_dialog.dart';
-import 'widgets/undo_redo_widgets.dart';
 import 'widgets/auth_gate.dart';
 import 'widgets/chat_dialog.dart';
 import 'widgets/chat_admin_panel.dart';
-import 'widgets/new_version_dialog.dart';
-import 'services/keyboard_shortcuts_service.dart';
-import 'services/undo_redo_manager.dart';
+import 'widgets/app_update_dialog.dart';
+import 'widgets/happy_sun_inventory_view.dart';
+import 'widgets/happy_sun_job_projects_screen.dart';
 import 'services/version_service.dart';
 import 'utils/seed_data.dart';
 import 'services/work_area_service.dart';
@@ -39,8 +45,11 @@ import 'services/job_list_service.dart';
 import 'services/job_list_preferences_service.dart';
 import 'services/user_service.dart';
 import 'services/chat_service.dart';
+import 'services/inventory_service.dart';
 import 'models/command.dart';
 import 'firebase_options.dart';
+import 'utils/happy_sun_migration.dart';
+import 'dart:html' as html show window;
 
 // Simple test command for debugging undo functionality
 class TestCommand extends Command {
@@ -84,13 +93,7 @@ void main() async {
     // Authentication Provider (must be first for initialization)
     ChangeNotifierProvider(create: (context) => AuthProvider()),
 
-    ChangeNotifierProvider(create: (context) => UndoRedoManager()),
-    ChangeNotifierProxyProvider<UndoRedoManager, ScheduleProvider>(
-      create: (context) =>
-          ScheduleProvider(undoRedoManager: context.read<UndoRedoManager>()),
-      update: (context, undoRedoManager, previous) =>
-          previous ?? ScheduleProvider(undoRedoManager: undoRedoManager),
-    ),
+    ChangeNotifierProvider(create: (context) => ScheduleProvider()),
     ChangeNotifierProvider(create: (context) => ScaleProvider()),
     ChangeNotifierProvider(create: (context) => VehicleDriverProvider()),
     ChangeNotifierProvider(create: (context) => MapViewProvider()),
@@ -114,6 +117,9 @@ void main() async {
     Provider(
       create: (context) => ChatService(FirebaseFirestore.instance),
     ),
+    Provider(
+      create: (context) => InventoryService(FirebaseFirestore.instance),
+    ),
     ChangeNotifierProvider(
       create: (context) => JobStatusProvider(),
     ),
@@ -135,18 +141,15 @@ void main() async {
             authProvider,
           ),
     ),
-    ChangeNotifierProxyProvider2<UndoRedoManager, AuthProvider,
-        JobListProvider>(
+    ChangeNotifierProxyProvider<AuthProvider, JobListProvider>(
       create: (context) => JobListProvider(
         context.read<JobListService>(),
-        context.read<UndoRedoManager>(),
         context.read<AuthProvider>(),
       ),
-      update: (context, undoRedoManager, authProvider, previous) =>
+      update: (context, authProvider, previous) =>
           previous ??
           JobListProvider(
             context.read<JobListService>(),
-            undoRedoManager,
             authProvider,
           ),
     ),
@@ -174,6 +177,23 @@ void main() async {
         return previous!;
       },
     ),
+    ChangeNotifierProvider(
+      create: (context) => InventoryProvider(
+        context.read<InventoryService>(),
+      ),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => HappySunProjectProvider(),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => HappySunJobProvider(),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => ToolSettingsProvider(),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => AppVersionProvider(),
+    ),
   ], child: const MyApp()));
 }
 
@@ -191,10 +211,60 @@ class _MyAppState extends State<MyApp> {
   @override
   void initState() {
     super.initState();
+    _versionService = VersionService(FirebaseFirestore.instance);
     // Initialize all providers asynchronously in parallel
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeProvidersAsync();
+      _setupHappySunSync();
     });
+  }
+
+  void _setupHappySunSync() {
+    // Set up callbacks to sync Happy Sun jobs with Job List items
+    final jobListProvider = context.read<JobListProvider>();
+    final happySunJobProvider = context.read<HappySunJobProvider>();
+    final toolSettingsProvider = context.read<ToolSettingsProvider>();
+    final inventoryProvider = context.read<InventoryProvider>();
+
+    // Load tool settings first
+    toolSettingsProvider.loadSettings();
+
+    jobListProvider.setHappySunCallbacks(
+      onAdded: (jobListItem) async {
+        // Auto-create Happy Sun job for window/solar cleaning jobs
+        // Calculate tools needed based on manDays (number of cleaners)
+        final numberOfCleaners = jobListItem.manDays.ceil();
+        final categorizedTools = toolSettingsProvider.calculateCategorizedTools(
+          numberOfCleaners,
+          inventoryProvider.tools,
+        );
+
+        await happySunJobProvider.createJobFromJobListItem(
+          jobListItem,
+          categorizedTools,
+        );
+      },
+      onUpdated: (oldItem, newItem) async {
+        // Update tools needed when manDays changes
+        if (oldItem.manDays != newItem.manDays &&
+            (newItem.jobType == JobType.windowCleaning ||
+                newItem.jobType == JobType.solarPanelCleaning)) {
+          final numberOfCleaners = newItem.manDays.ceil();
+          final categorizedTools =
+              toolSettingsProvider.calculateCategorizedTools(
+            numberOfCleaners,
+            inventoryProvider.tools,
+          );
+
+          await happySunJobProvider.updateToolsNeededFromManDays(
+            newItem.id,
+            newItem.date,
+            numberOfCleaners,
+            categorizedTools,
+          );
+        }
+      },
+    );
   }
 
   Future<void> _initializeProvidersAsync() async {
@@ -211,6 +281,7 @@ class _MyAppState extends State<MyApp> {
     // Initialize version checking for web only
     if (kIsWeb && mounted) {
       _initializeVersionCheck();
+      _setupVersionListener();
     }
 
     if (mounted) {
@@ -220,20 +291,63 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
-  void _initializeVersionCheck() {
-    _versionService = VersionService(FirebaseFirestore.instance);
-    _versionService.initialize(
-      onNewVersionAvailable: (String newVersion) {
-        // Show dialog to user
-        if (mounted) {
-          showDialog(
-            context: context,
-            barrierDismissible: false,
-            builder: (context) => NewVersionDialog(newVersion: newVersion),
-          );
-        }
-      },
+  void _initializeVersionCheck() async {
+    final versionProvider = context.read<AppVersionProvider>();
+
+    // Get current app version from package info
+    try {
+      final packageInfo = await PackageInfo.fromPlatform();
+      final currentVersion = packageInfo.version;
+
+      // Initialize with current app version
+      versionProvider.initialize(currentVersion);
+    } catch (e) {
+      print('Error getting package info: $e');
+      // Fallback to a default version
+      versionProvider.initialize('1.0.0');
+    }
+  }
+
+  void _setupVersionListener() {
+    final versionProvider = context.read<AppVersionProvider>();
+
+    // Listen for version changes
+    versionProvider.addListener(() {
+      if (versionProvider.needsUpdate && mounted) {
+        _showUpdateDialog(versionProvider);
+      }
+    });
+  }
+
+  void _showUpdateDialog(AppVersionProvider versionProvider) async {
+    if (!mounted) return;
+
+    final newVersion = versionProvider.currentVersion;
+    final currentVersion = versionProvider.localVersion?.version ?? '0.0.0';
+
+    if (newVersion == null) return;
+
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: !versionProvider.forceUpdate,
+      builder: (context) => AppUpdateDialog(
+        newVersion: newVersion,
+        currentVersion: currentVersion,
+        forceUpdate: versionProvider.forceUpdate,
+      ),
     );
+
+    if (result == true && mounted) {
+      // Refresh the page
+      _refreshApp();
+    }
+  }
+
+  void _refreshApp() {
+    // For web, reload the page
+    if (kIsWeb) {
+      html.window.location.reload();
+    }
   }
 
   @override
@@ -255,9 +369,7 @@ class _MyAppState extends State<MyApp> {
       ),
       home: _isInitialized
           ? AuthGate(
-              child: KeyboardShortcutsService.initializeShortcuts(
-                child: const DashboardScreen(),
-              ),
+              child: const DashboardScreen(),
             )
           : const Scaffold(
               body: Center(
@@ -300,14 +412,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     );
     _tabController.addListener(_handleTabChange);
 
-    // Set initial context after the first frame
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        final undoRedoManager = context.read<UndoRedoManager>();
-        undoRedoManager.setContext(
-            UndoRedoContext.scheduleGrid); // Default to schedule tab
-      }
-    });
+    // Initial setup complete
   }
 
   void _handleTabChange() {
@@ -315,22 +420,6 @@ class _DashboardScreenState extends State<DashboardScreen>
       setState(() {
         _currentTabIndex = _tabController.index;
       });
-
-      // Set the appropriate undo/redo context based on the active tab
-      final undoRedoManager = context.read<UndoRedoManager>();
-      switch (_currentTabIndex) {
-        case 0: // Schedule tab (includes map editing)
-          undoRedoManager.setContext(UndoRedoContext.scheduleGrid);
-          break;
-        case 1: // Job List tab
-          undoRedoManager.setContext(UndoRedoContext.jobList);
-          break;
-        case 2: // Collection Schedule tab
-        case 3: // Solar Panel Schedule tab
-        default:
-          undoRedoManager.setContext(UndoRedoContext.global);
-          break;
-      }
     }
   }
 
@@ -384,23 +473,10 @@ class _DashboardScreenState extends State<DashboardScreen>
               Tab(text: isSmallScreen ? 'Schedule' : 'Schedule'),
               Tab(text: isSmallScreen ? 'Jobs' : 'Job List'),
               Tab(text: isSmallScreen ? 'Collection' : 'Collection Schedule'),
-              Tab(text: isSmallScreen ? 'Solar' : 'Solar Panel Schedule'),
+              Tab(text: isSmallScreen ? 'Solar' : 'Happy Sun'),
             ],
           ),
           actions: [
-            // Show Undo/Redo only on larger screens
-            if (!isSmallScreen)
-              const UndoRedoButtons(
-                showLabels: false,
-                padding: EdgeInsets.all(4.0),
-                enabledColor: Colors.deepOrange,
-              ),
-            if (!isSmallScreen)
-              const VerticalDivider(
-                color: Colors.grey,
-                thickness: 1,
-                width: 20,
-              ),
             // Distributor management - always visible
             if (!isMediumScreen)
               IconButton(
@@ -451,6 +527,13 @@ class _DashboardScreenState extends State<DashboardScreen>
                   }
                 },
                 tooltip: 'Import KML data',
+              ),
+              IconButton(
+                icon: const Icon(Icons.sync),
+                onPressed: () async {
+                  await showMigrationDialog(context);
+                },
+                tooltip: 'Migrate Happy Sun Jobs',
               ),
             ],
             // Settings menu - always visible
@@ -571,7 +654,7 @@ class _DashboardScreenState extends State<DashboardScreen>
             const ScheduleTab(),
             const JobListTab(),
             const CollectionScheduleTab(),
-            const SolarPanelScheduleTab(),
+            const HappySunTab(),
           ],
         ),
         floatingActionButton: Consumer2<ChatProvider, AuthProvider>(
@@ -666,12 +749,6 @@ class _ScheduleTabState extends State<ScheduleTab>
                     )
                   : const ScheduleGrid(),
             ),
-            // Floating undo/redo button for Schedule tab
-            const Positioned(
-              bottom: 16,
-              right: 16,
-              child: UndoRedoFAB(heroTag: "schedule"),
-            ),
           ],
         );
       },
@@ -747,12 +824,6 @@ class _JobListTabState extends State<JobListTab>
         return const Stack(
           children: [
             JobListGrid(),
-            // Floating undo/redo button for Job List tab
-            Positioned(
-              bottom: 16,
-              right: 16,
-              child: UndoRedoFAB(heroTag: "joblist"),
-            ),
           ],
         );
       },
@@ -804,12 +875,6 @@ class _CollectionScheduleTabState extends State<CollectionScheduleTab>
                     )
                   : const CollectionScheduleGrid(),
             ),
-            // Floating undo/redo button for Collection Schedule tab
-            const Positioned(
-              bottom: 16,
-              right: 16,
-              child: UndoRedoFAB(heroTag: "collection"),
-            ),
           ],
         );
       },
@@ -817,34 +882,87 @@ class _CollectionScheduleTabState extends State<CollectionScheduleTab>
   }
 }
 
-class SolarPanelScheduleTab extends StatefulWidget {
-  const SolarPanelScheduleTab({super.key});
+class HappySunTab extends StatefulWidget {
+  const HappySunTab({super.key});
 
   @override
-  State<SolarPanelScheduleTab> createState() => _SolarPanelScheduleTabState();
+  State<HappySunTab> createState() => _HappySunTabState();
 }
 
-class _SolarPanelScheduleTabState extends State<SolarPanelScheduleTab>
-    with AutomaticKeepAliveClientMixin {
+class _HappySunTabState extends State<HappySunTab>
+    with AutomaticKeepAliveClientMixin, SingleTickerProviderStateMixin {
   @override
   bool get wantKeepAlive => true;
+
+  late TabController _subTabController;
+
+  @override
+  void initState() {
+    super.initState();
+    _subTabController = TabController(
+      length: 2,
+      vsync: this,
+    );
+  }
+
+  @override
+  void dispose() {
+    _subTabController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
+
+    return Column(
+      children: [
+        Container(
+          color: Colors.white,
+          child: TabBar(
+            controller: _subTabController,
+            labelColor: Colors.blue,
+            unselectedLabelColor: Colors.grey,
+            indicatorColor: Colors.blue,
+            tabs: const [
+              Tab(text: 'Projects'),
+              Tab(text: 'Inventory'),
+            ],
+          ),
+        ),
+        Expanded(
+          child: TabBarView(
+            controller: _subTabController,
+            children: const [
+              HappySunJobProjectsScreen(),
+              HappySunInventoryView(),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// Happy Sun Projects View
+class HappySunProjectsView extends StatelessWidget {
+  const HappySunProjectsView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
     return const Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.solar_power, size: 64, color: Colors.grey),
+          Icon(Icons.work, size: 64, color: Colors.orange),
           SizedBox(height: 16),
           Text(
-            'Solar Panel Schedule',
+            'Happy Sun Projects',
             style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
           ),
           SizedBox(height: 8),
           Text(
-            'Solar panel schedule functionality will be implemented here',
+            'Projects functionality will be implemented here',
             style: TextStyle(color: Colors.grey),
           ),
         ],
