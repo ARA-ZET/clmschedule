@@ -246,6 +246,28 @@ class InventoryProvider extends ChangeNotifier {
     }
   }
 
+  // Check out tools (mark as in use for a project)
+  Future<void> checkOutTools(List<String> toolIds, String projectId) async {
+    try {
+      await _inventoryService.checkOutTools(toolIds, projectId);
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  // Check in tools (mark as available)
+  Future<void> checkInTools(List<String> toolIds) async {
+    try {
+      await _inventoryService.checkInTools(toolIds);
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      rethrow;
+    }
+  }
+
   @override
   void dispose() {
     _toolsSubscription?.cancel();

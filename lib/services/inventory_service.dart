@@ -261,4 +261,36 @@ class InventoryService {
       // Deletion errors are non-fatal, continue silently
     }
   }
+
+  // Check out tools (mark as in use for a project)
+  Future<void> checkOutTools(List<String> toolIds, String projectId) async {
+    final batch = _firestore.batch();
+
+    for (final toolId in toolIds) {
+      final docRef = _firestore.collection('inventoryTools').doc(toolId);
+      batch.update(docRef, {
+        'isInUse': true,
+        'currentProject': projectId,
+        'lastUsed': FieldValue.serverTimestamp(),
+      });
+    }
+
+    await batch.commit();
+  }
+
+  // Check in tools (mark as available)
+  Future<void> checkInTools(List<String> toolIds) async {
+    final batch = _firestore.batch();
+
+    for (final toolId in toolIds) {
+      final docRef = _firestore.collection('inventoryTools').doc(toolId);
+      batch.update(docRef, {
+        'isInUse': false,
+        'currentProject': null,
+        'lastUsed': FieldValue.serverTimestamp(),
+      });
+    }
+
+    await batch.commit();
+  }
 }

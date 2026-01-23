@@ -211,16 +211,10 @@ class _ToolSettingsDialogState extends State<ToolSettingsDialog>
           child: const Icon(Icons.construction, color: Colors.orange),
         ),
         title: Text(
-          tool.name,
+          tool.baseName,
           style: const TextStyle(fontWeight: FontWeight.bold),
         ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(tool.category),
-            Text('ID: ${tool.toolId}', style: const TextStyle(fontSize: 11)),
-          ],
-        ),
+        subtitle: Text(tool.category),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -230,10 +224,10 @@ class _ToolSettingsDialogState extends State<ToolSettingsDialog>
                   ? () {
                       if (toolType == ToolType.team) {
                         provider.updateTeamToolQuantity(
-                            tool.toolId, tool.quantity - 1);
+                            tool.baseName, tool.quantity - 1);
                       } else {
                         provider.updateIndividualToolQuantity(
-                            tool.toolId, tool.quantity - 1);
+                            tool.baseName, tool.quantity - 1);
                       }
                     }
                   : null,
@@ -257,10 +251,10 @@ class _ToolSettingsDialogState extends State<ToolSettingsDialog>
               onPressed: () {
                 if (toolType == ToolType.team) {
                   provider.updateTeamToolQuantity(
-                      tool.toolId, tool.quantity + 1);
+                      tool.baseName, tool.quantity + 1);
                 } else {
                   provider.updateIndividualToolQuantity(
-                      tool.toolId, tool.quantity + 1);
+                      tool.baseName, tool.quantity + 1);
                 }
               },
               icon: const Icon(Icons.add_circle_outline),
@@ -269,9 +263,9 @@ class _ToolSettingsDialogState extends State<ToolSettingsDialog>
             IconButton(
               onPressed: () {
                 if (toolType == ToolType.team) {
-                  provider.removeTeamTool(tool.toolId);
+                  provider.removeTeamTool(tool.baseName);
                 } else {
-                  provider.removeIndividualTool(tool.toolId);
+                  provider.removeIndividualTool(tool.baseName);
                 }
               },
               icon: const Icon(Icons.delete, color: Colors.red),
@@ -301,8 +295,8 @@ class _AddToolToSettingsDialog extends StatefulWidget {
 }
 
 class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
-  final Map<String, bool> _selectedTools = {};
-  final Map<String, int> _toolQuantities = {};
+  final Map<String, bool> _selectedBaseNames = {};
+  final Map<String, int> _baseNameQuantities = {};
 
   @override
   Widget build(BuildContext context) {
@@ -315,25 +309,28 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
         height: 500,
         child: Consumer2<InventoryProvider, ToolSettingsProvider>(
           builder: (context, inventoryProvider, settingsProvider, child) {
-            // Get already added tool IDs to filter them out
-            final existingToolIds = widget.toolType == ToolType.team
+            // Get already added base names to filter them out
+            final existingBaseNames = widget.toolType == ToolType.team
                 ? settingsProvider.settings.teamTools
-                    .map((t) => t.toolId)
+                    .map((t) => t.baseName)
                     .toSet()
                 : settingsProvider.settings.individualTools
-                    .map((t) => t.toolId)
+                    .map((t) => t.baseName)
                     .toSet();
 
-            // Filter tools based on designation and exclude already added ones
-            final availableTools = inventoryProvider.tools.where((tool) {
-              // Exclude tools already added
-              if (existingToolIds.contains(tool.toolId)) return false;
+            // Group tools by base name and filter by tool type
+            final Map<String, List<InventoryTool>> groupedTools = {};
+            for (final tool in inventoryProvider.tools) {
+              if (tool.toolType == widget.toolType &&
+                  !existingBaseNames.contains(tool.baseName)) {
+                if (!groupedTools.containsKey(tool.baseName)) {
+                  groupedTools[tool.baseName] = [];
+                }
+                groupedTools[tool.baseName]!.add(tool);
+              }
+            }
 
-              // Filter by tool type
-              return tool.toolType == widget.toolType;
-            }).toList();
-
-            if (availableTools.isEmpty) {
+            if (groupedTools.isEmpty) {
               return Center(
                 child: Text(
                   widget.toolType == ToolType.team
@@ -345,24 +342,26 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
               );
             }
 
+            final baseNames = groupedTools.keys.toList()..sort();
+
             return Column(
               children: [
                 // Header with select all
                 Row(
                   children: [
                     Checkbox(
-                      value:
-                          _selectedTools.values.every((selected) => selected) &&
-                              _selectedTools.length == availableTools.length,
+                      value: _selectedBaseNames.values
+                              .every((selected) => selected) &&
+                          _selectedBaseNames.length == baseNames.length,
                       onChanged: (value) {
                         setState(() {
                           if (value == true) {
-                            for (var tool in availableTools) {
-                              _selectedTools[tool.toolId] = true;
-                              _toolQuantities[tool.toolId] ??= 1;
+                            for (var baseName in baseNames) {
+                              _selectedBaseNames[baseName] = true;
+                              _baseNameQuantities[baseName] ??= 1;
                             }
                           } else {
-                            _selectedTools.clear();
+                            _selectedBaseNames.clear();
                           }
                         });
                       },
@@ -373,20 +372,21 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
                     ),
                     const Spacer(),
                     Text(
-                      '${_selectedTools.values.where((v) => v).length} selected',
+                      '${_selectedBaseNames.values.where((v) => v).length} selected',
                       style: const TextStyle(color: Colors.grey),
                     ),
                   ],
                 ),
                 const Divider(),
-                // Tools list
+                // Base names list
                 Expanded(
                   child: ListView.builder(
-                    itemCount: availableTools.length,
+                    itemCount: baseNames.length,
                     itemBuilder: (context, index) {
-                      final tool = availableTools[index];
-                      final isSelected = _selectedTools[tool.toolId] ?? false;
-                      final quantity = _toolQuantities[tool.toolId] ?? 1;
+                      final baseName = baseNames[index];
+                      final tools = groupedTools[baseName]!;
+                      final isSelected = _selectedBaseNames[baseName] ?? false;
+                      final quantity = _baseNameQuantities[baseName] ?? 1;
 
                       return Card(
                         margin: const EdgeInsets.only(bottom: 8),
@@ -395,24 +395,25 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
                             value: isSelected,
                             onChanged: (value) {
                               setState(() {
-                                _selectedTools[tool.toolId] = value ?? false;
+                                _selectedBaseNames[baseName] = value ?? false;
                                 if (value == true) {
-                                  _toolQuantities[tool.toolId] ??= 1;
+                                  _baseNameQuantities[baseName] ??= 1;
                                 }
                               });
                             },
                           ),
                           title: Text(
-                            tool.name,
+                            baseName,
                             style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                           subtitle: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(tool.category),
+                              Text(tools.first.category),
                               Text(
-                                'ID: ${tool.toolId}',
-                                style: const TextStyle(fontSize: 11),
+                                '${tools.length} available in inventory',
+                                style: const TextStyle(
+                                    fontSize: 11, color: Colors.grey),
                               ),
                             ],
                           ),
@@ -426,7 +427,7 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
                                       onPressed: quantity > 1
                                           ? () {
                                               setState(() {
-                                                _toolQuantities[tool.toolId] =
+                                                _baseNameQuantities[baseName] =
                                                     quantity - 1;
                                               });
                                             }
@@ -452,7 +453,7 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
                                     IconButton(
                                       onPressed: () {
                                         setState(() {
-                                          _toolQuantities[tool.toolId] =
+                                          _baseNameQuantities[baseName] =
                                               quantity + 1;
                                         });
                                       },
@@ -479,27 +480,29 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
           child: const Text('Cancel'),
         ),
         ElevatedButton(
-          onPressed: _selectedTools.values.any((selected) => selected)
+          onPressed: _selectedBaseNames.values.any((selected) => selected)
               ? () async {
                   final settingsProvider = context.read<ToolSettingsProvider>();
                   final inventoryProvider = context.read<InventoryProvider>();
 
-                  // Get selected tools
-                  final selectedToolIds = _selectedTools.entries
+                  // Get selected base names
+                  final selectedBaseNamesList = _selectedBaseNames.entries
                       .where((entry) => entry.value)
                       .map((entry) => entry.key)
                       .toList();
 
-                  // Add each selected tool
-                  for (final toolId in selectedToolIds) {
+                  // Add each selected base name
+                  for (final baseName in selectedBaseNamesList) {
+                    // Find first tool with this base name to get category
                     final tool = inventoryProvider.tools.firstWhere(
-                      (t) => t.toolId == toolId,
+                      (t) =>
+                          t.baseName == baseName &&
+                          t.toolType == widget.toolType,
                     );
-                    final quantity = _toolQuantities[toolId] ?? 1;
+                    final quantity = _baseNameQuantities[baseName] ?? 1;
 
                     final toolRequirement = ToolRequirement(
-                      toolId: tool.toolId,
-                      name: tool.name,
+                      baseName: baseName,
                       category: tool.category,
                       quantity: quantity,
                     );
@@ -521,7 +524,7 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
             foregroundColor: Colors.white,
           ),
           child: Text(
-            'Add ${_selectedTools.values.where((v) => v).length} Tool${_selectedTools.values.where((v) => v).length != 1 ? 's' : ''}',
+            'Add ${_selectedBaseNames.values.where((v) => v).length} Tool${_selectedBaseNames.values.where((v) => v).length != 1 ? 's' : ''}',
           ),
         ),
       ],

@@ -8,6 +8,7 @@ class HappySunProjectCard extends StatelessWidget {
   final VoidCallback? onCheckout;
   final VoidCallback? onChecklist;
   final VoidCallback? onCheckin;
+  final VoidCallback? onEditTools;
 
   const HappySunProjectCard({
     super.key,
@@ -16,6 +17,7 @@ class HappySunProjectCard extends StatelessWidget {
     this.onCheckout,
     this.onChecklist,
     this.onCheckin,
+    this.onEditTools,
   });
 
   @override
@@ -37,9 +39,16 @@ class HappySunProjectCard extends StatelessWidget {
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Section 1: Project Details
+                  // Section 1: Project Details + Tools Needed
                   Expanded(
-                    child: _buildProjectDetailsSection(),
+                    flex: 2,
+                    child: Column(
+                      children: [
+                        _buildProjectDetailsSection(),
+                        const Divider(height: 16),
+                        _buildToolsNeededSection(context),
+                      ],
+                    ),
                   ),
                   const VerticalDivider(width: 1),
                   // Section 2: Checkout
@@ -125,6 +134,62 @@ class HappySunProjectCard extends StatelessWidget {
         if (project.scheduledTime != null)
           _buildDetailRow('Time', project.scheduledTime!),
         _buildDetailRow('Team Members', '${project.numberOfTeamMembers}'),
+      ],
+    );
+  }
+
+  Widget _buildToolsNeededSection(BuildContext context) {
+    final tools = project.toolsNeeded;
+    final hasTools = tools != null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '🛠️ Tools Needed',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 14,
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (hasTools) ...[
+          _buildDetailRow('Team Tools',
+              '${tools.teamTools.fold<int>(0, (sum, tool) => sum + tool.totalQuantity)}'),
+          _buildDetailRow('Individual',
+              '${tools.individualTools.fold<int>(0, (sum, tool) => sum + tool.totalQuantity)}'),
+          _buildDetailRow('Extras',
+              '${tools.extras.fold<int>(0, (sum, tool) => sum + tool.totalQuantity)}'),
+          _buildDetailRow('Total', '${tools.totalCount}',
+              valueColor: Colors.orange),
+          const SizedBox(height: 8),
+          if (onEditTools != null)
+            ElevatedButton.icon(
+              onPressed: onEditTools,
+              icon: const Icon(Icons.edit, size: 16),
+              label: const Text('View/Edit', style: TextStyle(fontSize: 12)),
+              style: ElevatedButton.styleFrom(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
+            ),
+        ] else ...[
+          const Text(
+            'No tools configured',
+            style: TextStyle(color: Colors.grey, fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          if (onEditTools != null)
+            ElevatedButton.icon(
+              onPressed: onEditTools,
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('Add Tools', style: TextStyle(fontSize: 12)),
+              style: ElevatedButton.styleFrom(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
+            ),
+        ],
       ],
     );
   }

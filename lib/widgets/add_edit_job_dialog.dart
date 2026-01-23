@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../models/job_list_item.dart';
 import '../models/collection_job.dart';
 import '../providers/job_list_provider.dart';
+import '../providers/job_list_status_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/collection_schedule_provider.dart';
 import '../services/job_assignment_service.dart';
@@ -41,7 +42,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   late final TextEditingController _whoToInvoiceController;
 
   // Dropdown values
-  late JobListStatus _selectedJobStatus;
+  late String _selectedJobStatusId; // Now stores custom status ID
   late JobType _selectedJobType;
   String? _selectedVehicleTrailerCombo;
 
@@ -79,7 +80,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         TextEditingController(text: job?.whoToInvoice ?? '');
 
     // Initialize dropdown values
-    _selectedJobStatus = job?.jobStatus ?? JobListStatus.standby;
+    _selectedJobStatusId = job?.jobStatusId ?? 'standby';
     _selectedJobType = job?.jobType ?? JobType.flyersPrintingOnly;
 
     // Initialize vehicle/trailer combo based on existing quantity for junk collection
@@ -313,30 +314,38 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                           ),
                                         ),
                                         const SizedBox(height: 12),
-                                        DropdownButtonFormField<JobListStatus>(
-                                          initialValue: _selectedJobStatus,
-                                          decoration: const InputDecoration(
-                                            labelText: 'Job Status *',
-                                            border: OutlineInputBorder(),
-                                          ),
-                                          items: JobListStatus.values
-                                              .map((status) {
-                                            return DropdownMenuItem<
-                                                JobListStatus>(
-                                              value: status,
-                                              child: Text(
-                                                status.displayName,
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
+                                        Consumer<JobListStatusProvider>(
+                                          builder:
+                                              (context, statusProvider, child) {
+                                            final statuses =
+                                                statusProvider.statuses;
+                                            return DropdownButtonFormField<
+                                                String>(
+                                              value: _selectedJobStatusId,
+                                              decoration: const InputDecoration(
+                                                labelText: 'Job Status *',
+                                                border: OutlineInputBorder(),
                                               ),
+                                              items: statuses.map((status) {
+                                                return DropdownMenuItem<String>(
+                                                  value: status.id,
+                                                  child: Text(
+                                                    status.label,
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                  ),
+                                                );
+                                              }).toList(),
+                                              onChanged: (value) {
+                                                if (value != null) {
+                                                  setState(() {
+                                                    _selectedJobStatusId =
+                                                        value;
+                                                  });
+                                                }
+                                              },
                                             );
-                                          }).toList(),
-                                          onChanged: (value) {
-                                            if (value != null) {
-                                              setState(() {
-                                                _selectedJobStatus = value;
-                                              });
-                                            }
                                           },
                                         ),
                                         const SizedBox(height: 12),
@@ -396,31 +405,40 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                         const SizedBox(width: 12),
                                         Flexible(
                                           flex: 2,
-                                          child: DropdownButtonFormField<
-                                              JobListStatus>(
-                                            initialValue: _selectedJobStatus,
-                                            decoration: const InputDecoration(
-                                              labelText: 'Job Status *',
-                                              border: OutlineInputBorder(),
-                                            ),
-                                            items: JobListStatus.values
-                                                .map((status) {
-                                              return DropdownMenuItem<
-                                                  JobListStatus>(
-                                                value: status,
-                                                child: Text(
-                                                  status.displayName,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
+                                          child:
+                                              Consumer<JobListStatusProvider>(
+                                            builder: (context, statusProvider,
+                                                child) {
+                                              final statuses =
+                                                  statusProvider.statuses;
+                                              return DropdownButtonFormField<
+                                                  String>(
+                                                value: _selectedJobStatusId,
+                                                decoration:
+                                                    const InputDecoration(
+                                                  labelText: 'Job Status *',
+                                                  border: OutlineInputBorder(),
                                                 ),
+                                                items: statuses.map((status) {
+                                                  return DropdownMenuItem<
+                                                      String>(
+                                                    value: status.id,
+                                                    child: Text(
+                                                      status.label,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                    ),
+                                                  );
+                                                }).toList(),
+                                                onChanged: (value) {
+                                                  if (value != null) {
+                                                    setState(() {
+                                                      _selectedJobStatusId =
+                                                          value;
+                                                    });
+                                                  }
+                                                },
                                               );
-                                            }).toList(),
-                                            onChanged: (value) {
-                                              if (value != null) {
-                                                setState(() {
-                                                  _selectedJobStatus = value;
-                                                });
-                                              }
                                             },
                                           ),
                                         ),
@@ -1326,7 +1344,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         invoice: _invoiceController.text.trim(),
         amount: double.tryParse(_amountController.text) ?? 0.0,
         client: _clientController.text.trim(),
-        jobStatusId: _selectedJobStatus.customStatusId,
+        jobStatusId: _selectedJobStatusId,
         invoiceStatusId: widget.jobToEdit?.invoiceStatusId ?? 'pending',
         jobType: _selectedJobType,
         area: _areaController.text.trim(),
@@ -1393,7 +1411,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         invoice: _invoiceController.text.trim(),
         amount: double.tryParse(_amountController.text) ?? 0.0,
         client: _clientController.text.trim(),
-        jobStatusId: _selectedJobStatus.customStatusId,
+        jobStatusId: _selectedJobStatusId,
         invoiceStatusId: widget.jobToEdit?.invoiceStatusId ?? 'pending',
         jobType: _selectedJobType,
         area: _areaController.text.trim(),
@@ -1446,7 +1464,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         invoice: _invoiceController.text.trim(),
         amount: double.tryParse(_amountController.text) ?? 0.0,
         client: _clientController.text.trim(),
-        jobStatusId: _selectedJobStatus.customStatusId,
+        jobStatusId: _selectedJobStatusId,
         invoiceStatusId: widget.jobToEdit?.invoiceStatusId ?? 'pending',
         jobType: _selectedJobType,
         area: _areaController.text.trim(),

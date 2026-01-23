@@ -166,6 +166,43 @@ class HappySunJobProvider extends ChangeNotifier {
     }
   }
 
+  /// Update only individual tools when manDays changes (keeps team tools unchanged)
+  Future<bool> updateIndividualToolsFromManDays(
+    String jobId,
+    DateTime date,
+    List<GroupedToolItem> individualTools,
+  ) async {
+    try {
+      _error = null;
+      await _jobService.updateIndividualTools(jobId, date, individualTools);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Update tools used (categorized) during checkout
+  Future<bool> updateToolsUsedCategorized(
+    String jobId,
+    DateTime date,
+    CategorizedTools categorizedTools,
+  ) async {
+    try {
+      _error = null;
+      await _jobService.updateToolsUsedCategorized(
+          jobId, date, categorizedTools);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
   /// Add tools to a job
   Future<bool> addTools(
     String jobId,
@@ -225,6 +262,24 @@ class HappySunJobProvider extends ChangeNotifier {
     try {
       _error = null;
       await _jobService.updateNotes(jobId, date, notes);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Update checklist data
+  Future<bool> updateChecklistData(
+    String jobId,
+    DateTime date,
+    ChecklistData checklistData,
+  ) async {
+    try {
+      _error = null;
+      await _jobService.updateChecklistData(jobId, date, checklistData);
       notifyListeners();
       return true;
     } catch (e) {

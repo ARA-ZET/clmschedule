@@ -23,6 +23,8 @@ import 'providers/happy_sun_job_provider.dart';
 import 'providers/app_version_provider.dart';
 import 'providers/tool_settings_provider.dart';
 import 'models/job_list_item.dart';
+import 'models/happy_sun_project.dart';
+import 'services/happy_sun_migration_service.dart';
 import 'widgets/schedule_grid.dart';
 import 'widgets/collection_schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
@@ -48,7 +50,6 @@ import 'services/chat_service.dart';
 import 'services/inventory_service.dart';
 import 'models/command.dart';
 import 'firebase_options.dart';
-import 'utils/happy_sun_migration.dart';
 import 'dart:html' as html show window;
 
 // Simple test command for debugging undo functionality
@@ -213,8 +214,8 @@ class _MyAppState extends State<MyApp> {
     super.initState();
     _versionService = VersionService(FirebaseFirestore.instance);
     // Initialize all providers asynchronously in parallel
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeProvidersAsync();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _initializeProvidersAsync();
       _setupHappySunSync();
     });
   }
@@ -223,45 +224,127 @@ class _MyAppState extends State<MyApp> {
     // Set up callbacks to sync Happy Sun jobs with Job List items
     final jobListProvider = context.read<JobListProvider>();
     final happySunJobProvider = context.read<HappySunJobProvider>();
+    final happySunProjectProvider = context.read<HappySunProjectProvider>();
     final toolSettingsProvider = context.read<ToolSettingsProvider>();
     final inventoryProvider = context.read<InventoryProvider>();
 
-    // Load tool settings first
-    toolSettingsProvider.loadSettings();
-
     jobListProvider.setHappySunCallbacks(
       onAdded: (jobListItem) async {
-        // Auto-create Happy Sun job for window/solar cleaning jobs
-        // Calculate tools needed based on manDays (number of cleaners)
-        final numberOfCleaners = jobListItem.manDays.ceil();
-        final categorizedTools = toolSettingsProvider.calculateCategorizedTools(
-          numberOfCleaners,
-          inventoryProvider.tools,
-        );
+        try {
+          debugPrint(
+              '🔵 Happy Sun Sync: Creating job and project for ${jobListItem.id}');
 
-        await happySunJobProvider.createJobFromJobListItem(
-          jobListItem,
-          categorizedTools,
-        );
-      },
-      onUpdated: (oldItem, newItem) async {
-        // Update tools needed when manDays changes
-        if (oldItem.manDays != newItem.manDays &&
-            (newItem.jobType == JobType.windowCleaning ||
-                newItem.jobType == JobType.solarPanelCleaning)) {
-          final numberOfCleaners = newItem.manDays.ceil();
+          // Auto-create Happy Sun job for window/solar cleaning jobs
+          // Calculate tools needed based on manDays (number of cleaners)
+          final numberOfCleaners = jobListItem.manDays.ceil();
+          debugPrint('   Number of cleaners: $numberOfCleaners');
+
+          // Check if tool settings are loaded
+          if (toolSettingsProvider.settings.teamTools.isEmpty &&
+              toolSettingsProvider.settings.individualTools.isEmpty) {
+            debugPrint(
+                '   ⚠️ WARNING: Tool settings are empty! Loading now...');
+            await toolSettingsProvider.loadSettings();
+          }
+
+          // Check if inventory is loaded
+          if (inventoryProvider.tools.isEmpty) {
+            debugPrint('   ⚠️ WARNING: Inventory is empty! Loading now...');
+            await inventoryProvider.initialize();
+          }
+
+          debugPrint(
+              '   Tool settings: ${toolSettingsProvider.settings.teamTools.length} team tools, ${toolSettingsProvider.settings.individualTools.length} individual tools');
+          debugPrint(
+              '   Inventory: ${inventoryProvider.tools.length} tools available');
+
+          // Calculate categorized tools: team tools (constant) + individual tools (per cleaner)
           final categorizedTools =
               toolSettingsProvider.calculateCategorizedTools(
             numberOfCleaners,
             inventoryProvider.tools,
           );
 
-          await happySunJobProvider.updateToolsNeededFromManDays(
-            newItem.id,
-            newItem.date,
-            numberOfCleaners,
+          debugPrint(
+              '   Team tools calculated: ${categorizedTools.teamTools.length} groups');
+          debugPrint(
+              '   Individual tools calculated: ${categorizedTools.individualTools.length} groups (×$numberOfCleaners cleaners)');
+          for (final tool in categorizedTools.teamTools) {
+            debugPrint('      Team: ${tool.baseName} × ${tool.totalQuantity}');
+          }
+          for (final tool in categorizedTools.individualTools) {
+            debugPrint(
+                '      Individual: ${tool.baseName} × ${tool.totalQuantity}');
+          }
+
+          final jobCreated = await happySunJobProvider.createJobFromJobListItem(
+            jobListItem,
             categorizedTools,
           );
+          debugPrint('   Happy Sun job created: $jobCreated');
+
+          // Also create corresponding HappySunProject
+          final project = HappySunProject(
+            id: jobListItem.id,
+            clientName: jobListItem.client,
+            address: jobListItem.collectionAddress.isNotEmpty
+                ? jobListItem.collectionAddress
+                : jobListItem.area,
+            scheduledDate: jobListItem.date,
+            numberOfTeamMembers: numberOfCleaners,
+            toolsNeeded: categorizedTools, // Add tools needed
+            status: 'pending',
+            createdAt: DateTime.now(),
+          );
+          await happySunProjectProvider.createProject(project);
+          debugPrint('   Happy Sun project created: ${project.clientName}');
+          debugPrint('✅ Happy Sun Sync: Complete for ${jobListItem.id}');
+        } catch (e) {
+          debugPrint('❌ Happy Sun Sync Error (onAdded): $e');
+        }
+      },
+      onUpdated: (oldItem, newItem) async {
+        // Only update individual tools when manDays changes (team tools remain constant)
+        if (oldItem.manDays != newItem.manDays &&
+            (newItem.jobType == JobType.windowCleaning ||
+                newItem.jobType == JobType.solarPanelCleaning)) {
+          final numberOfCleaners = newItem.manDays.ceil();
+
+          // Only recalculate individual tools (not team tools or extras)
+          final individualTools = toolSettingsProvider.calculateIndividualTools(
+            numberOfCleaners,
+            inventoryProvider.tools,
+          );
+
+          await happySunJobProvider.updateIndividualToolsFromManDays(
+            newItem.id,
+            newItem.date,
+            individualTools,
+          );
+
+          // Also update corresponding HappySunProject
+          final existingProject =
+              happySunProjectProvider.getProjectById(newItem.id);
+          if (existingProject != null) {
+            final updatedProject = existingProject.copyWith(
+              numberOfTeamMembers: numberOfCleaners,
+              updatedAt: DateTime.now(),
+            );
+            await happySunProjectProvider.updateProject(updatedProject);
+          }
+        }
+      },
+      onDeleted: (jobListItem) async {
+        // Delete corresponding Happy Sun job when window/solar cleaning job is deleted
+        if (jobListItem.jobType == JobType.windowCleaning ||
+            jobListItem.jobType == JobType.solarPanelCleaning) {
+          await happySunJobProvider.deleteJob(
+            jobListItem.id,
+            jobListItem.date,
+          );
+
+          // Also delete corresponding HappySunProject
+          await happySunProjectProvider.deleteProject(jobListItem.id);
         }
       },
     );
@@ -275,6 +358,8 @@ class _MyAppState extends State<MyApp> {
       context.read<AuthProvider>().initialize(),
       context.read<ScheduleProvider>().initialize(),
       context.read<JobListProvider>().initialize(),
+      context.read<InventoryProvider>().initialize(),
+      context.read<ToolSettingsProvider>().loadSettings(),
       // CollectionScheduleProvider loads lazily when tab opens (depends on JobListProvider data)
     ]);
 
@@ -527,13 +612,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                   }
                 },
                 tooltip: 'Import KML data',
-              ),
-              IconButton(
-                icon: const Icon(Icons.sync),
-                onPressed: () async {
-                  await showMigrationDialog(context);
-                },
-                tooltip: 'Migrate Happy Sun Jobs',
               ),
             ],
             // Settings menu - always visible
@@ -926,7 +1004,7 @@ class _HappySunTabState extends State<HappySunTab>
             indicatorColor: Colors.blue,
             tabs: const [
               Tab(text: 'Projects'),
-              Tab(text: 'Inventory'),
+              Tab(text: 'Tools/Inventory'),
             ],
           ),
         ),
@@ -945,26 +1023,93 @@ class _HappySunTabState extends State<HappySunTab>
 }
 
 // Happy Sun Projects View
-class HappySunProjectsView extends StatelessWidget {
+class HappySunProjectsView extends StatefulWidget {
   const HappySunProjectsView({super.key});
 
   @override
+  State<HappySunProjectsView> createState() => _HappySunProjectsViewState();
+}
+
+class _HappySunProjectsViewState extends State<HappySunProjectsView> {
+  bool _isMigrating = false;
+  String? _migrationResult;
+
+  Future<void> _runMigration() async {
+    setState(() {
+      _isMigrating = true;
+      _migrationResult = null;
+    });
+
+    try {
+      final migrationService = HappySunMigrationService();
+      final results = await migrationService.migrateJobsToProjects();
+
+      setState(() {
+        _migrationResult = 'Migration complete!\n\n'
+            'Jobs processed: ${results['jobsProcessed']}\n'
+            'Projects created: ${results['projectsCreated']}\n'
+            'Projects updated: ${results['projectsUpdated']}\n'
+            'Errors: ${results['errors']}';
+      });
+    } catch (e) {
+      setState(() {
+        _migrationResult = 'Migration failed: $e';
+      });
+    } finally {
+      setState(() {
+        _isMigrating = false;
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return const Center(
+    return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.work, size: 64, color: Colors.orange),
-          SizedBox(height: 16),
-          Text(
+          const Icon(Icons.work, size: 64, color: Colors.orange),
+          const SizedBox(height: 16),
+          const Text(
             'Happy Sun Projects',
             style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
           ),
-          SizedBox(height: 8),
-          Text(
+          const SizedBox(height: 8),
+          const Text(
             'Projects functionality will be implemented here',
             style: TextStyle(color: Colors.grey),
           ),
+          const SizedBox(height: 32),
+          ElevatedButton.icon(
+            onPressed: _isMigrating ? null : _runMigration,
+            icon: _isMigrating
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.sync),
+            label: Text(_isMigrating ? 'Migrating...' : 'Run Migration'),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            ),
+          ),
+          if (_migrationResult != null) ...[
+            const SizedBox(height: 24),
+            Container(
+              padding: const EdgeInsets.all(16),
+              margin: const EdgeInsets.symmetric(horizontal: 32),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+              child: Text(
+                _migrationResult!,
+                style: const TextStyle(fontFamily: 'monospace'),
+              ),
+            ),
+          ],
         ],
       ),
     );

@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'happy_sun_job.dart'; // For CategorizedTools
 
 /// Represents a tool checked out for a project
 class CheckedOutTool {
@@ -242,6 +243,9 @@ class HappySunProject {
   final DateTime createdAt;
   final DateTime? updatedAt;
 
+  // Tools needed for the project (preparation list)
+  final CategorizedTools? toolsNeeded;
+
   // Three phases
   final ProjectCheckout? checkout;
   final ProjectChecklist? checklist;
@@ -257,6 +261,7 @@ class HappySunProject {
     this.status = 'pending',
     required this.createdAt,
     this.updatedAt,
+    this.toolsNeeded,
     this.checkout,
     this.checklist,
     this.checkin,
@@ -274,6 +279,10 @@ class HappySunProject {
       status: data['status'] ?? 'pending',
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       updatedAt: (data['updatedAt'] as Timestamp?)?.toDate(),
+      toolsNeeded: data['toolsNeeded'] != null
+          ? CategorizedTools.fromMap(
+              data['toolsNeeded'] as Map<String, dynamic>)
+          : null,
       checkout:
           ProjectCheckout.fromMap(data['checkout'] as Map<String, dynamic>?),
       checklist:
@@ -292,6 +301,7 @@ class HappySunProject {
       'status': status,
       'createdAt': Timestamp.fromDate(createdAt),
       'updatedAt': updatedAt != null ? Timestamp.fromDate(updatedAt!) : null,
+      'toolsNeeded': toolsNeeded?.toMap(),
       'checkout': checkout?.toMap(),
       'checklist': checklist?.toMap(),
       'checkin': checkin?.toMap(),
@@ -308,6 +318,7 @@ class HappySunProject {
     String? status,
     DateTime? createdAt,
     DateTime? updatedAt,
+    CategorizedTools? toolsNeeded,
     ProjectCheckout? checkout,
     ProjectChecklist? checklist,
     ProjectCheckin? checkin,
@@ -322,6 +333,7 @@ class HappySunProject {
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      toolsNeeded: toolsNeeded ?? this.toolsNeeded,
       checkout: checkout ?? this.checkout,
       checklist: checklist ?? this.checklist,
       checkin: checkin ?? this.checkin,

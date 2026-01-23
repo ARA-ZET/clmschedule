@@ -49,6 +49,8 @@
 	<string>This app needs access to location when open to show your position on the map.</string>
 	<key>NSLocationAlwaysUsageDescription</key>
 	<string>This app needs access to location when in the background to show your position on the map.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>This app needs access to the camera to scan tool QR codes.</string>
 	<key>io.flutter.embedded_views_preview</key>
 	<true/>
 	<key>GMSApiKey</key>

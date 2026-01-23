@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/happy_sun_project.dart';
+import '../models/happy_sun_job.dart'; // For CategorizedTools
 import '../providers/happy_sun_project_provider.dart';
+import '../providers/inventory_provider.dart';
 import '../widgets/happy_sun_project_card.dart';
 import 'happy_sun_checkout_dialog.dart';
 import 'happy_sun_checklist_dialog.dart';
 import 'happy_sun_checkin_dialog.dart';
 import 'happy_sun_add_project_dialog.dart';
+import 'project_tools_dialog.dart';
 
 class HappySunProjectsScreen extends StatefulWidget {
   const HappySunProjectsScreen({super.key});
@@ -159,6 +162,7 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
               return HappySunProjectCard(
                 project: project,
                 onTap: () => _showProjectDetails(context, project),
+                onEditTools: () => _showToolsDialog(context, project),
                 onCheckout: !project.hasCheckout
                     ? () => _showCheckoutDialog(context, project)
                     : null,
@@ -241,6 +245,32 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
           Text('$label: ', style: const TextStyle(fontWeight: FontWeight.bold)),
           Expanded(child: Text(value)),
         ],
+      ),
+    );
+  }
+
+  void _showToolsDialog(BuildContext context, HappySunProject project) {
+    final inventoryProvider = context.read<InventoryProvider>();
+
+    showDialog(
+      context: context,
+      builder: (context) => ProjectToolsDialog(
+        toolsNeeded: project.toolsNeeded ?? CategorizedTools(),
+        availableTools: inventoryProvider.tools,
+        onSave: (updatedTools) async {
+          final provider = context.read<HappySunProjectProvider>();
+          final updatedProject = project.copyWith(toolsNeeded: updatedTools);
+          await provider.updateProject(updatedProject);
+
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Tools updated successfully'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        },
       ),
     );
   }

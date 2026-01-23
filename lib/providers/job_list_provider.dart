@@ -11,6 +11,7 @@ class JobListProvider extends ChangeNotifier {
   final JobListService _jobListService;
   final AuthProvider _authProvider;
   List<JobListItem> _jobListItems = [];
+  Set<String> _knownJobIds = {}; // Track known job IDs to detect new additions
   bool _isLoading = false;
   bool _isInitialized = false;
   String? _error;
@@ -53,6 +54,7 @@ class JobListProvider extends ChangeNotifier {
   // Callback for Happy Sun job syncing
   Function(JobListItem)? _onJobListItemAdded;
   Function(JobListItem oldItem, JobListItem newItem)? _onJobListItemUpdated;
+  Function(JobListItem)? _onJobListItemDeleted;
 
   JobListProvider(this._jobListService, this._authProvider);
 
@@ -60,9 +62,11 @@ class JobListProvider extends ChangeNotifier {
   void setHappySunCallbacks({
     Function(JobListItem)? onAdded,
     Function(JobListItem oldItem, JobListItem newItem)? onUpdated,
+    Function(JobListItem)? onDeleted,
   }) {
     _onJobListItemAdded = onAdded;
     _onJobListItemUpdated = onUpdated;
+    _onJobListItemDeleted = onDeleted;
   }
 
   // Async initialization method - call explicitly for concurrent loading
@@ -230,6 +234,14 @@ class JobListProvider extends ChangeNotifier {
     }
   }
 
+  // Trigger Happy Sun sync asynchronously (fire and forget with error logging)
+  void _triggerHappySunSync(JobListItem job) {
+    _onJobListItemAdded!(job).catchError((error) {
+      debugPrint(
+          '❌ JobListProvider: Happy Sun sync error for ${job.id}: $error');
+    });
+  }
+
   // Set up real-time listener for current month data only
   Future<void> _setupCurrentMonthListener() async {
     // Cancel existing subscription
@@ -244,6 +256,24 @@ class JobListProvider extends ChangeNotifier {
       (jobListItems) {
         print(
             'JobListProvider: Received ${jobListItems.length} job list items via snapshot');
+
+        // Detect new window/solar cleaning jobs and trigger Happy Sun sync
+        if (_onJobListItemAdded != null) {
+          for (final job in jobListItems) {
+            if (!_knownJobIds.contains(job.id) &&
+                (job.jobType == JobType.windowCleaning ||
+                    job.jobType == JobType.solarPanelCleaning)) {
+              // New Happy Sun job detected - trigger sync asynchronously
+              debugPrint(
+                  '🆕 JobListProvider: New Happy Sun job detected: ${job.id}');
+              _triggerHappySunSync(job);
+            }
+          }
+        }
+
+        // Update known IDs
+        _knownJobIds = jobListItems.map((job) => job.id).toSet();
+
         _jobListItems = jobListItems;
         _isLoading = false;
         _error = null;
@@ -271,7 +301,8 @@ class JobListProvider extends ChangeNotifier {
     final oldMonth = _currentMonth;
     _currentMonth = month;
 
-    // Clear current data and show loading state
+    // Clear current data and known IDs when changing months
+    _knownJobIds.clear();
     _isLoading = true;
     notifyListeners();
 
@@ -569,12 +600,9 @@ class JobListProvider extends ChangeNotifier {
     try {
       await _jobListService.addJobListItem(jobListItem, jobListItem.date);
 
-      // Trigger Happy Sun sync if job is window/solar cleaning
-      if (_onJobListItemAdded != null &&
-          (jobListItem.jobType == JobType.windowCleaning ||
-              jobListItem.jobType == JobType.solarPanelCleaning)) {
-        _onJobListItemAdded!(jobListItem);
-      }
+      // NOTE: Do NOT trigger Happy Sun sync here because we don't have the generated ID yet.
+      // The Firestore listener will pick up the new job, and if needed, callers should use
+      // addJobListItemAndReturn() to get the saved job with its ID for immediate sync.
     } catch (error) {
       _error = error.toString();
       notifyListeners();
@@ -593,6 +621,7 @@ class JobListProvider extends ChangeNotifier {
         amount: jobListItem.amount,
         client: jobListItem.client,
         jobStatusId: jobListItem.jobStatusId,
+        invoiceStatusId: jobListItem.invoiceStatusId,
         jobType: jobListItem.jobType,
         area: jobListItem.area,
         quantity: jobListItem.quantity,
@@ -612,7 +641,11 @@ class JobListProvider extends ChangeNotifier {
       if (_onJobListItemAdded != null &&
           (savedJob.jobType == JobType.windowCleaning ||
               savedJob.jobType == JobType.solarPanelCleaning)) {
-        _onJobListItemAdded!(savedJob);
+        debugPrint(
+            '🔄 JobListProvider: Triggering Happy Sun sync for ${savedJob.id}');
+        await _onJobListItemAdded!(savedJob);
+        debugPrint(
+            '✅ JobListProvider: Happy Sun sync completed for ${savedJob.id}');
       }
 
       return savedJob;
@@ -628,12 +661,8 @@ class JobListProvider extends ChangeNotifier {
     try {
       await _jobListService.addJobListItem(jobListItem, jobListItem.date);
 
-      // Trigger Happy Sun sync if job is window/solar cleaning
-      if (_onJobListItemAdded != null &&
-          (jobListItem.jobType == JobType.windowCleaning ||
-              jobListItem.jobType == JobType.solarPanelCleaning)) {
-        _onJobListItemAdded!(jobListItem);
-      }
+      // NOTE: Happy Sun sync will be triggered by the Firestore listener when it detects the new job
+      // This prevents issues with missing/temporary IDs
     } catch (error) {
       _error = error.toString();
       notifyListeners();
@@ -796,6 +825,12 @@ class JobListProvider extends ChangeNotifier {
       // Find the item to get its date for proper monthly context
       final item = getJobListItemById(id);
       final itemDate = item?.date ?? _currentMonth;
+
+      // Trigger callback before deletion (while item still exists)
+      if (item != null && _onJobListItemDeleted != null) {
+        await _onJobListItemDeleted!(item);
+      }
+
       await _jobListService.deleteJobListItem(id, itemDate);
     } catch (error) {
       _error = error.toString();

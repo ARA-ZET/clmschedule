@@ -48,22 +48,32 @@ class ToolSettings {
 }
 
 class ToolRequirement {
-  final String toolId;
-  final String name;
+  final String baseName;
   final String category;
   final int quantity;
 
   ToolRequirement({
-    required this.toolId,
-    required this.name,
+    required this.baseName,
     required this.category,
     required this.quantity,
   });
 
   factory ToolRequirement.fromMap(Map<String, dynamic> data) {
+    // Backward compatibility: if old format has 'toolId' and 'name', migrate to baseName
+    String baseName;
+    if (data.containsKey('baseName')) {
+      baseName = data['baseName'] as String? ?? '';
+    } else if (data.containsKey('name')) {
+      // Old format: extract base name from full name (remove #number suffix)
+      final name = data['name'] as String? ?? '';
+      final parts = name.split(' #');
+      baseName = parts.first;
+    } else {
+      baseName = '';
+    }
+
     return ToolRequirement(
-      toolId: data['toolId'] as String? ?? '',
-      name: data['name'] as String? ?? '',
+      baseName: baseName,
       category: data['category'] as String? ?? '',
       quantity: data['quantity'] as int? ?? 1,
     );
@@ -71,22 +81,19 @@ class ToolRequirement {
 
   Map<String, dynamic> toMap() {
     return {
-      'toolId': toolId,
-      'name': name,
+      'baseName': baseName,
       'category': category,
       'quantity': quantity,
     };
   }
 
   ToolRequirement copyWith({
-    String? toolId,
-    String? name,
+    String? baseName,
     String? category,
     int? quantity,
   }) {
     return ToolRequirement(
-      toolId: toolId ?? this.toolId,
-      name: name ?? this.name,
+      baseName: baseName ?? this.baseName,
       category: category ?? this.category,
       quantity: quantity ?? this.quantity,
     );

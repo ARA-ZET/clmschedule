@@ -228,6 +228,43 @@ class HappySunJobService {
     await updateJob(updatedJob);
   }
 
+  /// Update only individual tools (keeps team tools and extras unchanged)
+  Future<void> updateIndividualTools(
+    String jobId,
+    DateTime date,
+    List<GroupedToolItem> individualTools,
+  ) async {
+    final job = await getJob(jobId, date);
+    if (job == null) {
+      throw Exception('Job not found');
+    }
+
+    // Keep existing team tools and extras, only update individual tools
+    final updatedCategorized = CategorizedTools(
+      teamTools: job.toolsNeededCategorized?.teamTools ?? [],
+      individualTools: individualTools,
+      extras: job.toolsNeededCategorized?.extras ?? [],
+    );
+
+    final updatedJob = job.copyWith(toolsNeededCategorized: updatedCategorized);
+    await updateJob(updatedJob);
+  }
+
+  /// Update categorized tools used during checkout
+  Future<void> updateToolsUsedCategorized(
+    String jobId,
+    DateTime date,
+    CategorizedTools categorizedTools,
+  ) async {
+    final job = await getJob(jobId, date);
+    if (job == null) {
+      throw Exception('Job not found');
+    }
+
+    final updatedJob = job.copyWith(toolsUsedCategorized: categorizedTools);
+    await updateJob(updatedJob);
+  }
+
   /// Add tools to a job
   Future<void> addToolsToJob(
     String jobId,
@@ -290,6 +327,24 @@ class HappySunJobService {
     }
 
     final updatedJob = job.copyWith(notes: notes);
+    await updateJob(updatedJob);
+  }
+
+  /// Update checklist data
+  Future<void> updateChecklistData(
+    String jobId,
+    DateTime date,
+    ChecklistData checklistData,
+  ) async {
+    final job = await getJob(jobId, date);
+    if (job == null) {
+      throw Exception('Job not found');
+    }
+
+    final updatedJob = job.copyWith(
+      checklistData: checklistData,
+      updatedAt: DateTime.now(),
+    );
     await updateJob(updatedJob);
   }
 

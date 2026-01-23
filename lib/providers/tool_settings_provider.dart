@@ -58,18 +58,19 @@ class ToolSettingsProvider with ChangeNotifier {
   }
 
   /// Remove team tool
-  Future<void> removeTeamTool(String toolId) async {
+  Future<void> removeTeamTool(String baseName) async {
     final updatedSettings = _settings.copyWith(
-      teamTools: _settings.teamTools.where((t) => t.toolId != toolId).toList(),
+      teamTools:
+          _settings.teamTools.where((t) => t.baseName != baseName).toList(),
     );
     await saveSettings(updatedSettings);
   }
 
   /// Update team tool quantity
-  Future<void> updateTeamToolQuantity(String toolId, int quantity) async {
+  Future<void> updateTeamToolQuantity(String baseName, int quantity) async {
     final updatedSettings = _settings.copyWith(
       teamTools: _settings.teamTools.map((t) {
-        if (t.toolId == toolId) {
+        if (t.baseName == baseName) {
           return t.copyWith(quantity: quantity);
         }
         return t;
@@ -87,19 +88,21 @@ class ToolSettingsProvider with ChangeNotifier {
   }
 
   /// Remove individual tool
-  Future<void> removeIndividualTool(String toolId) async {
+  Future<void> removeIndividualTool(String baseName) async {
     final updatedSettings = _settings.copyWith(
-      individualTools:
-          _settings.individualTools.where((t) => t.toolId != toolId).toList(),
+      individualTools: _settings.individualTools
+          .where((t) => t.baseName != baseName)
+          .toList(),
     );
     await saveSettings(updatedSettings);
   }
 
   /// Update individual tool quantity
-  Future<void> updateIndividualToolQuantity(String toolId, int quantity) async {
+  Future<void> updateIndividualToolQuantity(
+      String baseName, int quantity) async {
     final updatedSettings = _settings.copyWith(
       individualTools: _settings.individualTools.map((t) {
-        if (t.toolId == toolId) {
+        if (t.baseName == baseName) {
           return t.copyWith(quantity: quantity);
         }
         return t;
@@ -114,20 +117,20 @@ class ToolSettingsProvider with ChangeNotifier {
 
     // Add team tools
     for (final tool in _settings.teamTools) {
-      toolsMap[tool.toolId] = tool;
+      toolsMap[tool.baseName] = tool;
     }
 
     // Add individual tools (multiplied by number of cleaners)
     for (final tool in _settings.individualTools) {
-      if (toolsMap.containsKey(tool.toolId)) {
+      if (toolsMap.containsKey(tool.baseName)) {
         // Tool already exists, add quantities
-        final existing = toolsMap[tool.toolId]!;
-        toolsMap[tool.toolId] = existing.copyWith(
+        final existing = toolsMap[tool.baseName]!;
+        toolsMap[tool.baseName] = existing.copyWith(
           quantity: existing.quantity + (tool.quantity * numberOfCleaners),
         );
       } else {
         // New tool, multiply by cleaners
-        toolsMap[tool.toolId] = tool.copyWith(
+        toolsMap[tool.baseName] = tool.copyWith(
           quantity: tool.quantity * numberOfCleaners,
         );
       }
@@ -137,7 +140,7 @@ class ToolSettingsProvider with ChangeNotifier {
   }
 
   /// Convert tool requirements to categorized grouped tools
-  /// Groups tools by base name and limits to available inventory
+  /// Creates a preparation list - actual tool IDs assigned at checkout
   CategorizedTools calculateCategorizedTools(
     int numberOfCleaners,
     List<InventoryTool> availableInventory,
@@ -145,56 +148,33 @@ class ToolSettingsProvider with ChangeNotifier {
     // Group team tools by base name
     final teamToolsMap = <String, _GroupedToolBuilder>{};
     for (final tool in _settings.teamTools) {
-      final matchingTools = availableInventory
-          .where((inv) =>
-              inv.toolType == ToolType.team && inv.toolId == tool.toolId)
-          .toList();
-
-      if (matchingTools.isNotEmpty) {
-        final baseName = matchingTools.first.baseName;
-        if (!teamToolsMap.containsKey(baseName)) {
-          teamToolsMap[baseName] = _GroupedToolBuilder(
-            baseName: baseName,
-            category: matchingTools.first.category,
-          );
-        }
-        // Add up to requested quantity, limited by availability
-        final availableCount = matchingTools.length;
-        final neededCount = tool.quantity;
-        final takeCount =
-            neededCount < availableCount ? neededCount : availableCount;
-
-        for (int i = 0; i < takeCount; i++) {
-          teamToolsMap[baseName]!.addTool(matchingTools[i].toolId);
-        }
+      if (!teamToolsMap.containsKey(tool.baseName)) {
+        teamToolsMap[tool.baseName] = _GroupedToolBuilder(
+          baseName: tool.baseName,
+          category: tool.category,
+        );
+      }
+      // Add requested quantity as empty placeholders (IDs assigned at checkout)
+      for (int i = 0; i < tool.quantity; i++) {
+        teamToolsMap[tool.baseName]!
+            .addTool(''); // Empty ID - assigned at checkout
       }
     }
 
     // Group individual tools by base name (multiply by cleaners)
     final individualToolsMap = <String, _GroupedToolBuilder>{};
     for (final tool in _settings.individualTools) {
-      final matchingTools = availableInventory
-          .where((inv) =>
-              inv.toolType == ToolType.individual && inv.toolId == tool.toolId)
-          .toList();
-
-      if (matchingTools.isNotEmpty) {
-        final baseName = matchingTools.first.baseName;
-        if (!individualToolsMap.containsKey(baseName)) {
-          individualToolsMap[baseName] = _GroupedToolBuilder(
-            baseName: baseName,
-            category: matchingTools.first.category,
-          );
-        }
-        // Multiply by cleaners and limit by availability
-        final availableCount = matchingTools.length;
-        final neededCount = tool.quantity * numberOfCleaners;
-        final takeCount =
-            neededCount < availableCount ? neededCount : availableCount;
-
-        for (int i = 0; i < takeCount; i++) {
-          individualToolsMap[baseName]!.addTool(matchingTools[i].toolId);
-        }
+      if (!individualToolsMap.containsKey(tool.baseName)) {
+        individualToolsMap[tool.baseName] = _GroupedToolBuilder(
+          baseName: tool.baseName,
+          category: tool.category,
+        );
+      }
+      // Multiply by cleaners and add as placeholders
+      final neededCount = tool.quantity * numberOfCleaners;
+      for (int i = 0; i < neededCount; i++) {
+        individualToolsMap[tool.baseName]!
+            .addTool(''); // Empty ID - assigned at checkout
       }
     }
 
@@ -206,6 +186,33 @@ class ToolSettingsProvider with ChangeNotifier {
             ..sort((a, b) => a.baseName.compareTo(b.baseName)),
       extras: [], // Can be added manually later
     );
+  }
+
+  /// Calculate only individual tools based on number of cleaners
+  /// Used when updating an existing job's cleaner count
+  List<GroupedToolItem> calculateIndividualTools(
+    int numberOfCleaners,
+    List<InventoryTool> availableInventory,
+  ) {
+    // Group individual tools by base name (multiply by cleaners)
+    final individualToolsMap = <String, _GroupedToolBuilder>{};
+    for (final tool in _settings.individualTools) {
+      if (!individualToolsMap.containsKey(tool.baseName)) {
+        individualToolsMap[tool.baseName] = _GroupedToolBuilder(
+          baseName: tool.baseName,
+          category: tool.category,
+        );
+      }
+      // Multiply by cleaners
+      final neededCount = tool.quantity * numberOfCleaners;
+      for (int i = 0; i < neededCount; i++) {
+        individualToolsMap[tool.baseName]!
+            .addTool(''); // Empty ID - assigned at checkout
+      }
+    }
+
+    return individualToolsMap.values.map((builder) => builder.build()).toList()
+      ..sort((a, b) => a.baseName.compareTo(b.baseName));
   }
 }
 

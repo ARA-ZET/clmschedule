@@ -1,5 +1,100 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+/// Represents a single tool's checklist status
+class ToolChecklistItem {
+  final String toolId;
+  final String baseName;
+  final String category;
+  final String status; // 'present', 'broken', 'missing'
+  final String notes;
+  final bool isVerified;
+
+  ToolChecklistItem({
+    required this.toolId,
+    required this.baseName,
+    required this.category,
+    required this.status,
+    this.notes = '',
+    required this.isVerified,
+  });
+
+  factory ToolChecklistItem.fromMap(Map<String, dynamic> data) {
+    return ToolChecklistItem(
+      toolId: data['toolId'] ?? '',
+      baseName: data['baseName'] ?? '',
+      category: data['category'] ?? 'General',
+      status: data['status'] ?? 'present',
+      notes: data['notes'] ?? '',
+      isVerified: data['isVerified'] ?? false,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'toolId': toolId,
+      'baseName': baseName,
+      'category': category,
+      'status': status,
+      'notes': notes,
+      'isVerified': isVerified,
+    };
+  }
+}
+
+/// Represents the complete checklist data
+class ChecklistData {
+  final List<ToolChecklistItem> items;
+  final DateTime completedAt;
+  final String completedBy;
+  final int totalTools;
+  final int verifiedCount;
+  final int brokenCount;
+  final int missingCount;
+  final String summary;
+
+  ChecklistData({
+    required this.items,
+    required this.completedAt,
+    required this.completedBy,
+    required this.totalTools,
+    required this.verifiedCount,
+    required this.brokenCount,
+    required this.missingCount,
+    this.summary = '',
+  });
+
+  factory ChecklistData.fromMap(Map<String, dynamic> data) {
+    return ChecklistData(
+      items: (data['items'] as List<dynamic>?)
+              ?.map((item) =>
+                  ToolChecklistItem.fromMap(item as Map<String, dynamic>))
+              .toList() ??
+          [],
+      completedAt:
+          (data['completedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      completedBy: data['completedBy'] ?? '',
+      totalTools: data['totalTools'] ?? 0,
+      verifiedCount: data['verifiedCount'] ?? 0,
+      brokenCount: data['brokenCount'] ?? 0,
+      missingCount: data['missingCount'] ?? 0,
+      summary: data['summary'] ?? '',
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'items': items.map((item) => item.toMap()).toList(),
+      'completedAt': Timestamp.fromDate(completedAt),
+      'completedBy': completedBy,
+      'totalTools': totalTools,
+      'verifiedCount': verifiedCount,
+      'brokenCount': brokenCount,
+      'missingCount': missingCount,
+      'summary': summary,
+    };
+  }
+}
+
 /// Represents a tool used in a Happy Sun job
 class HappySunToolUsage {
   final String toolId;
@@ -148,6 +243,9 @@ class HappySunJob {
   final String? weatherConditions;
   final List<String>? photoUrls;
 
+  // Checklist data
+  final ChecklistData? checklistData;
+
   // Status sync with JobListItem
   final String statusId; // Synced from JobListItem
 
@@ -169,6 +267,7 @@ class HappySunJob {
     this.notes,
     this.weatherConditions,
     this.photoUrls,
+    this.checklistData,
     required this.statusId,
     required this.createdAt,
     this.updatedAt,
@@ -205,6 +304,9 @@ class HappySunJob {
       notes: data['notes'],
       weatherConditions: data['weatherConditions'],
       photoUrls: (data['photoUrls'] as List<dynamic>?)?.cast<String>(),
+      checklistData: data['checklistData'] != null
+          ? ChecklistData.fromMap(data['checklistData'] as Map<String, dynamic>)
+          : null,
       statusId: data['statusId'] ?? 'scheduled',
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       updatedAt: (data['updatedAt'] as Timestamp?)?.toDate(),
@@ -227,6 +329,7 @@ class HappySunJob {
       'notes': notes,
       'weatherConditions': weatherConditions,
       'photoUrls': photoUrls,
+      'checklistData': checklistData?.toMap(),
       'statusId': statusId,
       'createdAt': Timestamp.fromDate(createdAt),
       'updatedAt': updatedAt != null ? Timestamp.fromDate(updatedAt!) : null,
@@ -248,6 +351,7 @@ class HappySunJob {
     String? notes,
     String? weatherConditions,
     List<String>? photoUrls,
+    ChecklistData? checklistData,
     String? statusId,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -268,6 +372,7 @@ class HappySunJob {
       notes: notes ?? this.notes,
       weatherConditions: weatherConditions ?? this.weatherConditions,
       photoUrls: photoUrls ?? this.photoUrls,
+      checklistData: checklistData ?? this.checklistData,
       statusId: statusId ?? this.statusId,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
