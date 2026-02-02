@@ -2,7 +2,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:clmschedule/models/tool_settings.dart';
 import 'package:clmschedule/models/inventory_tool.dart';
 import 'package:clmschedule/providers/tool_settings_provider.dart';
-import 'package:clmschedule/services/tool_settings_service.dart';
 
 void main() {
   group('Tool Settings BaseName Tests', () {

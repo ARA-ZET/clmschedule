@@ -293,4 +293,61 @@ class InventoryService {
 
     await batch.commit();
   }
+
+  // Update tool accessories relationship
+  Future<void> updateToolAccessories(
+      String toolId, List<String> accessoryIds) async {
+    final batch = _firestore.batch();
+
+    // Update the main tool with accessory IDs
+    final mainToolRef = _firestore.collection('inventoryTools').doc(toolId);
+    batch.update(mainToolRef, {
+      'accessoryIds': accessoryIds,
+    });
+
+    // Update each accessory to reference the parent tool
+    for (final accessoryId in accessoryIds) {
+      final accessoryRef =
+          _firestore.collection('inventoryTools').doc(accessoryId);
+      batch.update(accessoryRef, {
+        'parentToolId': toolId,
+        'isAccessory': true,
+      });
+    }
+
+    await batch.commit();
+  }
+
+  // Remove accessory from parent tool
+  Future<void> removeAccessoryFromTool(
+      String toolId, String accessoryId) async {
+    final batch = _firestore.batch();
+
+    // Get current tool to update its accessories list
+    final toolDoc =
+        await _firestore.collection('inventoryTools').doc(toolId).get();
+    if (toolDoc.exists) {
+      final data = toolDoc.data()!;
+      final currentAccessories = (data['accessoryIds'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          [];
+      currentAccessories.remove(accessoryId);
+
+      final mainToolRef = _firestore.collection('inventoryTools').doc(toolId);
+      batch.update(mainToolRef, {
+        'accessoryIds': currentAccessories,
+      });
+    }
+
+    // Remove parent reference from accessory
+    final accessoryRef =
+        _firestore.collection('inventoryTools').doc(accessoryId);
+    batch.update(accessoryRef, {
+      'parentToolId': null,
+      'isAccessory': false,
+    });
+
+    await batch.commit();
+  }
 }

@@ -4,7 +4,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 enum ToolType {
   team,
   individual,
-  extras;
+  extras,
+  accessories;
 
   String get displayName {
     switch (this) {
@@ -14,6 +15,8 @@ enum ToolType {
         return 'Individual Tool';
       case ToolType.extras:
         return 'Extras';
+      case ToolType.accessories:
+        return 'Accessories';
     }
   }
 }
@@ -31,6 +34,10 @@ class InventoryTool {
   final bool isInUse;
   final String? currentProject; // Project ID where tool is currently assigned
   final ToolType toolType; // Type of tool: team, individual, or extras
+  final List<String>
+      accessoryIds; // IDs of tools that are accessories to this main tool
+  final String? parentToolId; // ID of parent tool if this is an accessory
+  final bool isAccessory; // True if this is an accessory tool
 
   InventoryTool({
     required this.id,
@@ -45,6 +52,9 @@ class InventoryTool {
     this.isInUse = false,
     this.currentProject,
     this.toolType = ToolType.extras,
+    this.accessoryIds = const [],
+    this.parentToolId,
+    this.isAccessory = false,
   });
 
   factory InventoryTool.fromMap(String id, Map<String, dynamic> data) {
@@ -61,6 +71,12 @@ class InventoryTool {
       isInUse: data['isInUse'] ?? false,
       currentProject: data['currentProject'],
       toolType: _parseToolType(data),
+      accessoryIds: (data['accessoryIds'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          [],
+      parentToolId: data['parentToolId'],
+      isAccessory: data['isAccessory'] ?? false,
     );
   }
 
@@ -76,6 +92,8 @@ class InventoryTool {
             return ToolType.individual;
           case 'extras':
             return ToolType.extras;
+          case 'accessories':
+            return ToolType.accessories;
         }
       }
     }
@@ -83,6 +101,9 @@ class InventoryTool {
     // Legacy support: check old boolean fields
     if (data['isTeamTool'] == true) return ToolType.team;
     if (data['isIndividualTool'] == true) return ToolType.individual;
+
+    // Check if it's an accessory based on isAccessory field
+    if (data['isAccessory'] == true) return ToolType.accessories;
 
     return ToolType.extras;
   }
@@ -100,6 +121,9 @@ class InventoryTool {
       'isInUse': isInUse,
       'currentProject': currentProject,
       'toolType': toolType.name,
+      'accessoryIds': accessoryIds,
+      'parentToolId': parentToolId,
+      'isAccessory': isAccessory,
     };
   }
 
@@ -116,6 +140,9 @@ class InventoryTool {
     bool? isInUse,
     String? currentProject,
     ToolType? toolType,
+    List<String>? accessoryIds,
+    String? parentToolId,
+    bool? isAccessory,
   }) {
     return InventoryTool(
       id: id ?? this.id,
@@ -130,6 +157,9 @@ class InventoryTool {
       isInUse: isInUse ?? this.isInUse,
       currentProject: currentProject ?? this.currentProject,
       toolType: toolType ?? this.toolType,
+      accessoryIds: accessoryIds ?? this.accessoryIds,
+      parentToolId: parentToolId ?? this.parentToolId,
+      isAccessory: isAccessory ?? this.isAccessory,
     );
   }
 

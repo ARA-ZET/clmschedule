@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import '../models/happy_sun_job.dart';
+import '../models/inventory_tool.dart';
 import '../providers/happy_sun_job_provider.dart';
+import '../providers/inventory_provider.dart';
 
 class HappySunChecklistScreen extends StatefulWidget {
   final HappySunJob job;
@@ -16,7 +19,12 @@ class HappySunChecklistScreen extends StatefulWidget {
       _HappySunChecklistScreenState();
 }
 
-class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
+class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  MobileScannerController? _scannerController;
+  bool _isScanning = false;
+
   // Track tool verification status
   final Map<String, _ToolCheckStatus> _toolStatus = {}; // toolId -> status
   bool _isSaving = false;
@@ -25,7 +33,31 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
     _initializeToolStatus();
+
+    // Auto-start scanner when scan tab is selected
+    _tabController.addListener(() {
+      if (_tabController.index == 0 && !_isScanning) {
+        _startScanning();
+      } else if (_tabController.index != 0 && _isScanning) {
+        _stopScanning();
+      }
+    });
+
+    // Start scanner immediately if on scan tab
+    if (_tabController.index == 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _startScanning();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    _scannerController?.dispose();
+    super.dispose();
   }
 
   void _initializeToolStatus() {
@@ -60,6 +92,102 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
         }
       }
     }
+  }
+
+  void _startScanning() {
+    setState(() {
+      _isScanning = true;
+      _scannerController = MobileScannerController(
+        detectionSpeed: DetectionSpeed.noDuplicates,
+      );
+    });
+  }
+
+  void _stopScanning() {
+    setState(() {
+      _isScanning = false;
+      _scannerController?.dispose();
+      _scannerController = null;
+    });
+  }
+
+  void _handleBarcodeScan(
+      BarcodeCapture capture, InventoryProvider inventoryProvider) {
+    final List<Barcode> barcodes = capture.barcodes;
+
+    for (final barcode in barcodes) {
+      final String? code = barcode.rawValue;
+
+      if (code == null || code.isEmpty) continue;
+
+      // Find the tool in inventory by QR code or tool ID
+      try {
+        final tool = inventoryProvider.tools.firstWhere(
+          (t) => t.qrCode == code || t.toolId == code,
+        );
+
+        // Check if tool is in the checklist
+        if (!_toolStatus.containsKey(tool.id)) {
+          _showScanError('This tool is not in the checklist');
+          continue;
+        }
+
+        // Check if already verified
+        if (_toolStatus[tool.id]!.isVerified) {
+          _showScanError('Tool already verified: ${tool.name}');
+          continue;
+        }
+
+        // Mark as verified
+        setState(() {
+          _toolStatus[tool.id] = _toolStatus[tool.id]!.copyWith(
+            isVerified: true,
+            status: 'present',
+          );
+          _hasUnsavedChanges = true;
+        });
+
+        // Show success feedback
+        _showScanSuccess('Verified: ${tool.name}');
+      } catch (e) {
+        // Tool not found
+        _showScanError('Tool not found or not in checklist: $code');
+      }
+    }
+  }
+
+  void _showScanSuccess(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.check_circle, color: Colors.white),
+            const SizedBox(width: 8),
+            Expanded(child: Text(message)),
+          ],
+        ),
+        backgroundColor: Colors.green,
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  void _showScanError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.error, color: Colors.white),
+            const SizedBox(width: 8),
+            Expanded(child: Text(message)),
+          ],
+        ),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   bool _areAllToolsChecked() {
@@ -122,6 +250,8 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
     // Check if there are missing or broken tools
     final hasBroken = _getBrokenCount() > 0;
     final hasMissing = _getMissingCount() > 0;
+    final brokenCount = _getBrokenCount();
+    final missingCount = _getMissingCount();
 
     if (hasBroken || hasMissing) {
       final confirm = await showDialog<bool>(
@@ -130,8 +260,8 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
           title: const Text('Complete Checklist?'),
           content: Text(
             'You have marked some tools as:\n'
-            '${hasBroken ? '• Broken: $_getBrokenCount()\n' : ''}'
-            '${hasMissing ? '• Missing: $_getMissingCount()\n' : ''}'
+            '${hasBroken ? '• Broken: $brokenCount\n' : ''}'
+            '${hasMissing ? '• Missing: $missingCount\n' : ''}'
             '\nDo you want to complete the checklist?',
           ),
           actions: [
@@ -211,6 +341,35 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
     );
   }
 
+  String _getReadableToolId(String firestoreId, List<InventoryTool> tools) {
+    try {
+      final tool = tools.firstWhere((t) => t.id == firestoreId);
+      return tool.toolId;
+    } catch (e) {
+      return firestoreId; // Fallback
+    }
+  }
+
+  // Get accessories for a parent tool
+  List<InventoryTool> _getAccessoriesForTool(
+      String toolId, List<InventoryTool> allTools) {
+    try {
+      final tool = allTools.firstWhere((t) => t.id == toolId);
+      return allTools.where((t) => tool.accessoryIds.contains(t.id)).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // Get status of a tool in checklist
+  _ToolCheckStatus? _getToolStatus(String toolId) {
+    try {
+      return _toolStatus.values.firstWhere((t) => t.toolId == toolId);
+    } catch (e) {
+      return null;
+    }
+  }
+
   String _buildChecklistSummary() {
     final buffer = StringBuffer();
     buffer.writeln('=== CHECKLIST SUMMARY ===');
@@ -269,6 +428,18 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
           backgroundColor:
               widget.job.checklistData != null ? Colors.green : Colors.blue,
           foregroundColor: Colors.white,
+          bottom: widget.job.checklistData == null
+              ? TabBar(
+                  controller: _tabController,
+                  labelColor: Colors.white,
+                  unselectedLabelColor: Colors.white70,
+                  indicatorColor: Colors.white,
+                  tabs: const [
+                    Tab(icon: Icon(Icons.qr_code_scanner), text: 'Scan'),
+                    Tab(icon: Icon(Icons.checklist), text: 'Checklist'),
+                  ],
+                )
+              : null,
           actions: [
             if (widget.job.checklistData != null)
               Padding(
@@ -323,201 +494,333 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
               ),
           ],
         ),
-        body: Column(
-          children: [
-            // Completion banner if already completed
-            if (widget.job.checklistData != null) ...[
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.green.shade50,
-                  border: Border(
-                    bottom: BorderSide(color: Colors.green.shade200, width: 2),
+        body: widget.job.checklistData != null
+            ? Column(
+                children: [
+                  Expanded(child: _buildChecklistTab()),
+                  _buildBottomActions(),
+                ],
+              )
+            : Column(
+                children: [
+                  Expanded(
+                    child: TabBarView(
+                      controller: _tabController,
+                      children: [
+                        _buildScanTab(),
+                        _buildChecklistTab(),
+                      ],
+                    ),
                   ),
+                  _buildBottomActions(),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _buildScanTab() {
+    return Consumer<InventoryProvider>(
+      builder: (context, inventoryProvider, child) {
+        return Column(
+          children: [
+            // Scanner area
+            Expanded(
+              child: Container(
+                margin: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey.shade300, width: 2),
                 ),
-                child: Row(
-                  children: [
-                    Icon(Icons.check_circle, color: Colors.green, size: 24),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Checklist Completed',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.green.shade700,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: _isScanning && _scannerController != null
+                      ? Stack(
+                          children: [
+                            MobileScanner(
+                              controller: _scannerController,
+                              onDetect: (capture) => _handleBarcodeScan(
+                                  capture, inventoryProvider),
                             ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Completed on ${_formatDateTime(widget.job.checklistData!.completedAt)}',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.green.shade600,
+                            // Scan overlay
+                            Center(
+                              child: Container(
+                                width: 250,
+                                height: 250,
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                    color: Colors.green,
+                                    width: 3,
+                                  ),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
                             ),
+                            // Instructions
+                            Positioned(
+                              top: 50,
+                              left: 0,
+                              right: 0,
+                              child: Container(
+                                padding: const EdgeInsets.all(12),
+                                margin:
+                                    const EdgeInsets.symmetric(horizontal: 20),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withOpacity(0.7),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Text(
+                                  'Scan tool QR code or ID',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        )
+                      : const Center(
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
                           ),
-                        ],
+                        ),
+                ),
+              ),
+            ),
+            // Scanner controls
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (_isScanning)
+                    ElevatedButton.icon(
+                      onPressed: _stopScanning,
+                      icon: const Icon(Icons.stop),
+                      label: const Text('Stop Scanning'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 24, vertical: 12),
+                      ),
+                    )
+                  else
+                    ElevatedButton.icon(
+                      onPressed: _startScanning,
+                      icon: const Icon(Icons.qr_code_scanner),
+                      label: const Text('Start Scanning'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 24, vertical: 12),
                       ),
                     ),
-                  ],
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildChecklistTab() {
+    return Column(
+      children: [
+        // Completion banner if already completed
+        if (widget.job.checklistData != null) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.green.shade50,
+              border: Border(
+                bottom: BorderSide(color: Colors.green.shade200, width: 2),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green, size: 24),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Checklist Completed',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.green.shade700,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Completed on ${_formatDateTime(widget.job.checklistData!.completedAt)}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.green.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
+              ],
+            ),
+          ),
+        ],
+        // Checklist details banner
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: widget.job.checklistData != null
+                  ? [Colors.green.shade700, Colors.green.shade500]
+                  : [Colors.blue.shade700, Colors.blue.shade500],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.assignment_turned_in,
+                      color: Colors.white,
+                      size: 32,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Pre-Departure Checklist',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          widget.job.jobType == 'windowCleaning'
+                              ? 'Window Cleaning Job'
+                              : 'Solar Panel Cleaning Job',
+                          style: const TextStyle(
+                            fontSize: 14,
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Divider(color: Colors.white24, height: 1),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildInfoTile(
+                      'Total Tools',
+                      _getTotalTools().toString(),
+                      Icons.build_circle,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildInfoTile(
+                      'Date',
+                      '${widget.job.date.day}/${widget.job.date.month}/${widget.job.date.year}',
+                      Icons.calendar_today,
+                    ),
+                  ),
+                ],
               ),
             ],
-            // Checklist details banner
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: widget.job.checklistData != null
-                      ? [Colors.green.shade700, Colors.green.shade500]
-                      : [Colors.blue.shade700, Colors.blue.shade500],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.assignment_turned_in,
-                          color: Colors.white,
-                          size: 32,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Pre-Departure Checklist',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              widget.job.jobType == 'windowCleaning'
-                                  ? 'Window Cleaning Job'
-                                  : 'Solar Panel Cleaning Job',
-                              style: const TextStyle(
-                                fontSize: 14,
-                                color: Colors.white70,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  const Divider(color: Colors.white24, height: 1),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _buildInfoTile(
-                          'Total Tools',
-                          _getTotalTools().toString(),
-                          Icons.build_circle,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: _buildInfoTile(
-                          'Date',
-                          '${widget.job.date.day}/${widget.job.date.month}/${widget.job.date.year}',
-                          Icons.calendar_today,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            // Status banner
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.blue.shade50,
-                border: Border(
-                  bottom: BorderSide(color: Colors.blue.shade200),
-                ),
-              ),
-              child: Column(
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.checklist, color: Colors.blue),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Verify all tools before leaving',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            Text(
-                              'Mark each tool as present, broken, or missing',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey.shade600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      _buildStatusChip(
-                          'Verified', _getVerifiedCount(), Colors.green),
-                      const SizedBox(width: 8),
-                      _buildStatusChip('Remaining',
-                          _getTotalTools() - _getVerifiedCount(), Colors.grey),
-                      const SizedBox(width: 8),
-                      if (_getBrokenCount() > 0)
-                        _buildStatusChip(
-                            'Broken', _getBrokenCount(), Colors.orange),
-                      if (_getMissingCount() > 0) ...[
-                        const SizedBox(width: 8),
-                        _buildStatusChip(
-                            'Missing', _getMissingCount(), Colors.red),
-                      ],
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            // Tools list
-            Expanded(
-              child: _buildToolsList(),
-            ),
-            // Bottom actions
-            _buildBottomActions(),
-          ],
+          ),
         ),
-      ),
+        // Status banner
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.blue.shade50,
+            border: Border(
+              bottom: BorderSide(color: Colors.blue.shade200),
+            ),
+          ),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.checklist, color: Colors.blue),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Verify all tools before leaving',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Text(
+                          'Mark each tool as present, broken, or missing',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  _buildStatusChip(
+                      'Verified', _getVerifiedCount(), Colors.green),
+                  const SizedBox(width: 8),
+                  _buildStatusChip('Remaining',
+                      _getTotalTools() - _getVerifiedCount(), Colors.grey),
+                  const SizedBox(width: 8),
+                  if (_getBrokenCount() > 0)
+                    _buildStatusChip(
+                        'Broken', _getBrokenCount(), Colors.orange),
+                  if (_getMissingCount() > 0) ...[
+                    const SizedBox(width: 8),
+                    _buildStatusChip('Missing', _getMissingCount(), Colors.red),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+        // Tools list
+        Expanded(
+          child: _buildToolsList(),
+        ),
+      ],
     );
   }
 
@@ -577,57 +880,68 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
     final sortedGroups = groupedTools.entries.toList()
       ..sort((a, b) => a.key.compareTo(b.key));
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: sortedGroups.length,
-      itemBuilder: (context, index) {
-        final entry = sortedGroups[index];
-        final baseName = entry.key;
-        final tools = entry.value;
-        final allVerified = tools.every((t) => t.isVerified);
-        final anyBroken = tools.any((t) => t.status == 'broken');
-        final anyMissing = tools.any((t) => t.status == 'missing');
+    return Consumer<InventoryProvider>(
+      builder: (context, inventoryProvider, child) {
+        final inventoryTools = inventoryProvider.tools;
 
-        Color borderColor = Colors.grey.shade300;
-        if (allVerified) {
-          borderColor = anyBroken
-              ? Colors.orange
-              : (anyMissing ? Colors.red : Colors.green);
-        }
+        return ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: sortedGroups.length,
+          itemBuilder: (context, index) {
+            final entry = sortedGroups[index];
+            final baseName = entry.key;
+            final tools = entry.value;
+            final allVerified = tools.every((t) => t.isVerified);
+            final anyBroken = tools.any((t) => t.status == 'broken');
+            final anyMissing = tools.any((t) => t.status == 'missing');
 
-        return Card(
-          margin: const EdgeInsets.only(bottom: 12),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-            side: BorderSide(color: borderColor, width: 2),
-          ),
-          child: ExpansionTile(
-            leading: Icon(
-              allVerified ? Icons.check_circle : Icons.radio_button_unchecked,
-              color: borderColor,
-            ),
-            title: Text(
-              baseName,
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
+            Color borderColor = Colors.grey.shade300;
+            if (allVerified) {
+              borderColor = anyBroken
+                  ? Colors.orange
+                  : (anyMissing ? Colors.red : Colors.green);
+            }
+
+            return Card(
+              margin: const EdgeInsets.only(bottom: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+                side: BorderSide(color: borderColor, width: 2),
               ),
-            ),
-            subtitle: Text(
-              '${tools.length} ${tools.length == 1 ? 'tool' : 'tools'} • ${tools.where((t) => t.isVerified).length} verified',
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey.shade600,
+              child: ExpansionTile(
+                leading: Icon(
+                  allVerified
+                      ? Icons.check_circle
+                      : Icons.radio_button_unchecked,
+                  color: borderColor,
+                ),
+                title: Text(
+                  baseName,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                subtitle: Text(
+                  '${tools.length} ${tools.length == 1 ? 'tool' : 'tools'} • ${tools.where((t) => t.isVerified).length} verified',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+                children: tools
+                    .map((tool) => _buildToolItem(tool, inventoryTools))
+                    .toList(),
               ),
-            ),
-            children: tools.map((tool) => _buildToolItem(tool)).toList(),
-          ),
+            );
+          },
         );
       },
     );
   }
 
-  Widget _buildToolItem(_ToolCheckStatus toolStatus) {
+  Widget _buildToolItem(
+      _ToolCheckStatus toolStatus, List<InventoryTool> tools) {
     Color statusColor;
     IconData statusIcon;
 
@@ -673,7 +987,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      toolStatus.toolId,
+                      _getReadableToolId(toolStatus.toolId, tools),
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w500,
@@ -744,6 +1058,98 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen> {
               ),
             ),
           ],
+
+          // Show required accessories
+          ...(() {
+            final accessories =
+                _getAccessoriesForTool(toolStatus.toolId, tools);
+            if (accessories.isEmpty) return <Widget>[];
+
+            return [
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.orange.shade200),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.extension,
+                            size: 12, color: Colors.orange.shade700),
+                        const SizedBox(width: 6),
+                        Text(
+                          'Required accessories:',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.orange.shade700,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: accessories.map((accessory) {
+                        final accessoryStatus = _getToolStatus(accessory.id);
+                        final isVerified = accessoryStatus?.isVerified ?? false;
+                        final status = accessoryStatus?.status ?? 'unknown';
+
+                        Color color = Colors.grey;
+                        IconData icon = Icons.radio_button_unchecked;
+
+                        if (isVerified) {
+                          if (status == 'broken') {
+                            color = Colors.orange;
+                            icon = Icons.build;
+                          } else if (status == 'missing') {
+                            color = Colors.red;
+                            icon = Icons.error;
+                          } else {
+                            color = Colors.green;
+                            icon = Icons.check_circle;
+                          }
+                        }
+
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: isVerified
+                                ? color.withOpacity(0.1)
+                                : Colors.white,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: color, width: 1.5),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(icon, size: 10, color: color),
+                              const SizedBox(width: 4),
+                              Text(
+                                accessory.toolId,
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  color: color,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+              ),
+            ];
+          })(),
         ],
       ),
     );
@@ -931,4 +1337,19 @@ class _ToolCheckStatus {
     required this.status,
     required this.notes,
   });
+
+  _ToolCheckStatus copyWith({
+    bool? isVerified,
+    String? status,
+    String? notes,
+  }) {
+    return _ToolCheckStatus(
+      toolId: toolId,
+      baseName: baseName,
+      category: category,
+      isVerified: isVerified ?? this.isVerified,
+      status: status ?? this.status,
+      notes: notes ?? this.notes,
+    );
+  }
 }

@@ -268,6 +268,62 @@ class InventoryProvider extends ChangeNotifier {
     }
   }
 
+  // Get accessories for a tool
+  List<InventoryTool> getAccessories(String toolId) {
+    final tool = _tools.firstWhere(
+      (t) => t.id == toolId,
+      orElse: () => throw Exception('Tool not found'),
+    );
+
+    return _tools.where((t) => tool.accessoryIds.contains(t.id)).toList();
+  }
+
+  // Get all tools with their accessories (flattened list)
+  List<String> getToolIdsWithAccessories(List<String> toolIds) {
+    final allIds = <String>[];
+
+    for (final toolId in toolIds) {
+      allIds.add(toolId);
+
+      try {
+        final accessories = getAccessories(toolId);
+        allIds.addAll(accessories.map((a) => a.id));
+      } catch (e) {
+        // Tool might not have accessories
+      }
+    }
+
+    return allIds;
+  }
+
+  // Get parent tool of an accessory
+  InventoryTool? getParentTool(String accessoryId) {
+    final accessory = _tools.firstWhere(
+      (t) => t.id == accessoryId,
+      orElse: () => throw Exception('Accessory not found'),
+    );
+
+    if (accessory.parentToolId == null) return null;
+
+    try {
+      return _tools.firstWhere((t) => t.id == accessory.parentToolId);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Update tool accessories
+  Future<void> updateToolAccessories(
+      String toolId, List<String> accessoryIds) async {
+    try {
+      await _inventoryService.updateToolAccessories(toolId, accessoryIds);
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      rethrow;
+    }
+  }
+
   @override
   void dispose() {
     _toolsSubscription?.cancel();

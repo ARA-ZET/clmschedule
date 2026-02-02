@@ -38,6 +38,7 @@ class QrCodeDisplayDialog extends StatelessWidget {
                 version: QrVersions.auto,
                 size: 250.0,
                 backgroundColor: Colors.white,
+                errorCorrectionLevel: QrErrorCorrectLevel.H,
               ),
             ),
             const SizedBox(height: 16),

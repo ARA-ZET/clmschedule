@@ -145,36 +145,142 @@ class ToolSettingsProvider with ChangeNotifier {
     int numberOfCleaners,
     List<InventoryTool> availableInventory,
   ) {
-    // Group team tools by base name
-    final teamToolsMap = <String, _GroupedToolBuilder>{};
+    // Helper to get base name from tool name
+    String getBaseName(String toolName) {
+      final hashIndex = toolName.lastIndexOf('#');
+      if (hashIndex > 0) {
+        return toolName.substring(0, hashIndex).trim();
+      }
+      return toolName;
+    }
+
+    // Map to track all tools including accessories
+    final Map<String, _GroupedToolBuilder> allToolsMap = {};
+
+    // Process team tools
     for (final tool in _settings.teamTools) {
-      if (!teamToolsMap.containsKey(tool.baseName)) {
-        teamToolsMap[tool.baseName] = _GroupedToolBuilder(
-          baseName: tool.baseName,
+      final baseName = tool.baseName;
+
+      if (!allToolsMap.containsKey(baseName)) {
+        allToolsMap[baseName] = _GroupedToolBuilder(
+          baseName: baseName,
           category: tool.category,
         );
       }
-      // Add requested quantity as empty placeholders (IDs assigned at checkout)
+
+      // Add requested quantity
       for (int i = 0; i < tool.quantity; i++) {
-        teamToolsMap[tool.baseName]!
-            .addTool(''); // Empty ID - assigned at checkout
+        allToolsMap[baseName]!.addTool('');
+
+        // Find accessories for this tool and add them
+        final matchingTools = availableInventory
+            .where((t) => getBaseName(t.name) == baseName)
+            .toList();
+
+        if (matchingTools.isNotEmpty) {
+          final parentTool =
+              i < matchingTools.length ? matchingTools[i] : matchingTools.first;
+
+          // Get accessories from parent tool
+          for (final accessoryId in parentTool.accessoryIds) {
+            final accessory = availableInventory.firstWhere(
+              (t) => t.id == accessoryId,
+              orElse: () => InventoryTool(
+                id: '',
+                name: '',
+                description: '',
+                category: '',
+                toolId: '',
+                qrCode: '',
+                createdAt: DateTime.now(),
+              ),
+            );
+
+            if (accessory.id.isNotEmpty) {
+              final accessoryBaseName = getBaseName(accessory.name);
+              if (!allToolsMap.containsKey(accessoryBaseName)) {
+                allToolsMap[accessoryBaseName] = _GroupedToolBuilder(
+                  baseName: accessoryBaseName,
+                  category: accessory.category,
+                );
+              }
+              allToolsMap[accessoryBaseName]!.addTool('');
+            }
+          }
+        }
       }
     }
 
-    // Group individual tools by base name (multiply by cleaners)
-    final individualToolsMap = <String, _GroupedToolBuilder>{};
+    // Process individual tools (multiply by cleaners)
     for (final tool in _settings.individualTools) {
-      if (!individualToolsMap.containsKey(tool.baseName)) {
-        individualToolsMap[tool.baseName] = _GroupedToolBuilder(
-          baseName: tool.baseName,
+      final baseName = tool.baseName;
+
+      if (!allToolsMap.containsKey(baseName)) {
+        allToolsMap[baseName] = _GroupedToolBuilder(
+          baseName: baseName,
           category: tool.category,
         );
       }
-      // Multiply by cleaners and add as placeholders
+
       final neededCount = tool.quantity * numberOfCleaners;
       for (int i = 0; i < neededCount; i++) {
-        individualToolsMap[tool.baseName]!
-            .addTool(''); // Empty ID - assigned at checkout
+        allToolsMap[baseName]!.addTool('');
+
+        // Find accessories for this tool and add them
+        final matchingTools = availableInventory
+            .where((t) => getBaseName(t.name) == baseName)
+            .toList();
+
+        if (matchingTools.isNotEmpty) {
+          final parentTool =
+              i < matchingTools.length ? matchingTools[i] : matchingTools.first;
+
+          // Get accessories from parent tool
+          for (final accessoryId in parentTool.accessoryIds) {
+            final accessory = availableInventory.firstWhere(
+              (t) => t.id == accessoryId,
+              orElse: () => InventoryTool(
+                id: '',
+                name: '',
+                description: '',
+                category: '',
+                toolId: '',
+                qrCode: '',
+                createdAt: DateTime.now(),
+              ),
+            );
+
+            if (accessory.id.isNotEmpty) {
+              final accessoryBaseName = getBaseName(accessory.name);
+              if (!allToolsMap.containsKey(accessoryBaseName)) {
+                allToolsMap[accessoryBaseName] = _GroupedToolBuilder(
+                  baseName: accessoryBaseName,
+                  category: accessory.category,
+                );
+              }
+              allToolsMap[accessoryBaseName]!.addTool('');
+            }
+          }
+        }
+      }
+    }
+
+    // Separate team tools from individual/accessory tools
+    final teamToolsMap = <String, _GroupedToolBuilder>{};
+    final individualToolsMap = <String, _GroupedToolBuilder>{};
+
+    // Team tools are those from settings
+    for (final tool in _settings.teamTools) {
+      final baseName = tool.baseName;
+      if (allToolsMap.containsKey(baseName)) {
+        teamToolsMap[baseName] = allToolsMap[baseName]!;
+      }
+    }
+
+    // Individual tools are remaining (from settings + accessories)
+    for (final entry in allToolsMap.entries) {
+      if (!teamToolsMap.containsKey(entry.key)) {
+        individualToolsMap[entry.key] = entry.value;
       }
     }
 
@@ -184,7 +290,7 @@ class ToolSettingsProvider with ChangeNotifier {
       individualTools:
           individualToolsMap.values.map((builder) => builder.build()).toList()
             ..sort((a, b) => a.baseName.compareTo(b.baseName)),
-      extras: [], // Can be added manually later
+      extras: [],
     );
   }
 
@@ -194,20 +300,68 @@ class ToolSettingsProvider with ChangeNotifier {
     int numberOfCleaners,
     List<InventoryTool> availableInventory,
   ) {
-    // Group individual tools by base name (multiply by cleaners)
+    // Helper to get base name from tool name
+    String getBaseName(String toolName) {
+      final hashIndex = toolName.lastIndexOf('#');
+      if (hashIndex > 0) {
+        return toolName.substring(0, hashIndex).trim();
+      }
+      return toolName;
+    }
+
+    // Map to track all individual tools including accessories
     final individualToolsMap = <String, _GroupedToolBuilder>{};
+
     for (final tool in _settings.individualTools) {
-      if (!individualToolsMap.containsKey(tool.baseName)) {
-        individualToolsMap[tool.baseName] = _GroupedToolBuilder(
-          baseName: tool.baseName,
+      final baseName = tool.baseName;
+
+      if (!individualToolsMap.containsKey(baseName)) {
+        individualToolsMap[baseName] = _GroupedToolBuilder(
+          baseName: baseName,
           category: tool.category,
         );
       }
-      // Multiply by cleaners
+
       final neededCount = tool.quantity * numberOfCleaners;
       for (int i = 0; i < neededCount; i++) {
-        individualToolsMap[tool.baseName]!
-            .addTool(''); // Empty ID - assigned at checkout
+        individualToolsMap[baseName]!.addTool('');
+
+        // Find accessories for this tool and add them
+        final matchingTools = availableInventory
+            .where((t) => getBaseName(t.name) == baseName)
+            .toList();
+
+        if (matchingTools.isNotEmpty) {
+          final parentTool =
+              i < matchingTools.length ? matchingTools[i] : matchingTools.first;
+
+          // Get accessories from parent tool
+          for (final accessoryId in parentTool.accessoryIds) {
+            final accessory = availableInventory.firstWhere(
+              (t) => t.id == accessoryId,
+              orElse: () => InventoryTool(
+                id: '',
+                name: '',
+                description: '',
+                category: '',
+                toolId: '',
+                qrCode: '',
+                createdAt: DateTime.now(),
+              ),
+            );
+
+            if (accessory.id.isNotEmpty) {
+              final accessoryBaseName = getBaseName(accessory.name);
+              if (!individualToolsMap.containsKey(accessoryBaseName)) {
+                individualToolsMap[accessoryBaseName] = _GroupedToolBuilder(
+                  baseName: accessoryBaseName,
+                  category: accessory.category,
+                );
+              }
+              individualToolsMap[accessoryBaseName]!.addTool('');
+            }
+          }
+        }
       }
     }
 

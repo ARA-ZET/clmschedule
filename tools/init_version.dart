@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
-import '../lib/firebase_options.dart';
+import 'package:clmschedule/firebase_options.dart';
 
 /// Initialize the version collection in Firestore
 /// Run this once to set up the initial version

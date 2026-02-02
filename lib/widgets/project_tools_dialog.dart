@@ -447,7 +447,7 @@ class _AddToolDialogState extends State<_AddToolDialog> {
           children: [
             // Base name dropdown
             DropdownButtonFormField<String>(
-              value: _selectedBaseName,
+              initialValue: _selectedBaseName,
               decoration: const InputDecoration(
                 labelText: 'Tool Base Name',
                 border: OutlineInputBorder(),

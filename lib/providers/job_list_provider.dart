@@ -17,7 +17,7 @@ class JobListProvider extends ChangeNotifier {
   String? _error;
   String _searchQuery = '';
   Set<String> _statusFilters = {};
-  Set<String> _invoiceStatusFilters = {};
+  final Set<String> _invoiceStatusFilters = {};
   DateTime _currentMonth = DateTime.now();
 
   // Date filtering properties

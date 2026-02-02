@@ -86,7 +86,8 @@ class _HappySunInventoryViewState extends State<HappySunInventoryView> {
                       Expanded(
                         flex: 2,
                         child: DropdownButtonFormField<String>(
-                          value: inventoryProvider.selectedCategory ?? 'All',
+                          initialValue:
+                              inventoryProvider.selectedCategory ?? 'All',
                           decoration: const InputDecoration(
                             labelText: 'Category',
                             prefixIcon: Icon(Icons.category),
@@ -110,7 +111,7 @@ class _HappySunInventoryViewState extends State<HappySunInventoryView> {
                       Expanded(
                         flex: 2,
                         child: DropdownButtonFormField<String>(
-                          value:
+                          initialValue:
                               inventoryProvider.selectedAvailability ?? 'All',
                           decoration: const InputDecoration(
                             labelText: 'Status',

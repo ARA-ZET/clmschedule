@@ -321,7 +321,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                 statusProvider.statuses;
                                             return DropdownButtonFormField<
                                                 String>(
-                                              value: _selectedJobStatusId,
+                                              initialValue:
+                                                  _selectedJobStatusId,
                                               decoration: const InputDecoration(
                                                 labelText: 'Job Status *',
                                                 border: OutlineInputBorder(),
@@ -413,7 +414,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                   statusProvider.statuses;
                                               return DropdownButtonFormField<
                                                   String>(
-                                                value: _selectedJobStatusId,
+                                                initialValue:
+                                                    _selectedJobStatusId,
                                                 decoration:
                                                     const InputDecoration(
                                                   labelText: 'Job Status *',

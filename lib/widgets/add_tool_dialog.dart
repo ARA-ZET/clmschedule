@@ -386,7 +386,7 @@ class _AddToolDialogState extends State<AddToolDialog> {
                       ),
                       const SizedBox(height: 8),
                       DropdownButtonFormField<ToolType>(
-                        value: _toolType,
+                        initialValue: _toolType,
                         decoration: const InputDecoration(
                           border: OutlineInputBorder(),
                           contentPadding: EdgeInsets.symmetric(
@@ -405,6 +405,10 @@ class _AddToolDialogState extends State<AddToolDialog> {
                               break;
                             case ToolType.extras:
                               description = 'Extra or optional equipment';
+                              break;
+                            case ToolType.accessories:
+                              description =
+                                  'Required accessories for other tools';
                               break;
                           }
                           return DropdownMenuItem(

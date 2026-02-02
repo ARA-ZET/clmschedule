@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/happy_sun_job.dart';
+import '../models/inventory_tool.dart';
 import '../models/job_list_item.dart';
 import '../providers/happy_sun_job_provider.dart';
 import '../providers/happy_sun_project_provider.dart';
@@ -391,8 +392,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
   }
 
   Widget _buildCheckoutSection(BuildContext context, HappySunJob job) {
-    final hasCheckout =
-        job.toolsUsedCategorized != null || job.startTime != null;
+    final hasCheckout = job.startTime != null;
     final toolsUsed = job.toolsUsedCategorized;
     final totalToolsTaken = toolsUsed?.totalCount ?? 0;
 
@@ -562,6 +562,15 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
               '${job.workDuration!.inHours}h ${job.workDuration!.inMinutes.remainder(60)}m',
             ),
           _buildDetailRow('Status', 'Complete'),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: () => _showCheckinDetailsDialog(context, job),
+            icon: const Icon(Icons.visibility, size: 18),
+            label: const Text('View Check-in Details'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.green,
+            ),
+          ),
         ] else if (job.startTime == null) ...[
           const Text(
             'Complete checkout first',
@@ -687,180 +696,543 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 
     showDialog(
       context: context,
-      builder: (context) => Dialog(
-        child: Container(
-          width: 700,
-          constraints: const BoxConstraints(maxHeight: 800),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Header
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [Colors.green.shade700, Colors.green.shade500],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
+      builder: (context) => Consumer<InventoryProvider>(
+        builder: (context, inventoryProvider, child) => Dialog(
+          child: Container(
+            width: 700,
+            constraints: const BoxConstraints(maxHeight: 800),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Header
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Colors.green.shade700, Colors.green.shade500],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Icon(
+                          Icons.inventory_2,
+                          color: Colors.white,
+                          size: 28,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Checkout Details',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            if (job.startTime != null)
+                              Text(
+                                'Checked out at ${job.startTime!.hour.toString().padLeft(2, '0')}:${job.startTime!.minute.toString().padLeft(2, '0')} on ${job.date.day}/${job.date.month}/${job.date.year}',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ],
                   ),
                 ),
+                // Info banner
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  color: Colors.green.shade50,
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_outline,
+                          color: Colors.green.shade700, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'All tools below were checked out and are saved in the database',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.green.shade700,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // Tools list
+                Flexible(
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      if (toolsUsed.teamTools.isNotEmpty) ...[
+                        _buildToolCategorySection(
+                          'Team Tools',
+                          toolsUsed.teamTools,
+                          Colors.blue,
+                          job,
+                          inventoryProvider.tools,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      if (toolsUsed.individualTools.isNotEmpty) ...[
+                        _buildToolCategorySection(
+                          'Individual Tools',
+                          toolsUsed.individualTools,
+                          Colors.green,
+                          job,
+                          inventoryProvider.tools,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      if (toolsUsed.extras.isNotEmpty) ...[
+                        _buildToolCategorySection(
+                          'Extras',
+                          toolsUsed.extras,
+                          Colors.purple,
+                          job,
+                          inventoryProvider.tools,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                // Footer with summary
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade50,
+                    border: Border(
+                      top: BorderSide(color: Colors.grey.shade300),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Total Tools: ${toolsUsed.totalCount}',
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Team: ${toolsUsed.teamTools.fold<int>(0, (sum, t) => sum + t.totalQuantity)} • '
+                                'Individual: ${toolsUsed.individualTools.fold<int>(0, (sum, t) => sum + t.totalQuantity)} • '
+                                'Extras: ${toolsUsed.extras.fold<int>(0, (sum, t) => sum + t.totalQuantity)}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          ElevatedButton.icon(
+                            onPressed: () => Navigator.pop(context),
+                            icon: const Icon(Icons.check),
+                            label: const Text('Close'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showCheckinDetailsDialog(BuildContext context, HappySunJob job) {
+    final toolsUsed = job.toolsUsedCategorized;
+    if (toolsUsed == null) return;
+
+    showDialog(
+      context: context,
+      builder: (context) => Consumer<InventoryProvider>(
+        builder: (context, inventoryProvider, child) => Dialog(
+          child: Container(
+            width: 600,
+            constraints: const BoxConstraints(maxHeight: 700),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Header
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Colors.green.shade700, Colors.green.shade500],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.check_circle,
+                        color: Colors.white,
+                        size: 32,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Check-in Completed',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            if (job.endTime != null)
+                              Text(
+                                'Completed at ${job.endTime!.hour.toString().padLeft(2, '0')}:${job.endTime!.minute.toString().padLeft(2, '0')} on ${job.date.day}/${job.date.month}/${job.date.year}',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ],
+                  ),
+                ),
+                // Summary banner
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  color: Colors.green.shade50,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _buildSummaryColumn(
+                        'Total Tools',
+                        '${toolsUsed.totalCount}',
+                        Icons.build_circle,
+                        Colors.green,
+                      ),
+                      if (job.workDuration != null)
+                        _buildSummaryColumn(
+                          'Duration',
+                          '${job.workDuration!.inHours}h ${job.workDuration!.inMinutes.remainder(60)}m',
+                          Icons.timer,
+                          Colors.green,
+                        ),
+                      if (job.checklistData != null)
+                        _buildSummaryColumn(
+                          'Status',
+                          'All tools checked',
+                          Icons.verified,
+                          Colors.green,
+                        ),
+                    ],
+                  ),
+                ),
+                // Tools list
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      if (toolsUsed.teamTools.isNotEmpty) ...[
+                        _buildCheckinToolCategory(
+                          'Team Tools',
+                          toolsUsed.teamTools,
+                          Colors.blue,
+                          job,
+                          inventoryProvider.tools,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      if (toolsUsed.individualTools.isNotEmpty) ...[
+                        _buildCheckinToolCategory(
+                          'Individual Tools',
+                          toolsUsed.individualTools,
+                          Colors.green,
+                          job,
+                          inventoryProvider.tools,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      if (toolsUsed.extras.isNotEmpty) ...[
+                        _buildCheckinToolCategory(
+                          'Extras',
+                          toolsUsed.extras,
+                          Colors.purple,
+                          job,
+                          inventoryProvider.tools,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                // Footer
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade50,
+                    border: Border(
+                      top: BorderSide(color: Colors.grey.shade300),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.check),
+                        label: const Text('Close'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummaryColumn(
+      String label, String value, IconData icon, Color color) {
+    return Column(
+      children: [
+        Icon(icon, color: color, size: 24),
+        const SizedBox(height: 8),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+            color: color,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: Colors.grey.shade600,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCheckinToolCategory(
+    String title,
+    List<GroupedToolItem> tools,
+    Color color,
+    HappySunJob job,
+    List<InventoryTool> inventoryTools,
+  ) {
+    // Check if checklist exists to show condition status
+    final hasChecklist = job.checklistData != null;
+    final checklistItems = hasChecklist
+        ? {for (var item in job.checklistData!.items) item.toolId: item}
+        : <String, ToolChecklistItem>{};
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.check_circle, color: color, size: 20),
+            const SizedBox(width: 8),
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                '${tools.fold<int>(0, (sum, tool) => sum + tool.totalQuantity)}',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        ...tools.map((tool) => Card(
+              elevation: 0,
+              color: Colors.grey.shade50,
+              margin: const EdgeInsets.only(bottom: 8),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
                 child: Row(
                   children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(
-                        Icons.inventory_2,
-                        color: Colors.white,
-                        size: 28,
-                      ),
+                    Icon(
+                      _getCategoryIcon(tool.category),
+                      size: 20,
+                      color: color,
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text(
-                            'Checkout Details',
-                            style: TextStyle(
-                              fontSize: 20,
+                          Text(
+                            tool.baseName,
+                            style: const TextStyle(
+                              fontSize: 14,
                               fontWeight: FontWeight.bold,
-                              color: Colors.white,
                             ),
                           ),
-                          if (job.startTime != null)
-                            Text(
-                              'Checked out at ${job.startTime!.hour.toString().padLeft(2, '0')}:${job.startTime!.minute.toString().padLeft(2, '0')} on ${job.date.day}/${job.date.month}/${job.date.year}',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Colors.white70,
-                              ),
-                            ),
+                          const SizedBox(height: 4),
+                          Wrap(
+                            spacing: 4,
+                            runSpacing: 4,
+                            children: tool.toolIds.map((id) {
+                              final readableId =
+                                  _getReadableToolId(id, inventoryTools);
+                              final checklistItem = checklistItems[id];
+                              final hasNote =
+                                  checklistItem?.notes.isNotEmpty ?? false;
+
+                              return Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.green.withOpacity(0.1),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: Colors.green.withOpacity(0.3),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.check,
+                                      size: 12,
+                                      color: Colors.green.shade700,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      readableId,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w500,
+                                        color: Colors.green.shade700,
+                                      ),
+                                    ),
+                                    if (hasNote) ...[
+                                      const SizedBox(width: 4),
+                                      Icon(
+                                        Icons.note,
+                                        size: 12,
+                                        color: Colors.blue.shade700,
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              );
+                            }).toList(),
+                          ),
                         ],
                       ),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white),
-                      onPressed: () => Navigator.pop(context),
-                    ),
-                  ],
-                ),
-              ),
-              // Info banner
-              Container(
-                padding: const EdgeInsets.all(12),
-                color: Colors.green.shade50,
-                child: Row(
-                  children: [
-                    Icon(Icons.info_outline,
-                        color: Colors.green.shade700, size: 20),
-                    const SizedBox(width: 8),
-                    Expanded(
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                       child: Text(
-                        'All tools below were checked out and are saved in the database',
+                        '×${tool.totalQuantity}',
                         style: TextStyle(
-                          fontSize: 12,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
                           color: Colors.green.shade700,
-                          fontWeight: FontWeight.w500,
                         ),
                       ),
                     ),
                   ],
                 ),
               ),
-              // Tools list
-              Flexible(
-                child: ListView(
-                  padding: const EdgeInsets.all(16),
-                  children: [
-                    if (toolsUsed.teamTools.isNotEmpty) ...[
-                      _buildToolCategorySection(
-                        'Team Tools',
-                        toolsUsed.teamTools,
-                        Colors.blue,
-                        job,
-                      ),
-                      const SizedBox(height: 16),
-                    ],
-                    if (toolsUsed.individualTools.isNotEmpty) ...[
-                      _buildToolCategorySection(
-                        'Individual Tools',
-                        toolsUsed.individualTools,
-                        Colors.green,
-                        job,
-                      ),
-                      const SizedBox(height: 16),
-                    ],
-                    if (toolsUsed.extras.isNotEmpty) ...[
-                      _buildToolCategorySection(
-                        'Extras',
-                        toolsUsed.extras,
-                        Colors.purple,
-                        job,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              // Footer with summary
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade50,
-                  border: Border(
-                    top: BorderSide(color: Colors.grey.shade300),
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Total Tools: ${toolsUsed.totalCount}',
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Team: ${toolsUsed.teamTools.fold<int>(0, (sum, t) => sum + t.totalQuantity)} • '
-                              'Individual: ${toolsUsed.individualTools.fold<int>(0, (sum, t) => sum + t.totalQuantity)} • '
-                              'Extras: ${toolsUsed.extras.fold<int>(0, (sum, t) => sum + t.totalQuantity)}',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey.shade600,
-                              ),
-                            ),
-                          ],
-                        ),
-                        ElevatedButton.icon(
-                          onPressed: () => Navigator.pop(context),
-                          icon: const Icon(Icons.check),
-                          label: const Text('Close'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.green,
-                            foregroundColor: Colors.white,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
+            )),
+      ],
+    );
+  }
+
+  String _getReadableToolId(String firestoreId, List<InventoryTool> tools) {
+    final tool = tools.firstWhere(
+      (t) => t.id == firestoreId,
+      orElse: () => InventoryTool(
+        id: firestoreId,
+        toolId: firestoreId,
+        name: 'Unknown',
+        description: '',
+        category: 'Unknown',
+        qrCode: '',
+        createdAt: DateTime.now(),
       ),
     );
+    return tool.toolId;
   }
 
   Widget _buildToolCategorySection(
@@ -868,6 +1240,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     List<GroupedToolItem> tools,
     Color color,
     HappySunJob job,
+    List<InventoryTool> inventoryTools,
   ) {
     // Check if checklist exists to show condition status
     final hasChecklist = job.checklistData != null;
@@ -964,6 +1337,8 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                         spacing: 4,
                         runSpacing: 4,
                         children: tool.toolIds.map((id) {
+                          final readableId =
+                              _getReadableToolId(id, inventoryTools);
                           final checklistItem = checklistItems[id];
                           final hasIssue = checklistItem != null &&
                               checklistItem.status != 'present';
@@ -977,14 +1352,14 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                             ),
                             decoration: BoxDecoration(
                               color: hasIssue
-                                  ? (checklistItem!.status == 'broken'
+                                  ? (checklistItem.status == 'broken'
                                       ? Colors.orange.withOpacity(0.2)
                                       : Colors.red.withOpacity(0.2))
                                   : color.withOpacity(0.1),
                               borderRadius: BorderRadius.circular(12),
                               border: Border.all(
                                 color: hasIssue
-                                    ? (checklistItem!.status == 'broken'
+                                    ? (checklistItem.status == 'broken'
                                         ? Colors.orange
                                         : Colors.red)
                                     : color.withOpacity(0.3),
@@ -994,12 +1369,12 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Text(
-                                  id,
+                                  readableId,
                                   style: TextStyle(
                                     fontSize: 11,
                                     fontWeight: FontWeight.w500,
                                     color: hasIssue
-                                        ? (checklistItem!.status == 'broken'
+                                        ? (checklistItem.status == 'broken'
                                             ? Colors.orange.shade700
                                             : Colors.red.shade700)
                                         : color,
@@ -1008,7 +1383,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                                 if (hasIssue) ...[
                                   const SizedBox(width: 4),
                                   Icon(
-                                    checklistItem!.status == 'broken'
+                                    checklistItem.status == 'broken'
                                         ? Icons.build
                                         : Icons.warning,
                                     size: 12,
@@ -1467,37 +1842,170 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
   }
 
   CategorizedTools _buildCategorizedTools() {
-    // Convert tool entries to GroupedToolItems
-    final teamTools = _teamTools.entries
-        .where((e) => e.value.quantity > 0)
+    debugPrint('\n🔧 Building categorized tools with accessories...');
+    
+    // Helper to get base name
+    String getBaseName(String toolName) {
+      final hashIndex = toolName.lastIndexOf('#');
+      if (hashIndex > 0) {
+        return toolName.substring(0, hashIndex).trim();
+      }
+      return toolName;
+    }
+    
+    // Track all tools including accessories
+    final Map<String, Map<String, dynamic>> allToolsMap = {};
+    
+    // Process team tools and their accessories
+    debugPrint('   Processing team tools...');
+    for (final entry in _teamTools.entries.where((e) => e.value.quantity > 0)) {
+      final baseName = entry.key;
+      final toolEntry = entry.value;
+      
+      debugPrint('      Team tool: $baseName × ${toolEntry.quantity}');
+      allToolsMap[baseName] = {
+        'category': toolEntry.category,
+        'quantity': toolEntry.quantity,
+        'type': 'team',
+      };
+      
+      // Find accessories for this tool
+      for (var i = 0; i < toolEntry.quantity; i++) {
+        final matchingTools = widget.availableTools
+            .where((t) => getBaseName(t.name) == baseName)
+            .toList();
+        
+        if (matchingTools.isNotEmpty) {
+          final tool = i < matchingTools.length ? matchingTools[i] : matchingTools.first;
+          debugPrint('         Checking accessories for: ${tool.name}');
+          debugPrint('         Accessory IDs: ${tool.accessoryIds}');
+          
+          for (final accessoryId in tool.accessoryIds) {
+            try {
+              final accessory = widget.availableTools.firstWhere(
+                (t) => t.id == accessoryId,
+              );
+              
+              final accessoryBaseName = getBaseName(accessory.name);
+              debugPrint('            + Accessory: $accessoryBaseName');
+              
+              if (!allToolsMap.containsKey(accessoryBaseName)) {
+                allToolsMap[accessoryBaseName] = {
+                  'category': accessory.category,
+                  'quantity': 0,
+                  'type': 'individual', // Accessories go to individual
+                };
+              }
+              allToolsMap[accessoryBaseName]!['quantity']++;
+            } catch (e) {
+              debugPrint('            ⚠️ Accessory not found: $accessoryId');
+            }
+          }
+        }
+      }
+    }
+    
+    // Process individual tools and their accessories
+    debugPrint('   Processing individual tools...');
+    for (final entry in _individualTools.entries.where((e) => e.value.quantity > 0)) {
+      final baseName = entry.key;
+      final toolEntry = entry.value;
+      
+      debugPrint('      Individual tool: $baseName × ${toolEntry.quantity}');
+      if (!allToolsMap.containsKey(baseName)) {
+        allToolsMap[baseName] = {
+          'category': toolEntry.category,
+          'quantity': 0,
+          'type': 'individual',
+        };
+      }
+      allToolsMap[baseName]!['quantity'] += toolEntry.quantity;
+      
+      // Find accessories for this tool
+      for (var i = 0; i < toolEntry.quantity; i++) {
+        final matchingTools = widget.availableTools
+            .where((t) => getBaseName(t.name) == baseName)
+            .toList();
+        
+        if (matchingTools.isNotEmpty) {
+          final tool = i < matchingTools.length ? matchingTools[i] : matchingTools.first;
+          debugPrint('         Checking accessories for: ${tool.name}');
+          debugPrint('         Accessory IDs: ${tool.accessoryIds}');
+          
+          for (final accessoryId in tool.accessoryIds) {
+            try {
+              final accessory = widget.availableTools.firstWhere(
+                (t) => t.id == accessoryId,
+              );
+              
+              final accessoryBaseName = getBaseName(accessory.name);
+              debugPrint('            + Accessory: $accessoryBaseName');
+              
+              if (!allToolsMap.containsKey(accessoryBaseName)) {
+                allToolsMap[accessoryBaseName] = {
+                  'category': accessory.category,
+                  'quantity': 0,
+                  'type': 'individual',
+                };
+              }
+              allToolsMap[accessoryBaseName]!['quantity']++;
+            } catch (e) {
+              debugPrint('            ⚠️ Accessory not found: $accessoryId');
+            }
+          }
+        }
+      }
+    }
+    
+    // Process extras (no accessories typically)
+    debugPrint('   Processing extras...');
+    for (final entry in _extrasTools.entries.where((e) => e.value.quantity > 0)) {
+      final baseName = entry.key;
+      final toolEntry = entry.value;
+      
+      debugPrint('      Extra: $baseName × ${toolEntry.quantity}');
+      if (!allToolsMap.containsKey(baseName)) {
+        allToolsMap[baseName] = {
+          'category': toolEntry.category,
+          'quantity': 0,
+          'type': 'extras',
+        };
+      }
+      allToolsMap[baseName]!['quantity'] += toolEntry.quantity;
+    }
+    
+    // Convert to GroupedToolItems by type
+    final teamTools = allToolsMap.entries
+        .where((e) => e.value['type'] == 'team')
         .map((e) => GroupedToolItem(
               baseName: e.key,
-              category: e.value.category,
-              totalQuantity: e.value.quantity,
-              toolIds:
-                  List.generate(e.value.quantity, (_) => ''), // Placeholders
+              category: e.value['category'],
+              totalQuantity: e.value['quantity'],
+              toolIds: List.generate(e.value['quantity'], (_) => ''),
             ))
         .toList();
 
-    final individualTools = _individualTools.entries
-        .where((e) => e.value.quantity > 0)
+    final individualTools = allToolsMap.entries
+        .where((e) => e.value['type'] == 'individual')
         .map((e) => GroupedToolItem(
               baseName: e.key,
-              category: e.value.category,
-              totalQuantity: e.value.quantity,
-              toolIds: List.generate(e.value.quantity, (_) => ''),
+              category: e.value['category'],
+              totalQuantity: e.value['quantity'],
+              toolIds: List.generate(e.value['quantity'], (_) => ''),
             ))
         .toList();
 
-    final extras = _extrasTools.entries
-        .where((e) => e.value.quantity > 0)
+    final extras = allToolsMap.entries
+        .where((e) => e.value['type'] == 'extras')
         .map((e) => GroupedToolItem(
               baseName: e.key,
-              category: e.value.category,
-              totalQuantity: e.value.quantity,
-              toolIds: List.generate(e.value.quantity, (_) => ''),
+              category: e.value['category'],
+              totalQuantity: e.value['quantity'],
+              toolIds: List.generate(e.value['quantity'], (_) => ''),
             ))
         .toList();
+
+    debugPrint('   ✅ Final: ${teamTools.length} team, ${individualTools.length} individual, ${extras.length} extras\n');
 
     return CategorizedTools(
       teamTools: teamTools,
@@ -1509,7 +2017,7 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
   @override
   Widget build(BuildContext context) {
     return Dialog(
-      child: Container(
+      child: SizedBox(
         width: MediaQuery.of(context).size.width * 0.7,
         height: MediaQuery.of(context).size.height * 0.8,
         child: Column(
