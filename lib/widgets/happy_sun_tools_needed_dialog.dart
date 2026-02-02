@@ -45,7 +45,7 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
   void _recalculateAccessories() {
     debugPrint('\n🔄 Recalculating accessories...');
     debugPrint('   Selected tools: $_selectedTools');
-    
+
     final inventoryProvider = context.read<InventoryProvider>();
     final Map<String, int> accessories = {};
 
@@ -67,7 +67,8 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
           final tool =
               i < matchingTools.length ? matchingTools[i] : matchingTools.first;
           debugPrint('      Checking tool instance: ${tool.name} (${tool.id})');
-          debugPrint('      Tool has ${tool.accessoryIds.length} accessory IDs: ${tool.accessoryIds}');
+          debugPrint(
+              '      Tool has ${tool.accessoryIds.length} accessory IDs: ${tool.accessoryIds}');
 
           // Get accessories for this tool
           try {
@@ -79,7 +80,8 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
               final accessoryBaseName = _getBaseName(accessory.name);
               accessories[accessoryBaseName] =
                   (accessories[accessoryBaseName] ?? 0) + 1;
-              debugPrint('         + Accessory: $accessoryBaseName (${accessory.toolType})');
+              debugPrint(
+                  '         + Accessory: $accessoryBaseName (${accessory.toolType})');
             }
           } catch (e) {
             debugPrint('      ⚠️ Error getting accessories: $e');
@@ -505,7 +507,7 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
     debugPrint('\n💾 Saving tools needed...');
     debugPrint('   Job ID: ${widget.job.id}');
     debugPrint('   Job Date: ${widget.job.date}');
-    
+
     final inventoryProvider = context.read<InventoryProvider>();
     final happySunProvider = context.read<HappySunJobProvider>();
 
@@ -555,7 +557,7 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
         }
       }
     }
-    
+
     debugPrint('   Final tools with accessories: $allToolsWithQuantities');
 
     // Now create HappySunToolUsage for all tools including auto-added accessories
@@ -584,9 +586,10 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
         category: matchingTool.category,
         quantity: quantity,
       ));
-      debugPrint('      Created: $baseName × $quantity (${matchingTool.category})');
+      debugPrint(
+          '      Created: $baseName × $quantity (${matchingTool.category})');
     }
-    
+
     debugPrint('   Total tool types to save: ${toolsNeeded.length}');
 
     // Update the job with tools needed

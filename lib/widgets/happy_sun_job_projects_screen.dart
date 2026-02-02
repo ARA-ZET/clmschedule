@@ -1843,7 +1843,7 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
 
   CategorizedTools _buildCategorizedTools() {
     debugPrint('\n🔧 Building categorized tools with accessories...');
-    
+
     // Helper to get base name
     String getBaseName(String toolName) {
       final hashIndex = toolName.lastIndexOf('#');
@@ -1852,43 +1852,44 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
       }
       return toolName;
     }
-    
+
     // Track all tools including accessories
     final Map<String, Map<String, dynamic>> allToolsMap = {};
-    
+
     // Process team tools and their accessories
     debugPrint('   Processing team tools...');
     for (final entry in _teamTools.entries.where((e) => e.value.quantity > 0)) {
       final baseName = entry.key;
       final toolEntry = entry.value;
-      
+
       debugPrint('      Team tool: $baseName × ${toolEntry.quantity}');
       allToolsMap[baseName] = {
         'category': toolEntry.category,
         'quantity': toolEntry.quantity,
         'type': 'team',
       };
-      
+
       // Find accessories for this tool
       for (var i = 0; i < toolEntry.quantity; i++) {
         final matchingTools = widget.availableTools
             .where((t) => getBaseName(t.name) == baseName)
             .toList();
-        
+
         if (matchingTools.isNotEmpty) {
-          final tool = i < matchingTools.length ? matchingTools[i] : matchingTools.first;
+          final tool =
+              i < matchingTools.length ? matchingTools[i] : matchingTools.first;
           debugPrint('         Checking accessories for: ${tool.name}');
           debugPrint('         Accessory IDs: ${tool.accessoryIds}');
-          
+
           for (final accessoryId in tool.accessoryIds) {
             try {
               final accessory = widget.availableTools.firstWhere(
                 (t) => t.id == accessoryId,
               );
-              
+
               final accessoryBaseName = getBaseName(accessory.name);
               debugPrint('            + Accessory: $accessoryBaseName');
-              
+
               if (!allToolsMap.containsKey(accessoryBaseName)) {
                 allToolsMap[accessoryBaseName] = {
                   'category': accessory.category,
@@ -1904,13 +1905,14 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
         }
       }
     }
-    
+
     // Process individual tools and their accessories
     debugPrint('   Processing individual tools...');
-    for (final entry in _individualTools.entries.where((e) => e.value.quantity > 0)) {
+    for (final entry
+        in _individualTools.entries.where((e) => e.value.quantity > 0)) {
       final baseName = entry.key;
       final toolEntry = entry.value;
-      
+
       debugPrint('      Individual tool: $baseName × ${toolEntry.quantity}');
       if (!allToolsMap.containsKey(baseName)) {
         allToolsMap[baseName] = {
@@ -1920,27 +1922,28 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
         };
       }
       allToolsMap[baseName]!['quantity'] += toolEntry.quantity;
-      
+
       // Find accessories for this tool
       for (var i = 0; i < toolEntry.quantity; i++) {
         final matchingTools = widget.availableTools
             .where((t) => getBaseName(t.name) == baseName)
             .toList();
-        
+
         if (matchingTools.isNotEmpty) {
-          final tool = i < matchingTools.length ? matchingTools[i] : matchingTools.first;
+          final tool =
+              i < matchingTools.length ? matchingTools[i] : matchingTools.first;
           debugPrint('         Checking accessories for: ${tool.name}');
           debugPrint('         Accessory IDs: ${tool.accessoryIds}');
-          
+
           for (final accessoryId in tool.accessoryIds) {
             try {
               final accessory = widget.availableTools.firstWhere(
                 (t) => t.id == accessoryId,
               );
-              
+
               final accessoryBaseName = getBaseName(accessory.name);
               debugPrint('            + Accessory: $accessoryBaseName');
-              
+
               if (!allToolsMap.containsKey(accessoryBaseName)) {
                 allToolsMap[accessoryBaseName] = {
                   'category': accessory.category,
@@ -1956,13 +1959,14 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
         }
       }
     }
-    
+
     // Process extras (no accessories typically)
     debugPrint('   Processing extras...');
-    for (final entry in _extrasTools.entries.where((e) => e.value.quantity > 0)) {
+    for (final entry
+        in _extrasTools.entries.where((e) => e.value.quantity > 0)) {
       final baseName = entry.key;
       final toolEntry = entry.value;
-      
+
       debugPrint('      Extra: $baseName × ${toolEntry.quantity}');
       if (!allToolsMap.containsKey(baseName)) {
         allToolsMap[baseName] = {
@@ -1973,7 +1977,7 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
       }
       allToolsMap[baseName]!['quantity'] += toolEntry.quantity;
     }
-    
+
     // Convert to GroupedToolItems by type
     final teamTools = allToolsMap.entries
         .where((e) => e.value['type'] == 'team')
@@ -2005,7 +2009,8 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
             ))
         .toList();
 
-    debugPrint('   ✅ Final: ${teamTools.length} team, ${individualTools.length} individual, ${extras.length} extras\n');
+    debugPrint(
+        '   ✅ Final: ${teamTools.length} team, ${individualTools.length} individual, ${extras.length} extras\n');
 
     return CategorizedTools(
       teamTools: teamTools,
