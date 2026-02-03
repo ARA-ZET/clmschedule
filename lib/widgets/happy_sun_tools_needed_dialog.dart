@@ -68,14 +68,15 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
       if (matchingTools.isNotEmpty) {
         // Get the required accessories from the first tool (they all have the same)
         final tool = matchingTools.first;
-        debugPrint('      Tool has ${tool.requiredAccessories.length} required accessories');
+        debugPrint(
+            '      Tool has ${tool.requiredAccessories.length} required accessories');
 
         // For each quantity of this tool, add its required accessories
         for (var i = 0; i < quantity; i++) {
           for (final accessoryReq in tool.requiredAccessories) {
             final accessoryBaseName = accessoryReq.baseName;
             final accessoryQty = accessoryReq.quantity;
-            
+
             accessories[accessoryBaseName] =
                 (accessories[accessoryBaseName] ?? 0) + accessoryQty;
             debugPrint(
@@ -421,7 +422,8 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.arrow_back, 
+                        Icon(
+                          Icons.arrow_back,
                           color: Colors.grey.shade400,
                           size: 48,
                         ),
@@ -531,7 +533,8 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.info_outline,
+                        Icon(
+                          Icons.info_outline,
                           color: Colors.grey.shade400,
                           size: 48,
                         ),
@@ -636,17 +639,19 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
       if (matchingTools.isNotEmpty) {
         // Get the required accessories from the first tool (they all have the same)
         final tool = matchingTools.first;
-        debugPrint('      Tool has ${tool.requiredAccessories.length} required accessories');
+        debugPrint(
+            '      Tool has ${tool.requiredAccessories.length} required accessories');
 
         // For each quantity of this tool, add its required accessories
         for (var i = 0; i < quantity; i++) {
           for (final accessoryReq in tool.requiredAccessories) {
             final accessoryBaseName = accessoryReq.baseName;
             final accessoryQty = accessoryReq.quantity;
-            
+
             allToolsWithQuantities[accessoryBaseName] =
                 (allToolsWithQuantities[accessoryBaseName] ?? 0) + accessoryQty;
-            debugPrint('         + Added accessory: $accessoryBaseName × $accessoryQty');
+            debugPrint(
+                '         + Added accessory: $accessoryBaseName × $accessoryQty');
           }
         }
       }
