@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/happy_sun_project.dart';
-import '../models/happy_sun_job.dart'; // For CategorizedTools
+import '../models/happy_sun_shared.dart'; // For CategorizedTools
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
 import '../widgets/happy_sun_project_card.dart';

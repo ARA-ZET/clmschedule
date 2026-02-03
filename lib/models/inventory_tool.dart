@@ -1,5 +1,30 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+// Accessory requirement with base name and quantity
+class AccessoryRequirement {
+  final String baseName; // Base name without #number suffix
+  final int quantity; // How many of this accessory type are needed
+
+  AccessoryRequirement({
+    required this.baseName,
+    required this.quantity,
+  });
+
+  factory AccessoryRequirement.fromMap(Map<String, dynamic> data) {
+    return AccessoryRequirement(
+      baseName: data['baseName'] ?? '',
+      quantity: data['quantity'] ?? 1,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'baseName': baseName,
+      'quantity': quantity,
+    };
+  }
+}
+
 // Tool type enumeration
 enum ToolType {
   team,
@@ -34,8 +59,10 @@ class InventoryTool {
   final bool isInUse;
   final String? currentProject; // Project ID where tool is currently assigned
   final ToolType toolType; // Type of tool: team, individual, or extras
+  final List<AccessoryRequirement>
+      requiredAccessories; // Accessories needed with base names and quantities
   final List<String>
-      accessoryIds; // IDs of tools that are accessories to this main tool
+      accessoryIds; // Legacy: IDs of tools that are accessories to this main tool
   final String? parentToolId; // ID of parent tool if this is an accessory
   final bool isAccessory; // True if this is an accessory tool
 
@@ -52,6 +79,7 @@ class InventoryTool {
     this.isInUse = false,
     this.currentProject,
     this.toolType = ToolType.extras,
+    this.requiredAccessories = const [],
     this.accessoryIds = const [],
     this.parentToolId,
     this.isAccessory = false,
@@ -71,6 +99,11 @@ class InventoryTool {
       isInUse: data['isInUse'] ?? false,
       currentProject: data['currentProject'],
       toolType: _parseToolType(data),
+      requiredAccessories: (data['requiredAccessories'] as List<dynamic>?)
+              ?.map((e) =>
+                  AccessoryRequirement.fromMap(e as Map<String, dynamic>))
+              .toList() ??
+          [],
       accessoryIds: (data['accessoryIds'] as List<dynamic>?)
               ?.map((e) => e.toString())
               .toList() ??
@@ -121,6 +154,7 @@ class InventoryTool {
       'isInUse': isInUse,
       'currentProject': currentProject,
       'toolType': toolType.name,
+      'requiredAccessories': requiredAccessories.map((a) => a.toMap()).toList(),
       'accessoryIds': accessoryIds,
       'parentToolId': parentToolId,
       'isAccessory': isAccessory,
@@ -140,6 +174,7 @@ class InventoryTool {
     bool? isInUse,
     String? currentProject,
     ToolType? toolType,
+    List<AccessoryRequirement>? requiredAccessories,
     List<String>? accessoryIds,
     String? parentToolId,
     bool? isAccessory,
@@ -157,6 +192,7 @@ class InventoryTool {
       isInUse: isInUse ?? this.isInUse,
       currentProject: currentProject ?? this.currentProject,
       toolType: toolType ?? this.toolType,
+      requiredAccessories: requiredAccessories ?? this.requiredAccessories,
       accessoryIds: accessoryIds ?? this.accessoryIds,
       parentToolId: parentToolId ?? this.parentToolId,
       isAccessory: isAccessory ?? this.isAccessory,
@@ -186,6 +222,9 @@ class ToolCategory {
   static const String chemicals = 'Chemicals';
   static const String safety = 'Safety Equipment';
   static const String uniform = 'Uniform';
+  static const String pipes = 'Pipes';
+  static const String bottles = 'Bottles';
+  static const String scrappers = 'Scrappers';
   static const String other = 'Other';
 
   static List<String> get all => [
@@ -197,6 +236,9 @@ class ToolCategory {
         chemicals,
         safety,
         uniform,
+        pipes,
+        bottles,
+        scrappers,
         other,
       ];
 }

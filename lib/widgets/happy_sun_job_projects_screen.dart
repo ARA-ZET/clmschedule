@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../models/happy_sun_job.dart';
+import '../models/happy_sun_project.dart';
+import '../models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData, GroupedToolItem, ToolChecklistItem
 import '../models/inventory_tool.dart';
 import '../models/job_list_item.dart';
-import '../providers/happy_sun_job_provider.dart';
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/inventory_provider.dart';
@@ -37,23 +37,26 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<HappySunJobProvider>(
+    return Consumer<HappySunProjectProvider>(
       builder: (context, happySunProvider, child) {
         final now = DateTime.now();
         final today = DateTime(now.year, now.month, now.day);
 
-        final allJobs = happySunProvider.jobs;
-        final pendingCount = allJobs.where((job) {
-          final jobDate = DateTime(job.date.year, job.date.month, job.date.day);
-          return jobDate.isAfter(today);
+        final allProjects = happySunProvider.projects;
+        final pendingCount = allProjects.where((project) {
+          final projectDate = DateTime(project.scheduledDate.year,
+              project.scheduledDate.month, project.scheduledDate.day);
+          return projectDate.isAfter(today);
         }).length;
-        final inProgressCount = allJobs.where((job) {
-          final jobDate = DateTime(job.date.year, job.date.month, job.date.day);
-          return jobDate.isAtSameMomentAs(today);
+        final inProgressCount = allProjects.where((project) {
+          final projectDate = DateTime(project.scheduledDate.year,
+              project.scheduledDate.month, project.scheduledDate.day);
+          return projectDate.isAtSameMomentAs(today);
         }).length;
-        final completedCount = allJobs.where((job) {
-          final jobDate = DateTime(job.date.year, job.date.month, job.date.day);
-          return jobDate.isBefore(today);
+        final completedCount = allProjects.where((project) {
+          final projectDate = DateTime(project.scheduledDate.year,
+              project.scheduledDate.month, project.scheduledDate.day);
+          return projectDate.isBefore(today);
         }).length;
 
         return Column(
@@ -73,7 +76,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                         controller: _tabController,
                         isScrollable: true,
                         tabs: [
-                          Tab(text: 'All Projects (${allJobs.length})'),
+                          Tab(text: 'All Projects (${allProjects.length})'),
                           Tab(text: 'Confirmed ($pendingCount)'),
                           Tab(text: 'In Progress ($inProgressCount)'),
                           Tab(text: 'Completed ($completedCount)'),
@@ -139,7 +142,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
   }
 
   Widget _buildJobsList(String statusFilter) {
-    return Consumer2<HappySunJobProvider, JobListProvider>(
+    return Consumer2<HappySunProjectProvider, JobListProvider>(
       builder: (context, happySunProvider, jobListProvider, child) {
         if (happySunProvider.isLoading) {
           return const Center(child: CircularProgressIndicator());
@@ -169,32 +172,32 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
           );
         }
 
-        var jobs = happySunProvider.jobs;
+        var projects = happySunProvider.projects;
 
         // Apply date-based status filter
         final now = DateTime.now();
         final today = DateTime(now.year, now.month, now.day);
 
         if (statusFilter != 'all') {
-          jobs = jobs.where((job) {
-            final jobDate =
-                DateTime(job.date.year, job.date.month, job.date.day);
+          projects = projects.where((project) {
+            final projectDate = DateTime(project.scheduledDate.year,
+                project.scheduledDate.month, project.scheduledDate.day);
 
             if (statusFilter == 'confirmed') {
-              return jobDate.isAfter(today);
+              return projectDate.isAfter(today);
             } else if (statusFilter == 'in-progress') {
-              return jobDate.isAtSameMomentAs(today);
+              return projectDate.isAtSameMomentAs(today);
             } else if (statusFilter == 'completed') {
-              return jobDate.isBefore(today);
+              return projectDate.isBefore(today);
             }
             return true;
           }).toList();
         }
 
-        // Sort jobs by date (ascending)
-        jobs.sort((a, b) => a.date.compareTo(b.date));
+        // Sort projects by date (ascending)
+        projects.sort((a, b) => a.scheduledDate.compareTo(b.scheduledDate));
 
-        if (jobs.isEmpty) {
+        if (projects.isEmpty) {
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -227,28 +230,28 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 
         return ListView.builder(
           padding: const EdgeInsets.all(16),
-          itemCount: jobs.length,
+          itemCount: projects.length,
           itemBuilder: (context, index) {
-            final job = jobs[index];
+            final project = projects[index];
             // Get corresponding JobListItem for client details
             final jobListItem = jobListProvider.jobListItems.firstWhere(
-              (item) => item.id == job.jobListItemId,
+              (item) => item.id == project.jobListItemId,
               orElse: () => JobListItem(
-                id: job.id,
+                id: project.id,
                 invoice: '',
                 amount: 0,
                 client: 'Unknown Client',
-                jobStatusId: job.statusId,
+                jobStatusId: project.statusId,
                 invoiceStatusId: 'pending',
-                jobType: job.isWindowCleaning
+                jobType: project.isWindowCleaning
                     ? JobType.windowCleaning
                     : JobType.solarPanelCleaning,
                 area: '',
                 quantity: 0,
                 manDays: 0,
-                date: job.date,
+                date: project.scheduledDate,
                 collectionAddress: '',
-                collectionDate: job.date,
+                collectionDate: project.scheduledDate,
                 specialInstructions: '',
                 quantityDistributed: 0,
                 invoiceDetails: '',
@@ -257,24 +260,25 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
               ),
             );
 
-            return _buildJobCard(context, job, jobListItem);
+            return _buildProjectCard(context, project, jobListItem);
           },
         );
       },
     );
   }
 
-  Widget _buildJobCard(
-      BuildContext context, HappySunJob job, JobListItem jobListItem) {
+  Widget _buildProjectCard(
+      BuildContext context, HappySunProject project, JobListItem jobListItem) {
     // Determine border color based on date
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    final jobDate = DateTime(job.date.year, job.date.month, job.date.day);
+    final projectDate = DateTime(project.scheduledDate.year,
+        project.scheduledDate.month, project.scheduledDate.day);
 
     Color borderColor;
-    if (jobDate.isBefore(today)) {
+    if (projectDate.isBefore(today)) {
       borderColor = Colors.green;
-    } else if (jobDate.isAfter(today)) {
+    } else if (projectDate.isAfter(today)) {
       borderColor = Colors.blue;
     } else {
       borderColor = Colors.orange;
@@ -303,25 +307,25 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
             // Section 1: Project Details
             Expanded(
               flex: 1,
-              child: _buildProjectDetailsSection(job, jobListItem),
+              child: _buildProjectDetailsSection(project, jobListItem),
             ),
             const VerticalDivider(width: 32),
             // Section 2: Checkout
             Expanded(
               flex: 1,
-              child: _buildCheckoutSection(context, job),
+              child: _buildCheckoutSection(context, project),
             ),
             const VerticalDivider(width: 32),
             // Section 3: Checklist
             Expanded(
               flex: 1,
-              child: _buildChecklistSection(context, job),
+              child: _buildChecklistSection(context, project),
             ),
             const VerticalDivider(width: 32),
             // Section 4: Checkin
             Expanded(
               flex: 1,
-              child: _buildCheckinSection(context, job),
+              child: _buildCheckinSection(context, project),
             ),
           ],
         ),
@@ -329,14 +333,15 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     );
   }
 
-  Widget _buildProjectDetailsSection(HappySunJob job, JobListItem jobListItem) {
+  Widget _buildProjectDetailsSection(
+      HappySunProject project, JobListItem jobListItem) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
             Icon(
-              job.isWindowCleaning
+              project.isWindowCleaning
                   ? Icons.cleaning_services
                   : Icons.solar_power,
               color: Colors.orange,
@@ -373,13 +378,12 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
         ),
         const SizedBox(height: 16),
         OutlinedButton.icon(
-          onPressed: () => _showToolsDialog(context, job),
-          icon: Icon(
-              job.toolsNeededCategorized != null ? Icons.build : Icons.edit,
+          onPressed: () => _showToolsDialog(context, project),
+          icon: Icon(project.toolsNeeded != null ? Icons.build : Icons.edit,
               size: 18),
           label: Text(
-            job.toolsNeededCategorized != null
-                ? 'Tools Needed (${job.toolsNeededCategorized!.totalCount})'
+            project.toolsNeeded != null
+                ? 'Tools Needed (${project.toolsNeeded!.totalCount})'
                 : 'Add Tools',
           ),
           style: OutlinedButton.styleFrom(
@@ -391,9 +395,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     );
   }
 
-  Widget _buildCheckoutSection(BuildContext context, HappySunJob job) {
-    final hasCheckout = job.startTime != null;
-    final toolsUsed = job.toolsUsedCategorized;
+  Widget _buildCheckoutSection(BuildContext context, HappySunProject project) {
+    final hasCheckout = project.startTime != null;
+    final toolsUsed = project.toolsUsedCategorized;
     final totalToolsTaken = toolsUsed?.totalCount ?? 0;
 
     return Column(
@@ -418,10 +422,10 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
         ),
         const SizedBox(height: 12),
         if (hasCheckout) ...[
-          if (job.startTime != null)
+          if (project.startTime != null)
             _buildDetailRow(
               'Time',
-              '${job.startTime!.hour.toString().padLeft(2, '0')}:${job.startTime!.minute.toString().padLeft(2, '0')}',
+              '${project.startTime!.hour.toString().padLeft(2, '0')}:${project.startTime!.minute.toString().padLeft(2, '0')}',
             ),
           _buildDetailRow('Tools Taken', '$totalToolsTaken'),
           if (toolsUsed != null) ...[
@@ -432,9 +436,12 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                 '${toolsUsed.individualTools.fold<int>(0, (sum, tool) => sum + tool.totalQuantity)}'),
             _buildDetailRow('Extras',
                 '${toolsUsed.extras.fold<int>(0, (sum, tool) => sum + tool.totalQuantity)}'),
+            if (toolsUsed.accessories.isNotEmpty)
+              _buildDetailRow('Accessories',
+                  '${toolsUsed.accessories.fold<int>(0, (sum, tool) => sum + tool.totalQuantity)}'),
             const SizedBox(height: 8),
             OutlinedButton.icon(
-              onPressed: () => _showToolsTakenDialog(context, job),
+              onPressed: () => _showToolsTakenDialog(context, project),
               icon: const Icon(Icons.list, size: 16),
               label: const Text('View Tools'),
               style: OutlinedButton.styleFrom(
@@ -450,7 +457,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
           ),
           const SizedBox(height: 8),
           ElevatedButton.icon(
-            onPressed: () => _handleCheckout(context, job),
+            onPressed: () => _handleCheckout(context, project),
             icon: const Icon(Icons.logout, size: 18),
             label: const Text('Start Checkout'),
             style: ElevatedButton.styleFrom(
@@ -463,9 +470,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     );
   }
 
-  Widget _buildChecklistSection(BuildContext context, HappySunJob job) {
-    final hasChecklist = job.endTime == null && job.startTime != null;
-    final isComplete = job.endTime != null;
+  Widget _buildChecklistSection(BuildContext context, HappySunProject project) {
+    final hasChecklist = project.endTime == null && project.startTime != null;
+    final isComplete = project.endTime != null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -496,16 +503,16 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
           ],
         ),
         const SizedBox(height: 12),
-        if (job.startTime == null) ...[
+        if (project.startTime == null) ...[
           const Text(
             'Complete checkout first',
             style: TextStyle(color: Colors.grey),
           ),
-        ] else if (job.checklistData != null)
-          ..._buildChecklistDetails(context, job, job.checklistData!)
+        ] else if (project.checklistData != null)
+          ..._buildChecklistDetails(context, project, project.checklistData!)
         else if (isComplete) ...[
           _buildDetailRow('Status', 'Completed (No Checklist)'),
-          if (job.notes != null) _buildDetailRow('Notes', job.notes!),
+          if (project.notes != null) _buildDetailRow('Notes', project.notes!),
         ] else ...[
           // Job in progress - checklist not done yet
           const Text(
@@ -514,7 +521,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
           ),
           const SizedBox(height: 8),
           ElevatedButton.icon(
-            onPressed: () => _handleChecklist(context, job),
+            onPressed: () => _handleChecklist(context, project),
             icon: const Icon(Icons.checklist, size: 18),
             label: const Text('Do Checklist'),
             style: ElevatedButton.styleFrom(
@@ -527,8 +534,8 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     );
   }
 
-  Widget _buildCheckinSection(BuildContext context, HappySunJob job) {
-    final hasCheckin = job.endTime != null;
+  Widget _buildCheckinSection(BuildContext context, HappySunProject project) {
+    final hasCheckin = project.endTime != null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -554,29 +561,29 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
         if (hasCheckin) ...[
           _buildDetailRow(
             'Time',
-            '${job.endTime!.hour.toString().padLeft(2, '0')}:${job.endTime!.minute.toString().padLeft(2, '0')}',
+            '${project.endTime!.hour.toString().padLeft(2, '0')}:${project.endTime!.minute.toString().padLeft(2, '0')}',
           ),
-          if (job.workDuration != null)
+          if (project.workDuration != null)
             _buildDetailRow(
               'Duration',
-              '${job.workDuration!.inHours}h ${job.workDuration!.inMinutes.remainder(60)}m',
+              '${project.workDuration!.inHours}h ${project.workDuration!.inMinutes.remainder(60)}m',
             ),
           _buildDetailRow('Status', 'Complete'),
           const SizedBox(height: 8),
           OutlinedButton.icon(
-            onPressed: () => _showCheckinDetailsDialog(context, job),
+            onPressed: () => _showCheckinDetailsDialog(context, project),
             icon: const Icon(Icons.visibility, size: 18),
             label: const Text('View Check-in Details'),
             style: OutlinedButton.styleFrom(
               foregroundColor: Colors.green,
             ),
           ),
-        ] else if (job.startTime == null) ...[
+        ] else if (project.startTime == null) ...[
           const Text(
             'Complete checkout first',
             style: TextStyle(color: Colors.grey),
           ),
-        ] else if (job.checklistData == null) ...[
+        ] else if (project.checklistData == null) ...[
           const Text(
             'Complete checklist first',
             style: TextStyle(color: Colors.grey),
@@ -588,7 +595,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
           ),
           const SizedBox(height: 8),
           ElevatedButton.icon(
-            onPressed: () => _handleCheckin(context, job),
+            onPressed: () => _handleCheckin(context, project),
             icon: const Icon(Icons.assignment_return, size: 18),
             label: const Text('Check In Tools'),
             style: ElevatedButton.styleFrom(
@@ -635,8 +642,8 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     );
   }
 
-  List<Widget> _buildChecklistDetails(
-      BuildContext context, HappySunJob job, ChecklistData checklistData) {
+  List<Widget> _buildChecklistDetails(BuildContext context,
+      HappySunProject project, ChecklistData checklistData) {
     final toolsWithNotes =
         checklistData.items.where((item) => item.notes.isNotEmpty).length;
 
@@ -669,7 +676,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
         ),
       const SizedBox(height: 8),
       OutlinedButton.icon(
-        onPressed: () => _handleChecklist(context, job),
+        onPressed: () => _handleChecklist(context, project),
         icon: const Icon(Icons.checklist, size: 16),
         label: const Text('View Checklist'),
         style: OutlinedButton.styleFrom(
@@ -680,18 +687,18 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     ];
   }
 
-  void _handleCheckout(BuildContext context, HappySunJob job) {
+  void _handleCheckout(BuildContext context, HappySunProject project) {
     // Navigate to the checkout screen
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => HappySunCheckoutScreen(job: job),
+        builder: (context) => HappySunCheckoutScreen(project: project),
       ),
     );
   }
 
-  void _showToolsTakenDialog(BuildContext context, HappySunJob job) {
-    final toolsUsed = job.toolsUsedCategorized;
+  void _showToolsTakenDialog(BuildContext context, HappySunProject project) {
+    final toolsUsed = project.toolsUsedCategorized;
     if (toolsUsed == null) return;
 
     showDialog(
@@ -741,9 +748,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                                 color: Colors.white,
                               ),
                             ),
-                            if (job.startTime != null)
+                            if (project.startTime != null)
                               Text(
-                                'Checked out at ${job.startTime!.hour.toString().padLeft(2, '0')}:${job.startTime!.minute.toString().padLeft(2, '0')} on ${job.date.day}/${job.date.month}/${job.date.year}',
+                                'Checked out at ${project.startTime!.hour.toString().padLeft(2, '0')}:${project.startTime!.minute.toString().padLeft(2, '0')} on ${project.scheduledDate.day}/${project.scheduledDate.month}/${project.scheduledDate.year}',
                                 style: const TextStyle(
                                   fontSize: 12,
                                   color: Colors.white70,
@@ -791,7 +798,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                           'Team Tools',
                           toolsUsed.teamTools,
                           Colors.blue,
-                          job,
+                          project,
                           inventoryProvider.tools,
                         ),
                         const SizedBox(height: 16),
@@ -801,7 +808,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                           'Individual Tools',
                           toolsUsed.individualTools,
                           Colors.green,
-                          job,
+                          project,
                           inventoryProvider.tools,
                         ),
                         const SizedBox(height: 16),
@@ -811,7 +818,17 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                           'Extras',
                           toolsUsed.extras,
                           Colors.purple,
-                          job,
+                          project,
+                          inventoryProvider.tools,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      if (toolsUsed.accessories.isNotEmpty) ...[
+                        _buildToolCategorySection(
+                          'Accessories',
+                          toolsUsed.accessories,
+                          Colors.orange,
+                          project,
                           inventoryProvider.tools,
                         ),
                       ],
@@ -847,7 +864,8 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                               Text(
                                 'Team: ${toolsUsed.teamTools.fold<int>(0, (sum, t) => sum + t.totalQuantity)} • '
                                 'Individual: ${toolsUsed.individualTools.fold<int>(0, (sum, t) => sum + t.totalQuantity)} • '
-                                'Extras: ${toolsUsed.extras.fold<int>(0, (sum, t) => sum + t.totalQuantity)}',
+                                'Extras: ${toolsUsed.extras.fold<int>(0, (sum, t) => sum + t.totalQuantity)} • '
+                                'Accessories: ${toolsUsed.accessories.fold<int>(0, (sum, t) => sum + t.totalQuantity)}',
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.grey.shade600,
@@ -877,8 +895,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     );
   }
 
-  void _showCheckinDetailsDialog(BuildContext context, HappySunJob job) {
-    final toolsUsed = job.toolsUsedCategorized;
+  void _showCheckinDetailsDialog(
+      BuildContext context, HappySunProject project) {
+    final toolsUsed = project.toolsUsedCategorized;
     if (toolsUsed == null) return;
 
     showDialog(
@@ -922,9 +941,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                               ),
                             ),
                             const SizedBox(height: 4),
-                            if (job.endTime != null)
+                            if (project.endTime != null)
                               Text(
-                                'Completed at ${job.endTime!.hour.toString().padLeft(2, '0')}:${job.endTime!.minute.toString().padLeft(2, '0')} on ${job.date.day}/${job.date.month}/${job.date.year}',
+                                'Completed at ${project.endTime!.hour.toString().padLeft(2, '0')}:${project.endTime!.minute.toString().padLeft(2, '0')} on ${project.scheduledDate.day}/${project.scheduledDate.month}/${project.scheduledDate.year}',
                                 style: const TextStyle(
                                   fontSize: 12,
                                   color: Colors.white70,
@@ -953,14 +972,14 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                         Icons.build_circle,
                         Colors.green,
                       ),
-                      if (job.workDuration != null)
+                      if (project.workDuration != null)
                         _buildSummaryColumn(
                           'Duration',
-                          '${job.workDuration!.inHours}h ${job.workDuration!.inMinutes.remainder(60)}m',
+                          '${project.workDuration!.inHours}h ${project.workDuration!.inMinutes.remainder(60)}m',
                           Icons.timer,
                           Colors.green,
                         ),
-                      if (job.checklistData != null)
+                      if (project.checklistData != null)
                         _buildSummaryColumn(
                           'Status',
                           'All tools checked',
@@ -980,7 +999,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                           'Team Tools',
                           toolsUsed.teamTools,
                           Colors.blue,
-                          job,
+                          project,
                           inventoryProvider.tools,
                         ),
                         const SizedBox(height: 16),
@@ -990,7 +1009,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                           'Individual Tools',
                           toolsUsed.individualTools,
                           Colors.green,
-                          job,
+                          project,
                           inventoryProvider.tools,
                         ),
                         const SizedBox(height: 16),
@@ -1000,7 +1019,17 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                           'Extras',
                           toolsUsed.extras,
                           Colors.purple,
-                          job,
+                          project,
+                          inventoryProvider.tools,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      if (toolsUsed.accessories.isNotEmpty) ...[
+                        _buildCheckinToolCategory(
+                          'Accessories',
+                          toolsUsed.accessories,
+                          Colors.orange,
+                          project,
                           inventoryProvider.tools,
                         ),
                       ],
@@ -1069,13 +1098,13 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     String title,
     List<GroupedToolItem> tools,
     Color color,
-    HappySunJob job,
+    HappySunProject project,
     List<InventoryTool> inventoryTools,
   ) {
     // Check if checklist exists to show condition status
-    final hasChecklist = job.checklistData != null;
+    final hasChecklist = project.checklistData != null;
     final checklistItems = hasChecklist
-        ? {for (var item in job.checklistData!.items) item.toolId: item}
+        ? {for (var item in project.checklistData!.items) item.toolId: item}
         : <String, ToolChecklistItem>{};
 
     return Column(
@@ -1239,13 +1268,13 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     String title,
     List<GroupedToolItem> tools,
     Color color,
-    HappySunJob job,
+    HappySunProject project,
     List<InventoryTool> inventoryTools,
   ) {
     // Check if checklist exists to show condition status
-    final hasChecklist = job.checklistData != null;
+    final hasChecklist = project.checklistData != null;
     final checklistItems = hasChecklist
-        ? {for (var item in job.checklistData!.items) item.toolId: item}
+        ? {for (var item in project.checklistData!.items) item.toolId: item}
         : <String, ToolChecklistItem>{};
 
     return Column(
@@ -1445,40 +1474,36 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     );
   }
 
-  void _handleChecklist(BuildContext context, HappySunJob job) async {
+  void _handleChecklist(BuildContext context, HappySunProject project) async {
     // Navigate to the checklist screen and wait for result
     await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => HappySunChecklistScreen(job: job),
+        builder: (context) => HappySunChecklistScreen(project: project),
       ),
     );
     // UI will auto-refresh via provider stream subscription
   }
 
-  void _handleCheckin(BuildContext context, HappySunJob job) async {
+  void _handleCheckin(BuildContext context, HappySunProject project) async {
     // Navigate to the checkin screen
     await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => HappySunCheckinScreen(job: job),
+        builder: (context) => HappySunCheckinScreen(project: project),
       ),
     );
     // UI will auto-refresh via provider stream subscription
   }
 
-  void _showToolsDialog(BuildContext context, HappySunJob job) async {
+  void _showToolsDialog(BuildContext context, HappySunProject project) async {
     final inventoryProvider = context.read<InventoryProvider>();
     final projectProvider = context.read<HappySunProjectProvider>();
-    final jobProvider = context.read<HappySunJobProvider>();
 
     // Initialize inventory if needed
     if (inventoryProvider.tools.isEmpty && !inventoryProvider.isLoading) {
       inventoryProvider.initialize();
     }
-
-    // Fetch the project using job's ID
-    final project = projectProvider.getProjectById(job.id);
 
     if (!context.mounted) return;
 
@@ -1486,25 +1511,16 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     await showDialog(
       context: context,
       builder: (context) => _InlineToolsDialog(
-        job: job,
-        currentTools: job.toolsNeededCategorized ?? CategorizedTools(),
+        project: project,
+        currentTools: project.toolsNeeded ?? CategorizedTools.empty(),
         availableTools: inventoryProvider.tools,
         onSave: (updatedTools) async {
-          // Update the job with new categorized tools
-          await jobProvider.updateToolsNeededFromManDays(
-            job.id,
-            job.date,
-            0, // numberOfCleaners not used in this context
+          // Update the project with new categorized tools
+          await projectProvider.updateToolsNeeded(
+            project.id,
+            project.scheduledDate,
             updatedTools,
           );
-
-          // If project exists, update it too
-          if (project != null) {
-            final updatedProject = project.copyWith(
-              toolsNeeded: updatedTools,
-            );
-            await projectProvider.updateProject(updatedProject);
-          }
 
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -1521,7 +1537,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 
   Widget _buildMonthButton(
     BuildContext context,
-    HappySunJobProvider provider,
+    HappySunProjectProvider provider,
     String label,
     DateTime targetMonth,
   ) {
@@ -1562,7 +1578,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 
   Future<void> _showMonthPicker(
     BuildContext context,
-    HappySunJobProvider provider,
+    HappySunProjectProvider provider,
   ) async {
     final currentMonth = provider.currentMonth;
     int? selectedYear = currentMonth.year;
@@ -1706,13 +1722,13 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 
 // Inline Tools Dialog - Shows all tools with quick add/remove buttons
 class _InlineToolsDialog extends StatefulWidget {
-  final HappySunJob job;
+  final HappySunProject project;
   final CategorizedTools currentTools;
   final List<dynamic> availableTools;
   final Function(CategorizedTools) onSave;
 
   const _InlineToolsDialog({
-    required this.job,
+    required this.project,
     required this.currentTools,
     required this.availableTools,
     required this.onSave,
@@ -1730,13 +1746,14 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
   late Map<String, _ToolEntry> _teamTools;
   late Map<String, _ToolEntry> _individualTools;
   late Map<String, _ToolEntry> _extrasTools;
+  late Map<String, _ToolEntry> _accessoriesTools;
 
   bool _hasChanges = false;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _initializeTools();
   }
 
@@ -1807,6 +1824,26 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
         );
       }
     }
+
+    // Initialize accessories
+    _accessoriesTools = {};
+    for (final entry in toolsByBaseName.entries) {
+      final baseName = entry.key;
+      final tools = entry.value;
+      if (tools.isNotEmpty &&
+          tools.first.toolType.toString() == 'ToolType.accessories') {
+        final category = tools.first.category;
+        final currentQty = widget.currentTools.accessories
+            .where((t) => t.baseName == baseName)
+            .fold(0, (sum, t) => sum + t.totalQuantity);
+        _accessoriesTools[baseName] = _ToolEntry(
+          baseName: baseName,
+          category: category,
+          quantity: currentQty,
+          availableCount: tools.length,
+        );
+      }
+    }
   }
 
   String _extractBaseName(String toolName) {
@@ -1869,38 +1906,43 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
         'type': 'team',
       };
 
-      // Find accessories for this tool
-      for (var i = 0; i < toolEntry.quantity; i++) {
-        final matchingTools = widget.availableTools
-            .where((t) => getBaseName(t.name) == baseName)
-            .toList();
+      // Find accessories for this tool using requiredAccessories
+      final matchingTools = widget.availableTools
+          .where((t) => getBaseName(t.name) == baseName)
+          .toList();
 
-        if (matchingTools.isNotEmpty) {
-          final tool =
-              i < matchingTools.length ? matchingTools[i] : matchingTools.first;
-          debugPrint('         Checking accessories for: ${tool.name}');
-          debugPrint('         Accessory IDs: ${tool.accessoryIds}');
+      if (matchingTools.isNotEmpty) {
+        final tool = matchingTools.first;
+        debugPrint('         Checking accessories for: ${tool.name}');
+        debugPrint(
+            '         Required accessories: ${tool.requiredAccessories.length}');
 
-          for (final accessoryId in tool.accessoryIds) {
-            try {
-              final accessory = widget.availableTools.firstWhere(
-                (t) => t.id == accessoryId,
-              );
+        // Process requiredAccessories (base name + quantity per tool)
+        for (final accessoryReq in tool.requiredAccessories) {
+          final accessoryBaseName = accessoryReq.baseName;
+          final qtyPerTool = accessoryReq.quantity;
+          final totalQty = qtyPerTool * toolEntry.quantity;
 
-              final accessoryBaseName = getBaseName(accessory.name);
-              debugPrint('            + Accessory: $accessoryBaseName');
+          debugPrint(
+              '            + Accessory: $accessoryBaseName ($qtyPerTool × ${toolEntry.quantity} = $totalQty)');
 
-              if (!allToolsMap.containsKey(accessoryBaseName)) {
-                allToolsMap[accessoryBaseName] = {
-                  'category': accessory.category,
-                  'quantity': 0,
-                  'type': 'individual', // Accessories go to individual
-                };
-              }
-              allToolsMap[accessoryBaseName]!['quantity']++;
-            } catch (e) {
-              debugPrint('            ⚠️ Accessory not found: $accessoryId');
+          // Find the actual accessory tool to get its category
+          final accessoryTool = widget.availableTools
+              .where((t) => getBaseName(t.name) == accessoryBaseName)
+              .firstOrNull;
+
+          if (accessoryTool != null) {
+            if (!allToolsMap.containsKey(accessoryBaseName)) {
+              allToolsMap[accessoryBaseName] = {
+                'category': accessoryTool.category,
+                'quantity': 0,
+                'type': 'accessories', // Put in accessories category
+              };
             }
+            allToolsMap[accessoryBaseName]!['quantity'] += totalQty;
+          } else {
+            debugPrint(
+                '            ⚠️ Accessory tool not found: $accessoryBaseName');
           }
         }
       }
@@ -1923,38 +1965,43 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
       }
       allToolsMap[baseName]!['quantity'] += toolEntry.quantity;
 
-      // Find accessories for this tool
-      for (var i = 0; i < toolEntry.quantity; i++) {
-        final matchingTools = widget.availableTools
-            .where((t) => getBaseName(t.name) == baseName)
-            .toList();
+      // Find accessories for this tool using requiredAccessories
+      final matchingTools = widget.availableTools
+          .where((t) => getBaseName(t.name) == baseName)
+          .toList();
 
-        if (matchingTools.isNotEmpty) {
-          final tool =
-              i < matchingTools.length ? matchingTools[i] : matchingTools.first;
-          debugPrint('         Checking accessories for: ${tool.name}');
-          debugPrint('         Accessory IDs: ${tool.accessoryIds}');
+      if (matchingTools.isNotEmpty) {
+        final tool = matchingTools.first;
+        debugPrint('         Checking accessories for: ${tool.name}');
+        debugPrint(
+            '         Required accessories: ${tool.requiredAccessories.length}');
 
-          for (final accessoryId in tool.accessoryIds) {
-            try {
-              final accessory = widget.availableTools.firstWhere(
-                (t) => t.id == accessoryId,
-              );
+        // Process requiredAccessories (base name + quantity per tool)
+        for (final accessoryReq in tool.requiredAccessories) {
+          final accessoryBaseName = accessoryReq.baseName;
+          final qtyPerTool = accessoryReq.quantity;
+          final totalQty = qtyPerTool * toolEntry.quantity;
 
-              final accessoryBaseName = getBaseName(accessory.name);
-              debugPrint('            + Accessory: $accessoryBaseName');
+          debugPrint(
+              '            + Accessory: $accessoryBaseName ($qtyPerTool × ${toolEntry.quantity} = $totalQty)');
 
-              if (!allToolsMap.containsKey(accessoryBaseName)) {
-                allToolsMap[accessoryBaseName] = {
-                  'category': accessory.category,
-                  'quantity': 0,
-                  'type': 'individual',
-                };
-              }
-              allToolsMap[accessoryBaseName]!['quantity']++;
-            } catch (e) {
-              debugPrint('            ⚠️ Accessory not found: $accessoryId');
+          // Find the actual accessory tool to get its category
+          final accessoryTool = widget.availableTools
+              .where((t) => getBaseName(t.name) == accessoryBaseName)
+              .firstOrNull;
+
+          if (accessoryTool != null) {
+            if (!allToolsMap.containsKey(accessoryBaseName)) {
+              allToolsMap[accessoryBaseName] = {
+                'category': accessoryTool.category,
+                'quantity': 0,
+                'type': 'accessories', // Put in accessories category
+              };
             }
+            allToolsMap[accessoryBaseName]!['quantity'] += totalQty;
+          } else {
+            debugPrint(
+                '            ⚠️ Accessory tool not found: $accessoryBaseName');
           }
         }
       }
@@ -1973,6 +2020,24 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
           'category': toolEntry.category,
           'quantity': 0,
           'type': 'extras',
+        };
+      }
+      allToolsMap[baseName]!['quantity'] += toolEntry.quantity;
+    }
+
+    // Process accessories
+    debugPrint('   Processing accessories...');
+    for (final entry
+        in _accessoriesTools.entries.where((e) => e.value.quantity > 0)) {
+      final baseName = entry.key;
+      final toolEntry = entry.value;
+
+      debugPrint('      Accessory: $baseName × ${toolEntry.quantity}');
+      if (!allToolsMap.containsKey(baseName)) {
+        allToolsMap[baseName] = {
+          'category': toolEntry.category,
+          'quantity': 0,
+          'type': 'accessories',
         };
       }
       allToolsMap[baseName]!['quantity'] += toolEntry.quantity;
@@ -2009,13 +2074,24 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
             ))
         .toList();
 
+    final accessories = allToolsMap.entries
+        .where((e) => e.value['type'] == 'accessories')
+        .map((e) => GroupedToolItem(
+              baseName: e.key,
+              category: e.value['category'],
+              totalQuantity: e.value['quantity'],
+              toolIds: List.generate(e.value['quantity'], (_) => ''),
+            ))
+        .toList();
+
     debugPrint(
-        '   ✅ Final: ${teamTools.length} team, ${individualTools.length} individual, ${extras.length} extras\n');
+        '   ✅ Final: ${teamTools.length} team, ${individualTools.length} individual, ${extras.length} extras, ${accessories.length} accessories\n');
 
     return CategorizedTools(
       teamTools: teamTools,
       individualTools: individualTools,
       extras: extras,
+      accessories: accessories,
     );
   }
 
@@ -2132,6 +2208,19 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
                     ],
                   ),
                 ),
+                Tab(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('Accessories'),
+                      const SizedBox(width: 8),
+                      _buildCountChip(
+                          _accessoriesTools.values
+                              .fold(0, (sum, e) => sum + e.quantity),
+                          Colors.orange),
+                    ],
+                  ),
+                ),
               ],
             ),
             // Tool lists
@@ -2142,6 +2231,7 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
                   _buildToolsList(_teamTools, Colors.blue),
                   _buildToolsList(_individualTools, Colors.green),
                   _buildToolsList(_extrasTools, Colors.purple),
+                  _buildToolsList(_accessoriesTools, Colors.orange),
                 ],
               ),
             ),
@@ -2158,7 +2248,7 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    'Total: ${_teamTools.values.fold(0, (sum, e) => sum + e.quantity) + _individualTools.values.fold(0, (sum, e) => sum + e.quantity) + _extrasTools.values.fold(0, (sum, e) => sum + e.quantity)} tools',
+                    'Total: ${_teamTools.values.fold(0, (sum, e) => sum + e.quantity) + _individualTools.values.fold(0, (sum, e) => sum + e.quantity) + _extrasTools.values.fold(0, (sum, e) => sum + e.quantity) + _accessoriesTools.values.fold(0, (sum, e) => sum + e.quantity)} tools',
                     style: const TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.bold,

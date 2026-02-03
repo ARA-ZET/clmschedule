@@ -22,18 +22,9 @@ class _ManageAccessoriesDialogState extends State<ManageAccessoriesDialog> {
   @override
   void initState() {
     super.initState();
-    // Convert existing accessory IDs to base name quantities
-    final inventoryProvider = context.read<InventoryProvider>();
-    for (final accessoryId in widget.tool.accessoryIds) {
-      try {
-        final tool =
-            inventoryProvider.tools.firstWhere((t) => t.id == accessoryId);
-        final baseName = _getBaseName(tool.name);
-        _selectedAccessories[baseName] =
-            (_selectedAccessories[baseName] ?? 0) + 1;
-      } catch (e) {
-        // Tool not found, skip
-      }
+    // Load existing required accessories
+    for (final accessory in widget.tool.requiredAccessories) {
+      _selectedAccessories[accessory.baseName] = accessory.quantity;
     }
   }
 
@@ -51,28 +42,18 @@ class _ManageAccessoriesDialogState extends State<ManageAccessoriesDialog> {
     try {
       final inventoryProvider = context.read<InventoryProvider>();
 
-      // Convert base name quantities to actual tool IDs
-      final List<String> accessoryIds = [];
+      // Convert base name quantities to AccessoryRequirement objects
+      final List<AccessoryRequirement> requiredAccessories = [];
       for (final entry in _selectedAccessories.entries) {
-        final baseName = entry.key;
-        final quantity = entry.value;
-
-        // Find tools with this base name
-        final matchingTools = inventoryProvider.tools
-            .where((t) =>
-                _getBaseName(t.name) == baseName &&
-                t.toolType == ToolType.accessories)
-            .toList();
-
-        // Add the first N tool IDs
-        for (var i = 0; i < quantity && i < matchingTools.length; i++) {
-          accessoryIds.add(matchingTools[i].id);
-        }
+        requiredAccessories.add(AccessoryRequirement(
+          baseName: entry.key,
+          quantity: entry.value,
+        ));
       }
 
-      await inventoryProvider.updateToolAccessories(
+      await inventoryProvider.updateToolRequiredAccessories(
         widget.tool.id,
-        accessoryIds,
+        requiredAccessories,
       );
 
       if (mounted) {

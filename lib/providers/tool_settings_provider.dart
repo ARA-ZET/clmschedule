@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 import '../models/tool_settings.dart';
-import '../models/happy_sun_job.dart';
+import '../models/happy_sun_shared.dart';
 import '../models/inventory_tool.dart';
 import '../services/tool_settings_service.dart';
 

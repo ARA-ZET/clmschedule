@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
-import '../models/happy_sun_job.dart';
-import '../providers/happy_sun_job_provider.dart';
+import '../models/happy_sun_project.dart';
+import '../providers/happy_sun_project_provider.dart';
 import '../providers/scale_provider.dart';
 
 class HappySunJobsScreen extends StatefulWidget {
@@ -18,7 +18,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
     super.initState();
     // Load jobs for current month when screen opens
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final provider = context.read<HappySunJobProvider>();
+      final provider = context.read<HappySunProjectProvider>();
       final now = DateTime.now();
       provider.setMonth(now.year, now.month);
     });
@@ -26,7 +26,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<HappySunJobProvider, ScaleProvider>(
+    return Consumer2<HappySunProjectProvider, ScaleProvider>(
       builder: (context, jobProvider, scaleProvider, child) {
         if (jobProvider.isLoading) {
           return const Center(
@@ -62,9 +62,9 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
           );
         }
 
-        final jobs = jobProvider.jobs;
+        final projects = jobProvider.projects;
 
-        if (jobs.isEmpty) {
+        if (projects.isEmpty) {
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -98,9 +98,9 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
             Expanded(
               child: ListView.builder(
                 padding: EdgeInsets.all(16 * scaleProvider.scale),
-                itemCount: jobs.length,
+                itemCount: projects.length,
                 itemBuilder: (context, index) {
-                  return _buildJobCard(jobs[index], scaleProvider);
+                  return _buildJobCard(projects[index], scaleProvider);
                 },
               ),
             ),
@@ -111,7 +111,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
   }
 
   Widget _buildHeader(
-      HappySunJobProvider provider, ScaleProvider scaleProvider) {
+      HappySunProjectProvider provider, ScaleProvider scaleProvider) {
     final currentMonth = provider.currentMonth;
     final monthFormat = DateFormat('MMMM yyyy');
 
@@ -164,7 +164,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
     );
   }
 
-  Widget _buildJobCard(HappySunJob job, ScaleProvider scaleProvider) {
+  Widget _buildJobCard(HappySunProject project, ScaleProvider scaleProvider) {
     final dateFormat = DateFormat('EEE, MMM d, yyyy');
 
     return Card(
@@ -178,7 +178,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
             Row(
               children: [
                 Icon(
-                  job.jobType == 'windowCleaning'
+                  project.jobType == 'windowCleaning'
                       ? Icons.cleaning_services
                       : Icons.solar_power,
                   color: Colors.orange,
@@ -190,7 +190,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        job.jobType == 'windowCleaning'
+                        project.jobType == 'windowCleaning'
                             ? 'Window Cleaning'
                             : 'Solar Panel Cleaning',
                         style: TextStyle(
@@ -199,7 +199,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
                         ),
                       ),
                       Text(
-                        dateFormat.format(job.date),
+                        dateFormat.format(project.scheduledDate),
                         style: TextStyle(
                           fontSize: 14 * scaleProvider.scale,
                           color: Colors.grey[600],
@@ -208,11 +208,12 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
                     ],
                   ),
                 ),
-                _buildStatusChip(job.statusId, scaleProvider),
+                _buildStatusChip(project.statusId, scaleProvider),
               ],
             ),
 
-            if (job.toolsUsed.isNotEmpty) ...[
+            if (project.toolsUsedCategorized != null &&
+                project.toolsUsedCategorized!.allTools.isNotEmpty) ...[
               SizedBox(height: 12 * scaleProvider.scale),
               const Divider(),
               SizedBox(height: 8 * scaleProvider.scale),
@@ -227,10 +228,10 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
               Wrap(
                 spacing: 8 * scaleProvider.scale,
                 runSpacing: 8 * scaleProvider.scale,
-                children: job.toolsUsed.map((tool) {
+                children: project.toolsUsedCategorized!.allTools.map((tool) {
                   return Chip(
                     label: Text(
-                      '${tool.toolName} (${tool.quantity})',
+                      '${tool.baseName} (${tool.totalQuantity})',
                       style: TextStyle(fontSize: 12 * scaleProvider.scale),
                     ),
                     backgroundColor: Colors.blue.shade50,
@@ -239,7 +240,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
               ),
             ],
 
-            if (job.teamMemberIds.isNotEmpty) ...[
+            if (project.teamMemberIds.isNotEmpty) ...[
               SizedBox(height: 12 * scaleProvider.scale),
               const Divider(),
               SizedBox(height: 8 * scaleProvider.scale),
@@ -254,7 +255,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
               Wrap(
                 spacing: 8 * scaleProvider.scale,
                 runSpacing: 8 * scaleProvider.scale,
-                children: job.teamMemberIds.map((member) {
+                children: project.teamMemberIds.map((member) {
                   return Chip(
                     avatar: const CircleAvatar(
                       child: Icon(Icons.person, size: 16),
@@ -269,13 +270,13 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
               ),
             ],
 
-            if (job.startTime != null || job.endTime != null) ...[
+            if (project.startTime != null || project.endTime != null) ...[
               SizedBox(height: 12 * scaleProvider.scale),
               const Divider(),
               SizedBox(height: 8 * scaleProvider.scale),
               Row(
                 children: [
-                  if (job.startTime != null) ...[
+                  if (project.startTime != null) ...[
                     Icon(
                       Icons.access_time,
                       size: 16 * scaleProvider.scale,
@@ -283,7 +284,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
                     ),
                     SizedBox(width: 4 * scaleProvider.scale),
                     Text(
-                      'Start: ${DateFormat('HH:mm').format(job.startTime!)}',
+                      'Start: ${DateFormat('HH:mm').format(project.startTime!)}',
                       style: TextStyle(
                         fontSize: 12 * scaleProvider.scale,
                         color: Colors.grey[600],
@@ -291,7 +292,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
                     ),
                     SizedBox(width: 16 * scaleProvider.scale),
                   ],
-                  if (job.endTime != null) ...[
+                  if (project.endTime != null) ...[
                     Icon(
                       Icons.access_time_filled,
                       size: 16 * scaleProvider.scale,
@@ -299,7 +300,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
                     ),
                     SizedBox(width: 4 * scaleProvider.scale),
                     Text(
-                      'End: ${DateFormat('HH:mm').format(job.endTime!)}',
+                      'End: ${DateFormat('HH:mm').format(project.endTime!)}',
                       style: TextStyle(
                         fontSize: 12 * scaleProvider.scale,
                         color: Colors.grey[600],
@@ -310,7 +311,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
               ),
             ],
 
-            if (job.notes != null && job.notes!.isNotEmpty) ...[
+            if (project.notes != null && project.notes!.isNotEmpty) ...[
               SizedBox(height: 12 * scaleProvider.scale),
               const Divider(),
               SizedBox(height: 8 * scaleProvider.scale),
@@ -323,7 +324,7 @@ class _HappySunJobsScreenState extends State<HappySunJobsScreen> {
               ),
               SizedBox(height: 4 * scaleProvider.scale),
               Text(
-                job.notes!,
+                project.notes!,
                 style: TextStyle(
                   fontSize: 12 * scaleProvider.scale,
                   color: Colors.grey[700],

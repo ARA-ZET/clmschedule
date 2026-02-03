@@ -64,6 +64,8 @@ dependencies:
   # QR Code functionality
   mobile_scanner: ^5.2.3
   qr_flutter: ^4.1.0
+  pdf: ^3.10.8
+  printing: ^5.12.0
 
 dev_dependencies:
   flutter_test:

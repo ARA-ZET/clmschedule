@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import '../models/happy_sun_project.dart';
+import '../models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
 import '../services/happy_sun_project_service.dart';
 
 class HappySunProjectProvider extends ChangeNotifier {
@@ -10,13 +11,20 @@ class HappySunProjectProvider extends ChangeNotifier {
   bool _isLoading = false;
   String? _error;
   StreamSubscription<List<HappySunProject>>? _projectsSubscription;
+  DateTime _currentMonth = DateTime.now();
 
   List<HappySunProject> get projects => _projects;
   bool get isLoading => _isLoading;
   String? get error => _error;
+  DateTime get currentMonth => _currentMonth;
 
   HappySunProjectProvider() {
     _initializeProjects();
+  }
+
+  void setMonth(int year, int month) {
+    _currentMonth = DateTime(year, month);
+    notifyListeners();
   }
 
   void _initializeProjects() {
@@ -216,6 +224,201 @@ class HappySunProjectProvider extends ChangeNotifier {
       );
       return projectDate.isAfter(today) && projectDate.isBefore(nextWeek);
     }).toList();
+  }
+
+  // Job Execution Methods
+
+  // Update start time
+  Future<bool> updateStartTime(String projectId, DateTime startTime) async {
+    try {
+      _error = null;
+      await _projectService.updateStartTime(projectId, startTime);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Update end time
+  Future<bool> updateEndTime(String projectId, DateTime endTime) async {
+    try {
+      _error = null;
+      await _projectService.updateEndTime(projectId, endTime);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Update notes
+  Future<bool> updateNotes(String projectId, String notes) async {
+    try {
+      _error = null;
+      await _projectService.updateNotes(projectId, notes);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Update weather conditions
+  Future<bool> updateWeatherConditions(
+      String projectId, String weatherConditions) async {
+    try {
+      _error = null;
+      await _projectService.updateWeatherConditions(
+          projectId, weatherConditions);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Add photo URL
+  Future<bool> addPhotoUrl(String projectId, String photoUrl) async {
+    try {
+      _error = null;
+      await _projectService.addPhotoUrl(projectId, photoUrl);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Remove photo URL
+  Future<bool> removePhotoUrl(String projectId, String photoUrl) async {
+    try {
+      _error = null;
+      await _projectService.removePhotoUrl(projectId, photoUrl);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Update tools used
+  Future<bool> updateToolsUsed(
+      String projectId, CategorizedTools toolsUsed) async {
+    try {
+      _error = null;
+      await _projectService.updateToolsUsed(projectId, toolsUsed);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Update tools needed (preparation list)
+  Future<bool> updateToolsNeeded(String projectId, DateTime projectDate,
+      CategorizedTools toolsNeeded) async {
+    try {
+      _error = null;
+      // Update the project document
+      await _projectService.updateProjectFields(
+        projectId,
+        {'toolsNeeded': toolsNeeded.toMap()},
+      );
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Update team members
+  Future<bool> updateTeamMembers(
+      String projectId, List<String> teamMemberIds) async {
+    try {
+      _error = null;
+      await _projectService.updateTeamMembers(projectId, teamMemberIds);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Add team member
+  Future<bool> addTeamMember(String projectId, String memberId) async {
+    try {
+      _error = null;
+      await _projectService.addTeamMember(projectId, memberId);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Remove team member
+  Future<bool> removeTeamMember(String projectId, String memberId) async {
+    try {
+      _error = null;
+      await _projectService.removeTeamMember(projectId, memberId);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Update checklist data
+  Future<bool> updateChecklistData(
+      String projectId, ChecklistData checklistData) async {
+    try {
+      _error = null;
+      await _projectService.updateChecklistData(projectId, checklistData);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // Sync status from JobListItem
+  Future<bool> syncStatusFromJobListItem(
+      String projectId, String statusId) async {
+    try {
+      _error = null;
+      await _projectService.syncStatusFromJobListItem(projectId, statusId);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
   }
 
   @override

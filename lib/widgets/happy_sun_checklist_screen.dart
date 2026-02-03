@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../models/happy_sun_job.dart';
+import '../models/happy_sun_shared.dart';
+import '../models/happy_sun_project.dart';
 import '../models/inventory_tool.dart';
-import '../providers/happy_sun_job_provider.dart';
+import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
 
 class HappySunChecklistScreen extends StatefulWidget {
-  final HappySunJob job;
+  final HappySunProject project;
 
   const HappySunChecklistScreen({
     super.key,
-    required this.job,
+    required this.project,
   });
 
   @override
@@ -61,12 +62,12 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
   }
 
   void _initializeToolStatus() {
-    if (widget.job.toolsUsedCategorized == null) return;
+    if (widget.project.toolsUsedCategorized == null) return;
 
-    final categorized = widget.job.toolsUsedCategorized!;
+    final categorized = widget.project.toolsUsedCategorized!;
 
     // Check if we have existing checklist data
-    final existingChecklistData = widget.job.checklistData;
+    final existingChecklistData = widget.project.checklistData;
     final existingItemsMap = existingChecklistData != null
         ? {for (var item in existingChecklistData.items) item.toolId: item}
         : <String, ToolChecklistItem>{};
@@ -75,7 +76,8 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     for (final tool in [
       ...categorized.teamTools,
       ...categorized.individualTools,
-      ...categorized.extras
+      ...categorized.extras,
+      ...categorized.accessories
     ]) {
       for (final toolId in tool.toolIds) {
         if (toolId.isNotEmpty) {
@@ -210,11 +212,10 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
 
     try {
       final checklistData = _buildChecklistData();
-      final jobProvider = context.read<HappySunJobProvider>();
+      final jobProvider = context.read<HappySunProjectProvider>();
 
       await jobProvider.updateChecklistData(
-        widget.job.id,
-        widget.job.date,
+        widget.project.id,
         checklistData,
       );
 
@@ -287,11 +288,10 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
 
     try {
       final checklistData = _buildChecklistData();
-      final jobProvider = context.read<HappySunJobProvider>();
+      final jobProvider = context.read<HappySunProjectProvider>();
 
       await jobProvider.updateChecklistData(
-        widget.job.id,
-        widget.job.date,
+        widget.project.id,
         checklistData,
       );
 
@@ -422,13 +422,13 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text(widget.job.checklistData != null
+          title: Text(widget.project.checklistData != null
               ? 'Checklist (Completed)'
               : 'Pre-Departure Checklist'),
           backgroundColor:
-              widget.job.checklistData != null ? Colors.green : Colors.blue,
+              widget.project.checklistData != null ? Colors.green : Colors.blue,
           foregroundColor: Colors.white,
-          bottom: widget.job.checklistData == null
+          bottom: widget.project.checklistData == null
               ? TabBar(
                   controller: _tabController,
                   labelColor: Colors.white,
@@ -441,7 +441,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                 )
               : null,
           actions: [
-            if (widget.job.checklistData != null)
+            if (widget.project.checklistData != null)
               Padding(
                 padding: const EdgeInsets.only(right: 16),
                 child: Center(
@@ -494,7 +494,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
               ),
           ],
         ),
-        body: widget.job.checklistData != null
+        body: widget.project.checklistData != null
             ? Column(
                 children: [
                   Expanded(child: _buildChecklistTab()),
@@ -634,7 +634,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     return Column(
       children: [
         // Completion banner if already completed
-        if (widget.job.checklistData != null) ...[
+        if (widget.project.checklistData != null) ...[
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(16),
@@ -662,7 +662,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Completed on ${_formatDateTime(widget.job.checklistData!.completedAt)}',
+                        'Completed on ${_formatDateTime(widget.project.checklistData!.completedAt)}',
                         style: TextStyle(
                           fontSize: 12,
                           color: Colors.green.shade600,
@@ -680,7 +680,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             gradient: LinearGradient(
-              colors: widget.job.checklistData != null
+              colors: widget.project.checklistData != null
                   ? [Colors.green.shade700, Colors.green.shade500]
                   : [Colors.blue.shade700, Colors.blue.shade500],
               begin: Alignment.topLeft,
@@ -719,7 +719,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          widget.job.jobType == 'windowCleaning'
+                          widget.project.jobType == 'windowCleaning'
                               ? 'Window Cleaning Job'
                               : 'Solar Panel Cleaning Job',
                           style: const TextStyle(
@@ -748,7 +748,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                   Expanded(
                     child: _buildInfoTile(
                       'Date',
-                      '${widget.job.date.day}/${widget.job.date.month}/${widget.job.date.year}',
+                      '${widget.project.scheduledDate.day}/${widget.project.scheduledDate.month}/${widget.project.scheduledDate.year}',
                       Icons.calendar_today,
                     ),
                   ),

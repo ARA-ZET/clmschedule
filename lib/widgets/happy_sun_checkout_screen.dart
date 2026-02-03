@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../models/happy_sun_job.dart';
+import '../models/happy_sun_shared.dart';
+import '../models/happy_sun_project.dart';
 import '../models/inventory_tool.dart';
-import '../providers/happy_sun_job_provider.dart';
+import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
 
 class HappySunCheckoutScreen extends StatefulWidget {
-  final HappySunJob job;
+  final HappySunProject project;
 
   const HappySunCheckoutScreen({
     super.key,
-    required this.job,
+    required this.project,
   });
 
   @override
@@ -55,14 +56,15 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
 
   void _initializeToolsTaken() {
     // Initialize from existing tools if any (for resume scenario)
-    if (widget.job.toolsUsedCategorized != null) {
-      final categorized = widget.job.toolsUsedCategorized!;
+    if (widget.project.toolsUsedCategorized != null) {
+      final categorized = widget.project.toolsUsedCategorized!;
 
       // Load existing tool IDs
       for (final tool in [
         ...categorized.teamTools,
         ...categorized.individualTools,
-        ...categorized.extras
+        ...categorized.extras,
+        ...categorized.accessories
       ]) {
         _toolsTaken[tool.baseName] =
             List.from(tool.toolIds.where((id) => id.isNotEmpty));
@@ -78,9 +80,9 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
   }
 
   bool _areAllToolsTaken() {
-    if (widget.job.toolsNeededCategorized == null) return true;
+    if (widget.project.toolsNeeded == null) return true;
 
-    final needed = widget.job.toolsNeededCategorized!;
+    final needed = widget.project.toolsNeeded!;
 
     // Check team tools
     for (final tool in needed.teamTools) {
@@ -100,6 +102,12 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
       if (taken < tool.totalQuantity) return false;
     }
 
+    // Check accessories
+    for (final tool in needed.accessories) {
+      final taken = _toolsTaken[tool.baseName]?.length ?? 0;
+      if (taken < tool.totalQuantity) return false;
+    }
+
     return true;
   }
 
@@ -108,11 +116,10 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
 
     try {
       final categorizedTools = _buildCategorizedToolsUsed();
-      final jobProvider = context.read<HappySunJobProvider>();
+      final jobProvider = context.read<HappySunProjectProvider>();
 
-      await jobProvider.updateToolsUsedCategorized(
-        widget.job.id,
-        widget.job.date,
+      await jobProvider.updateToolsUsed(
+        widget.project.id,
         categorizedTools,
       );
 
@@ -149,7 +156,7 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
 
     try {
       final categorizedTools = _buildCategorizedToolsUsed();
-      final jobProvider = context.read<HappySunJobProvider>();
+      final jobProvider = context.read<HappySunProjectProvider>();
       final inventoryProvider = context.read<InventoryProvider>();
 
       // Get all tool IDs that were taken
@@ -159,20 +166,18 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
       }
 
       // Update tools used and record start time
-      await jobProvider.updateToolsUsedCategorized(
-        widget.job.id,
-        widget.job.date,
+      await jobProvider.updateToolsUsed(
+        widget.project.id,
         categorizedTools,
       );
 
-      await jobProvider.recordStartTime(
-        widget.job.id,
-        widget.job.date,
+      await jobProvider.updateStartTime(
+        widget.project.id,
         DateTime.now(),
       );
 
       // Mark tools as checked out in inventory
-      await inventoryProvider.checkOutTools(allToolIds, widget.job.id);
+      await inventoryProvider.checkOutTools(allToolIds, widget.project.id);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -197,11 +202,11 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
   }
 
   CategorizedTools _buildCategorizedToolsUsed() {
-    if (widget.job.toolsNeededCategorized == null) {
+    if (widget.project.toolsNeeded == null) {
       return CategorizedTools();
     }
 
-    final needed = widget.job.toolsNeededCategorized!;
+    final needed = widget.project.toolsNeeded!;
 
     // Build team tools with actual IDs
     final teamTools = needed.teamTools
@@ -245,10 +250,25 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
         .where((tool) => tool.totalQuantity > 0)
         .toList();
 
+    // Build accessories with actual IDs
+    final accessories = needed.accessories
+        .map((tool) {
+          final takenIds = _toolsTaken[tool.baseName] ?? [];
+          return GroupedToolItem(
+            baseName: tool.baseName,
+            category: tool.category,
+            totalQuantity: takenIds.length,
+            toolIds: takenIds,
+          );
+        })
+        .where((tool) => tool.totalQuantity > 0)
+        .toList();
+
     return CategorizedTools(
       teamTools: teamTools,
       individualTools: individualTools,
       extras: extras,
+      accessories: accessories,
     );
   }
 
@@ -261,20 +281,35 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
     }
   }
 
-  // Get accessories that need to be checked for a parent tool
-  List<InventoryTool> _getAccessoriesForTool(
-      String toolId, List<InventoryTool> allTools) {
+  // Helper to get base name from tool name (e.g., "Ladder #1" -> "Ladder")
+  String _getBaseName(String toolName) {
+    final hashIndex = toolName.lastIndexOf('#');
+    if (hashIndex > 0) {
+      return toolName.substring(0, hashIndex).trim();
+    }
+    return toolName;
+  }
+
+  // Get accessories needed for a specific tool (by baseName)
+  List<AccessoryRequirement> _getRequiredAccessoriesForTool(
+      String toolBaseName, List<InventoryTool> allTools) {
     try {
-      final tool = allTools.firstWhere((t) => t.id == toolId);
-      return allTools.where((t) => tool.accessoryIds.contains(t.id)).toList();
+      // Find any tool matching this baseName
+      final tool = allTools
+          .where((t) => _getBaseName(t.name) == toolBaseName)
+          .firstOrNull;
+      if (tool != null) {
+        return tool.requiredAccessories;
+      }
+      return [];
     } catch (e) {
       return [];
     }
   }
 
-  // Check if a tool ID is taken in the checkout
-  bool _isToolTaken(String toolId) {
-    return _toolsTaken.values.any((ids) => ids.contains(toolId));
+  // Get number of accessories taken for a specific baseName
+  int _getAccessoriesTakenCount(String accessoryBaseName) {
+    return _toolsTaken[accessoryBaseName]?.length ?? 0;
   }
 
   void _addToolById(String toolId, String baseName) {
@@ -548,7 +583,7 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
         }
 
         // Check if tool is in use by another job
-        if (tool.isInUse && tool.currentProject != widget.job.id) {
+        if (tool.isInUse && tool.currentProject != widget.project.id) {
           _showScanError('Tool is currently in use on another job');
           continue;
         }
@@ -603,18 +638,20 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
   }
 
   Widget _buildToolsTakenTab() {
-    if (widget.job.toolsNeededCategorized == null) {
+    if (widget.project.toolsNeeded == null) {
       return const Center(
         child: Text('No tools needed for this job'),
       );
     }
 
-    final needed = widget.job.toolsNeededCategorized!;
+    final needed = widget.project.toolsNeeded!;
     final allNeededTools = [
       ...needed.teamTools.map((t) => _ToolNeededEntry(t, 'Team', Colors.blue)),
       ...needed.individualTools
           .map((t) => _ToolNeededEntry(t, 'Individual', Colors.green)),
       ...needed.extras.map((t) => _ToolNeededEntry(t, 'Extras', Colors.purple)),
+      ...needed.accessories
+          .map((t) => _ToolNeededEntry(t, 'Accessories', Colors.orange)),
     ];
 
     return Consumer<InventoryProvider>(
@@ -751,115 +788,103 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
                             // Show accessories that need to be checked
                             ...(() {
                               final accessories = <Widget>[];
-                              for (final toolId in takenIds) {
-                                final toolAccessories = _getAccessoriesForTool(
-                                    toolId, inventoryProvider.tools);
-                                if (toolAccessories.isNotEmpty) {
-                                  accessories.add(const SizedBox(height: 12));
-                                  accessories.add(
-                                    Container(
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: Colors.orange.shade50,
-                                        borderRadius: BorderRadius.circular(8),
-                                        border: Border.all(
-                                            color: Colors.orange.shade200),
-                                      ),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Row(
-                                            children: [
-                                              Icon(Icons.extension,
-                                                  size: 14,
-                                                  color:
-                                                      Colors.orange.shade700),
-                                              const SizedBox(width: 6),
-                                              Text(
-                                                'Required accessories for ${_getReadableToolId(toolId, inventoryProvider.tools)}:',
-                                                style: TextStyle(
-                                                  fontSize: 11,
-                                                  fontWeight: FontWeight.bold,
-                                                  color: Colors.orange.shade700,
-                                                ),
+
+                              // Get required accessories for this tool baseName
+                              final requiredAccessories =
+                                  _getRequiredAccessoriesForTool(
+                                      tool.baseName, inventoryProvider.tools);
+
+                              if (requiredAccessories.isNotEmpty &&
+                                  takenIds.isNotEmpty) {
+                                accessories.add(const SizedBox(height: 12));
+                                accessories.add(
+                                  Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      color: Colors.orange.shade50,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                          color: Colors.orange.shade200),
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            Icon(Icons.extension,
+                                                size: 14,
+                                                color: Colors.orange.shade700),
+                                            const SizedBox(width: 6),
+                                            Text(
+                                              'Accessories needed for ${takenIds.length} × ${tool.baseName}:',
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.orange.shade700,
                                               ),
-                                            ],
-                                          ),
-                                          const SizedBox(height: 8),
-                                          Wrap(
-                                            spacing: 6,
-                                            runSpacing: 6,
-                                            children: toolAccessories
-                                                .map((accessory) {
-                                              final isTaken =
-                                                  _isToolTaken(accessory.id);
-                                              return Container(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                        horizontal: 8,
-                                                        vertical: 4),
-                                                decoration: BoxDecoration(
-                                                  color: isTaken
-                                                      ? Colors.green.shade100
-                                                      : Colors.white,
-                                                  borderRadius:
-                                                      BorderRadius.circular(12),
-                                                  border: Border.all(
-                                                    color: isTaken
-                                                        ? Colors.green
-                                                        : Colors
-                                                            .orange.shade300,
-                                                    width: 1.5,
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 8),
+                                        ...requiredAccessories
+                                            .map((accessoryReq) {
+                                          final neededQty =
+                                              accessoryReq.quantity *
+                                                  takenIds.length;
+                                          final takenQty =
+                                              _getAccessoriesTakenCount(
+                                                  accessoryReq.baseName);
+                                          final isComplete =
+                                              takenQty >= neededQty;
+
+                                          return Padding(
+                                            padding: const EdgeInsets.only(
+                                                bottom: 6),
+                                            child: Row(
+                                              children: [
+                                                Icon(
+                                                  isComplete
+                                                      ? Icons.check_circle
+                                                      : Icons
+                                                          .radio_button_unchecked,
+                                                  size: 14,
+                                                  color: isComplete
+                                                      ? Colors.green
+                                                      : Colors.orange,
+                                                ),
+                                                const SizedBox(width: 6),
+                                                Expanded(
+                                                  child: Text(
+                                                    '${accessoryReq.baseName}: $takenQty / $neededQty',
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      color: isComplete
+                                                          ? Colors
+                                                              .green.shade700
+                                                          : Colors
+                                                              .orange.shade700,
+                                                      fontWeight: isComplete
+                                                          ? FontWeight.w600
+                                                          : FontWeight.normal,
+                                                    ),
                                                   ),
                                                 ),
-                                                child: Row(
-                                                  mainAxisSize:
-                                                      MainAxisSize.min,
-                                                  children: [
-                                                    Icon(
-                                                      isTaken
-                                                          ? Icons.check_circle
-                                                          : Icons
-                                                              .radio_button_unchecked,
-                                                      size: 12,
-                                                      color: isTaken
-                                                          ? Colors.green
-                                                          : Colors.orange,
-                                                    ),
-                                                    const SizedBox(width: 4),
-                                                    Text(
-                                                      accessory.toolId,
-                                                      style: TextStyle(
-                                                        fontSize: 10,
-                                                        color: isTaken
-                                                            ? Colors
-                                                                .green.shade700
-                                                            : Colors.orange
-                                                                .shade700,
-                                                        fontWeight:
-                                                            FontWeight.w500,
-                                                      ),
-                                                    ),
-                                                    const SizedBox(width: 2),
-                                                    Text(
-                                                      accessory.baseName,
-                                                      style: TextStyle(
-                                                        fontSize: 9,
-                                                        color: Colors
-                                                            .grey.shade600,
-                                                      ),
-                                                    ),
-                                                  ],
+                                                Text(
+                                                  '(${accessoryReq.quantity} each)',
+                                                  style: TextStyle(
+                                                    fontSize: 9,
+                                                    color: Colors.grey.shade600,
+                                                  ),
                                                 ),
-                                              );
-                                            }).toList(),
-                                          ),
-                                        ],
-                                      ),
+                                              ],
+                                            ),
+                                          );
+                                        }),
+                                      ],
                                     ),
-                                  );
-                                }
+                                  ),
+                                );
                               }
                               return accessories;
                             })(),
@@ -1053,8 +1078,8 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
   }
 
   int _getTotalNeeded() {
-    if (widget.job.toolsNeededCategorized == null) return 0;
-    final needed = widget.job.toolsNeededCategorized!;
+    if (widget.project.toolsNeeded == null) return 0;
+    final needed = widget.project.toolsNeeded!;
     return needed.totalCount;
   }
 

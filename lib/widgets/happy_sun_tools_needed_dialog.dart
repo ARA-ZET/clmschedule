@@ -1,16 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/inventory_tool.dart';
-import '../models/happy_sun_job.dart';
+import '../models/happy_sun_shared.dart';
+import '../models/happy_sun_project.dart';
 import '../providers/inventory_provider.dart';
-import '../providers/happy_sun_job_provider.dart';
+import '../providers/happy_sun_project_provider.dart';
 
 class HappySunToolsNeededDialog extends StatefulWidget {
-  final HappySunJob job;
+  final HappySunProject project;
 
   const HappySunToolsNeededDialog({
     super.key,
-    required this.job,
+    required this.project,
   });
 
   @override
@@ -31,10 +32,13 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
     super.initState();
     // Initialize with existing tools needed
     _selectedTools = {};
-    for (var tool in widget.job.toolsNeeded) {
-      final baseName = _getBaseName(tool.toolName);
-      // Only add non-accessory tools to selected tools
-      _selectedTools[baseName] = tool.quantity;
+    if (widget.project.toolsNeeded != null) {
+      // toolsNeeded is CategorizedTools, need to iterate through all categories
+      for (var tool in widget.project.toolsNeeded!.allTools) {
+        final baseName = tool.baseName;
+        // Only add non-accessory tools to selected tools
+        _selectedTools[baseName] = tool.totalQuantity;
+      }
     }
     // Calculate accessories after initialization
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -49,7 +53,7 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
     final inventoryProvider = context.read<InventoryProvider>();
     final Map<String, int> accessories = {};
 
-    // For each selected tool, find its accessories
+    // For each selected tool, find its required accessories
     for (final entry in _selectedTools.entries) {
       final baseName = entry.key;
       final quantity = entry.value;
@@ -62,29 +66,20 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
       debugPrint('      Found ${matchingTools.length} matching tools');
 
       if (matchingTools.isNotEmpty) {
-        // For each quantity of this tool
+        // Get the required accessories from the first tool (they all have the same)
+        final tool = matchingTools.first;
+        debugPrint('      Tool has ${tool.requiredAccessories.length} required accessories');
+
+        // For each quantity of this tool, add its required accessories
         for (var i = 0; i < quantity; i++) {
-          final tool =
-              i < matchingTools.length ? matchingTools[i] : matchingTools.first;
-          debugPrint('      Checking tool instance: ${tool.name} (${tool.id})');
-          debugPrint(
-              '      Tool has ${tool.accessoryIds.length} accessory IDs: ${tool.accessoryIds}');
-
-          // Get accessories for this tool
-          try {
-            final toolAccessories = inventoryProvider.getAccessories(tool.id);
-            debugPrint('      Retrieved ${toolAccessories.length} accessories');
-
-            // Add each accessory's base name to our tracking map
-            for (final accessory in toolAccessories) {
-              final accessoryBaseName = _getBaseName(accessory.name);
-              accessories[accessoryBaseName] =
-                  (accessories[accessoryBaseName] ?? 0) + 1;
-              debugPrint(
-                  '         + Accessory: $accessoryBaseName (${accessory.toolType})');
-            }
-          } catch (e) {
-            debugPrint('      ⚠️ Error getting accessories: $e');
+          for (final accessoryReq in tool.requiredAccessories) {
+            final accessoryBaseName = accessoryReq.baseName;
+            final accessoryQty = accessoryReq.quantity;
+            
+            accessories[accessoryBaseName] =
+                (accessories[accessoryBaseName] ?? 0) + accessoryQty;
+            debugPrint(
+                '         + Accessory: $accessoryBaseName × $accessoryQty');
           }
         }
       }
@@ -201,10 +196,24 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
                     child: _buildToolsList(),
                   ),
                   const SizedBox(width: 16),
-                  // Selected tools summary
+                  // Right side: Selected tools and accessories
                   Expanded(
                     flex: 1,
-                    child: _buildSelectedToolsSummary(),
+                    child: Column(
+                      children: [
+                        // Selected tools summary
+                        Expanded(
+                          flex: 3,
+                          child: _buildSelectedToolsSummary(),
+                        ),
+                        const SizedBox(height: 16),
+                        // Accessories section
+                        Expanded(
+                          flex: 2,
+                          child: _buildAccessoriesSection(),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -362,140 +371,234 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
   Widget _buildSelectedToolsSummary() {
     final totalMainTools =
         _selectedTools.values.fold(0, (sum, qty) => sum + qty);
+
+    return Card(
+      color: Colors.blue.shade50,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade100,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(12),
+                topRight: Radius.circular(12),
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.build_circle, color: Colors.blue, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Main Tools',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue,
+                        ),
+                      ),
+                      Text(
+                        'Total: $totalMainTools items',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.blue.shade800,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: _selectedTools.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.arrow_back, 
+                          color: Colors.grey.shade400,
+                          size: 48,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Select tools from the left',
+                          style: TextStyle(
+                            color: Colors.grey.shade600,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView(
+                    padding: const EdgeInsets.all(8),
+                    children: _selectedTools.entries.map((entry) {
+                      final toolName = entry.key;
+                      final quantity = entry.value;
+
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        child: ListTile(
+                          dense: true,
+                          leading: const Icon(
+                            Icons.check_circle,
+                            color: Colors.blue,
+                            size: 20,
+                          ),
+                          title: Text(
+                            toolName,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          subtitle: Text('Quantity: $quantity'),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.close, size: 18),
+                            color: Colors.red.shade300,
+                            onPressed: () {
+                              setState(() {
+                                _selectedTools.remove(toolName);
+                              });
+                              _recalculateAccessories();
+                            },
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAccessoriesSection() {
     final totalAccessories =
         _calculatedAccessories.values.fold(0, (sum, qty) => sum + qty);
-    final grandTotal = totalMainTools + totalAccessories;
 
     return Card(
       color: Colors.orange.shade50,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
+          Container(
             padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            decoration: BoxDecoration(
+              color: Colors.orange.shade100,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(12),
+                topRight: Radius.circular(12),
+              ),
+            ),
+            child: Row(
               children: [
-                Text(
-                  'Selected Tools',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Total: $grandTotal tools ($totalMainTools + $totalAccessories accessories)',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade700,
+                const Icon(Icons.extension, color: Colors.orange, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Required Accessories',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.orange,
+                        ),
+                      ),
+                      Text(
+                        'Auto-calculated: $totalAccessories items',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.orange.shade800,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
           ),
-          const Divider(height: 1),
           Expanded(
-            child: _selectedTools.isEmpty && _calculatedAccessories.isEmpty
+            child: _calculatedAccessories.isEmpty
                 ? Center(
-                    child: Text(
-                      'No tools selected',
-                      style: TextStyle(color: Colors.grey.shade600),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.info_outline,
+                          color: Colors.grey.shade400,
+                          size: 48,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'No accessories required',
+                          style: TextStyle(
+                            color: Colors.grey.shade600,
+                            fontSize: 13,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Accessories will appear here\nwhen you select tools',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.grey.shade500,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
                     ),
                   )
                 : ListView(
-                    children: [
-                      // Main tools section
-                      if (_selectedTools.isNotEmpty) ...[
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                          child: Text(
-                            'Main Tools ($totalMainTools)',
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.grey.shade700,
+                    padding: const EdgeInsets.all(8),
+                    children: _calculatedAccessories.entries.map((entry) {
+                      final accessoryName = entry.key;
+                      final quantity = entry.value;
+
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        elevation: 1,
+                        child: ListTile(
+                          dense: true,
+                          leading: Icon(
+                            Icons.extension,
+                            color: Colors.orange.shade400,
+                            size: 20,
+                          ),
+                          title: Text(
+                            accessoryName,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          subtitle: Text('Quantity: $quantity'),
+                          trailing: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.shade100,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Text(
+                              'AUTO',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.orange,
+                              ),
                             ),
                           ),
                         ),
-                        ..._selectedTools.entries.map((entry) {
-                          final toolName = entry.key;
-                          final quantity = entry.value;
-
-                          return ListTile(
-                            dense: true,
-                            leading: const Icon(
-                              Icons.check_circle,
-                              color: Colors.orange,
-                              size: 20,
-                            ),
-                            title: Text(toolName),
-                            subtitle: Text('Qty: $quantity'),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.close, size: 18),
-                              onPressed: () {
-                                setState(() {
-                                  _selectedTools.remove(toolName);
-                                });
-                                _recalculateAccessories();
-                              },
-                            ),
-                          );
-                        }).toList(),
-                      ],
-
-                      // Accessories section
-                      if (_calculatedAccessories.isNotEmpty) ...[
-                        const Divider(),
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.extension,
-                                size: 16,
-                                color: Colors.orange.shade700,
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                'Auto-Added Accessories ($totalAccessories)',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.orange.shade700,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        ..._calculatedAccessories.entries.map((entry) {
-                          final accessoryName = entry.key;
-                          final quantity = entry.value;
-
-                          return ListTile(
-                            dense: true,
-                            leading: Icon(
-                              Icons.extension,
-                              color: Colors.orange.shade300,
-                              size: 20,
-                            ),
-                            title: Text(
-                              accessoryName,
-                              style: TextStyle(
-                                color: Colors.grey.shade700,
-                              ),
-                            ),
-                            subtitle: Text(
-                              'Qty: $quantity (auto)',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.grey.shade600,
-                              ),
-                            ),
-                          );
-                        }).toList(),
-                      ],
-                    ],
+                      );
+                    }).toList(),
                   ),
           ),
         ],
@@ -505,20 +608,20 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
 
   Future<void> _saveToolsNeeded() async {
     debugPrint('\n💾 Saving tools needed...');
-    debugPrint('   Job ID: ${widget.job.id}');
-    debugPrint('   Job Date: ${widget.job.date}');
+    debugPrint('   Job ID: ${widget.project.id}');
+    debugPrint('   Job Date: ${widget.project.scheduledDate}');
 
     final inventoryProvider = context.read<InventoryProvider>();
-    final happySunProvider = context.read<HappySunJobProvider>();
+    final happySunProvider = context.read<HappySunProjectProvider>();
 
-    // Convert selected tools to HappySunToolUsage
-    final toolsNeeded = <HappySunToolUsage>[];
+    // Convert selected tools to GroupedToolItem
+    final toolsList = <GroupedToolItem>[];
 
     // Create a map to track all tools including auto-added accessories
     final Map<String, int> allToolsWithQuantities = Map.from(_selectedTools);
     debugPrint('   Initial selected tools: $allToolsWithQuantities');
 
-    // For each selected tool, check if it has accessories and add them
+    // For each selected tool, check if it has required accessories and add them
     for (final entry in _selectedTools.entries) {
       final baseName = entry.key;
       final quantity = entry.value;
@@ -531,28 +634,19 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
       debugPrint('      Found ${matchingTools.length} matching tool instances');
 
       if (matchingTools.isNotEmpty) {
-        // For each quantity of this tool
+        // Get the required accessories from the first tool (they all have the same)
+        final tool = matchingTools.first;
+        debugPrint('      Tool has ${tool.requiredAccessories.length} required accessories');
+
+        // For each quantity of this tool, add its required accessories
         for (var i = 0; i < quantity; i++) {
-          // Get the tool instance (or first one if not enough instances)
-          final tool =
-              i < matchingTools.length ? matchingTools[i] : matchingTools.first;
-          debugPrint('      Checking instance $i: ${tool.name} (${tool.id})');
-          debugPrint('      Accessory IDs: ${tool.accessoryIds}');
-
-          // Get accessories for this tool
-          try {
-            final accessories = inventoryProvider.getAccessories(tool.id);
-            debugPrint('      Retrieved ${accessories.length} accessories');
-
-            // Add each accessory's base name to our tracking map
-            for (final accessory in accessories) {
-              final accessoryBaseName = _getBaseName(accessory.name);
-              allToolsWithQuantities[accessoryBaseName] =
-                  (allToolsWithQuantities[accessoryBaseName] ?? 0) + 1;
-              debugPrint('         + Added accessory: $accessoryBaseName');
-            }
-          } catch (e) {
-            debugPrint('      ⚠️ Error getting accessories: $e');
+          for (final accessoryReq in tool.requiredAccessories) {
+            final accessoryBaseName = accessoryReq.baseName;
+            final accessoryQty = accessoryReq.quantity;
+            
+            allToolsWithQuantities[accessoryBaseName] =
+                (allToolsWithQuantities[accessoryBaseName] ?? 0) + accessoryQty;
+            debugPrint('         + Added accessory: $accessoryBaseName × $accessoryQty');
           }
         }
       }
@@ -580,32 +674,39 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
         ),
       );
 
-      toolsNeeded.add(HappySunToolUsage(
-        toolId: baseName, // Use base name as ID for grouping
-        toolName: baseName,
+      toolsList.add(GroupedToolItem(
+        baseName: baseName,
         category: matchingTool.category,
-        quantity: quantity,
+        totalQuantity: quantity,
+        toolIds: [], // Will be filled during checkout
       ));
       debugPrint(
           '      Created: $baseName × $quantity (${matchingTool.category})');
     }
 
-    debugPrint('   Total tool types to save: ${toolsNeeded.length}');
+    debugPrint('   Total tool types to save: ${toolsList.length}');
+
+    // Create CategorizedTools (for now, put everything in teamTools)
+    final categorizedTools = CategorizedTools(
+      teamTools: toolsList,
+      individualTools: [],
+      extras: [],
+    );
 
     // Update the job with tools needed
     try {
       debugPrint('   Calling updateToolsNeeded...');
       await happySunProvider.updateToolsNeeded(
-        widget.job.id,
-        widget.job.date,
-        toolsNeeded,
+        widget.project.id,
+        widget.project.scheduledDate,
+        categorizedTools,
       );
       debugPrint('   ✅ Successfully saved tools needed\n');
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Saved ${toolsNeeded.length} tool types needed'),
+            content: Text('Saved ${toolsList.length} tool types needed'),
             backgroundColor: Colors.green,
           ),
         );

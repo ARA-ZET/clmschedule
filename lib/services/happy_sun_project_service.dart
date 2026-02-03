@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/happy_sun_project.dart';
+import '../models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
 
 class HappySunProjectService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -84,6 +85,22 @@ class HappySunProjectService {
           project.toMap()..['updatedAt'] = FieldValue.serverTimestamp());
     } catch (e) {
       print('Error updating project: $e');
+      rethrow;
+    }
+  }
+
+  // Update specific fields in a project
+  Future<void> updateProjectFields(
+      String projectId, Map<String, dynamic> fields) async {
+    try {
+      final updateData = Map<String, dynamic>.from(fields);
+      updateData['updatedAt'] = FieldValue.serverTimestamp();
+      await _firestore
+          .collection(collectionName)
+          .doc(projectId)
+          .update(updateData);
+    } catch (e) {
+      print('Error updating project fields: $e');
       rethrow;
     }
   }
@@ -175,5 +192,168 @@ class HappySunProjectService {
     final startDate = DateTime(now.year, now.month, now.day);
     final endDate = startDate.add(const Duration(days: 7));
     return getProjectsByDateRange(startDate, endDate);
+  }
+
+  // Job Execution Methods
+
+  // Update start time
+  Future<void> updateStartTime(String projectId, DateTime startTime) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'startTime': Timestamp.fromDate(startTime),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error updating start time: $e');
+      rethrow;
+    }
+  }
+
+  // Update end time
+  Future<void> updateEndTime(String projectId, DateTime endTime) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'endTime': Timestamp.fromDate(endTime),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error updating end time: $e');
+      rethrow;
+    }
+  }
+
+  // Update notes
+  Future<void> updateNotes(String projectId, String notes) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'notes': notes,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error updating notes: $e');
+      rethrow;
+    }
+  }
+
+  // Update weather conditions
+  Future<void> updateWeatherConditions(
+      String projectId, String weatherConditions) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'weatherConditions': weatherConditions,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error updating weather conditions: $e');
+      rethrow;
+    }
+  }
+
+  // Add photo URL
+  Future<void> addPhotoUrl(String projectId, String photoUrl) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'photoUrls': FieldValue.arrayUnion([photoUrl]),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error adding photo URL: $e');
+      rethrow;
+    }
+  }
+
+  // Remove photo URL
+  Future<void> removePhotoUrl(String projectId, String photoUrl) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'photoUrls': FieldValue.arrayRemove([photoUrl]),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error removing photo URL: $e');
+      rethrow;
+    }
+  }
+
+  // Update tools used
+  Future<void> updateToolsUsed(
+      String projectId, CategorizedTools toolsUsed) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'toolsUsedCategorized': toolsUsed.toMap(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error updating tools used: $e');
+      rethrow;
+    }
+  }
+
+  // Update team members
+  Future<void> updateTeamMembers(
+      String projectId, List<String> teamMemberIds) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'teamMemberIds': teamMemberIds,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error updating team members: $e');
+      rethrow;
+    }
+  }
+
+  // Add team member
+  Future<void> addTeamMember(String projectId, String memberId) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'teamMemberIds': FieldValue.arrayUnion([memberId]),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error adding team member: $e');
+      rethrow;
+    }
+  }
+
+  // Remove team member
+  Future<void> removeTeamMember(String projectId, String memberId) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'teamMemberIds': FieldValue.arrayRemove([memberId]),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error removing team member: $e');
+      rethrow;
+    }
+  }
+
+  // Update checklist data (from job execution)
+  Future<void> updateChecklistData(
+      String projectId, ChecklistData checklistData) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'checklistData': checklistData.toMap(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error updating checklist data: $e');
+      rethrow;
+    }
+  }
+
+  // Sync statusId from JobListItem
+  Future<void> syncStatusFromJobListItem(
+      String projectId, String statusId) async {
+    try {
+      await _firestore.collection(collectionName).doc(projectId).update({
+        'statusId': statusId,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      print('Error syncing status: $e');
+      rethrow;
+    }
   }
 }

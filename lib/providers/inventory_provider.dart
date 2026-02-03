@@ -324,6 +324,19 @@ class InventoryProvider extends ChangeNotifier {
     }
   }
 
+  // Update tool required accessories (with base names and quantities)
+  Future<void> updateToolRequiredAccessories(
+      String toolId, List<AccessoryRequirement> requiredAccessories) async {
+    try {
+      await _inventoryService.updateToolRequiredAccessories(
+          toolId, requiredAccessories);
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      rethrow;
+    }
+  }
+
   @override
   void dispose() {
     _toolsSubscription?.cancel();

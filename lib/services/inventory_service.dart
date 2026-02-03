@@ -318,6 +318,15 @@ class InventoryService {
     await batch.commit();
   }
 
+  // Update tool required accessories (with base names and quantities)
+  Future<void> updateToolRequiredAccessories(
+      String toolId, List<AccessoryRequirement> requiredAccessories) async {
+    final toolRef = _firestore.collection('inventoryTools').doc(toolId);
+    await toolRef.update({
+      'requiredAccessories': requiredAccessories.map((a) => a.toMap()).toList(),
+    });
+  }
+
   // Remove accessory from parent tool
   Future<void> removeAccessoryFromTool(
       String toolId, String accessoryId) async {

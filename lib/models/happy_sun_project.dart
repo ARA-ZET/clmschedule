@@ -1,5 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'happy_sun_job.dart'; // For CategorizedTools
+import 'happy_sun_shared.dart'; // For CategorizedTools
 
 /// Represents a tool checked out for a project
 class CheckedOutTool {
@@ -232,8 +232,12 @@ class ProjectCheckin {
 }
 
 /// Main project model for Happy Sun projects
+/// Consolidated model combining job execution and project management
+/// Stored in /happySunProjects/{id} (individual documents)
+/// Synced with JobListItem by matching ID
 class HappySunProject {
-  final String id;
+  final String id; // Same ID as JobListItem
+  final String jobListItemId; // Reference to jobList item
   final String clientName;
   final String address;
   final DateTime scheduledDate;
@@ -243,16 +247,41 @@ class HappySunProject {
   final DateTime createdAt;
   final DateTime? updatedAt;
 
+  // Job type from JobListItem
+  final String jobType; // 'windowCleaning' or 'solarPanelCleaning'
+
   // Tools needed for the project (preparation list)
   final CategorizedTools? toolsNeeded;
 
-  // Three phases
+  // Tools actually used during execution (from HappySunJob)
+  final CategorizedTools? toolsUsedCategorized;
+
+  // Team member IDs for actual execution
+  final List<String> teamMemberIds;
+
+  // Time tracking for job execution
+  final DateTime? startTime;
+  final DateTime? endTime;
+
+  // Notes and observations from job execution
+  final String? notes;
+  final String? weatherConditions;
+  final List<String>? photoUrls;
+
+  // Checklist data from job execution
+  final ChecklistData? checklistData;
+
+  // Status sync with JobListItem
+  final String statusId; // Synced from JobListItem
+
+  // Three phases for tool management
   final ProjectCheckout? checkout;
   final ProjectChecklist? checklist;
   final ProjectCheckin? checkin;
 
   HappySunProject({
     required this.id,
+    required this.jobListItemId,
     required this.clientName,
     required this.address,
     required this.scheduledDate,
@@ -261,7 +290,17 @@ class HappySunProject {
     this.status = 'pending',
     required this.createdAt,
     this.updatedAt,
+    required this.jobType,
     this.toolsNeeded,
+    this.toolsUsedCategorized,
+    this.teamMemberIds = const [],
+    this.startTime,
+    this.endTime,
+    this.notes,
+    this.weatherConditions,
+    this.photoUrls,
+    this.checklistData,
+    required this.statusId,
     this.checkout,
     this.checklist,
     this.checkin,
@@ -270,6 +309,7 @@ class HappySunProject {
   factory HappySunProject.fromMap(String id, Map<String, dynamic> data) {
     return HappySunProject(
       id: id,
+      jobListItemId: data['jobListItemId'] ?? id,
       clientName: data['clientName'] ?? '',
       address: data['address'] ?? '',
       scheduledDate:
@@ -279,10 +319,26 @@ class HappySunProject {
       status: data['status'] ?? 'pending',
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       updatedAt: (data['updatedAt'] as Timestamp?)?.toDate(),
+      jobType: data['jobType'] ?? 'windowCleaning',
       toolsNeeded: data['toolsNeeded'] != null
           ? CategorizedTools.fromMap(
               data['toolsNeeded'] as Map<String, dynamic>)
           : null,
+      toolsUsedCategorized: data['toolsUsedCategorized'] != null
+          ? CategorizedTools.fromMap(
+              data['toolsUsedCategorized'] as Map<String, dynamic>)
+          : null,
+      teamMemberIds:
+          (data['teamMemberIds'] as List<dynamic>?)?.cast<String>() ?? [],
+      startTime: (data['startTime'] as Timestamp?)?.toDate(),
+      endTime: (data['endTime'] as Timestamp?)?.toDate(),
+      notes: data['notes'],
+      weatherConditions: data['weatherConditions'],
+      photoUrls: (data['photoUrls'] as List<dynamic>?)?.cast<String>(),
+      checklistData: data['checklistData'] != null
+          ? ChecklistData.fromMap(data['checklistData'] as Map<String, dynamic>)
+          : null,
+      statusId: data['statusId'] ?? data['status'] ?? 'scheduled',
       checkout:
           ProjectCheckout.fromMap(data['checkout'] as Map<String, dynamic>?),
       checklist:
@@ -293,6 +349,8 @@ class HappySunProject {
 
   Map<String, dynamic> toMap() {
     return {
+      'id': id, // Include for compatibility
+      'jobListItemId': jobListItemId,
       'clientName': clientName,
       'address': address,
       'scheduledDate': Timestamp.fromDate(scheduledDate),
@@ -301,7 +359,17 @@ class HappySunProject {
       'status': status,
       'createdAt': Timestamp.fromDate(createdAt),
       'updatedAt': updatedAt != null ? Timestamp.fromDate(updatedAt!) : null,
+      'jobType': jobType,
       'toolsNeeded': toolsNeeded?.toMap(),
+      'toolsUsedCategorized': toolsUsedCategorized?.toMap(),
+      'teamMemberIds': teamMemberIds,
+      'startTime': startTime != null ? Timestamp.fromDate(startTime!) : null,
+      'endTime': endTime != null ? Timestamp.fromDate(endTime!) : null,
+      'notes': notes,
+      'weatherConditions': weatherConditions,
+      'photoUrls': photoUrls,
+      'checklistData': checklistData?.toMap(),
+      'statusId': statusId,
       'checkout': checkout?.toMap(),
       'checklist': checklist?.toMap(),
       'checkin': checkin?.toMap(),
@@ -310,6 +378,7 @@ class HappySunProject {
 
   HappySunProject copyWith({
     String? id,
+    String? jobListItemId,
     String? clientName,
     String? address,
     DateTime? scheduledDate,
@@ -318,13 +387,24 @@ class HappySunProject {
     String? status,
     DateTime? createdAt,
     DateTime? updatedAt,
+    String? jobType,
     CategorizedTools? toolsNeeded,
+    CategorizedTools? toolsUsedCategorized,
+    List<String>? teamMemberIds,
+    DateTime? startTime,
+    DateTime? endTime,
+    String? notes,
+    String? weatherConditions,
+    List<String>? photoUrls,
+    ChecklistData? checklistData,
+    String? statusId,
     ProjectCheckout? checkout,
     ProjectChecklist? checklist,
     ProjectCheckin? checkin,
   }) {
     return HappySunProject(
       id: id ?? this.id,
+      jobListItemId: jobListItemId ?? this.jobListItemId,
       clientName: clientName ?? this.clientName,
       address: address ?? this.address,
       scheduledDate: scheduledDate ?? this.scheduledDate,
@@ -333,16 +413,44 @@ class HappySunProject {
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      jobType: jobType ?? this.jobType,
       toolsNeeded: toolsNeeded ?? this.toolsNeeded,
+      toolsUsedCategorized: toolsUsedCategorized ?? this.toolsUsedCategorized,
+      teamMemberIds: teamMemberIds ?? this.teamMemberIds,
+      startTime: startTime ?? this.startTime,
+      endTime: endTime ?? this.endTime,
+      notes: notes ?? this.notes,
+      weatherConditions: weatherConditions ?? this.weatherConditions,
+      photoUrls: photoUrls ?? this.photoUrls,
+      checklistData: checklistData ?? this.checklistData,
+      statusId: statusId ?? this.statusId,
       checkout: checkout ?? this.checkout,
       checklist: checklist ?? this.checklist,
       checkin: checkin ?? this.checkin,
     );
   }
 
-  // Helper getters
+  // Helper getters for project phases
   bool get hasCheckout => checkout != null && checkout!.checkoutTime != null;
   bool get hasChecklist =>
       checklist != null && checklist!.checklistTime != null;
   bool get hasCheckin => checkin != null && checkin!.checkinTime != null;
+
+  // Helper getters from job execution
+  Duration? get workDuration {
+    if (startTime != null && endTime != null) {
+      return endTime!.difference(startTime!);
+    }
+    return null;
+  }
+
+  bool get isWindowCleaning => jobType == 'windowCleaning';
+  bool get isSolarPanelCleaning => jobType == 'solarPanelCleaning';
+
+  int get totalToolsUsed {
+    if (toolsUsedCategorized != null) {
+      return toolsUsedCategorized!.totalCount;
+    }
+    return 0;
+  }
 }

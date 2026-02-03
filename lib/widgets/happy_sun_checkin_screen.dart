@@ -1,17 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../models/happy_sun_job.dart';
+import '../models/happy_sun_project.dart';
 import '../models/inventory_tool.dart';
-import '../providers/happy_sun_job_provider.dart';
+import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
 
 class HappySunCheckinScreen extends StatefulWidget {
-  final HappySunJob job;
+  final HappySunProject project;
 
   const HappySunCheckinScreen({
     super.key,
-    required this.job,
+    required this.project,
   });
 
   @override
@@ -59,8 +59,8 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
 
   void _initializeToolStatus() {
     // Use checklist data if available
-    if (widget.job.checklistData != null) {
-      for (final item in widget.job.checklistData!.items) {
+    if (widget.project.checklistData != null) {
+      for (final item in widget.project.checklistData!.items) {
         _toolStatus[item.toolId] = _ToolCheckinStatus(
           toolId: item.toolId,
           baseName: item.baseName,
@@ -70,13 +70,14 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
           checklistNotes: item.notes,
         );
       }
-    } else if (widget.job.toolsUsedCategorized != null) {
+    } else if (widget.project.toolsUsedCategorized != null) {
       // Fallback: use tools used data
-      final categorized = widget.job.toolsUsedCategorized!;
+      final categorized = widget.project.toolsUsedCategorized!;
       for (final tool in [
         ...categorized.teamTools,
         ...categorized.individualTools,
-        ...categorized.extras
+        ...categorized.extras,
+        ...categorized.accessories
       ]) {
         for (final toolId in tool.toolIds) {
           if (toolId.isNotEmpty) {
@@ -252,7 +253,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
     setState(() => _isChecking = true);
 
     try {
-      final jobProvider = context.read<HappySunJobProvider>();
+      final jobProvider = context.read<HappySunProjectProvider>();
       final inventoryProvider = context.read<InventoryProvider>();
 
       // Get all tool IDs that were returned
@@ -262,9 +263,8 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
           .toList();
 
       // Record end time for the job
-      await jobProvider.recordEndTime(
-        widget.job.id,
-        widget.job.date,
+      await jobProvider.updateEndTime(
+        widget.project.id,
         DateTime.now(),
       );
 
@@ -295,7 +295,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
 
   @override
   Widget build(BuildContext context) {
-    final isCompleted = widget.job.endTime != null;
+    final isCompleted = widget.project.endTime != null;
 
     return Scaffold(
       appBar: AppBar(
@@ -528,7 +528,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          widget.job.jobType == 'windowCleaning'
+                          widget.project.jobType == 'windowCleaning'
                               ? 'Window Cleaning Job'
                               : 'Solar Panel Cleaning Job',
                           style: const TextStyle(
@@ -557,7 +557,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                   Expanded(
                     child: _buildInfoTile(
                       'Date',
-                      '${widget.job.date.day}/${widget.job.date.month}/${widget.job.date.year}',
+                      '${widget.project.scheduledDate.day}/${widget.project.scheduledDate.month}/${widget.project.scheduledDate.year}',
                       Icons.calendar_today,
                     ),
                   ),
@@ -955,7 +955,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
   }
 
   Widget _buildBottomActions() {
-    final isCompleted = widget.job.endTime != null;
+    final isCompleted = widget.project.endTime != null;
     final allReturned = _areAllToolsReturned();
     final progress =
         _getTotalTools() > 0 ? _getReturnedCount() / _getTotalTools() : 0.0;
@@ -1090,9 +1090,9 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                             ),
                           ),
                           const SizedBox(height: 4),
-                          if (widget.job.endTime != null)
+                          if (widget.project.endTime != null)
                             Text(
-                              'Completed at ${widget.job.endTime!.hour.toString().padLeft(2, '0')}:${widget.job.endTime!.minute.toString().padLeft(2, '0')} on ${widget.job.date.day}/${widget.job.date.month}/${widget.job.date.year}',
+                              'Completed at ${widget.project.endTime!.hour.toString().padLeft(2, '0')}:${widget.project.endTime!.minute.toString().padLeft(2, '0')} on ${widget.project.scheduledDate.day}/${widget.project.scheduledDate.month}/${widget.project.scheduledDate.year}',
                               style: const TextStyle(
                                 fontSize: 12,
                                 color: Colors.white70,
@@ -1127,10 +1127,10 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                       Icons.check_circle,
                       Colors.green,
                     ),
-                    if (widget.job.workDuration != null)
+                    if (widget.project.workDuration != null)
                       _buildSummaryTile(
                         'Duration',
-                        '${widget.job.workDuration!.inHours}h ${widget.job.workDuration!.inMinutes.remainder(60)}m',
+                        '${widget.project.workDuration!.inHours}h ${widget.project.workDuration!.inMinutes.remainder(60)}m',
                         Icons.timer,
                         Colors.green,
                       ),

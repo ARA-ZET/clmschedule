@@ -19,12 +19,11 @@ import 'providers/scale_provider.dart';
 import 'providers/map_view_provider.dart';
 import 'providers/inventory_provider.dart';
 import 'providers/happy_sun_project_provider.dart';
-import 'providers/happy_sun_job_provider.dart';
 import 'providers/app_version_provider.dart';
 import 'providers/tool_settings_provider.dart';
 import 'models/job_list_item.dart';
 import 'models/happy_sun_project.dart';
-import 'services/happy_sun_migration_service.dart';
+import 'models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
 import 'widgets/schedule_grid.dart';
 import 'widgets/collection_schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
@@ -187,9 +186,6 @@ void main() async {
       create: (context) => HappySunProjectProvider(),
     ),
     ChangeNotifierProvider(
-      create: (context) => HappySunJobProvider(),
-    ),
-    ChangeNotifierProvider(
       create: (context) => ToolSettingsProvider(),
     ),
     ChangeNotifierProvider(
@@ -221,9 +217,8 @@ class _MyAppState extends State<MyApp> {
   }
 
   void _setupHappySunSync() {
-    // Set up callbacks to sync Happy Sun jobs with Job List items
+    // Set up callbacks to sync Happy Sun projects with Job List items
     final jobListProvider = context.read<JobListProvider>();
-    final happySunJobProvider = context.read<HappySunJobProvider>();
     final happySunProjectProvider = context.read<HappySunProjectProvider>();
     final toolSettingsProvider = context.read<ToolSettingsProvider>();
     final inventoryProvider = context.read<InventoryProvider>();
@@ -232,9 +227,9 @@ class _MyAppState extends State<MyApp> {
       onAdded: (jobListItem) async {
         try {
           debugPrint(
-              '🔵 Happy Sun Sync: Creating job and project for ${jobListItem.id}');
+              '🔵 Happy Sun Sync: Creating project for ${jobListItem.id}');
 
-          // Auto-create Happy Sun job for window/solar cleaning jobs
+          // Auto-create Happy Sun project for window/solar cleaning jobs
           // Calculate tools needed based on manDays (number of cleaners)
           final numberOfCleaners = jobListItem.manDays.ceil();
           debugPrint('   Number of cleaners: $numberOfCleaners');
@@ -277,22 +272,24 @@ class _MyAppState extends State<MyApp> {
                 '      Individual: ${tool.baseName} × ${tool.totalQuantity}');
           }
 
-          final jobCreated = await happySunJobProvider.createJobFromJobListItem(
-            jobListItem,
-            categorizedTools,
-          );
-          debugPrint('   Happy Sun job created: $jobCreated');
+          // Determine job type
+          final jobType = jobListItem.jobType == JobType.windowCleaning
+              ? 'windowCleaning'
+              : 'solarPanelCleaning';
 
-          // Also create corresponding HappySunProject
+          // Create HappySunProject with consolidated fields
           final project = HappySunProject(
             id: jobListItem.id,
+            jobListItemId: jobListItem.id,
             clientName: jobListItem.client,
             address: jobListItem.collectionAddress.isNotEmpty
                 ? jobListItem.collectionAddress
                 : jobListItem.area,
             scheduledDate: jobListItem.date,
             numberOfTeamMembers: numberOfCleaners,
-            toolsNeeded: categorizedTools, // Add tools needed
+            jobType: jobType,
+            toolsNeeded: categorizedTools,
+            statusId: jobListItem.jobStatusId,
             status: 'pending',
             createdAt: DateTime.now(),
           );
@@ -304,47 +301,59 @@ class _MyAppState extends State<MyApp> {
         }
       },
       onUpdated: (oldItem, newItem) async {
-        // Only update individual tools when manDays changes (team tools remain constant)
-        if (oldItem.manDays != newItem.manDays &&
-            (newItem.jobType == JobType.windowCleaning ||
-                newItem.jobType == JobType.solarPanelCleaning)) {
-          final numberOfCleaners = newItem.manDays.ceil();
+        try {
+          // Update project when JobListItem changes
+          if ((oldItem.manDays != newItem.manDays ||
+                  oldItem.client != newItem.client ||
+                  oldItem.collectionAddress != newItem.collectionAddress ||
+                  oldItem.area != newItem.area ||
+                  oldItem.jobStatusId != newItem.jobStatusId) &&
+              (newItem.jobType == JobType.windowCleaning ||
+                  newItem.jobType == JobType.solarPanelCleaning)) {
+            final existingProject =
+                happySunProjectProvider.getProjectById(newItem.id);
+            if (existingProject != null) {
+              final numberOfCleaners = newItem.manDays.ceil();
 
-          // Only recalculate individual tools (not team tools or extras)
-          final individualTools = toolSettingsProvider.calculateIndividualTools(
-            numberOfCleaners,
-            inventoryProvider.tools,
-          );
+              // Recalculate tools if manDays changed
+              CategorizedTools? updatedToolsNeeded;
+              if (oldItem.manDays != newItem.manDays) {
+                updatedToolsNeeded =
+                    toolSettingsProvider.calculateCategorizedTools(
+                  numberOfCleaners,
+                  inventoryProvider.tools,
+                );
+              }
 
-          await happySunJobProvider.updateIndividualToolsFromManDays(
-            newItem.id,
-            newItem.date,
-            individualTools,
-          );
-
-          // Also update corresponding HappySunProject
-          final existingProject =
-              happySunProjectProvider.getProjectById(newItem.id);
-          if (existingProject != null) {
-            final updatedProject = existingProject.copyWith(
-              numberOfTeamMembers: numberOfCleaners,
-              updatedAt: DateTime.now(),
-            );
-            await happySunProjectProvider.updateProject(updatedProject);
+              final updatedProject = existingProject.copyWith(
+                clientName: newItem.client,
+                address: newItem.collectionAddress.isNotEmpty
+                    ? newItem.collectionAddress
+                    : newItem.area,
+                numberOfTeamMembers: numberOfCleaners,
+                toolsNeeded: updatedToolsNeeded ?? existingProject.toolsNeeded,
+                statusId: newItem.jobStatusId,
+                updatedAt: DateTime.now(),
+              );
+              await happySunProjectProvider.updateProject(updatedProject);
+              debugPrint(
+                  '   Happy Sun project updated: ${updatedProject.clientName}');
+            }
           }
+        } catch (e) {
+          debugPrint('❌ Happy Sun Sync Error (onUpdated): $e');
         }
       },
       onDeleted: (jobListItem) async {
-        // Delete corresponding Happy Sun job when window/solar cleaning job is deleted
-        if (jobListItem.jobType == JobType.windowCleaning ||
-            jobListItem.jobType == JobType.solarPanelCleaning) {
-          await happySunJobProvider.deleteJob(
-            jobListItem.id,
-            jobListItem.date,
-          );
-
-          // Also delete corresponding HappySunProject
-          await happySunProjectProvider.deleteProject(jobListItem.id);
+        try {
+          // Delete corresponding HappySunProject when window/solar cleaning job is deleted
+          if (jobListItem.jobType == JobType.windowCleaning ||
+              jobListItem.jobType == JobType.solarPanelCleaning) {
+            await happySunProjectProvider.deleteProject(jobListItem.id);
+            debugPrint('   Happy Sun project deleted: ${jobListItem.id}');
+          }
+        } catch (e) {
+          debugPrint('❌ Happy Sun Sync Error (onDeleted): $e');
         }
       },
     );
@@ -1018,100 +1027,6 @@ class _HappySunTabState extends State<HappySunTab>
           ),
         ),
       ],
-    );
-  }
-}
-
-// Happy Sun Projects View
-class HappySunProjectsView extends StatefulWidget {
-  const HappySunProjectsView({super.key});
-
-  @override
-  State<HappySunProjectsView> createState() => _HappySunProjectsViewState();
-}
-
-class _HappySunProjectsViewState extends State<HappySunProjectsView> {
-  bool _isMigrating = false;
-  String? _migrationResult;
-
-  Future<void> _runMigration() async {
-    setState(() {
-      _isMigrating = true;
-      _migrationResult = null;
-    });
-
-    try {
-      final migrationService = HappySunMigrationService();
-      final results = await migrationService.migrateJobsToProjects();
-
-      setState(() {
-        _migrationResult = 'Migration complete!\n\n'
-            'Jobs processed: ${results['jobsProcessed']}\n'
-            'Projects created: ${results['projectsCreated']}\n'
-            'Projects updated: ${results['projectsUpdated']}\n'
-            'Errors: ${results['errors']}';
-      });
-    } catch (e) {
-      setState(() {
-        _migrationResult = 'Migration failed: $e';
-      });
-    } finally {
-      setState(() {
-        _isMigrating = false;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(Icons.work, size: 64, color: Colors.orange),
-          const SizedBox(height: 16),
-          const Text(
-            'Happy Sun Projects',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Projects functionality will be implemented here',
-            style: TextStyle(color: Colors.grey),
-          ),
-          const SizedBox(height: 32),
-          ElevatedButton.icon(
-            onPressed: _isMigrating ? null : _runMigration,
-            icon: _isMigrating
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.sync),
-            label: Text(_isMigrating ? 'Migrating...' : 'Run Migration'),
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-            ),
-          ),
-          if (_migrationResult != null) ...[
-            const SizedBox(height: 24),
-            Container(
-              padding: const EdgeInsets.all(16),
-              margin: const EdgeInsets.symmetric(horizontal: 32),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey.shade300),
-              ),
-              child: Text(
-                _migrationResult!,
-                style: const TextStyle(fontFamily: 'monospace'),
-              ),
-            ),
-          ],
-        ],
-      ),
     );
   }
 }

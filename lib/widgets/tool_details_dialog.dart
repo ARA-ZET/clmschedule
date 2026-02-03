@@ -104,110 +104,101 @@ class ToolDetailsDialog extends StatelessWidget {
 
                     // Accessories section
                     const SizedBox(height: 24),
-                    Consumer<InventoryProvider>(
-                      builder: (context, inventoryProvider, child) {
-                        final accessories = inventoryProvider.tools
-                            .where((t) => tool.accessoryIds.contains(t.id))
-                            .toList();
-
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                const Text(
-                                  'Required Accessories',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
+                            const Text(
+                              'Required Accessories',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                              ),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: () async {
+                                await showDialog(
+                                  context: context,
+                                  builder: (context) =>
+                                      ManageAccessoriesDialog(tool: tool),
+                                );
+                                // Dialog will trigger rebuild through provider
+                              },
+                              icon: const Icon(Icons.edit, size: 16),
+                              label: const Text('Manage'),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 8,
                                 ),
-                                OutlinedButton.icon(
-                                  onPressed: () async {
-                                    await showDialog(
-                                      context: context,
-                                      builder: (context) =>
-                                          ManageAccessoriesDialog(tool: tool),
-                                    );
-                                    // Dialog will trigger rebuild through provider
-                                  },
-                                  icon: const Icon(Icons.edit, size: 16),
-                                  label: const Text('Manage'),
-                                  style: OutlinedButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 8,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        if (tool.requiredAccessories.isEmpty)
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.grey.shade300),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(Icons.info_outline,
+                                    color: Colors.grey.shade600),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    'No accessories configured. Click "Manage" to add accessories that must be checked out with this tool.',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: Colors.grey.shade600,
                                     ),
                                   ),
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 12),
-                            if (accessories.isEmpty)
-                              Container(
-                                padding: const EdgeInsets.all(16),
-                                decoration: BoxDecoration(
-                                  color: Colors.grey.shade100,
-                                  borderRadius: BorderRadius.circular(8),
-                                  border:
-                                      Border.all(color: Colors.grey.shade300),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(Icons.info_outline,
-                                        color: Colors.grey.shade600),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Text(
-                                        'No accessories configured. Click "Manage" to add accessories that must be checked out with this tool.',
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          color: Colors.grey.shade600,
-                                        ),
-                                      ),
+                          )
+                        else
+                          ...tool.requiredAccessories.map((accessory) => Card(
+                                margin: const EdgeInsets.only(bottom: 8),
+                                child: ListTile(
+                                  dense: true,
+                                  leading: CircleAvatar(
+                                    backgroundColor: Colors.blue.shade100,
+                                    radius: 16,
+                                    child: Icon(
+                                      Icons.extension,
+                                      size: 16,
+                                      color: Colors.blue.shade700,
                                     ),
-                                  ],
-                                ),
-                              )
-                            else
-                              ...accessories.map((accessory) => Card(
-                                    margin: const EdgeInsets.only(bottom: 8),
-                                    child: ListTile(
-                                      dense: true,
-                                      leading: CircleAvatar(
-                                        backgroundColor: Colors.blue.shade100,
-                                        radius: 16,
-                                        child: Icon(
-                                          Icons.extension,
-                                          size: 16,
-                                          color: Colors.blue.shade700,
-                                        ),
-                                      ),
-                                      title: Text(
-                                        accessory.name,
-                                        style: const TextStyle(
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                      subtitle: Text(
-                                        accessory.toolId,
-                                        style: const TextStyle(fontSize: 12),
-                                      ),
-                                      trailing: Chip(
-                                        label: Text(
-                                          accessory.category,
-                                          style: const TextStyle(fontSize: 10),
-                                        ),
-                                        backgroundColor: Colors.blue.shade50,
-                                        padding: EdgeInsets.zero,
-                                      ),
+                                  ),
+                                  title: Text(
+                                    accessory.baseName,
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w500,
                                     ),
-                                  )),
-                          ],
-                        );
-                      },
+                                  ),
+                                  subtitle: Text(
+                                    'Quantity: ${accessory.quantity}',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                  trailing: Chip(
+                                    label: Text(
+                                      'Other',
+                                      style: const TextStyle(fontSize: 10),
+                                    ),
+                                    backgroundColor: Colors.blue.shade50,
+                                    padding: EdgeInsets.zero,
+                                  ),
+                                ),
+                              )),
+                      ],
                     ),
 
                     const SizedBox(height: 24),

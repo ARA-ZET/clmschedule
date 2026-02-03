@@ -6,6 +6,8 @@ import 'tool_details_dialog.dart';
 import 'add_tool_dialog.dart';
 import 'qr_scanner_dialog.dart';
 import 'tool_settings_dialog.dart';
+import 'edit_basename_tools_dialog.dart';
+import 'qr_code_print_preview_dialog.dart';
 
 class HappySunInventoryView extends StatefulWidget {
   const HappySunInventoryView({super.key});
@@ -200,6 +202,27 @@ class _HappySunInventoryViewState extends State<HappySunInventoryView> {
                         tooltip: 'Tool Requirements Settings',
                         style: IconButton.styleFrom(
                           backgroundColor: Colors.grey[200],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      // Print QR codes button
+                      ElevatedButton.icon(
+                        onPressed: inventoryProvider.tools.isEmpty
+                            ? null
+                            : () {
+                                showDialog(
+                                  context: context,
+                                  builder: (context) =>
+                                      QrCodePrintPreviewDialog(
+                                    tools: inventoryProvider.tools,
+                                  ),
+                                );
+                              },
+                        icon: const Icon(Icons.print),
+                        label: const Text('QR Stickers'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange,
+                          foregroundColor: Colors.white,
                         ),
                       ),
                     ],
@@ -493,20 +516,67 @@ class ToolDetailListScreen extends StatelessWidget {
         title: Text(baseName),
         backgroundColor: Colors.orange,
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.edit),
+            tooltip: 'Edit Group',
+            onPressed: () async {
+              final result = await showDialog<bool>(
+                context: context,
+                builder: (context) => EditBaseNameToolsDialog(
+                  baseName: baseName,
+                  tools: tools,
+                ),
+              );
+
+              // If changes were made, pop back to refresh the list
+              if (result == true && context.mounted) {
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+        ],
       ),
-      body: GridView.builder(
-        padding: const EdgeInsets.all(16),
-        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 200,
-          childAspectRatio: 0.75,
-          crossAxisSpacing: 16,
-          mainAxisSpacing: 16,
-        ),
-        itemCount: tools.length,
-        itemBuilder: (context, index) {
-          final tool = tools[index];
-          return ToolCard(tool: tool);
-        },
+      body: Column(
+        children: [
+          // Info banner
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            color: Colors.blue.shade50,
+            child: Row(
+              children: [
+                Icon(Icons.info_outline, color: Colors.blue.shade700, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Tap "Edit" to change all ${tools.length} tools at once (base name, category, quantity)',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.blue.shade700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: GridView.builder(
+              padding: const EdgeInsets.all(16),
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 200,
+                childAspectRatio: 0.75,
+                crossAxisSpacing: 16,
+                mainAxisSpacing: 16,
+              ),
+              itemCount: tools.length,
+              itemBuilder: (context, index) {
+                final tool = tools[index];
+                return ToolCard(tool: tool);
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

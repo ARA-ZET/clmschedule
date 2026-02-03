@@ -180,7 +180,7 @@ class _HappySunAddProjectDialogState extends State<HappySunAddProjectDialog> {
       scheduledTime: _timeController.text.isEmpty ? null : _timeController.text,
       numberOfTeamMembers: _numberOfTeamMembers,
       status: 'pending',
-      createdAt: DateTime.now(),
+      createdAt: DateTime.now(), jobListItemId: '', jobType: '', statusId: '',
     );
 
     final projectProvider = context.read<HappySunProjectProvider>();
