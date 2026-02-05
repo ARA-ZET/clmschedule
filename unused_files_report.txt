@@ -1,0 +1,67 @@
+Total .dart files in lib/: 152
+
+Total files used (imported): 101
+
+Total UNUSED files: 45
+
+=== UNUSED FILES BY DIRECTORY ===
+
+commands/ (3 files):
+  - lib/commands/job_list_commands.dart
+  - lib/commands/map_commands.dart
+  - lib/commands/schedule_commands.dart
+
+models/ (2 files):
+  - lib/models/gpx_track.dart
+  - lib/models/happy_sun_job.dart
+
+providers/ (2 files):
+  - lib/providers/job_provider.dart
+  - lib/providers/mock_auth_provider.dart
+
+root/ (1 files):
+  - lib/theme.dart
+
+services/ (11 files):
+  - lib/services/auth_service.dart
+  - lib/services/chat_service_backup_old.dart
+  - lib/services/firestore_service_old.dart
+  - lib/services/gpx_parser_service.dart
+  - lib/services/job_cache_service.dart
+  - lib/services/keyboard_shortcuts_service.dart
+  - lib/services/kml_parser_service.dart
+  - lib/services/mock_auth_service.dart
+  - lib/services/platform_auth_service.dart
+  - lib/services/schedule_tracking_service.dart
+  - lib/services/simple_auth_service.dart
+
+utils/ (6 files):
+  - lib/utils/collection_job_integration_helper.dart
+  - lib/utils/color_utils.dart
+  - lib/utils/google_maps_utils.dart
+  - lib/utils/maps_util.dart
+  - lib/utils/seed_job_list_data.dart
+  - lib/utils/work_area_converter.dart
+
+widgets/ (20 files):
+  - lib/widgets/cache_debug_widget.dart
+  - lib/widgets/compact_date_filter.dart
+  - lib/widgets/date_filter_widget.dart
+  - lib/widgets/editable_text_field.dart
+  - lib/widgets/fast_job_list_view.dart
+  - lib/widgets/google_sheets_tracking_view.dart
+  - lib/widgets/happy_sun_jobs_screen.dart
+  - lib/widgets/happy_sun_project_card.dart
+  - lib/widgets/happy_sun_projects_screen.dart
+  - lib/widgets/happy_sun_tools_needed_dialog.dart
+  - lib/widgets/job_list_card.dart
+  - lib/widgets/job_list_row_widget.dart
+  - lib/widgets/kml_download_demo.dart
+  - lib/widgets/kml_map_demo.dart
+  - lib/widgets/map_view.dart
+  - lib/widgets/new_version_dialog.dart
+  - lib/widgets/scale_test_widget.dart
+  - lib/widgets/schedule_tracking_view.dart
+  - lib/widgets/undo_redo_widgets.dart
+  - lib/widgets/updated_map_view.dart
+

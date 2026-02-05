@@ -77,125 +77,140 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
     final isMobile = MediaQuery.of(context).size.width < 600;
     final screenWidth = MediaQuery.of(context).size.width;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          isMobile ? 'Projects' : 'Happy Sun Projects',
-          style: TextStyle(
-            fontSize: isMobile ? 18 : 20,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        backgroundColor: Colors.orange,
-        foregroundColor: Colors.white,
-        actions: [
-          if (screenWidth > 400)
-            IconButton(
-              icon: const Icon(Icons.calendar_month),
-              onPressed: () {
-                // TODO: Add month filter functionality
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Month filter coming soon'),
-                    duration: Duration(seconds: 1),
-                  ),
-                );
-              },
-              tooltip: 'Filter by Month',
-            ),
-          IconButton(
-            icon: const Icon(Icons.add),
-            onPressed: () => _showAddProjectDialog(context),
-            tooltip: 'Add Project',
-          ),
-          SizedBox(width: isMobile ? 4 : 8),
-        ],
-        bottom: isMobile
-            ? PreferredSize(
-                preferredSize: const Size.fromHeight(56),
-                child: Container(
-                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-                  color: Colors.orange.shade700,
-                  child: Row(
-                    children: [
-                      const Icon(Icons.filter_list,
-                          color: Colors.white, size: 18),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Container(
-                          height: 44,
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: DropdownButton<String>(
-                            value: _selectedStatus,
-                            isExpanded: true,
-                            underline: const SizedBox(),
-                            icon: const Icon(Icons.arrow_drop_down, size: 24),
-                            style: const TextStyle(
-                              fontSize: 14,
-                              color: Colors.black87,
-                            ),
-                            onChanged: (String? newValue) {
-                              if (newValue != null) {
-                                setState(() {
-                                  _selectedStatus = newValue;
-                                  _tabController
-                                      .animateTo(_getIndexFromStatus(newValue));
-                                });
-                              }
-                            },
-                            items: const [
-                              DropdownMenuItem(
-                                value: 'all',
-                                child: Text('All Projects'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'pending',
-                                child: Text('Pending'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'in-progress',
-                                child: Text('In Progress'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'completed',
-                                child: Text('Completed'),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
+    return Consumer<HappySunProjectProvider>(
+      builder: (context, projectProvider, _) {
+        final currentMonth = projectProvider.currentMonth;
+        final monthYear =
+            '${_getMonthName(currentMonth.month)} ${currentMonth.year}';
+
+        return Scaffold(
+          appBar: AppBar(
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  isMobile ? 'Projects' : 'Happy Sun Projects',
+                  style: TextStyle(
+                    fontSize: isMobile ? 18 : 20,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
-              )
-            : TabBar(
-                controller: _tabController,
-                labelColor: Colors.white,
-                unselectedLabelColor: Colors.white70,
-                indicatorColor: Colors.white,
-                tabs: const [
-                  Tab(text: 'All Projects'),
-                  Tab(text: 'Pending'),
-                  Tab(text: 'In Progress'),
-                  Tab(text: 'Completed'),
-                ],
-              ),
-      ),
-      body: isMobile
-          ? _buildProjectsList(_selectedStatus)
-          : TabBarView(
-              controller: _tabController,
-              children: [
-                _buildProjectsList('all'),
-                _buildProjectsList('pending'),
-                _buildProjectsList('in-progress'),
-                _buildProjectsList('completed'),
+                if (!isMobile)
+                  Text(
+                    monthYear,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.normal,
+                    ),
+                  ),
               ],
             ),
+            backgroundColor: Colors.orange,
+            foregroundColor: Colors.white,
+            actions: [
+              if (screenWidth > 400)
+                IconButton(
+                  icon: const Icon(Icons.calendar_month),
+                  onPressed: () => _showMonthFilterDialog(context),
+                  tooltip: 'Filter by Month',
+                ),
+              IconButton(
+                icon: const Icon(Icons.add),
+                onPressed: () => _showAddProjectDialog(context),
+                tooltip: 'Add Project',
+              ),
+              SizedBox(width: isMobile ? 4 : 8),
+            ],
+            bottom: isMobile
+                ? PreferredSize(
+                    preferredSize: const Size.fromHeight(56),
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                      color: Colors.orange.shade700,
+                      child: Row(
+                        children: [
+                          const Icon(Icons.filter_list,
+                              color: Colors.white, size: 18),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Container(
+                              height: 44,
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 12),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: DropdownButton<String>(
+                                value: _selectedStatus,
+                                isExpanded: true,
+                                underline: const SizedBox(),
+                                icon:
+                                    const Icon(Icons.arrow_drop_down, size: 24),
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  color: Colors.black87,
+                                ),
+                                onChanged: (String? newValue) {
+                                  if (newValue != null) {
+                                    setState(() {
+                                      _selectedStatus = newValue;
+                                      _tabController.animateTo(
+                                          _getIndexFromStatus(newValue));
+                                    });
+                                  }
+                                },
+                                items: const [
+                                  DropdownMenuItem(
+                                    value: 'all',
+                                    child: Text('All Projects'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'pending',
+                                    child: Text('Pending'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'in-progress',
+                                    child: Text('In Progress'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'completed',
+                                    child: Text('Completed'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : TabBar(
+                    controller: _tabController,
+                    labelColor: Colors.white,
+                    unselectedLabelColor: Colors.white70,
+                    indicatorColor: Colors.white,
+                    tabs: const [
+                      Tab(text: 'All Projects'),
+                      Tab(text: 'Pending'),
+                      Tab(text: 'In Progress'),
+                      Tab(text: 'Completed'),
+                    ],
+                  ),
+          ),
+          body: isMobile
+              ? _buildProjectsList(_selectedStatus)
+              : TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _buildProjectsList('all'),
+                    _buildProjectsList('pending'),
+                    _buildProjectsList('in-progress'),
+                    _buildProjectsList('completed'),
+                  ],
+                ),
+        );
+      },
     );
   }
 
@@ -476,5 +491,64 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
             )
           : HappySunCheckinDialog(project: project),
     );
+  }
+
+  void _showMonthFilterDialog(BuildContext context) async {
+    final projectProvider = context.read<HappySunProjectProvider>();
+    final currentMonth = projectProvider.currentMonth;
+
+    final selectedDate = await showDatePicker(
+      context: context,
+      initialDate: currentMonth,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2030),
+      initialDatePickerMode: DatePickerMode.year,
+      helpText: 'Select Month',
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: const ColorScheme.light(
+              primary: Colors.orange,
+              onPrimary: Colors.white,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (selectedDate != null) {
+      projectProvider.setMonth(selectedDate.year, selectedDate.month);
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Showing projects for ${_getMonthName(selectedDate.month)} ${selectedDate.year}',
+            ),
+            duration: const Duration(seconds: 2),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    }
+  }
+
+  String _getMonthName(int month) {
+    const months = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December'
+    ];
+    return months[month - 1];
   }
 }

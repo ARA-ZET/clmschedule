@@ -146,7 +146,7 @@ class HappySunProjectCard extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          '🛠️ Tools Needed',
+          '🛠️ Tools Needed FC',
           style: TextStyle(
             fontWeight: FontWeight.bold,
             fontSize: 14,

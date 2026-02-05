@@ -103,147 +103,177 @@ class _HappySunToolsNeededDialogState extends State<HappySunToolsNeededDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return Dialog(
-      child: Container(
-        width: 800,
-        height: 600,
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header
-            Row(
-              children: [
-                const Icon(Icons.build, color: Colors.orange),
-                const SizedBox(width: 12),
-                const Text(
-                  'Tools Needed',
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
+    final content = Container(
+      width: isMobile ? double.infinity : 800,
+      height: isMobile ? double.infinity : 600,
+      padding: EdgeInsets.all(isMobile ? 16 : 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Row(
+            children: [
+              const Icon(Icons.build, color: Colors.orange),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Tools Needed MD',
                   style: TextStyle(
-                    fontSize: 24,
+                    fontSize: isMobile ? 20 : 24,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-                const Spacer(),
-                IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () => Navigator.pop(context),
-                ),
-              ],
-            ),
-            const Divider(),
-            const SizedBox(height: 16),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+          const Divider(),
+          const SizedBox(height: 16),
 
-            // Search and Filter
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    decoration: InputDecoration(
-                      hintText: 'Search tools...',
-                      prefixIcon: const Icon(Icons.search),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
+          // Search and Filter
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  decoration: InputDecoration(
+                    hintText: 'Search tools...',
+                    prefixIcon: const Icon(Icons.search),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                    onChanged: (value) {
-                      setState(() {
-                        _searchQuery = value;
-                      });
-                    },
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 16),
-                Consumer<InventoryProvider>(
-                  builder: (context, inventoryProvider, child) {
-                    return DropdownButton<String>(
-                      value: _selectedCategory,
-                      hint: const Text('Category'),
-                      items: [
-                        const DropdownMenuItem<String>(
-                          value: null,
-                          child: Text('All Categories'),
-                        ),
-                        ...inventoryProvider.categories
-                            .where((cat) => cat != 'All')
-                            .map((category) => DropdownMenuItem(
-                                  value: category,
-                                  child: Text(category),
-                                )),
-                      ],
-                      onChanged: (value) {
-                        setState(() {
-                          _selectedCategory = value;
-                        });
-                      },
-                    );
+                  onChanged: (value) {
+                    setState(() {
+                      _searchQuery = value;
+                    });
                   },
                 ),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // Tools list and selection
-            Expanded(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Available tools list
-                  Expanded(
-                    flex: 2,
-                    child: _buildToolsList(),
-                  ),
-                  const SizedBox(width: 16),
-                  // Right side: Selected tools and accessories
-                  Expanded(
-                    flex: 1,
-                    child: Column(
-                      children: [
-                        // Selected tools summary
-                        Expanded(
-                          flex: 3,
-                          child: _buildSelectedToolsSummary(),
-                        ),
-                        const SizedBox(height: 16),
-                        // Accessories section
-                        Expanded(
-                          flex: 2,
-                          child: _buildAccessoriesSection(),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
               ),
-            ),
+              const SizedBox(width: 16),
+              Consumer<InventoryProvider>(
+                builder: (context, inventoryProvider, child) {
+                  return DropdownButton<String>(
+                    value: _selectedCategory,
+                    hint: const Text('Category'),
+                    items: [
+                      const DropdownMenuItem<String>(
+                        value: null,
+                        child: Text('All Categories'),
+                      ),
+                      ...inventoryProvider.categories
+                          .where((cat) => cat != 'All')
+                          .map((category) => DropdownMenuItem(
+                                value: category,
+                                child: Text(category),
+                              )),
+                    ],
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedCategory = value;
+                      });
+                    },
+                  );
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
 
-            const SizedBox(height: 16),
-            // Actions
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('Cancel'),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: _saveToolsNeeded,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.orange,
-                    foregroundColor: Colors.white,
+          // Tools list and selection
+          Expanded(
+            child: isMobile
+                ? Column(
+                    children: [
+                      // On mobile, stack vertically
+                      Expanded(
+                        flex: 2,
+                        child: _buildToolsList(),
+                      ),
+                      const SizedBox(height: 12),
+                      Expanded(
+                        flex: 1,
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: _buildSelectedToolsSummary(),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _buildAccessoriesSection(),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  )
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Available tools list
+                      Expanded(
+                        flex: 2,
+                        child: _buildToolsList(),
+                      ),
+                      const SizedBox(width: 16),
+                      // Right side: Selected tools and accessories
+                      Expanded(
+                        flex: 1,
+                        child: Column(
+                          children: [
+                            // Selected tools summary
+                            Expanded(
+                              flex: 3,
+                              child: _buildSelectedToolsSummary(),
+                            ),
+                            const SizedBox(height: 16),
+                            // Accessories section
+                            Expanded(
+                              flex: 2,
+                              child: _buildAccessoriesSection(),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                  child: const Text('Save Tools Needed'),
+          ),
+
+          const SizedBox(height: 16),
+          // Actions
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: _saveToolsNeeded,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
                 ),
-              ],
-            ),
-          ],
-        ),
+                child: Text(isMobile ? 'Save' : 'Save Tools Needed'),
+              ),
+            ],
+          ),
+        ],
       ),
     );
+
+    return isMobile
+        ? Dialog.fullscreen(child: content)
+        : Dialog(child: content);
   }
 
   Widget _buildToolsList() {

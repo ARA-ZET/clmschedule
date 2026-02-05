@@ -24,12 +24,15 @@ class HappySunProjectProvider extends ChangeNotifier {
 
   void setMonth(int year, int month) {
     _currentMonth = DateTime(year, month);
+    _initializeProjects(); // Reload projects for the new month
     notifyListeners();
   }
 
   void _initializeProjects() {
     _setLoading(true);
-    _projectsSubscription = _projectService.getAllProjects().listen(
+    _projectsSubscription?.cancel(); // Cancel previous subscription
+    _projectsSubscription =
+        _projectService.getProjectsForMonth(_currentMonth).listen(
       (projects) {
         _projects = projects;
         _setLoading(false);
