@@ -281,7 +281,7 @@ class _EditBaseNameToolsDialogState extends State<EditBaseNameToolsDialog> {
                     ),
                     const SizedBox(height: 8),
                     DropdownButtonFormField<String>(
-                      value: _selectedCategory,
+                      initialValue: _selectedCategory,
                       decoration: InputDecoration(
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
@@ -316,7 +316,7 @@ class _EditBaseNameToolsDialogState extends State<EditBaseNameToolsDialog> {
                     ),
                     const SizedBox(height: 8),
                     DropdownButtonFormField<ToolType>(
-                      value: _selectedToolType,
+                      initialValue: _selectedToolType,
                       decoration: InputDecoration(
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),

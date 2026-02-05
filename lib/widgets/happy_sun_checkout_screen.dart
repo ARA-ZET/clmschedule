@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -30,6 +31,11 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
       {}; // baseName -> [toolId1, toolId2, ...]
   bool _isSaving = false;
   bool _hasUnsavedChanges = false;
+
+  // Scan feedback
+  String _scanMessage = 'Align QR code within frame';
+  Color _scanMessageColor = Colors.white;
+  Timer? _scanMessageTimer;
 
   @override
   void initState() {
@@ -76,6 +82,7 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
   void dispose() {
     _tabController.dispose();
     _scannerController?.dispose();
+    _scanMessageTimer?.cancel();
     super.dispose();
   }
 
@@ -465,12 +472,13 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
                                           bottomRight: Radius.circular(8),
                                         ),
                                       ),
-                                      child: const Text(
-                                        'Align QR code within frame',
+                                      child: Text(
+                                        _scanMessage,
                                         style: TextStyle(
-                                          color: Colors.white,
+                                          color: _scanMessageColor,
                                           fontSize: 12,
                                         ),
+                                        textAlign: TextAlign.center,
                                       ),
                                     ),
                                   ],
@@ -604,37 +612,37 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
   }
 
   void _showScanSuccess(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const Icon(Icons.check_circle, color: Colors.white),
-            const SizedBox(width: 8),
-            Expanded(child: Text(message)),
-          ],
-        ),
-        backgroundColor: Colors.green,
-        duration: const Duration(seconds: 2),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    _scanMessageTimer?.cancel();
+    setState(() {
+      _scanMessage = message;
+      _scanMessageColor = Colors.green;
+    });
+
+    _scanMessageTimer = Timer(const Duration(seconds: 1), () {
+      if (mounted) {
+        setState(() {
+          _scanMessage = 'Align QR code within frame';
+          _scanMessageColor = Colors.white;
+        });
+      }
+    });
   }
 
   void _showScanError(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const Icon(Icons.error, color: Colors.white),
-            const SizedBox(width: 8),
-            Expanded(child: Text(message)),
-          ],
-        ),
-        backgroundColor: Colors.red,
-        duration: const Duration(seconds: 2),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    _scanMessageTimer?.cancel();
+    setState(() {
+      _scanMessage = message;
+      _scanMessageColor = Colors.red;
+    });
+
+    _scanMessageTimer = Timer(const Duration(seconds: 1), () {
+      if (mounted) {
+        setState(() {
+          _scanMessage = 'Align QR code within frame';
+          _scanMessageColor = Colors.white;
+        });
+      }
+    });
   }
 
   Widget _buildToolsTakenTab() {
