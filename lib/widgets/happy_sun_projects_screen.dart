@@ -75,47 +75,55 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
   @override
   Widget build(BuildContext context) {
     final isMobile = MediaQuery.of(context).size.width < 600;
+    final screenWidth = MediaQuery.of(context).size.width;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Happy Sun Projects'),
+        title: Text(
+          isMobile ? 'Projects' : 'Happy Sun Projects',
+          style: TextStyle(
+            fontSize: isMobile ? 18 : 20,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         backgroundColor: Colors.orange,
         foregroundColor: Colors.white,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.calendar_month),
-            onPressed: () {
-              // TODO: Add month filter functionality
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Month filter coming soon'),
-                  duration: Duration(seconds: 1),
-                ),
-              );
-            },
-            tooltip: 'Filter by Month',
-          ),
+          if (screenWidth > 400)
+            IconButton(
+              icon: const Icon(Icons.calendar_month),
+              onPressed: () {
+                // TODO: Add month filter functionality
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Month filter coming soon'),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+              },
+              tooltip: 'Filter by Month',
+            ),
           IconButton(
             icon: const Icon(Icons.add),
             onPressed: () => _showAddProjectDialog(context),
             tooltip: 'Add Project',
           ),
-          const SizedBox(width: 8),
+          SizedBox(width: isMobile ? 4 : 8),
         ],
         bottom: isMobile
             ? PreferredSize(
-                preferredSize: const Size.fromHeight(60),
+                preferredSize: const Size.fromHeight(56),
                 child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
                   color: Colors.orange.shade700,
                   child: Row(
                     children: [
                       const Icon(Icons.filter_list,
-                          color: Colors.white, size: 20),
-                      const SizedBox(width: 12),
+                          color: Colors.white, size: 18),
+                      const SizedBox(width: 8),
                       Expanded(
                         child: Container(
+                          height: 44,
                           padding: const EdgeInsets.symmetric(horizontal: 12),
                           decoration: BoxDecoration(
                             color: Colors.white,
@@ -125,7 +133,11 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
                             value: _selectedStatus,
                             isExpanded: true,
                             underline: const SizedBox(),
-                            icon: const Icon(Icons.arrow_drop_down),
+                            icon: const Icon(Icons.arrow_drop_down, size: 24),
+                            style: const TextStyle(
+                              fontSize: 14,
+                              color: Colors.black87,
+                            ),
                             onChanged: (String? newValue) {
                               if (newValue != null) {
                                 setState(() {

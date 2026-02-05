@@ -22,6 +22,7 @@ class HappySunJobProjectsScreen extends StatefulWidget {
 class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  final Map<String, int> _cardTabIndices = {}; // Track tab index per project ID
 
   @override
   void initState() {
@@ -35,8 +36,20 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     super.dispose();
   }
 
+  int _getCardTabIndex(String projectId) {
+    return _cardTabIndices[projectId] ?? 0;
+  }
+
+  void _setCardTabIndex(String projectId, int index) {
+    setState(() {
+      _cardTabIndices[projectId] = index;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     return Consumer<HappySunProjectProvider>(
       builder: (context, happySunProvider, child) {
         final now = DateTime.now();
@@ -66,78 +79,179 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
               elevation: 2,
               child: Container(
                 color: Theme.of(context).colorScheme.surface,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Row(
-                  children: [
-                    // Tabs on the left
-                    Expanded(
-                      child: TabBar(
-                        controller: _tabController,
-                        isScrollable: true,
-                        tabs: [
-                          Tab(text: 'All Projects (${allProjects.length})'),
-                          Tab(text: 'Confirmed ($pendingCount)'),
-                          Tab(text: 'In Progress ($inProgressCount)'),
-                          Tab(text: 'Completed ($completedCount)'),
+                padding: EdgeInsets.symmetric(
+                  horizontal: isMobile ? 8 : 16,
+                  vertical: isMobile ? 4 : 8,
+                ),
+                child: isMobile
+                    ? _buildMobileHeader(
+                        context,
+                        happySunProvider,
+                        allProjects.length,
+                        pendingCount,
+                        inProgressCount,
+                        completedCount,
+                        now,
+                      )
+                    : Row(
+                        children: [
+                          // Tabs on the left
+                          Expanded(
+                            child: TabBar(
+                              controller: _tabController,
+                              isScrollable: true,
+                              tabs: [
+                                Tab(
+                                    text:
+                                        'All Projects (${allProjects.length})'),
+                                Tab(text: 'Confirmed ($pendingCount)'),
+                                Tab(text: 'In Progress ($inProgressCount)'),
+                                Tab(text: 'Completed ($completedCount)'),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 24),
+                          // Month filters on the right
+                          const SizedBox(width: 12),
+                          _buildMonthButton(
+                            context,
+                            happySunProvider,
+                            'Last Month',
+                            DateTime(now.year, now.month - 1),
+                          ),
+                          const SizedBox(width: 8),
+                          _buildMonthButton(
+                            context,
+                            happySunProvider,
+                            'This Month',
+                            DateTime(now.year, now.month),
+                          ),
+                          const SizedBox(width: 8),
+                          _buildMonthButton(
+                            context,
+                            happySunProvider,
+                            'Next Month',
+                            DateTime(now.year, now.month + 1),
+                          ),
+                          const SizedBox(width: 16),
+                          OutlinedButton.icon(
+                            onPressed: () =>
+                                _showMonthPicker(context, happySunProvider),
+                            icon: const Icon(Icons.calendar_today, size: 18),
+                            label: Text(
+                              _getMonthYearText(happySunProvider.currentMonth),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 8),
+                            ),
+                          ),
                         ],
                       ),
+              ),
+            ),
+            Expanded(
+              child: isMobile
+                  ? _buildJobsList(_getSelectedStatus())
+                  : TabBarView(
+                      controller: _tabController,
+                      children: [
+                        _buildJobsList('all'),
+                        _buildJobsList('confirmed'),
+                        _buildJobsList('in-progress'),
+                        _buildJobsList('completed'),
+                      ],
                     ),
-                    const SizedBox(width: 24),
-                    // Month filters on the right
+            ),
+          ],
+        );
+      },
+    );
+  }
 
-                    const SizedBox(width: 12),
-                    _buildMonthButton(
-                      context,
-                      happySunProvider,
-                      'Last Month',
-                      DateTime(now.year, now.month - 1),
+  String _getSelectedStatus() {
+    switch (_tabController.index) {
+      case 0:
+        return 'all';
+      case 1:
+        return 'confirmed';
+      case 2:
+        return 'in-progress';
+      case 3:
+        return 'completed';
+      default:
+        return 'all';
+    }
+  }
+
+  Widget _buildMobileHeader(
+    BuildContext context,
+    HappySunProjectProvider happySunProvider,
+    int allCount,
+    int pendingCount,
+    int inProgressCount,
+    int completedCount,
+    DateTime now,
+  ) {
+    return Column(
+      children: [
+        // Status filter dropdown
+        Row(
+          spacing: 8,
+          children: [
+            const Icon(Icons.filter_list, size: 18),
+            Expanded(
+              child: Container(
+                height: 40,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade300),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: DropdownButton<int>(
+                  value: _tabController.index,
+                  isExpanded: true,
+                  underline: const SizedBox(),
+                  icon: const Icon(Icons.arrow_drop_down, size: 20),
+                  style: const TextStyle(fontSize: 14, color: Colors.black87),
+                  onChanged: (int? newValue) {
+                    if (newValue != null) {
+                      setState(() {
+                        _tabController.animateTo(newValue);
+                      });
+                    }
+                  },
+                  items: [
+                    DropdownMenuItem(
+                      value: 0,
+                      child: Text('All Projects ($allCount)'),
                     ),
-                    const SizedBox(width: 8),
-                    _buildMonthButton(
-                      context,
-                      happySunProvider,
-                      'This Month',
-                      DateTime(now.year, now.month),
+                    DropdownMenuItem(
+                      value: 1,
+                      child: Text('Confirmed ($pendingCount)'),
                     ),
-                    const SizedBox(width: 8),
-                    _buildMonthButton(
-                      context,
-                      happySunProvider,
-                      'Next Month',
-                      DateTime(now.year, now.month + 1),
+                    DropdownMenuItem(
+                      value: 2,
+                      child: Text('In Progress ($inProgressCount)'),
                     ),
-                    const SizedBox(width: 16),
-                    OutlinedButton.icon(
-                      onPressed: () =>
-                          _showMonthPicker(context, happySunProvider),
-                      icon: const Icon(Icons.calendar_today, size: 18),
-                      label: Text(
-                        _getMonthYearText(happySunProvider.currentMonth),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 8),
-                      ),
+                    DropdownMenuItem(
+                      value: 3,
+                      child: Text('Completed ($completedCount)'),
                     ),
                   ],
                 ),
               ),
             ),
-            Expanded(
-              child: TabBarView(
-                controller: _tabController,
-                children: [
-                  _buildJobsList('all'),
-                  _buildJobsList('confirmed'),
-                  _buildJobsList('in-progress'),
-                  _buildJobsList('completed'),
-                ],
-              ),
+            IconButton(
+              onPressed: () => _showMonthPicker(context, happySunProvider),
+              icon: const Icon(Icons.calendar_month, size: 20),
+              tooltip: _getMonthYearText(happySunProvider.currentMonth),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
             ),
           ],
-        );
-      },
+        ),
+      ],
     );
   }
 
@@ -269,6 +383,8 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 
   Widget _buildProjectCard(
       BuildContext context, HappySunProject project, JobListItem jobListItem) {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     // Determine border color based on date
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -287,13 +403,11 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
       child: Container(
-        padding:
-            const EdgeInsets.only(left: 16, right: 16, top: 16, bottom: 16),
         decoration: BoxDecoration(
           border: Border(
             left: BorderSide(
               color: borderColor,
-              width: 10,
+              width: isMobile ? 6 : 10,
             ),
           ),
           borderRadius: const BorderRadius.only(
@@ -301,36 +415,181 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
             bottomLeft: Radius.circular(4),
           ),
         ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Section 1: Project Details
-            Expanded(
-              flex: 1,
-              child: _buildProjectDetailsSection(project, jobListItem),
+        child: isMobile
+            ? _buildMobileProjectCard(
+                context, project, jobListItem, borderColor)
+            : _buildDesktopProjectCard(context, project, jobListItem),
+      ),
+    );
+  }
+
+  Widget _buildDesktopProjectCard(
+      BuildContext context, HappySunProject project, JobListItem jobListItem) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Section 1: Project Details
+          Expanded(
+            flex: 1,
+            child: _buildProjectDetailsSection(project, jobListItem),
+          ),
+          const VerticalDivider(width: 32),
+          // Section 2: Checkout
+          Expanded(
+            flex: 1,
+            child: _buildCheckoutSection(context, project),
+          ),
+          const VerticalDivider(width: 32),
+          // Section 3: Checklist
+          Expanded(
+            flex: 1,
+            child: _buildChecklistSection(context, project),
+          ),
+          const VerticalDivider(width: 32),
+          // Section 4: Checkin
+          Expanded(
+            flex: 1,
+            child: _buildCheckinSection(context, project),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMobileProjectCard(BuildContext context, HappySunProject project,
+      JobListItem jobListItem, Color borderColor) {
+    final currentTabIndex = _getCardTabIndex(project.id);
+
+    // Determine status icons
+    final hasCheckout = project.startTime != null;
+    final hasChecklist = project.checklistData != null;
+    final hasCheckin = project.endTime != null;
+
+    return Column(
+      children: [
+        // Tab bar
+        Container(
+          decoration: BoxDecoration(
+            color: borderColor.withOpacity(0.1),
+            border: Border(
+              bottom: BorderSide(color: Colors.grey.shade200),
             ),
-            const VerticalDivider(width: 32),
-            // Section 2: Checkout
-            Expanded(
-              flex: 1,
-              child: _buildCheckoutSection(context, project),
+          ),
+          child: Row(
+            children: [
+              _buildMobileTab(
+                icon: Icons.info_outline,
+                label: 'Details',
+                isSelected: currentTabIndex == 0,
+                onTap: () => _setCardTabIndex(project.id, 0),
+              ),
+              _buildMobileTab(
+                icon: hasCheckout ? Icons.check_circle : Icons.logout,
+                label: 'Checkout',
+                isSelected: currentTabIndex == 1,
+                onTap: () => _setCardTabIndex(project.id, 1),
+                statusColor: hasCheckout ? Colors.green : null,
+              ),
+              _buildMobileTab(
+                icon: hasChecklist ? Icons.check_circle : Icons.checklist,
+                label: 'Checklist',
+                isSelected: currentTabIndex == 2,
+                onTap: () => _setCardTabIndex(project.id, 2),
+                statusColor: hasChecklist ? Colors.green : null,
+              ),
+              _buildMobileTab(
+                icon: hasCheckin ? Icons.check_circle : Icons.assignment_return,
+                label: 'Check-in',
+                isSelected: currentTabIndex == 3,
+                onTap: () => _setCardTabIndex(project.id, 3),
+                statusColor: hasCheckin ? Colors.green : null,
+              ),
+            ],
+          ),
+        ),
+        // Content
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            child: _buildMobileCardContent(
+              context,
+              project,
+              jobListItem,
+              currentTabIndex,
             ),
-            const VerticalDivider(width: 32),
-            // Section 3: Checklist
-            Expanded(
-              flex: 1,
-              child: _buildChecklistSection(context, project),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMobileTab({
+    required IconData icon,
+    required String label,
+    required bool isSelected,
+    required VoidCallback onTap,
+    Color? statusColor,
+  }) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                color: isSelected ? Colors.orange : Colors.transparent,
+                width: 3,
+              ),
             ),
-            const VerticalDivider(width: 32),
-            // Section 4: Checkin
-            Expanded(
-              flex: 1,
-              child: _buildCheckinSection(context, project),
-            ),
-          ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 20,
+                color:
+                    statusColor ?? (isSelected ? Colors.orange : Colors.grey),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: isSelected ? Colors.orange : Colors.grey,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
         ),
       ),
     );
+  }
+
+  Widget _buildMobileCardContent(
+    BuildContext context,
+    HappySunProject project,
+    JobListItem jobListItem,
+    int tabIndex,
+  ) {
+    switch (tabIndex) {
+      case 0:
+        return _buildProjectDetailsSection(project, jobListItem);
+      case 1:
+        return _buildCheckoutSection(context, project);
+      case 2:
+        return _buildChecklistSection(context, project);
+      case 3:
+        return _buildCheckinSection(context, project);
+      default:
+        return _buildProjectDetailsSection(project, jobListItem);
+    }
   }
 
   Widget _buildProjectDetailsSection(
