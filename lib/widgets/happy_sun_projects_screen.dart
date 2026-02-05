@@ -23,6 +23,7 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   String _selectedStatus = 'all'; // For mobile dropdown
+  DateTime _selectedMonth = DateTime.now(); // For month filter
 
   @override
   void initState() {
@@ -84,15 +85,7 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
         actions: [
           IconButton(
             icon: const Icon(Icons.calendar_month),
-            onPressed: () {
-              // TODO: Add month filter functionality
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Month filter coming soon'),
-                  duration: Duration(seconds: 1),
-                ),
-              );
-            },
+            onPressed: () => _showMonthPicker(context),
             tooltip: 'Filter by Month',
           ),
           IconButton(
@@ -218,6 +211,12 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
         List<HappySunProject> projects = statusFilter == 'all'
             ? projectProvider.projects
             : projectProvider.getProjectsByStatus(statusFilter);
+
+        // Filter projects by selected month
+        projects = projects.where((project) {
+          return project.scheduledDate.year == _selectedMonth.year &&
+              project.scheduledDate.month == _selectedMonth.month;
+        }).toList();
 
         if (projects.isEmpty) {
           return Center(
@@ -464,5 +463,131 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
             )
           : HappySunCheckinDialog(project: project),
     );
+  }
+
+  Future<void> _showMonthPicker(BuildContext context) async {
+    int? selectedYear = _selectedMonth.year;
+    int? selectedMonth = _selectedMonth.month;
+
+    final result = await showDialog<Map<String, int>>(
+      context: context,
+      builder: (BuildContext context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: const Text('Select Month'),
+              content: SizedBox(
+                width: 300,
+                height: 400,
+                child: Column(
+                  children: [
+                    // Year selector
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.chevron_left),
+                          onPressed: () {
+                            setState(() {
+                              selectedYear = selectedYear! - 1;
+                            });
+                          },
+                        ),
+                        Text(
+                          '$selectedYear',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.chevron_right),
+                          onPressed: () {
+                            setState(() {
+                              selectedYear = selectedYear! + 1;
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    // Month grid
+                    Expanded(
+                      child: GridView.builder(
+                        gridDelegate:
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 3,
+                          childAspectRatio: 2,
+                          crossAxisSpacing: 8,
+                          mainAxisSpacing: 8,
+                        ),
+                        itemCount: 12,
+                        itemBuilder: (context, index) {
+                          final month = index + 1;
+                          final isSelected = month == selectedMonth;
+                          const monthNames = [
+                            'Jan',
+                            'Feb',
+                            'Mar',
+                            'Apr',
+                            'May',
+                            'Jun',
+                            'Jul',
+                            'Aug',
+                            'Sep',
+                            'Oct',
+                            'Nov',
+                            'Dec'
+                          ];
+
+                          return ElevatedButton(
+                            onPressed: () {
+                              setState(() {
+                                selectedMonth = month;
+                              });
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor:
+                                  isSelected ? Colors.orange : null,
+                              foregroundColor: isSelected ? Colors.white : null,
+                            ),
+                            child: Text(monthNames[index]),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context, {
+                      'year': selectedYear!,
+                      'month': selectedMonth!,
+                    });
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('OK'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result != null) {
+      setState(() {
+        _selectedMonth = DateTime(result['year']!, result['month']!);
+      });
+    }
   }
 }
