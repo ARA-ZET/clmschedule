@@ -6,6 +6,7 @@ import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
 import '../widgets/happy_sun_project_card.dart';
 import 'happy_sun_checkout_dialog.dart';
+import 'happy_sun_checkout_screen.dart';
 import 'happy_sun_checklist_dialog.dart';
 import 'happy_sun_checkin_dialog.dart';
 import 'happy_sun_add_project_dialog.dart';
@@ -21,11 +22,18 @@ class HappySunProjectsScreen extends StatefulWidget {
 class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  String _selectedStatus = 'all'; // For mobile dropdown
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 4, vsync: this);
+    _tabController.addListener(() {
+      // Sync dropdown with tab selection
+      setState(() {
+        _selectedStatus = _getStatusFromIndex(_tabController.index);
+      });
+    });
   }
 
   @override
@@ -34,55 +42,148 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
     super.dispose();
   }
 
+  String _getStatusFromIndex(int index) {
+    switch (index) {
+      case 0:
+        return 'all';
+      case 1:
+        return 'pending';
+      case 2:
+        return 'in-progress';
+      case 3:
+        return 'completed';
+      default:
+        return 'all';
+    }
+  }
+
+  int _getIndexFromStatus(String status) {
+    switch (status) {
+      case 'all':
+        return 0;
+      case 'pending':
+        return 1;
+      case 'in-progress':
+        return 2;
+      case 'completed':
+        return 3;
+      default:
+        return 0;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        // Top bar with tabs and add button
-        Material(
-          elevation: 2,
-          child: Container(
-            color: Theme.of(context).colorScheme.surface,
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: TabBar(
-                        controller: _tabController,
-                        isScrollable: true,
-                        tabs: const [
-                          Tab(text: 'All Projects'),
-                          Tab(text: 'Pending'),
-                          Tab(text: 'In Progress'),
-                          Tab(text: 'Completed'),
-                        ],
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.add),
-                      onPressed: () => _showAddProjectDialog(context),
-                      tooltip: 'Add Project',
-                    ),
-                    const SizedBox(width: 8),
-                  ],
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Happy Sun Projects'),
+        backgroundColor: Colors.orange,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.calendar_month),
+            onPressed: () {
+              // TODO: Add month filter functionality
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Month filter coming soon'),
+                  duration: Duration(seconds: 1),
                 ),
+              );
+            },
+            tooltip: 'Filter by Month',
+          ),
+          IconButton(
+            icon: const Icon(Icons.add),
+            onPressed: () => _showAddProjectDialog(context),
+            tooltip: 'Add Project',
+          ),
+          const SizedBox(width: 8),
+        ],
+        bottom: isMobile
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(60),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  color: Colors.orange.shade700,
+                  child: Row(
+                    children: [
+                      const Icon(Icons.filter_list,
+                          color: Colors.white, size: 20),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: DropdownButton<String>(
+                            value: _selectedStatus,
+                            isExpanded: true,
+                            underline: const SizedBox(),
+                            icon: const Icon(Icons.arrow_drop_down),
+                            onChanged: (String? newValue) {
+                              if (newValue != null) {
+                                setState(() {
+                                  _selectedStatus = newValue;
+                                  _tabController
+                                      .animateTo(_getIndexFromStatus(newValue));
+                                });
+                              }
+                            },
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'all',
+                                child: Text('All Projects'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'pending',
+                                child: Text('Pending'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'in-progress',
+                                child: Text('In Progress'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'completed',
+                                child: Text('Completed'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            : TabBar(
+                controller: _tabController,
+                labelColor: Colors.white,
+                unselectedLabelColor: Colors.white70,
+                indicatorColor: Colors.white,
+                tabs: const [
+                  Tab(text: 'All Projects'),
+                  Tab(text: 'Pending'),
+                  Tab(text: 'In Progress'),
+                  Tab(text: 'Completed'),
+                ],
+              ),
+      ),
+      body: isMobile
+          ? _buildProjectsList(_selectedStatus)
+          : TabBarView(
+              controller: _tabController,
+              children: [
+                _buildProjectsList('all'),
+                _buildProjectsList('pending'),
+                _buildProjectsList('in-progress'),
+                _buildProjectsList('completed'),
               ],
             ),
-          ),
-        ),
-        Expanded(
-          child: TabBarView(
-            controller: _tabController,
-            children: [
-              _buildProjectsList('all'),
-              _buildProjectsList('pending'),
-              _buildProjectsList('in-progress'),
-              _buildProjectsList('completed'),
-            ],
-          ),
-        ),
-      ],
     );
   }
 
@@ -188,49 +289,67 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
   }
 
   void _showProjectDetails(BuildContext context, HappySunProject project) {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(project.clientName),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildDetailSection('Address', project.address),
-              _buildDetailSection('Status', project.status),
-              _buildDetailSection(
-                  'Team Members', '${project.numberOfTeamMembers}'),
-              if (project.hasCheckout) ...[
-                const Divider(),
-                const Text('Checkout Details',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
-                Text('Tools: ${project.checkout!.totalToolsCount}'),
+      useSafeArea: true,
+      builder: (context) => isMobile
+          ? Dialog.fullscreen(
+              child: Scaffold(
+                appBar: AppBar(
+                  title: Text(project.clientName),
+                  backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
+                ),
+                body: _buildProjectDetailsContent(project),
+              ),
+            )
+          : AlertDialog(
+              title: Text(project.clientName),
+              content: _buildProjectDetailsContent(project),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Close'),
+                ),
               ],
-              if (project.hasChecklist) ...[
-                const Divider(),
-                const Text('Checklist Details',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
-                Text(
-                    'Completed: ${project.checklist!.checkedItemsCount}/${project.checklist!.totalItemsCount}'),
-              ],
-              if (project.hasCheckin) ...[
-                const Divider(),
-                const Text('Check-in Details',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
-                Text('Returned: ${project.checkin!.totalReturnedCount}'),
-                if (!project.checkin!.hasAllToolsReturned)
-                  Text('Missing: ${project.checkin!.missingTools.length}',
-                      style: const TextStyle(color: Colors.red)),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
+            ),
+    );
+  }
+
+  Widget _buildProjectDetailsContent(HappySunProject project) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildDetailSection('Address', project.address),
+          _buildDetailSection('Status', project.status),
+          _buildDetailSection('Team Members', '${project.numberOfTeamMembers}'),
+          if (project.hasCheckout) ...[
+            const Divider(),
+            const Text('Checkout Details',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            Text('Tools: ${project.checkout!.totalToolsCount}'),
+          ],
+          if (project.hasChecklist) ...[
+            const Divider(),
+            const Text('Checklist Details',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+                'Completed: ${project.checklist!.checkedItemsCount}/${project.checklist!.totalItemsCount}'),
+          ],
+          if (project.hasCheckin) ...[
+            const Divider(),
+            const Text('Check-in Details',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            Text('Returned: ${project.checkin!.totalReturnedCount}'),
+            if (!project.checkin!.hasAllToolsReturned)
+              Text('Missing: ${project.checkin!.missingTools.length}',
+                  style: const TextStyle(color: Colors.red)),
+          ],
         ],
       ),
     );
@@ -251,48 +370,99 @@ class _HappySunProjectsScreenState extends State<HappySunProjectsScreen>
 
   void _showToolsDialog(BuildContext context, HappySunProject project) {
     final inventoryProvider = context.read<InventoryProvider>();
+    final isMobile = MediaQuery.of(context).size.width < 600;
 
     showDialog(
       context: context,
-      builder: (context) => ProjectToolsDialog(
-        toolsNeeded: project.toolsNeeded ?? CategorizedTools(),
-        availableTools: inventoryProvider.tools,
-        onSave: (updatedTools) async {
-          final provider = context.read<HappySunProjectProvider>();
-          final updatedProject = project.copyWith(toolsNeeded: updatedTools);
-          await provider.updateProject(updatedProject);
+      useSafeArea: true,
+      builder: (context) => isMobile
+          ? Dialog.fullscreen(
+              child: ProjectToolsDialog(
+                toolsNeeded: project.toolsNeeded ?? CategorizedTools(),
+                availableTools: inventoryProvider.tools,
+                onSave: (updatedTools) async {
+                  final provider = context.read<HappySunProjectProvider>();
+                  final updatedProject =
+                      project.copyWith(toolsNeeded: updatedTools);
+                  await provider.updateProject(updatedProject);
 
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Tools updated successfully'),
-                backgroundColor: Colors.green,
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Tools updated successfully'),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                  }
+                },
               ),
-            );
-          }
-        },
-      ),
+            )
+          : ProjectToolsDialog(
+              toolsNeeded: project.toolsNeeded ?? CategorizedTools(),
+              availableTools: inventoryProvider.tools,
+              onSave: (updatedTools) async {
+                final provider = context.read<HappySunProjectProvider>();
+                final updatedProject =
+                    project.copyWith(toolsNeeded: updatedTools);
+                await provider.updateProject(updatedProject);
+
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Tools updated successfully'),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                }
+              },
+            ),
     );
   }
 
   void _showCheckoutDialog(BuildContext context, HappySunProject project) {
-    showDialog(
-      context: context,
-      builder: (context) => HappySunCheckoutDialog(project: project),
-    );
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
+    if (isMobile) {
+      // Use full-screen navigation on mobile
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (context) => HappySunCheckoutScreen(project: project),
+        ),
+      );
+    } else {
+      // Use dialog on larger screens
+      showDialog(
+        context: context,
+        builder: (context) => HappySunCheckoutDialog(project: project),
+      );
+    }
   }
 
   void _showChecklistDialog(BuildContext context, HappySunProject project) {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     showDialog(
       context: context,
-      builder: (context) => HappySunChecklistDialog(project: project),
+      useSafeArea: true,
+      builder: (context) => isMobile
+          ? Dialog.fullscreen(
+              child: HappySunChecklistDialog(project: project),
+            )
+          : HappySunChecklistDialog(project: project),
     );
   }
 
   void _showCheckinDialog(BuildContext context, HappySunProject project) {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     showDialog(
       context: context,
-      builder: (context) => HappySunCheckinDialog(project: project),
+      useSafeArea: true,
+      builder: (context) => isMobile
+          ? Dialog.fullscreen(
+              child: HappySunCheckinDialog(project: project),
+            )
+          : HappySunCheckinDialog(project: project),
     );
   }
 }
