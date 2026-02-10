@@ -50,11 +50,42 @@ class _AddToolDialogState extends State<AddToolDialog> {
   Future<void> _pickImage() async {
     try {
       final ImagePicker picker = ImagePicker();
+
+      // Show options to choose camera or gallery
+      final ImageSource? source = await showDialog<ImageSource>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Choose Image Source'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt, color: Colors.blue),
+                title: const Text('Camera'),
+                subtitle: const Text('Take a photo'),
+                onTap: () => Navigator.pop(context, ImageSource.camera),
+              ),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.photo_library, color: Colors.green),
+                title: const Text('Gallery'),
+                subtitle: const Text('Choose from library'),
+                onTap: () => Navigator.pop(context, ImageSource.gallery),
+              ),
+            ],
+          ),
+        ),
+      );
+
+      if (source == null) return;
+
+      // Explicitly use the selected source
       final XFile? image = await picker.pickImage(
-        source: ImageSource.gallery,
+        source: source,
         maxWidth: 1024,
         maxHeight: 1024,
         imageQuality: 85,
+        preferredCameraDevice: CameraDevice.rear,
       );
 
       if (image != null && mounted) {
@@ -211,36 +242,46 @@ class _AddToolDialogState extends State<AddToolDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     return Dialog(
+      insetPadding: isMobile
+          ? EdgeInsets.zero
+          : const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
       child: Container(
-        width: 500,
-        constraints: const BoxConstraints(maxHeight: 700),
+        width: isMobile ? double.infinity : 500,
+        height: isMobile ? double.infinity : null,
+        constraints: isMobile ? null : const BoxConstraints(maxHeight: 700),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Header
             Container(
-              padding: const EdgeInsets.all(16),
+              padding: EdgeInsets.all(isMobile ? 12 : 16),
               decoration: BoxDecoration(
                 color: Theme.of(context).primaryColor,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(4)),
+                borderRadius: isMobile
+                    ? null
+                    : const BorderRadius.vertical(top: Radius.circular(4)),
               ),
               child: Row(
                 children: [
                   Expanded(
                     child: Text(
                       widget.tool == null ? 'Add New Tool' : 'Edit Tool',
-                      style: const TextStyle(
+                      style: TextStyle(
                         color: Colors.white,
-                        fontSize: 20,
+                        fontSize: isMobile ? 16 : 20,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
+                    icon: Icon(Icons.close,
+                        color: Colors.white, size: isMobile ? 20 : 24),
                     onPressed: () => Navigator.of(context).pop(),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
                   ),
                 ],
               ),
@@ -248,7 +289,7 @@ class _AddToolDialogState extends State<AddToolDialog> {
             // Form
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.all(24),
+                padding: EdgeInsets.all(isMobile ? 16 : 24),
                 child: Form(
                   key: _formKey,
                   child: Column(
@@ -259,8 +300,8 @@ class _AddToolDialogState extends State<AddToolDialog> {
                         child: GestureDetector(
                           onTap: _pickImage,
                           child: Container(
-                            width: 150,
-                            height: 150,
+                            width: isMobile ? 120 : 150,
+                            height: isMobile ? 120 : 150,
                             decoration: BoxDecoration(
                               color: Colors.grey[200],
                               borderRadius: BorderRadius.circular(8),
@@ -444,11 +485,12 @@ class _AddToolDialogState extends State<AddToolDialog> {
             ),
             // Actions
             Container(
-              padding: const EdgeInsets.all(16),
+              padding: EdgeInsets.all(isMobile ? 10 : 16),
               decoration: BoxDecoration(
                 color: Colors.grey[100],
-                borderRadius:
-                    const BorderRadius.vertical(bottom: Radius.circular(4)),
+                borderRadius: isMobile
+                    ? null
+                    : const BorderRadius.vertical(bottom: Radius.circular(4)),
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.end,
@@ -456,19 +498,29 @@ class _AddToolDialogState extends State<AddToolDialog> {
                   TextButton(
                     onPressed:
                         _isLoading ? null : () => Navigator.of(context).pop(),
-                    child: const Text('Cancel'),
+                    child: Text('Cancel',
+                        style: TextStyle(fontSize: isMobile ? 13 : 14)),
                   ),
-                  const SizedBox(width: 8),
+                  SizedBox(width: isMobile ? 6 : 8),
                   ElevatedButton(
                     onPressed: _isLoading ? null : _saveTool,
+                    style: ElevatedButton.styleFrom(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: isMobile ? 16 : 20,
+                        vertical: isMobile ? 10 : 12,
+                      ),
+                    ),
                     child: _isLoading
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
+                        ? SizedBox(
+                            width: isMobile ? 16 : 20,
+                            height: isMobile ? 16 : 20,
+                            child:
+                                const CircularProgressIndicator(strokeWidth: 2),
                           )
                         : Text(
-                            widget.tool == null ? 'Add Tool' : 'Save Changes'),
+                            widget.tool == null ? 'Add Tool' : 'Save Changes',
+                            style: TextStyle(fontSize: isMobile ? 13 : 14),
+                          ),
                   ),
                 ],
               ),

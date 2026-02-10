@@ -24,10 +24,10 @@ These files are clearly obsolete, empty, or debug-only with no risk to productio
 
 #### 🗑️ Backup/Old Files (2 files)
 
-| File | Reason | Risk Level |
-|------|--------|------------|
-| `lib/services/chat_service_backup_old.dart` | Old backup with `_old` suffix | 🟢 ZERO |
-| `lib/services/firestore_service_old.dart` | Old backup with `_old` suffix | 🟢 ZERO |
+| File                                        | Reason                        | Risk Level |
+| ------------------------------------------- | ----------------------------- | ---------- |
+| `lib/services/chat_service_backup_old.dart` | Old backup with `_old` suffix | 🟢 ZERO    |
+| `lib/services/firestore_service_old.dart`   | Old backup with `_old` suffix | 🟢 ZERO    |
 
 **Action**: Delete both files immediately.
 
@@ -35,12 +35,12 @@ These files are clearly obsolete, empty, or debug-only with no risk to productio
 
 #### 🧪 Debug/Test Widgets (4 files)
 
-| File | Purpose | Risk Level |
-|------|---------|------------|
-| `lib/widgets/cache_debug_widget.dart` | Debug UI for cache inspection | 🟢 ZERO |
-| `lib/widgets/scale_test_widget.dart` | Scale testing utility | 🟢 ZERO |
-| `lib/widgets/kml_download_demo.dart` | KML demo/testing | 🟢 ZERO |
-| `lib/widgets/kml_map_demo.dart` | KML map demo/testing | 🟢 ZERO |
+| File                                  | Purpose                       | Risk Level |
+| ------------------------------------- | ----------------------------- | ---------- |
+| `lib/widgets/cache_debug_widget.dart` | Debug UI for cache inspection | 🟢 ZERO    |
+| `lib/widgets/scale_test_widget.dart`  | Scale testing utility         | 🟢 ZERO    |
+| `lib/widgets/kml_download_demo.dart`  | KML demo/testing              | 🟢 ZERO    |
+| `lib/widgets/kml_map_demo.dart`       | KML map demo/testing          | 🟢 ZERO    |
 
 **Action**: Delete all debug widgets.
 
@@ -48,9 +48,9 @@ These files are clearly obsolete, empty, or debug-only with no risk to productio
 
 #### 📄 Empty/Placeholder Files (1 file)
 
-| File | Content | Risk Level |
-|------|---------|------------|
-| `lib/theme.dart` | Empty (whitespace only) | 🟢 ZERO |
+| File             | Content                 | Risk Level |
+| ---------------- | ----------------------- | ---------- |
+| `lib/theme.dart` | Empty (whitespace only) | 🟢 ZERO    |
 
 **Action**: Delete empty file.
 
@@ -58,14 +58,14 @@ These files are clearly obsolete, empty, or debug-only with no risk to productio
 
 #### 🔧 Unused Utilities (6 files)
 
-| File | Purpose | Risk Level |
-|------|---------|------------|
-| `lib/utils/color_utils.dart` | Color helper functions | 🟢 ZERO |
-| `lib/utils/google_maps_utils.dart` | Google Maps helpers | 🟢 ZERO |
-| `lib/utils/maps_util.dart` | Map utilities | 🟢 ZERO |
-| `lib/utils/work_area_converter.dart` | Work area conversion | 🟢 ZERO |
-| `lib/utils/seed_job_list_data.dart` | Seed data generation | 🟢 ZERO |
-| `lib/utils/collection_job_integration_helper.dart` | Integration helper | 🟢 ZERO |
+| File                                               | Purpose                | Risk Level |
+| -------------------------------------------------- | ---------------------- | ---------- |
+| `lib/utils/color_utils.dart`                       | Color helper functions | 🟢 ZERO    |
+| `lib/utils/google_maps_utils.dart`                 | Google Maps helpers    | 🟢 ZERO    |
+| `lib/utils/maps_util.dart`                         | Map utilities          | 🟢 ZERO    |
+| `lib/utils/work_area_converter.dart`               | Work area conversion   | 🟢 ZERO    |
+| `lib/utils/seed_job_list_data.dart`                | Seed data generation   | 🟢 ZERO    |
+| `lib/utils/collection_job_integration_helper.dart` | Integration helper     | 🟢 ZERO    |
 
 **Action**: Delete all unused utility files.
 
@@ -73,12 +73,12 @@ These files are clearly obsolete, empty, or debug-only with no risk to productio
 
 #### 🔐 Unused Auth Implementations (2 files)
 
-| File | Purpose | Risk Level |
-|------|---------|------------|
-| `lib/services/mock_auth_service.dart` | Mock authentication | 🟢 ZERO* |
-| `lib/providers/mock_auth_provider.dart` | Mock auth provider | 🟢 ZERO* |
+| File                                    | Purpose             | Risk Level |
+| --------------------------------------- | ------------------- | ---------- |
+| `lib/services/mock_auth_service.dart`   | Mock authentication | 🟢 ZERO\*  |
+| `lib/providers/mock_auth_provider.dart` | Mock auth provider  | 🟢 ZERO\*  |
 
-**Note**: *Safe to delete IF not used in tests. Check `test/` directory first.
+**Note**: \*Safe to delete IF not used in tests. Check `test/` directory first.
 
 **Action**: Verify no test dependencies, then delete.
 
@@ -92,15 +92,16 @@ These files appear unused but may have been part of incomplete features or futur
 
 #### 🎯 Command Pattern Files (3 files)
 
-| File | Classes Defined | Status |
-|------|----------------|--------|
+| File                                  | Classes Defined                                                                 | Status                                  |
+| ------------------------------------- | ------------------------------------------------------------------------------- | --------------------------------------- |
 | `lib/commands/job_list_commands.dart` | `AddJobListItemCommand`, `UpdateJobListItemCommand`, `DeleteJobListItemCommand` | ⚠️ Architecture pattern not implemented |
-| `lib/commands/map_commands.dart` | Map-related commands | ⚠️ Architecture pattern not implemented |
-| `lib/commands/schedule_commands.dart` | `AddJobCommand`, `UpdateJobCommand`, etc. | ⚠️ Architecture pattern not implemented |
+| `lib/commands/map_commands.dart`      | Map-related commands                                                            | ⚠️ Architecture pattern not implemented |
+| `lib/commands/schedule_commands.dart` | `AddJobCommand`, `UpdateJobCommand`, etc.                                       | ⚠️ Architecture pattern not implemented |
 
 **Finding**: Code comments in `schedule_provider.dart` indicate the Command pattern was bypassed in favor of direct Firestore calls.
 
 **Recommendation**:
+
 - ✅ DELETE if Command pattern refactoring is abandoned
 - ⏸️ KEEP if you plan to implement proper undo/redo architecture
 
@@ -110,19 +111,21 @@ These files appear unused but may have been part of incomplete features or futur
 
 #### 🗺️ Map View Variations (2 files)
 
-| File | Purpose | Likely Status |
-|------|---------|---------------|
-| `lib/widgets/map_view.dart` | Original map view implementation | 🔄 Replaced by `updated_map_view.dart` |
-| `lib/widgets/updated_map_view.dart` | Updated map view | ❓ Which is canonical? |
+| File                                | Purpose                          | Likely Status                          |
+| ----------------------------------- | -------------------------------- | -------------------------------------- |
+| `lib/widgets/map_view.dart`         | Original map view implementation | 🔄 Replaced by `updated_map_view.dart` |
+| `lib/widgets/updated_map_view.dart` | Updated map view                 | ❓ Which is canonical?                 |
 
 **Finding**: Two map view implementations exist. Need to determine which is actively used.
 
 **Recommendation**:
+
 - Check import usage in main app screens
 - Keep the one that's actively rendered
 - Delete the obsolete version
 
-**Action Required**: 
+**Action Required**:
+
 ```bash
 # Search for usage
 grep -r "import.*map_view.dart" lib/
@@ -133,9 +136,9 @@ grep -r "import.*updated_map_view.dart" lib/
 
 #### 📅 Date Filter Widgets (2 files)
 
-| File | Likely Purpose |
-|------|----------------|
-| `lib/widgets/date_filter_widget.dart` | Date filtering UI |
+| File                                   | Likely Purpose              |
+| -------------------------------------- | --------------------------- |
+| `lib/widgets/date_filter_widget.dart`  | Date filtering UI           |
 | `lib/widgets/compact_date_filter.dart` | Compact date filter variant |
 
 **Finding**: Multiple date filter implementations suggest UI iteration.
@@ -148,12 +151,12 @@ grep -r "import.*updated_map_view.dart" lib/
 
 #### 📊 Alternative Widget Implementations (4 files)
 
-| File | Purpose | Status |
-|------|---------|--------|
-| `lib/widgets/fast_job_list_view.dart` | Performance-optimized job list | ❓ Replaced by `job_list_grid.dart`? |
-| `lib/widgets/job_list_card.dart` | Card layout for job list | ❓ Not used in current grid |
-| `lib/widgets/job_list_row_widget.dart` | Row layout for job list | ❓ Not used in current grid |
-| `lib/widgets/editable_text_field.dart` | Custom editable field | ❓ Replaced by `editable_table_cell.dart`? |
+| File                                   | Purpose                        | Status                                     |
+| -------------------------------------- | ------------------------------ | ------------------------------------------ |
+| `lib/widgets/fast_job_list_view.dart`  | Performance-optimized job list | ❓ Replaced by `job_list_grid.dart`?       |
+| `lib/widgets/job_list_card.dart`       | Card layout for job list       | ❓ Not used in current grid                |
+| `lib/widgets/job_list_row_widget.dart` | Row layout for job list        | ❓ Not used in current grid                |
+| `lib/widgets/editable_text_field.dart` | Custom editable field          | ❓ Replaced by `editable_table_cell.dart`? |
 
 **Recommendation**: These appear to be alternative implementations. Delete if superseded.
 
@@ -163,16 +166,17 @@ grep -r "import.*updated_map_view.dart" lib/
 
 #### 🌞 Happy Sun Unused Widgets (4 files)
 
-| File | Purpose | Imported By |
-|------|---------|-------------|
-| `lib/widgets/happy_sun_jobs_screen.dart` | Jobs screen | ❌ None |
-| `lib/widgets/happy_sun_project_card.dart` | Project card widget | ❌ None |
-| `lib/widgets/happy_sun_projects_screen.dart` | Projects screen | ❌ None |
-| `lib/widgets/happy_sun_tools_needed_dialog.dart` | Tools dialog | ❌ None |
+| File                                             | Purpose             | Imported By |
+| ------------------------------------------------ | ------------------- | ----------- |
+| `lib/widgets/happy_sun_jobs_screen.dart`         | Jobs screen         | ❌ None     |
+| `lib/widgets/happy_sun_project_card.dart`        | Project card widget | ❌ None     |
+| `lib/widgets/happy_sun_projects_screen.dart`     | Projects screen     | ❌ None     |
+| `lib/widgets/happy_sun_tools_needed_dialog.dart` | Tools dialog        | ❌ None     |
 
 **Finding**: These Happy Sun widgets exist but are not imported. Current implementation uses `happy_sun_job_projects_screen.dart`.
 
-**Recommendation**: 
+**Recommendation**:
+
 - ✅ DELETE if the new combined screen (`happy_sun_job_projects_screen.dart`) replaces these
 - ⏸️ KEEP if these are part of an upcoming UI refactor
 
@@ -182,12 +186,13 @@ grep -r "import.*updated_map_view.dart" lib/
 
 #### 📈 Tracking & Version Widgets (2 files)
 
-| File | Purpose | Risk Level |
-|------|---------|------------|
-| `lib/widgets/schedule_tracking_view.dart` | Schedule tracking UI | 🟡 LOW |
-| `lib/widgets/new_version_dialog.dart` | Version update dialog | 🟡 LOW |
+| File                                      | Purpose               | Risk Level |
+| ----------------------------------------- | --------------------- | ---------- |
+| `lib/widgets/schedule_tracking_view.dart` | Schedule tracking UI  | 🟡 LOW     |
+| `lib/widgets/new_version_dialog.dart`     | Version update dialog | 🟡 LOW     |
 
-**Recommendation**: 
+**Recommendation**:
+
 - `schedule_tracking_view.dart`: Delete if tracking feature is not implemented
 - `new_version_dialog.dart`: Keep if you have app update notifications, otherwise delete
 
@@ -197,9 +202,9 @@ grep -r "import.*updated_map_view.dart" lib/
 
 #### 🔄 Undo/Redo Widgets (1 file)
 
-| File | Purpose | Risk Level |
-|------|---------|------------|
-| `lib/widgets/undo_redo_widgets.dart` | Undo/redo UI controls | 🟡 LOW |
+| File                                 | Purpose               | Risk Level |
+| ------------------------------------ | --------------------- | ---------- |
+| `lib/widgets/undo_redo_widgets.dart` | Undo/redo UI controls | 🟡 LOW     |
 
 **Finding**: Undo/redo UI exists but not shown anywhere.
 
@@ -217,10 +222,10 @@ These files may have dependencies or be planned features.
 
 #### 🔐 Authentication Alternatives (2 files)
 
-| File | Purpose | Keep/Delete |
-|------|---------|-------------|
-| `lib/services/auth_service.dart` | Abstract auth interface | ⚠️ May be needed for abstraction |
-| `lib/services/platform_auth_service.dart` | Platform-specific auth | ⚠️ May be needed for multi-platform |
+| File                                      | Purpose                 | Keep/Delete                         |
+| ----------------------------------------- | ----------------------- | ----------------------------------- |
+| `lib/services/auth_service.dart`          | Abstract auth interface | ⚠️ May be needed for abstraction    |
+| `lib/services/platform_auth_service.dart` | Platform-specific auth  | ⚠️ May be needed for multi-platform |
 
 **Recommendation**: Keep if planning multi-platform support (iOS/Android/Web with different auth).
 
@@ -230,8 +235,8 @@ These files may have dependencies or be planned features.
 
 #### 🔐 Simple Auth (1 file)
 
-| File | Purpose | Keep/Delete |
-|------|---------|-------------|
+| File                                    | Purpose                        | Keep/Delete        |
+| --------------------------------------- | ------------------------------ | ------------------ |
 | `lib/services/simple_auth_service.dart` | Simplified auth implementation | ⚠️ May be fallback |
 
 **Recommendation**: Delete if current auth (Firebase) is the only implementation.
@@ -242,12 +247,13 @@ These files may have dependencies or be planned features.
 
 #### 📊 Tracking & Cache Services (2 files)
 
-| File | Purpose | Keep/Delete |
-|------|---------|-------------|
-| `lib/services/schedule_tracking_service.dart` | Schedule tracking logic | ⚠️ May be planned feature |
-| `lib/services/job_cache_service.dart` | Job caching for offline | ⚠️ May be needed for performance |
+| File                                          | Purpose                 | Keep/Delete                      |
+| --------------------------------------------- | ----------------------- | -------------------------------- |
+| `lib/services/schedule_tracking_service.dart` | Schedule tracking logic | ⚠️ May be planned feature        |
+| `lib/services/job_cache_service.dart`         | Job caching for offline | ⚠️ May be needed for performance |
 
-**Recommendation**: 
+**Recommendation**:
+
 - Keep if offline support is planned
 - Delete if all data is real-time from Firestore
 
@@ -257,14 +263,15 @@ These files may have dependencies or be planned features.
 
 #### 🗺️ Parser Services (2 files)
 
-| File | Purpose | Keep/Delete |
-|------|---------|-------------|
+| File                                   | Purpose               | Keep/Delete                      |
+| -------------------------------------- | --------------------- | -------------------------------- |
 | `lib/services/gpx_parser_service.dart` | Parse GPX track files | ⚠️ May be planned import feature |
-| `lib/services/kml_parser_service.dart` | Parse KML map files | ⚠️ Already have KML in project |
+| `lib/services/kml_parser_service.dart` | Parse KML map files   | ⚠️ Already have KML in project   |
 
 **Finding**: KML parser exists but KML features appear to be present in the app.
 
 **Recommendation**:
+
 - Delete `gpx_parser_service.dart` if GPX import is not planned
 - Investigate if `kml_parser_service.dart` is used indirectly (check imports more carefully)
 
@@ -274,8 +281,8 @@ These files may have dependencies or be planned features.
 
 #### ⌨️ Keyboard Shortcuts (1 file)
 
-| File | Purpose | Keep/Delete |
-|------|---------|-------------|
+| File                                           | Purpose                    | Keep/Delete        |
+| ---------------------------------------------- | -------------------------- | ------------------ |
 | `lib/services/keyboard_shortcuts_service.dart` | Keyboard shortcut handling | ⚠️ Desktop feature |
 
 **Recommendation**: Keep if targeting desktop (Windows/Mac/Linux), delete if web/mobile only.
@@ -286,10 +293,10 @@ These files may have dependencies or be planned features.
 
 #### 📦 Models (2 files)
 
-| File | Purpose | Keep/Delete |
-|------|---------|-------------|
-| `lib/models/gpx_track.dart` | GPX track data model | ⚠️ Matches GPX parser |
-| `lib/models/happy_sun_job.dart` | Happy Sun job model | ⚠️ Check if used differently than project model |
+| File                            | Purpose              | Keep/Delete                                     |
+| ------------------------------- | -------------------- | ----------------------------------------------- |
+| `lib/models/gpx_track.dart`     | GPX track data model | ⚠️ Matches GPX parser                           |
+| `lib/models/happy_sun_job.dart` | Happy Sun job model  | ⚠️ Check if used differently than project model |
 
 **Recommendation**: Delete if features are not implemented.
 
@@ -299,8 +306,8 @@ These files may have dependencies or be planned features.
 
 #### 🔄 Providers (1 file)
 
-| File | Purpose | Keep/Delete |
-|------|---------|-------------|
+| File                              | Purpose              | Keep/Delete                             |
+| --------------------------------- | -------------------- | --------------------------------------- |
 | `lib/providers/job_provider.dart` | Job state management | ⚠️ May be replaced by schedule_provider |
 
 **Recommendation**: Delete if `schedule_provider.dart` handles all job state.
@@ -311,8 +318,8 @@ These files may have dependencies or be planned features.
 
 #### 📊 Google Sheets Integration (1 file)
 
-| File | Purpose | Keep/Delete |
-|------|---------|-------------|
+| File                                           | Purpose                   | Keep/Delete               |
+| ---------------------------------------------- | ------------------------- | ------------------------- |
 | `lib/widgets/google_sheets_tracking_view.dart` | Google Sheets export/view | ⚠️ May be planned feature |
 
 **Recommendation**: Keep if planning Google Sheets integration, delete otherwise.
@@ -324,6 +331,7 @@ These files may have dependencies or be planned features.
 ## 🚀 EXECUTION STEPS
 
 ### Phase 1: Safe Deletions (15 files)
+
 **Time**: 10 minutes  
 **Risk**: ZERO
 
@@ -355,6 +363,7 @@ flutter run --release
 ```
 
 ### Phase 2: Verified Deletions (18 files)
+
 **Time**: 30 minutes  
 **Risk**: LOW (after verification)
 
@@ -370,6 +379,7 @@ flutter test
 ```
 
 ### Phase 3: Investigation Required (12 files)
+
 **Time**: 1-2 hours  
 **Risk**: MEDIUM
 
@@ -400,18 +410,21 @@ git revert HEAD
 ## 📊 EXPECTED OUTCOMES
 
 ### Before Cleanup
+
 - Total lib/ files: 152
 - Active files: 101
 - Unused files: 45
 
 ### After Cleanup (Aggressive)
+
 - Total lib/ files: 107 (-45)
 - Active files: 101
 - Unused files: 0
 
 ### After Cleanup (Conservative - Priority 1 only)
+
 - Total lib/ files: 137 (-15)
-- Active files: 101  
+- Active files: 101
 - Unused files: 30
 
 ---

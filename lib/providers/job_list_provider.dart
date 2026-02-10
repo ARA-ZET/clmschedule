@@ -56,6 +56,9 @@ class JobListProvider extends ChangeNotifier {
   Function(JobListItem oldItem, JobListItem newItem)? _onJobListItemUpdated;
   Function(JobListItem)? _onJobListItemDeleted;
 
+  // Track jobs added locally to prevent duplicate Happy Sun sync from listener
+  final Set<String> _locallyAddedJobIds = {};
+
   JobListProvider(this._jobListService, this._authProvider);
 
   // Set callbacks for Happy Sun job syncing
@@ -257,10 +260,19 @@ class JobListProvider extends ChangeNotifier {
         print(
             'JobListProvider: Received ${jobListItems.length} job list items via snapshot');
 
+        // Store previous known IDs before updating
+        final previousKnownIds = Set<String>.from(_knownJobIds);
+
+        // Update known IDs first
+        _knownJobIds = jobListItems.map((job) => job.id).toSet();
+
         // Detect new window/solar cleaning jobs and trigger Happy Sun sync
-        if (_onJobListItemAdded != null) {
+        // Only trigger for jobs that were truly just added (not in previous known IDs)
+        // Skip jobs that were added locally (already synced)
+        if (_onJobListItemAdded != null && previousKnownIds.isNotEmpty) {
           for (final job in jobListItems) {
-            if (!_knownJobIds.contains(job.id) &&
+            if (!previousKnownIds.contains(job.id) &&
+                !_locallyAddedJobIds.contains(job.id) &&
                 (job.jobType == JobType.windowCleaning ||
                     job.jobType == JobType.solarPanelCleaning)) {
               // New Happy Sun job detected - trigger sync asynchronously
@@ -271,8 +283,8 @@ class JobListProvider extends ChangeNotifier {
           }
         }
 
-        // Update known IDs
-        _knownJobIds = jobListItems.map((job) => job.id).toSet();
+        // Clean up locally added job IDs after processing
+        _locallyAddedJobIds.clear();
 
         _jobListItems = jobListItems;
         _isLoading = false;
@@ -636,6 +648,9 @@ class JobListProvider extends ChangeNotifier {
         whoToInvoice: jobListItem.whoToInvoice,
         collectionJobId: jobListItem.collectionJobId,
       );
+
+      // Track this job as locally added to prevent duplicate sync from listener
+      _locallyAddedJobIds.add(savedJob.id);
 
       // Trigger Happy Sun sync if job is window/solar cleaning
       if (_onJobListItemAdded != null &&

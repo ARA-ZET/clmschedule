@@ -338,6 +338,8 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
 
   @override
   Widget build(BuildContext context) {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     return WillPopScope(
       onWillPop: () async {
         if (_hasUnsavedChanges) {
@@ -367,59 +369,141 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
         return true;
       },
       child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Checkout Tools'),
-          backgroundColor: Colors.orange,
-          foregroundColor: Colors.white,
-          actions: [
-            if (_hasUnsavedChanges)
-              Padding(
-                padding: const EdgeInsets.only(right: 16),
-                child: Center(
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Text(
-                      'Unsaved',
-                      style: TextStyle(
-                        color: Colors.orange,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
+        appBar: isMobile
+            ? null
+            : AppBar(
+                title: const Text('Checkout Tools'),
+                backgroundColor: Colors.orange,
+                foregroundColor: Colors.white,
+                actions: [
+                  if (_hasUnsavedChanges)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 16),
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Text(
+                            'Unsaved',
+                            style: TextStyle(
+                              color: Colors.orange,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
                       ),
                     ),
+                ],
+                bottom: TabBar(
+                  controller: _tabController,
+                  labelColor: Colors.white,
+                  unselectedLabelColor: Colors.white70,
+                  indicatorColor: Colors.white,
+                  tabs: const [
+                    Tab(icon: Icon(Icons.qr_code_scanner), text: 'Scan'),
+                    Tab(icon: Icon(Icons.list), text: 'Tools Taken'),
+                  ],
+                ),
+              ),
+        body: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // Calculate height for mobile header if present
+              final mobileHeaderHeight = isMobile ? 120.0 : 0.0;
+              // Calculate height for bottom actions
+              final bottomActionsHeight = isMobile ? 140.0 : 100.0;
+              // Calculate available height for TabBarView
+              final tabViewHeight = constraints.maxHeight -
+                  mobileHeaderHeight -
+                  bottomActionsHeight;
+
+              return Column(
+                children: [
+                  if (isMobile) _buildMobileHeader(),
+                  SizedBox(
+                    height: tabViewHeight,
+                    child: TabBarView(
+                      controller: _tabController,
+                      children: [
+                        _buildScanTab(),
+                        _buildToolsTakenTab(),
+                      ],
+                    ),
+                  ),
+                  _buildBottomActions(),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMobileHeader() {
+    return Container(
+      color: Colors.orange,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      child: Column(
+        children: [
+          // Top row with back button and title
+          Row(
+            children: [
+              IconButton(
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.arrow_back, color: Colors.white),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Checkout Tools',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
               ),
-          ],
-          bottom: TabBar(
+              if (_hasUnsavedChanges)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Text(
+                    'Unsaved',
+                    style: TextStyle(
+                      color: Colors.orange,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // Tab bar
+          TabBar(
             controller: _tabController,
             labelColor: Colors.white,
             unselectedLabelColor: Colors.white70,
             indicatorColor: Colors.white,
+            indicatorWeight: 3,
             tabs: const [
-              Tab(icon: Icon(Icons.qr_code_scanner), text: 'Scan'),
-              Tab(icon: Icon(Icons.list), text: 'Tools Taken'),
+              Tab(icon: Icon(Icons.qr_code_scanner, size: 20), text: 'Scan'),
+              Tab(icon: Icon(Icons.list, size: 20), text: 'Tools Taken'),
             ],
           ),
-        ),
-        body: Column(
-          children: [
-            Expanded(
-              child: TabBarView(
-                controller: _tabController,
-                children: [
-                  _buildScanTab(),
-                  _buildToolsTakenTab(),
-                ],
-              ),
-            ),
-            _buildBottomActions(),
-          ],
-        ),
+        ],
       ),
     );
   }
@@ -429,8 +513,9 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
       builder: (context, inventoryProvider, child) {
         return Column(
           children: [
-            // Scanner area
-            Expanded(
+            // Scanner area (fixed height)
+            SizedBox(
+              height: 300,
               child: Container(
                 margin: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
@@ -508,39 +593,42 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
                 ),
               ),
             ),
-            // Recently scanned
+            // Recently scanned (scrollable and takes remaining space)
             if (_toolsTaken.isNotEmpty) ...[
               const Divider(),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Recently Scanned',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Recently Scanned',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: _toolsTaken.entries.expand((entry) {
-                        return entry.value.map((toolId) {
-                          final readableId = _getReadableToolId(
-                              toolId, inventoryProvider.tools);
-                          return Chip(
-                            avatar: const Icon(Icons.check_circle, size: 16),
-                            label: Text('${entry.key} - $readableId'),
-                            deleteIcon: const Icon(Icons.close, size: 16),
-                            onDeleted: () => _removeToolById(entry.key, toolId),
-                          );
-                        });
-                      }).toList(),
-                    ),
-                  ],
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: _toolsTaken.entries.expand((entry) {
+                          return entry.value.map((toolId) {
+                            final readableId = _getReadableToolId(
+                                toolId, inventoryProvider.tools);
+                            return Chip(
+                              avatar: const Icon(Icons.check_circle, size: 16),
+                              label: Text('${entry.key} - $readableId'),
+                              deleteIcon: const Icon(Icons.close, size: 16),
+                              onDeleted: () =>
+                                  _removeToolById(entry.key, toolId),
+                            );
+                          });
+                        }).toList(),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -676,7 +764,7 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
             final isComplete = taken >= needed;
 
             return Card(
-              margin: const EdgeInsets.only(bottom: 12),
+              margin: const EdgeInsets.only(bottom: 8),
               child: InkWell(
                 onTap: () => _showManualSelection(
                   context,
@@ -687,22 +775,23 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
                   needed,
                 ),
                 child: Padding(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(12),
                   child: Row(
                     children: [
                       Container(
-                        width: 48,
-                        height: 48,
+                        width: 36,
+                        height: 36,
                         decoration: BoxDecoration(
                           color: entry.color.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(8),
+                          borderRadius: BorderRadius.circular(6),
                         ),
                         child: Icon(
                           _getCategoryIcon(tool.category),
                           color: entry.color,
+                          size: 14,
                         ),
                       ),
-                      const SizedBox(width: 16),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -713,24 +802,24 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
                                   child: Text(
                                     tool.baseName,
                                     style: const TextStyle(
-                                      fontSize: 16,
+                                      fontSize: 14,
                                       fontWeight: FontWeight.bold,
                                     ),
                                   ),
                                 ),
                                 Container(
                                   padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 4,
+                                    horizontal: 6,
+                                    vertical: 2,
                                   ),
                                   decoration: BoxDecoration(
                                     color: entry.color.withOpacity(0.2),
-                                    borderRadius: BorderRadius.circular(12),
+                                    borderRadius: BorderRadius.circular(10),
                                   ),
                                   child: Text(
                                     entry.type,
                                     style: TextStyle(
-                                      fontSize: 10,
+                                      fontSize: 9,
                                       fontWeight: FontWeight.bold,
                                       color: entry.color,
                                     ),
@@ -738,30 +827,30 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 4),
+                            const SizedBox(height: 2),
                             Text(
                               tool.category,
                               style: TextStyle(
-                                fontSize: 12,
+                                fontSize: 11,
                                 color: Colors.grey.shade600,
                               ),
                             ),
-                            const SizedBox(height: 8),
+                            const SizedBox(height: 6),
                             Row(
                               children: [
                                 Icon(
                                   isComplete
                                       ? Icons.check_circle
                                       : Icons.radio_button_unchecked,
-                                  size: 16,
+                                  size: 14,
                                   color:
                                       isComplete ? Colors.green : Colors.orange,
                                 ),
-                                const SizedBox(width: 8),
+                                const SizedBox(width: 6),
                                 Text(
                                   'Taken: $taken / $needed',
                                   style: TextStyle(
-                                    fontSize: 14,
+                                    fontSize: 12,
                                     fontWeight: FontWeight.w500,
                                     color: isComplete
                                         ? Colors.green
@@ -771,23 +860,26 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
                               ],
                             ),
                             if (takenIds.isNotEmpty) ...[
-                              const SizedBox(height: 8),
+                              const SizedBox(height: 6),
                               Wrap(
-                                spacing: 4,
-                                runSpacing: 4,
+                                spacing: 3,
+                                runSpacing: 3,
                                 children: takenIds.map((id) {
                                   final readableId = _getReadableToolId(
                                       id, inventoryProvider.tools);
                                   return Chip(
                                     label: Text(
                                       readableId,
-                                      style: const TextStyle(fontSize: 10),
+                                      style: const TextStyle(fontSize: 9),
                                     ),
                                     deleteIcon:
-                                        const Icon(Icons.close, size: 14),
+                                        const Icon(Icons.close, size: 12),
                                     onDeleted: () =>
                                         _removeToolById(tool.baseName, id),
                                     visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    materialTapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
                                   );
                                 }).toList(),
                               ),
@@ -924,6 +1016,8 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
             (tool) => _extractBaseName(tool.name) == baseName && !tool.isInUse)
         .toList();
 
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -931,10 +1025,13 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
           final takenIds = _toolsTaken[baseName] ?? [];
 
           return AlertDialog(
+            insetPadding: isMobile ? EdgeInsets.zero : const EdgeInsets.all(40),
             title: Text('Select $baseName'),
             content: SizedBox(
-              width: double.maxFinite,
-              height: 400,
+              width: isMobile
+                  ? MediaQuery.of(context).size.width
+                  : double.maxFinite,
+              height: isMobile ? MediaQuery.of(context).size.height * 0.7 : 400,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1014,6 +1111,7 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
 
   Widget _buildBottomActions() {
     final allTaken = _areAllToolsTaken();
+    final isMobile = MediaQuery.of(context).size.width < 600;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -1027,61 +1125,135 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
           ),
         ],
       ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: isMobile
+          ? Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  'Progress: ${_getTotalTaken()} / ${_getTotalNeeded()} tools',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
+                // Progress
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Progress: ${_getTotalTaken()} / ${_getTotalNeeded()} tools',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    LinearProgressIndicator(
+                      value: _getTotalNeeded() > 0
+                          ? _getTotalTaken() / _getTotalNeeded()
+                          : 0,
+                      backgroundColor: Colors.grey.shade200,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        allTaken ? Colors.green : Colors.orange,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                // Buttons
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _hasUnsavedChanges && !_isSaving
+                            ? _saveProgress
+                            : null,
+                        icon: _isSaving
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.save),
+                        label: const Text('Save'),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 14),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed:
+                            allTaken && !_isSaving ? _completeCheckout : null,
+                        icon: const Icon(Icons.check_circle, size: 20),
+                        label: const Text('Complete'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 14),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            )
+          : Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Progress: ${_getTotalTaken()} / ${_getTotalNeeded()} tools',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      LinearProgressIndicator(
+                        value: _getTotalNeeded() > 0
+                            ? _getTotalTaken() / _getTotalNeeded()
+                            : 0,
+                        backgroundColor: Colors.grey.shade200,
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          allTaken ? Colors.green : Colors.orange,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 4),
-                LinearProgressIndicator(
-                  value: _getTotalNeeded() > 0
-                      ? _getTotalTaken() / _getTotalNeeded()
-                      : 0,
-                  backgroundColor: Colors.grey.shade200,
-                  valueColor: AlwaysStoppedAnimation<Color>(
-                    allTaken ? Colors.green : Colors.orange,
+                const SizedBox(width: 16),
+                OutlinedButton.icon(
+                  onPressed:
+                      _hasUnsavedChanges && !_isSaving ? _saveProgress : null,
+                  icon: _isSaving
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.save),
+                  label: const Text('Save'),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 16),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton.icon(
+                  onPressed: allTaken && !_isSaving ? _completeCheckout : null,
+                  icon: const Icon(Icons.check_circle),
+                  label: const Text('Complete Checkout'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 16),
                   ),
                 ),
               ],
             ),
-          ),
-          const SizedBox(width: 16),
-          OutlinedButton.icon(
-            onPressed: _hasUnsavedChanges && !_isSaving ? _saveProgress : null,
-            icon: _isSaving
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.save),
-            label: const Text('Save'),
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-            ),
-          ),
-          const SizedBox(width: 8),
-          ElevatedButton.icon(
-            onPressed: allTaken && !_isSaving ? _completeCheckout : null,
-            icon: const Icon(Icons.check_circle),
-            label: const Text('Complete Checkout'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.green,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-            ),
-          ),
-        ],
-      ),
     );
   }
 

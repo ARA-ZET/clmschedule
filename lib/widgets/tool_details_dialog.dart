@@ -13,36 +13,46 @@ class ToolDetailsDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     return Dialog(
+      insetPadding: isMobile
+          ? EdgeInsets.zero
+          : const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
       child: Container(
-        width: 600,
-        constraints: const BoxConstraints(maxHeight: 700),
+        width: isMobile ? double.infinity : 600,
+        height: isMobile ? double.infinity : null,
+        constraints: isMobile ? null : const BoxConstraints(maxHeight: 700),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Header
             Container(
-              padding: const EdgeInsets.all(16),
+              padding: EdgeInsets.all(isMobile ? 12 : 16),
               decoration: BoxDecoration(
                 color: Theme.of(context).primaryColor,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(4)),
+                borderRadius: isMobile
+                    ? null
+                    : const BorderRadius.vertical(top: Radius.circular(4)),
               ),
               child: Row(
                 children: [
                   Expanded(
                     child: Text(
                       tool.name,
-                      style: const TextStyle(
+                      style: TextStyle(
                         color: Colors.white,
-                        fontSize: 20,
+                        fontSize: isMobile ? 16 : 20,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
+                    icon: Icon(Icons.close,
+                        color: Colors.white, size: isMobile ? 20 : 24),
                     onPressed: () => Navigator.of(context).pop(),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
                   ),
                 ],
               ),
@@ -50,15 +60,15 @@ class ToolDetailsDialog extends StatelessWidget {
             // Content
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.all(24),
+                padding: EdgeInsets.all(isMobile ? 16 : 24),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     // Image
                     Center(
                       child: Container(
-                        width: 200,
-                        height: 200,
+                        width: isMobile ? 150 : 200,
+                        height: isMobile ? 150 : 200,
                         decoration: BoxDecoration(
                           color: Colors.grey[200],
                           borderRadius: BorderRadius.circular(8),
@@ -232,20 +242,22 @@ class ToolDetailsDialog extends StatelessWidget {
             ),
             // Actions
             Container(
-              padding: const EdgeInsets.all(16),
+              padding: EdgeInsets.all(isMobile ? 10 : 16),
               decoration: BoxDecoration(
                 color: Colors.grey[100],
-                borderRadius:
-                    const BorderRadius.vertical(bottom: Radius.circular(4)),
+                borderRadius: isMobile
+                    ? null
+                    : const BorderRadius.vertical(bottom: Radius.circular(4)),
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
                   TextButton(
                     onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Close'),
+                    child: Text('Close',
+                        style: TextStyle(fontSize: isMobile ? 13 : 14)),
                   ),
-                  const SizedBox(width: 8),
+                  SizedBox(width: isMobile ? 6 : 8),
                   ElevatedButton(
                     onPressed: () {
                       Navigator.of(context).pop();
@@ -255,9 +267,10 @@ class ToolDetailsDialog extends StatelessWidget {
                         builder: (context) => AddToolDialog(tool: tool),
                       );
                     },
-                    child: const Text('Edit'),
+                    child: Text('Edit',
+                        style: TextStyle(fontSize: isMobile ? 13 : 14)),
                   ),
-                  const SizedBox(width: 8),
+                  SizedBox(width: isMobile ? 6 : 8),
                   ElevatedButton(
                     onPressed: () async {
                       final confirmed = await showDialog<bool>(
@@ -305,7 +318,8 @@ class ToolDetailsDialog extends StatelessWidget {
                     },
                     style:
                         ElevatedButton.styleFrom(backgroundColor: Colors.red),
-                    child: const Text('Delete'),
+                    child: Text('Delete',
+                        style: TextStyle(fontSize: isMobile ? 13 : 14)),
                   ),
                 ],
               ),

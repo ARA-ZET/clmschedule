@@ -233,7 +233,7 @@ class ProjectCheckin {
 
 /// Main project model for Happy Sun projects
 /// Consolidated model combining job execution and project management
-/// Stored in /happySunProjects/{id} (individual documents)
+/// Stored in /happySunProjects/{YYYY-MM}/projects[] (monthly documents with array)
 /// Synced with JobListItem by matching ID
 class HappySunProject {
   final String id; // Same ID as JobListItem
@@ -306,6 +306,14 @@ class HappySunProject {
     this.checkin,
   });
 
+  // Helper to parse DateTime from either Timestamp or String
+  static DateTime? _parseDateTime(dynamic value) {
+    if (value == null) return null;
+    if (value is Timestamp) return value.toDate();
+    if (value is String) return DateTime.tryParse(value);
+    return null;
+  }
+
   factory HappySunProject.fromMap(String id, Map<String, dynamic> data) {
     return HappySunProject(
       id: id,
@@ -318,7 +326,7 @@ class HappySunProject {
       numberOfTeamMembers: data['numberOfTeamMembers'] ?? 1,
       status: data['status'] ?? 'pending',
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
-      updatedAt: (data['updatedAt'] as Timestamp?)?.toDate(),
+      updatedAt: _parseDateTime(data['updatedAt']),
       jobType: data['jobType'] ?? 'windowCleaning',
       toolsNeeded: data['toolsNeeded'] != null
           ? CategorizedTools.fromMap(

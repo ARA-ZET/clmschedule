@@ -29,16 +29,28 @@ class HappySunProjectProvider extends ChangeNotifier {
   }
 
   void _initializeProjects() {
+    debugPrint(
+        '\n📦 HappySunProjectProvider: Initializing projects for ${_currentMonth.year}-${_currentMonth.month}');
     _setLoading(true);
     _projectsSubscription?.cancel(); // Cancel previous subscription
+    debugPrint('   Setting up stream listener for projects subcollection...');
     _projectsSubscription =
         _projectService.getProjectsForMonth(_currentMonth).listen(
       (projects) {
+        debugPrint(
+            '   ✅ Received ${projects.length} projects from subcollection');
+        for (final project in projects) {
+          debugPrint('      - ${project.id}: ${project.clientName}');
+        }
         _projects = projects;
         _setLoading(false);
         notifyListeners();
       },
       onError: (error) {
+        debugPrint('   ❌ Error loading projects: $error');
+        debugPrint(
+            '   This could be old array-format data - clearing projects list');
+        _projects = []; // Clear corrupted data
         _error = error.toString();
         _setLoading(false);
         notifyListeners();
@@ -51,14 +63,26 @@ class HappySunProjectProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Create a new project
-  Future<String?> createProject(HappySunProject project) async {
+  // Create a new project with jobListItemId as the document ID
+  Future<String?> createProject(
+      HappySunProject project, String jobListItemId) async {
     try {
+      debugPrint('\n🏗️ HappySunProjectProvider.createProject: CALLED');
+      debugPrint('   Job List Item ID: $jobListItemId');
+      debugPrint('   Client: ${project.clientName}');
+      debugPrint('   Job Type: ${project.jobType}');
+      debugPrint('   Scheduled Date: ${project.scheduledDate}');
+      debugPrint('   Stack trace:');
+      debugPrint(StackTrace.current.toString().split('\n').take(5).join('\n'));
+
       _error = null;
-      final projectId = await _projectService.createProject(project);
+      final projectId =
+          await _projectService.createProject(project, jobListItemId);
+      debugPrint('   ✅ Provider: Project created successfully');
       notifyListeners();
       return projectId;
     } catch (e) {
+      debugPrint('   ❌ Provider: Error creating project: $e');
       _error = e.toString();
       notifyListeners();
       return null;
@@ -162,10 +186,17 @@ class HappySunProjectProvider extends ChangeNotifier {
   Future<bool> deleteProject(String projectId) async {
     try {
       _error = null;
+
+      // Remove from local list immediately for instant UI update
+      _projects.removeWhere((project) => project.id == projectId);
+
+      // Delete from Firestore
       await _projectService.deleteProject(projectId);
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ HappySunProjectProvider: Error deleting project: $e');
       _error = e.toString();
       notifyListeners();
       return false;

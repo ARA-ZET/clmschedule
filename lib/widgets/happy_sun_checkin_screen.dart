@@ -488,7 +488,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
       children: [
         // Check-in details banner
         Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
             gradient: LinearGradient(
               colors: [Colors.purple.shade700, Colors.purple.shade500],
@@ -496,72 +496,53 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
               end: Alignment.bottomRight,
             ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Row(
             children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(
-                      Icons.assignment_return,
-                      color: Colors.white,
-                      size: 32,
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Tool Check-in',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          widget.project.jobType == 'windowCleaning'
-                              ? 'Window Cleaning Job'
-                              : 'Solar Panel Cleaning Job',
-                          style: const TextStyle(
-                            fontSize: 14,
-                            color: Colors.white70,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.assignment_return,
+                  color: Colors.white,
+                  size: 20,
+                ),
               ),
-              const SizedBox(height: 16),
-              const Divider(color: Colors.white24, height: 1),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: _buildInfoTile(
-                      'Total Tools',
-                      _getTotalTools().toString(),
-                      Icons.build_circle,
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Tool Check-in',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _buildInfoTile(
-                      'Date',
-                      '${widget.project.scheduledDate.day}/${widget.project.scheduledDate.month}/${widget.project.scheduledDate.year}',
-                      Icons.calendar_today,
+                    Text(
+                      widget.project.jobType == 'windowCleaning'
+                          ? 'Window Cleaning Job'
+                          : 'Solar Panel Cleaning Job',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Colors.white70,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
+              ),
+              _buildCompactInfoTile(
+                Icons.build_circle,
+                _getTotalTools().toString(),
+              ),
+              const SizedBox(width: 8),
+              _buildCompactInfoTile(
+                Icons.calendar_today,
+                '${widget.project.scheduledDate.day}/${widget.project.scheduledDate.month}',
               ),
             ],
           ),
@@ -627,7 +608,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
               final tools = inventoryProvider.tools;
 
               return ListView.builder(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(12),
                 itemCount: _toolStatus.length,
                 itemBuilder: (context, index) {
                   final entry = _toolStatus.entries.elementAt(index);
@@ -635,7 +616,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                   final status = entry.value;
 
                   return Card(
-                      margin: const EdgeInsets.only(bottom: 12),
+                      margin: const EdgeInsets.only(bottom: 8),
                       child: InkWell(
                         onTap: () {
                           setState(() {
@@ -643,18 +624,24 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                           });
                         },
                         child: Padding(
-                          padding: const EdgeInsets.all(16),
+                          padding: const EdgeInsets.all(12),
                           child: Row(
                             children: [
-                              Checkbox(
-                                value: status.isReturned,
-                                onChanged: (value) {
-                                  setState(() {
-                                    status.isReturned = value ?? false;
-                                  });
-                                },
+                              SizedBox(
+                                width: 30,
+                                height: 30,
+                                child: Checkbox(
+                                  value: status.isReturned,
+                                  onChanged: (value) {
+                                    setState(() {
+                                      status.isReturned = value ?? false;
+                                    });
+                                  },
+                                  materialTapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                ),
                               ),
-                              const SizedBox(width: 12),
+                              const SizedBox(width: 8),
                               Expanded(
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -665,7 +652,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                           child: Text(
                                             status.baseName,
                                             style: const TextStyle(
-                                              fontSize: 16,
+                                              fontSize: 13,
                                               fontWeight: FontWeight.bold,
                                             ),
                                           ),
@@ -673,8 +660,8 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                         if (status.checklistStatus != 'present')
                                           Container(
                                             padding: const EdgeInsets.symmetric(
-                                              horizontal: 8,
-                                              vertical: 4,
+                                              horizontal: 6,
+                                              vertical: 2,
                                             ),
                                             decoration: BoxDecoration(
                                               color: status.checklistStatus ==
@@ -682,13 +669,13 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                                   ? Colors.orange.shade100
                                                   : Colors.red.shade100,
                                               borderRadius:
-                                                  BorderRadius.circular(4),
+                                                  BorderRadius.circular(3),
                                             ),
                                             child: Text(
                                               status.checklistStatus
                                                   .toUpperCase(),
                                               style: TextStyle(
-                                                fontSize: 10,
+                                                fontSize: 8,
                                                 fontWeight: FontWeight.bold,
                                                 color: status.checklistStatus ==
                                                         'broken'
@@ -699,22 +686,22 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                           ),
                                       ],
                                     ),
-                                    const SizedBox(height: 4),
+                                    const SizedBox(height: 2),
                                     Text(
                                       'ID: ${_getReadableToolId(toolId, tools)} • ${status.category}',
                                       style: TextStyle(
-                                        fontSize: 12,
+                                        fontSize: 10,
                                         color: Colors.grey.shade600,
                                       ),
                                     ),
                                     if (status.checklistNotes.isNotEmpty) ...[
-                                      const SizedBox(height: 8),
+                                      const SizedBox(height: 6),
                                       Container(
-                                        padding: const EdgeInsets.all(8),
+                                        padding: const EdgeInsets.all(6),
                                         decoration: BoxDecoration(
                                           color: Colors.blue.shade50,
                                           borderRadius:
-                                              BorderRadius.circular(4),
+                                              BorderRadius.circular(3),
                                           border: Border.all(
                                               color: Colors.blue.shade200),
                                         ),
@@ -724,7 +711,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                           children: [
                                             Icon(
                                               Icons.note,
-                                              size: 14,
+                                              size: 12,
                                               color: Colors.blue.shade700,
                                             ),
                                             const SizedBox(width: 4),
@@ -732,7 +719,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                               child: Text(
                                                 status.checklistNotes,
                                                 style: TextStyle(
-                                                  fontSize: 11,
+                                                  fontSize: 10,
                                                   color: Colors.blue.shade700,
                                                 ),
                                               ),
@@ -914,12 +901,37 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
     );
   }
 
+  Widget _buildCompactInfoTile(IconData icon, String value) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 14),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildStatusChip(String label, int count, Color color) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: color.withOpacity(0.3)),
       ),
       child: Row(
@@ -928,22 +940,22 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
           Text(
             label,
             style: TextStyle(
-              fontSize: 12,
+              fontSize: 10,
               fontWeight: FontWeight.w600,
               color: color,
             ),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 4),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
             decoration: BoxDecoration(
               color: color,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(8),
             ),
             child: Text(
               count.toString(),
               style: const TextStyle(
-                fontSize: 10,
+                fontSize: 9,
                 fontWeight: FontWeight.bold,
                 color: Colors.white,
               ),
@@ -961,7 +973,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
         _getTotalTools() > 0 ? _getReturnedCount() / _getTotalTools() : 0.0;
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: Colors.white,
         boxShadow: [
@@ -981,12 +993,13 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
               width: double.infinity,
               child: ElevatedButton.icon(
                 onPressed: _showCheckinDetails,
-                icon: const Icon(Icons.info_outline),
-                label: const Text('View Check-in Details'),
+                icon: const Icon(Icons.info_outline, size: 18),
+                label: const Text('View Check-in Details',
+                    style: TextStyle(fontSize: 13)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.green,
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
                 ),
               ),
             ),
@@ -1001,11 +1014,11 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                       Text(
                         'Progress: ${_getReturnedCount()} / ${_getTotalTools()} tools returned',
                         style: const TextStyle(
-                          fontSize: 14,
+                          fontSize: 11,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 6),
                       LinearProgressIndicator(
                         value: progress,
                         backgroundColor: Colors.grey.shade200,
@@ -1018,7 +1031,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 10),
             // Complete button
             SizedBox(
               width: double.infinity,
@@ -1026,20 +1039,22 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                 onPressed: !_isChecking ? _completeCheckin : null,
                 icon: _isChecking
                     ? const SizedBox(
-                        width: 20,
-                        height: 20,
+                        width: 16,
+                        height: 16,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
                           color: Colors.white,
                         ),
                       )
-                    : const Icon(Icons.check_circle),
-                label:
-                    Text(_isChecking ? 'Checking in...' : 'Complete Check-in'),
+                    : const Icon(Icons.check_circle, size: 18),
+                label: Text(
+                  _isChecking ? 'Checking in...' : 'Complete Check-in',
+                  style: const TextStyle(fontSize: 13),
+                ),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.purple,
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
                 ),
               ),
             ),
@@ -1050,18 +1065,24 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
   }
 
   void _showCheckinDetails() {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
     showDialog(
       context: context,
       builder: (context) => Dialog(
+        insetPadding: isMobile
+            ? EdgeInsets.zero
+            : const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
         child: Container(
-          width: 600,
-          constraints: const BoxConstraints(maxHeight: 700),
+          width: isMobile ? double.infinity : 600,
+          height: isMobile ? double.infinity : null,
+          constraints: isMobile ? null : const BoxConstraints(maxHeight: 700),
           child: Column(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisSize: isMobile ? MainAxisSize.max : MainAxisSize.min,
             children: [
               // Header
               Container(
-                padding: const EdgeInsets.all(20),
+                padding: EdgeInsets.all(isMobile ? 12 : 20),
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     colors: [Colors.green.shade700, Colors.green.shade500],
@@ -1071,30 +1092,33 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                 ),
                 child: Row(
                   children: [
-                    const Icon(
+                    Icon(
                       Icons.check_circle,
                       color: Colors.white,
-                      size: 32,
+                      size: isMobile ? 20 : 32,
                     ),
-                    const SizedBox(width: 16),
+                    SizedBox(width: isMobile ? 10 : 16),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text(
+                          Text(
                             'Check-in Completed',
                             style: TextStyle(
-                              fontSize: 20,
+                              fontSize: isMobile ? 14 : 20,
                               fontWeight: FontWeight.bold,
                               color: Colors.white,
                             ),
                           ),
-                          const SizedBox(height: 4),
+                          if (isMobile)
+                            const SizedBox(height: 2)
+                          else
+                            const SizedBox(height: 4),
                           if (widget.project.endTime != null)
                             Text(
                               'Completed at ${widget.project.endTime!.hour.toString().padLeft(2, '0')}:${widget.project.endTime!.minute.toString().padLeft(2, '0')} on ${widget.project.scheduledDate.day}/${widget.project.scheduledDate.month}/${widget.project.scheduledDate.year}',
-                              style: const TextStyle(
-                                fontSize: 12,
+                              style: TextStyle(
+                                fontSize: isMobile ? 9 : 12,
                                 color: Colors.white70,
                               ),
                             ),
@@ -1102,15 +1126,18 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                       ),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white),
+                      icon: Icon(Icons.close,
+                          color: Colors.white, size: isMobile ? 20 : 24),
                       onPressed: () => Navigator.pop(context),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
                     ),
                   ],
                 ),
               ),
               // Summary
               Container(
-                padding: const EdgeInsets.all(16),
+                padding: EdgeInsets.all(isMobile ? 10 : 16),
                 color: Colors.green.shade50,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
@@ -1120,12 +1147,14 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                       _getTotalTools().toString(),
                       Icons.build_circle,
                       Colors.green,
+                      isMobile,
                     ),
                     _buildSummaryTile(
                       'Returned',
                       _getReturnedCount().toString(),
                       Icons.check_circle,
                       Colors.green,
+                      isMobile,
                     ),
                     if (widget.project.workDuration != null)
                       _buildSummaryTile(
@@ -1133,6 +1162,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                         '${widget.project.workDuration!.inHours}h ${widget.project.workDuration!.inMinutes.remainder(60)}m',
                         Icons.timer,
                         Colors.green,
+                        isMobile,
                       ),
                   ],
                 ),
@@ -1144,7 +1174,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                     final tools = inventoryProvider.tools;
 
                     return ListView.builder(
-                      padding: const EdgeInsets.all(16),
+                      padding: EdgeInsets.all(isMobile ? 10 : 16),
                       itemCount: _toolStatus.length,
                       itemBuilder: (context, index) {
                         final entry = _toolStatus.entries.elementAt(index);
@@ -1152,9 +1182,9 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                         final status = entry.value;
 
                         return Card(
-                          margin: const EdgeInsets.only(bottom: 12),
+                          margin: EdgeInsets.only(bottom: isMobile ? 8 : 12),
                           child: Padding(
-                            padding: const EdgeInsets.all(16),
+                            padding: EdgeInsets.all(isMobile ? 10 : 16),
                             child: Row(
                               children: [
                                 Icon(
@@ -1164,9 +1194,9 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                   color: status.isReturned
                                       ? Colors.green
                                       : Colors.red,
-                                  size: 24,
+                                  size: isMobile ? 18 : 24,
                                 ),
-                                const SizedBox(width: 12),
+                                SizedBox(width: isMobile ? 8 : 12),
                                 Expanded(
                                   child: Column(
                                     crossAxisAlignment:
@@ -1177,8 +1207,8 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                           Expanded(
                                             child: Text(
                                               status.baseName,
-                                              style: const TextStyle(
-                                                fontSize: 14,
+                                              style: TextStyle(
+                                                fontSize: isMobile ? 11 : 14,
                                                 fontWeight: FontWeight.bold,
                                               ),
                                             ),
@@ -1186,23 +1216,23 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                           if (status.checklistStatus !=
                                               'present')
                                             Container(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      horizontal: 8,
-                                                      vertical: 4),
+                                              padding: EdgeInsets.symmetric(
+                                                  horizontal: isMobile ? 5 : 8,
+                                                  vertical: isMobile ? 2 : 4),
                                               decoration: BoxDecoration(
                                                 color: status.checklistStatus ==
                                                         'broken'
                                                     ? Colors.orange.shade100
                                                     : Colors.red.shade100,
                                                 borderRadius:
-                                                    BorderRadius.circular(12),
+                                                    BorderRadius.circular(
+                                                        isMobile ? 8 : 12),
                                               ),
                                               child: Text(
                                                 status.checklistStatus
                                                     .toUpperCase(),
                                                 style: TextStyle(
-                                                  fontSize: 10,
+                                                  fontSize: isMobile ? 7 : 10,
                                                   fontWeight: FontWeight.bold,
                                                   color:
                                                       status.checklistStatus ==
@@ -1215,22 +1245,23 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                             ),
                                         ],
                                       ),
-                                      const SizedBox(height: 4),
+                                      SizedBox(height: isMobile ? 2 : 4),
                                       Text(
                                         'ID: ${_getReadableToolId(toolId, tools)} • ${status.category}',
                                         style: TextStyle(
-                                          fontSize: 12,
+                                          fontSize: isMobile ? 9 : 12,
                                           color: Colors.grey.shade600,
                                         ),
                                       ),
                                       if (status.checklistNotes.isNotEmpty) ...[
-                                        const SizedBox(height: 8),
+                                        SizedBox(height: isMobile ? 5 : 8),
                                         Container(
-                                          padding: const EdgeInsets.all(8),
+                                          padding:
+                                              EdgeInsets.all(isMobile ? 5 : 8),
                                           decoration: BoxDecoration(
                                             color: Colors.blue.shade50,
                                             borderRadius:
-                                                BorderRadius.circular(4),
+                                                BorderRadius.circular(3),
                                             border: Border.all(
                                                 color: Colors.blue.shade200),
                                           ),
@@ -1240,15 +1271,15 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
                                             children: [
                                               Icon(
                                                 Icons.note,
-                                                size: 14,
+                                                size: isMobile ? 11 : 14,
                                                 color: Colors.blue.shade700,
                                               ),
-                                              const SizedBox(width: 4),
+                                              SizedBox(width: isMobile ? 3 : 4),
                                               Expanded(
                                                 child: Text(
                                                   status.checklistNotes,
                                                   style: TextStyle(
-                                                    fontSize: 11,
+                                                    fontSize: isMobile ? 9 : 11,
                                                     color: Colors.blue.shade700,
                                                   ),
                                                 ),
@@ -1277,24 +1308,25 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
   }
 
   Widget _buildSummaryTile(
-      String label, String value, IconData icon, Color color) {
+      String label, String value, IconData icon, Color color,
+      [bool isMobile = false]) {
     return Column(
       children: [
-        Icon(icon, color: color, size: 28),
-        const SizedBox(height: 8),
+        Icon(icon, color: color, size: isMobile ? 20 : 28),
+        SizedBox(height: isMobile ? 4 : 8),
         Text(
           value,
           style: TextStyle(
-            fontSize: 20,
+            fontSize: isMobile ? 14 : 20,
             fontWeight: FontWeight.bold,
             color: color,
           ),
         ),
-        const SizedBox(height: 4),
+        SizedBox(height: isMobile ? 2 : 4),
         Text(
           label,
           style: TextStyle(
-            fontSize: 12,
+            fontSize: isMobile ? 9 : 12,
             color: Colors.grey.shade700,
           ),
         ),

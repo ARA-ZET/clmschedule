@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import '../models/happy_sun_project.dart';
 import '../models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
 
@@ -11,51 +12,78 @@ class HappySunProjectService {
     return '${date.year}-${date.month.toString().padLeft(2, '0')}';
   }
 
-  // Create a new project
-  Future<String> createProject(HappySunProject project) async {
+  /// Get reference to projects subcollection for a given month
+  CollectionReference _getProjectsCollection(DateTime date) {
+    final monthDocId = _getMonthDocId(date);
+    return _firestore
+        .collection(collectionName)
+        .doc(monthDocId)
+        .collection('projects');
+  }
+
+  // Create a new project with jobListItemId as the document ID
+  Future<String> createProject(
+      HappySunProject project, String jobListItemId) async {
     try {
       final monthDocId = _getMonthDocId(project.scheduledDate);
-      final monthDocRef = _firestore.collection(collectionName).doc(monthDocId);
+      final projectsCollection = _getProjectsCollection(project.scheduledDate);
 
-      // Generate unique ID for the project
-      final projectId = _firestore.collection('_').doc().id;
+      // Use jobListItemId as the document ID to prevent duplicates
+      final projectDoc = projectsCollection.doc(jobListItemId);
+
+      // Check if project already exists
+      final existingDoc = await projectDoc.get();
+      if (existingDoc.exists) {
+        debugPrint(
+            '⚠️ HappySunProjectService: Project $jobListItemId already exists, skipping creation');
+        return jobListItemId;
+      }
+
       final projectData = project.toMap();
-      projectData['id'] = projectId;
+      projectData['id'] = jobListItemId;
+      projectData['createdAt'] = FieldValue.serverTimestamp();
+      projectData['updatedAt'] = FieldValue.serverTimestamp();
 
-      // Add project to the projects array in monthly document
-      await monthDocRef.set({
+      debugPrint('   Writing project document to Firestore subcollection...');
+      // Create the project document
+      await projectDoc.set(projectData);
+      debugPrint('   ✅ Document written to subcollection');
+
+      // Ensure month document exists (for queries)
+      // Also remove any legacy array-based field to prevent confusion
+      debugPrint(
+          '   Updating month document metadata (removing legacy array if present)...');
+      await _firestore.collection(collectionName).doc(monthDocId).set({
         'month': monthDocId,
-        'projects': FieldValue.arrayUnion([projectData]),
+        'lastUpdated': FieldValue.serverTimestamp(),
+        'projects': FieldValue.delete(),
       }, SetOptions(merge: true));
+      debugPrint('   ✅ Month document updated (legacy projects array removed)');
 
-      return projectId;
+      debugPrint('✅ HappySunProjectService: Project creation COMPLETE');
+      debugPrint(
+          '   Document path: /happySunProjects/$monthDocId/projects/$jobListItemId');
+      return jobListItemId;
     } catch (e) {
       print('Error creating project: $e');
       rethrow;
     }
   }
 
-  // Get project by ID (searches all months)
+  // Get project by ID (searches current month and nearby months)
   Future<HappySunProject?> getProject(String projectId) async {
     try {
-      // We need to search through monthly documents to find the project
-      // This is less efficient but necessary with monthly structure
+      // Search through monthly documents to find the project
       final now = DateTime.now();
       // Search current month and 6 months before/after
       for (int i = -6; i <= 6; i++) {
         final checkDate = DateTime(now.year, now.month + i);
-        final monthDocId = _getMonthDocId(checkDate);
-        final doc =
-            await _firestore.collection(collectionName).doc(monthDocId).get();
+        final projectDoc =
+            await _getProjectsCollection(checkDate).doc(projectId).get();
 
-        if (doc.exists && doc.data() != null) {
-          final projects = (doc.data()!['projects'] as List<dynamic>?) ?? [];
-          for (var projectData in projects) {
-            if (projectData['id'] == projectId) {
-              return HappySunProject.fromMap(
-                  projectId, projectData as Map<String, dynamic>);
-            }
-          }
+        if (projectDoc.exists && projectDoc.data() != null) {
+          return HappySunProject.fromMap(
+              projectId, projectDoc.data() as Map<String, dynamic>);
         }
       }
       return null;
@@ -68,28 +96,19 @@ class HappySunProjectService {
   // Get all projects for a specific month
   Stream<List<HappySunProject>> getProjectsForMonth(DateTime month) {
     final monthDocId = _getMonthDocId(month);
-    return _firestore
-        .collection(collectionName)
-        .doc(monthDocId)
-        .snapshots()
-        .map((snapshot) {
-      if (!snapshot.exists || snapshot.data() == null) {
-        return <HappySunProject>[];
-      }
-
-      final projects = (snapshot.data()!['projects'] as List<dynamic>?) ?? [];
-      return projects
-          .map((projectData) => HappySunProject.fromMap(
-              projectData['id'] ?? '', projectData as Map<String, dynamic>))
-          .toList()
+    debugPrint('🔍 HappySunProjectService.getProjectsForMonth: $monthDocId');
+    debugPrint(
+        '   Querying subcollection: /happySunProjects/$monthDocId/projects');
+    return _getProjectsCollection(month).snapshots().map((snapshot) {
+      debugPrint(
+          '   📥 Snapshot received: ${snapshot.docs.length} documents in subcollection');
+      return snapshot.docs.map((doc) {
+        debugPrint('      - Document ID: ${doc.id}');
+        return HappySunProject.fromMap(
+            doc.id, doc.data() as Map<String, dynamic>);
+      }).toList()
         ..sort((a, b) => b.scheduledDate.compareTo(a.scheduledDate));
     });
-  }
-
-  // Get all projects (deprecated - use getProjectsForMonth instead)
-  Stream<List<HappySunProject>> getAllProjects() {
-    // Return current month by default
-    return getProjectsForMonth(DateTime.now());
   }
 
   // Get projects by date range
@@ -110,30 +129,13 @@ class HappySunProjectService {
   // Update project
   Future<void> updateProject(HappySunProject project) async {
     try {
-      final monthDocId = _getMonthDocId(project.scheduledDate);
-      final monthDocRef = _firestore.collection(collectionName).doc(monthDocId);
-
-      // Get current projects array
-      final monthDoc = await monthDocRef.get();
-      if (!monthDoc.exists) {
-        throw Exception('Month document not found');
-      }
-
-      final projects = List<Map<String, dynamic>>.from(
-          (monthDoc.data()!['projects'] as List<dynamic>?) ?? []);
-
-      // Find and update the project
-      final index = projects.indexWhere((p) => p['id'] == project.id);
-      if (index == -1) {
-        throw Exception('Project not found in month document');
-      }
+      final projectDoc =
+          _getProjectsCollection(project.scheduledDate).doc(project.id);
 
       final updatedData = project.toMap();
       updatedData['updatedAt'] = FieldValue.serverTimestamp();
-      projects[index] = updatedData;
 
-      // Update the entire projects array
-      await monthDocRef.update({'projects': projects});
+      await projectDoc.update(updatedData);
     } catch (e) {
       print('Error updating project: $e');
       rethrow;
@@ -150,33 +152,12 @@ class HappySunProjectService {
         throw Exception('Project not found');
       }
 
-      final monthDocId = _getMonthDocId(project.scheduledDate);
-      final monthDocRef = _firestore.collection(collectionName).doc(monthDocId);
+      final projectDoc =
+          _getProjectsCollection(project.scheduledDate).doc(projectId);
 
-      // Get current projects array
-      final monthDoc = await monthDocRef.get();
-      if (!monthDoc.exists) {
-        throw Exception('Month document not found');
-      }
+      fields['updatedAt'] = FieldValue.serverTimestamp();
 
-      final projects = List<Map<String, dynamic>>.from(
-          (monthDoc.data()!['projects'] as List<dynamic>?) ?? []);
-
-      // Find and update the project
-      final index = projects.indexWhere((p) => p['id'] == projectId);
-      if (index == -1) {
-        throw Exception('Project not found in month document');
-      }
-
-      // Merge fields
-      projects[index] = {
-        ...projects[index],
-        ...fields,
-        'updatedAt': FieldValue.serverTimestamp()
-      };
-
-      // Update the entire projects array
-      await monthDocRef.update({'projects': projects});
+      await projectDoc.update(fields);
     } catch (e) {
       print('Error updating project fields: $e');
       rethrow;
@@ -236,26 +217,17 @@ class HappySunProjectService {
       // Find the project first to get its month
       final project = await getProject(projectId);
       if (project == null) {
-        throw Exception('Project not found');
+        // Project already deleted or doesn't exist - not an error
+        debugPrint(
+            'ℹ️ HappySunProjectService: Project $projectId not found, may already be deleted');
+        return;
       }
 
-      final monthDocId = _getMonthDocId(project.scheduledDate);
-      final monthDocRef = _firestore.collection(collectionName).doc(monthDocId);
+      final projectDoc =
+          _getProjectsCollection(project.scheduledDate).doc(projectId);
+      await projectDoc.delete();
 
-      // Get current projects array
-      final monthDoc = await monthDocRef.get();
-      if (!monthDoc.exists) {
-        throw Exception('Month document not found');
-      }
-
-      final projects = List<Map<String, dynamic>>.from(
-          (monthDoc.data()!['projects'] as List<dynamic>?) ?? []);
-
-      // Remove the project
-      projects.removeWhere((p) => p['id'] == projectId);
-
-      // Update the projects array
-      await monthDocRef.update({'projects': projects});
+      debugPrint('✅ HappySunProjectService: Deleted project $projectId');
     } catch (e) {
       print('Error deleting project: $e');
       rethrow;

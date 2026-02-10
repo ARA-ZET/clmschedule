@@ -501,19 +501,27 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                   _buildBottomActions(),
                 ],
               )
-            : Column(
-                children: [
-                  Expanded(
-                    child: TabBarView(
-                      controller: _tabController,
-                      children: [
-                        _buildScanTab(),
-                        _buildChecklistTab(),
-                      ],
-                    ),
-                  ),
-                  _buildBottomActions(),
-                ],
+            : LayoutBuilder(
+                builder: (context, constraints) {
+                  // Calculate available height for TabBarView (subtract approximate bottom actions height)
+                  final tabViewHeight = constraints.maxHeight - 120;
+
+                  return Column(
+                    children: [
+                      SizedBox(
+                        height: tabViewHeight,
+                        child: TabBarView(
+                          controller: _tabController,
+                          children: [
+                            _buildScanTab(),
+                            _buildChecklistTab(),
+                          ],
+                        ),
+                      ),
+                      _buildBottomActions(),
+                    ],
+                  );
+                },
               ),
       ),
     );
@@ -677,7 +685,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
         ],
         // Checklist details banner
         Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
             gradient: LinearGradient(
               colors: widget.project.checklistData != null
@@ -687,79 +695,62 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
               end: Alignment.bottomRight,
             ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Row(
             children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(
-                      Icons.assignment_turned_in,
-                      color: Colors.white,
-                      size: 32,
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Pre-Departure Checklist',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          widget.project.jobType == 'windowCleaning'
-                              ? 'Window Cleaning Job'
-                              : 'Solar Panel Cleaning Job',
-                          style: const TextStyle(
-                            fontSize: 14,
-                            color: Colors.white70,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.assignment_turned_in,
+                  color: Colors.white,
+                  size: 20,
+                ),
               ),
-              const SizedBox(height: 16),
-              const Divider(color: Colors.white24, height: 1),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: _buildInfoTile(
-                      'Total Tools',
-                      _getTotalTools().toString(),
-                      Icons.build_circle,
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Pre-Departure Checklist',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _buildInfoTile(
-                      'Date',
-                      '${widget.project.scheduledDate.day}/${widget.project.scheduledDate.month}/${widget.project.scheduledDate.year}',
-                      Icons.calendar_today,
+                    Text(
+                      widget.project.jobType == 'windowCleaning'
+                          ? 'Window Cleaning Job'
+                          : 'Solar Panel Cleaning Job',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Colors.white70,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
+              ),
+              _buildCompactInfoTile(
+                'Total Tools',
+                _getTotalTools().toString(),
+                Icons.build_circle,
+              ),
+              const SizedBox(width: 8),
+              _buildCompactInfoTile(
+                'Date',
+                '${widget.project.scheduledDate.day}/${widget.project.scheduledDate.month}/${widget.project.scheduledDate.year}',
+                Icons.calendar_today,
               ),
             ],
           ),
         ),
         // Status banner
         Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
             color: Colors.blue.shade50,
             border: Border(
@@ -770,45 +761,34 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
             children: [
               Row(
                 children: [
-                  const Icon(Icons.checklist, color: Colors.blue),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Verify all tools before leaving',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        Text(
-                          'Mark each tool as present, broken, or missing',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey.shade600,
-                          ),
-                        ),
-                      ],
+                  const Icon(Icons.checklist, color: Colors.blue, size: 16),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Verify all tools before leaving',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
               Row(
                 children: [
                   _buildStatusChip(
                       'Verified', _getVerifiedCount(), Colors.green),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
                   _buildStatusChip('Remaining',
                       _getTotalTools() - _getVerifiedCount(), Colors.grey),
-                  const SizedBox(width: 8),
-                  if (_getBrokenCount() > 0)
+                  if (_getBrokenCount() > 0) ...[
+                    const SizedBox(width: 6),
                     _buildStatusChip(
                         'Broken', _getBrokenCount(), Colors.orange),
+                  ],
                   if (_getMissingCount() > 0) ...[
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     _buildStatusChip('Missing', _getMissingCount(), Colors.red),
                   ],
                 ],
@@ -826,10 +806,10 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
 
   Widget _buildStatusChip(String label, int count, Color color) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: color.withOpacity(0.2),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: color.withOpacity(0.5)),
       ),
       child: Row(
@@ -838,22 +818,22 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
           Text(
             label,
             style: TextStyle(
-              fontSize: 12,
+              fontSize: 10,
               fontWeight: FontWeight.bold,
               color: color,
             ),
           ),
-          const SizedBox(width: 4),
+          const SizedBox(width: 3),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
             decoration: BoxDecoration(
               color: color,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(8),
             ),
             child: Text(
               '$count',
               style: const TextStyle(
-                fontSize: 10,
+                fontSize: 9,
                 fontWeight: FontWeight.bold,
                 color: Colors.white,
               ),
@@ -866,8 +846,11 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
 
   Widget _buildToolsList() {
     if (_toolStatus.isEmpty) {
-      return const Center(
-        child: Text('No tools to verify'),
+      return const Padding(
+        padding: EdgeInsets.all(24.0),
+        child: Center(
+          child: Text('No tools to verify'),
+        ),
       );
     }
 
@@ -885,7 +868,9 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
         final inventoryTools = inventoryProvider.tools;
 
         return ListView.builder(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(12),
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
           itemCount: sortedGroups.length,
           itemBuilder: (context, index) {
             final entry = sortedGroups[index];
@@ -903,29 +888,32 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
             }
 
             return Card(
-              margin: const EdgeInsets.only(bottom: 12),
+              margin: const EdgeInsets.only(bottom: 8),
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(6),
                 side: BorderSide(color: borderColor, width: 2),
               ),
               child: ExpansionTile(
+                tilePadding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                 leading: Icon(
                   allVerified
                       ? Icons.check_circle
                       : Icons.radio_button_unchecked,
                   color: borderColor,
+                  size: 20,
                 ),
                 title: Text(
                   baseName,
                   style: const TextStyle(
-                    fontSize: 16,
+                    fontSize: 13,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
                 subtitle: Text(
                   '${tools.length} ${tools.length == 1 ? 'tool' : 'tools'} • ${tools.where((t) => t.isVerified).length} verified',
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 10,
                     color: Colors.grey.shade600,
                   ),
                 ),
@@ -960,7 +948,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: toolStatus.isVerified ? statusColor.withOpacity(0.05) : null,
         border: Border(
@@ -972,16 +960,21 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
         children: [
           Row(
             children: [
-              Checkbox(
-                value: toolStatus.isVerified,
-                onChanged: (value) {
-                  setState(() {
-                    toolStatus.isVerified = value ?? false;
-                    _hasUnsavedChanges = true;
-                  });
-                },
+              SizedBox(
+                width: 30,
+                height: 30,
+                child: Checkbox(
+                  value: toolStatus.isVerified,
+                  onChanged: (value) {
+                    setState(() {
+                      toolStatus.isVerified = value ?? false;
+                      _hasUnsavedChanges = true;
+                    });
+                  },
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -989,7 +982,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                     Text(
                       _getReadableToolId(toolStatus.toolId, tools),
                       style: TextStyle(
-                        fontSize: 14,
+                        fontSize: 12,
                         fontWeight: FontWeight.w500,
                         decoration: toolStatus.isVerified
                             ? TextDecoration.lineThrough
@@ -999,7 +992,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                     Text(
                       toolStatus.category,
                       style: TextStyle(
-                        fontSize: 11,
+                        fontSize: 9,
                         color: Colors.grey.shade600,
                       ),
                     ),
@@ -1010,11 +1003,17 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
               DropdownButton<String>(
                 value: toolStatus.status,
                 underline: Container(),
-                icon: Icon(statusIcon, color: statusColor, size: 20),
+                icon: Icon(statusIcon, color: statusColor, size: 16),
                 items: const [
-                  DropdownMenuItem(value: 'present', child: Text('Present')),
-                  DropdownMenuItem(value: 'broken', child: Text('Broken')),
-                  DropdownMenuItem(value: 'missing', child: Text('Missing')),
+                  DropdownMenuItem(
+                      value: 'present',
+                      child: Text('Present', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(
+                      value: 'broken',
+                      child: Text('Broken', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(
+                      value: 'missing',
+                      child: Text('Missing', style: TextStyle(fontSize: 12))),
                 ],
                 onChanged: (value) {
                   setState(() {
@@ -1023,33 +1022,36 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                   });
                 },
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 4),
               IconButton(
                 icon: Icon(
                   toolStatus.notes.isEmpty ? Icons.note_add : Icons.note,
                   color: toolStatus.notes.isEmpty ? Colors.grey : Colors.blue,
+                  size: 18,
                 ),
                 onPressed: () => _showNotesDialog(toolStatus),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
               ),
             ],
           ),
           if (toolStatus.notes.isNotEmpty) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Container(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(6),
               decoration: BoxDecoration(
                 color: Colors.blue.shade50,
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Row(
                 children: [
-                  Icon(Icons.note, size: 14, color: Colors.blue.shade700),
-                  const SizedBox(width: 8),
+                  Icon(Icons.note, size: 12, color: Colors.blue.shade700),
+                  const SizedBox(width: 6),
                   Expanded(
                     child: Text(
                       toolStatus.notes,
                       style: TextStyle(
-                        fontSize: 12,
+                        fontSize: 10,
                         color: Colors.blue.shade700,
                       ),
                     ),
@@ -1066,12 +1068,12 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
             if (accessories.isEmpty) return <Widget>[];
 
             return [
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
               Container(
-                padding: const EdgeInsets.all(10),
+                padding: const EdgeInsets.all(6),
                 decoration: BoxDecoration(
                   color: Colors.orange.shade50,
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(4),
                   border: Border.all(color: Colors.orange.shade200),
                 ),
                 child: Column(
@@ -1080,22 +1082,22 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                     Row(
                       children: [
                         Icon(Icons.extension,
-                            size: 12, color: Colors.orange.shade700),
-                        const SizedBox(width: 6),
+                            size: 10, color: Colors.orange.shade700),
+                        const SizedBox(width: 4),
                         Text(
                           'Required accessories:',
                           style: TextStyle(
-                            fontSize: 11,
+                            fontSize: 9,
                             fontWeight: FontWeight.bold,
                             color: Colors.orange.shade700,
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
+                      spacing: 4,
+                      runSpacing: 4,
                       children: accessories.map((accessory) {
                         final accessoryStatus = _getToolStatus(accessory.id);
                         final isVerified = accessoryStatus?.isVerified ?? false;
@@ -1198,7 +1200,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
         _getTotalTools() > 0 ? _getVerifiedCount() / _getTotalTools() : 0.0;
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: Colors.white,
         boxShadow: [
@@ -1222,11 +1224,11 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                     Text(
                       'Progress: ${_getVerifiedCount()} / ${_getTotalTools()} tools verified',
                       style: const TextStyle(
-                        fontSize: 14,
+                        fontSize: 11,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 6),
                     LinearProgressIndicator(
                       value: progress,
                       backgroundColor: Colors.grey.shade200,
@@ -1239,7 +1241,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
               ),
             ],
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
           // Buttons
           Row(
             children: [
@@ -1249,12 +1251,16 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                       _hasUnsavedChanges && !_isSaving ? _saveProgress : null,
                   icon: _isSaving
                       ? const SizedBox(
-                          width: 16,
-                          height: 16,
+                          width: 14,
+                          height: 14,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Icon(Icons.save),
-                  label: const Text('Save Progress'),
+                      : const Icon(Icons.save, size: 16),
+                  label: const Text('Save Progress',
+                      style: TextStyle(fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
@@ -1262,11 +1268,12 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                 child: ElevatedButton.icon(
                   onPressed:
                       allChecked && !_isSaving ? _completeChecklist : null,
-                  icon: const Icon(Icons.check_circle),
-                  label: const Text('Complete'),
+                  icon: const Icon(Icons.check_circle, size: 16),
+                  label: const Text('Complete', style: TextStyle(fontSize: 12)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.green,
                     foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 10),
                   ),
                 ),
               ),
@@ -1309,6 +1316,31 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
                   ),
                 ),
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCompactInfoTile(String label, String value, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 14),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
             ),
           ),
         ],

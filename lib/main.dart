@@ -49,7 +49,8 @@ import 'services/chat_service.dart';
 import 'services/inventory_service.dart';
 import 'models/command.dart';
 import 'firebase_options.dart';
-import 'dart:html' as html show window;
+import 'utils/web_reload.dart'
+    if (dart.library.io) 'utils/web_reload_stub.dart';
 
 // Simple test command for debugging undo functionality
 class TestCommand extends Command {
@@ -226,50 +227,94 @@ class _MyAppState extends State<MyApp> {
     jobListProvider.setHappySunCallbacks(
       onAdded: (jobListItem) async {
         try {
-          debugPrint(
-              '🔵 Happy Sun Sync: Creating project for ${jobListItem.id}');
+          debugPrint('\n🌞 ========== HAPPY SUN SYNC TRIGGERED ==========');
+          debugPrint('🔵 Happy Sun Sync onAdded callback');
+          debugPrint('   Job List Item ID: ${jobListItem.id}');
+          debugPrint('   Client: ${jobListItem.client}');
+          debugPrint('   Job Type: ${jobListItem.jobType.displayName}');
+          debugPrint('   Date: ${jobListItem.date}');
+          debugPrint('   Has Tools: ${jobListItem.toolsNeeded != null}');
+
+          // Check if project already exists to prevent duplicates
+          debugPrint('   Checking if project already exists in provider...');
+          try {
+            final existingProject =
+                happySunProjectProvider.getProjectById(jobListItem.id);
+            if (existingProject != null) {
+              debugPrint(
+                  '   ⚠️ Happy Sun project already exists in provider - ABORTING');
+              return;
+            }
+            debugPrint(
+                '   No existing project found - proceeding with creation');
+          } catch (e) {
+            // If there's an error checking (e.g., corrupted old data), proceed anyway
+            // The service-level check will prevent actual duplicates
+            debugPrint(
+                '   ⚠️ Error checking existing project (possibly old data): $e');
+            debugPrint(
+                '   Proceeding with creation - service will prevent duplicates');
+          }
 
           // Auto-create Happy Sun project for window/solar cleaning jobs
-          // Calculate tools needed based on manDays (number of cleaners)
+          // Use tools from job item if specified, otherwise calculate based on manDays
           final numberOfCleaners = jobListItem.manDays.ceil();
           debugPrint('   Number of cleaners: $numberOfCleaners');
 
-          // Check if tool settings are loaded
-          if (toolSettingsProvider.settings.teamTools.isEmpty &&
-              toolSettingsProvider.settings.individualTools.isEmpty) {
+          CategorizedTools categorizedTools;
+
+          // Check if job item has pre-defined tools
+          if (jobListItem.toolsNeeded != null) {
+            debugPrint('   Using pre-defined tools from job item');
+            categorizedTools = jobListItem.toolsNeeded!;
             debugPrint(
-                '   ⚠️ WARNING: Tool settings are empty! Loading now...');
-            await toolSettingsProvider.loadSettings();
-          }
-
-          // Check if inventory is loaded
-          if (inventoryProvider.tools.isEmpty) {
-            debugPrint('   ⚠️ WARNING: Inventory is empty! Loading now...');
-            await inventoryProvider.initialize();
-          }
-
-          debugPrint(
-              '   Tool settings: ${toolSettingsProvider.settings.teamTools.length} team tools, ${toolSettingsProvider.settings.individualTools.length} individual tools');
-          debugPrint(
-              '   Inventory: ${inventoryProvider.tools.length} tools available');
-
-          // Calculate categorized tools: team tools (constant) + individual tools (per cleaner)
-          final categorizedTools =
-              toolSettingsProvider.calculateCategorizedTools(
-            numberOfCleaners,
-            inventoryProvider.tools,
-          );
-
-          debugPrint(
-              '   Team tools calculated: ${categorizedTools.teamTools.length} groups');
-          debugPrint(
-              '   Individual tools calculated: ${categorizedTools.individualTools.length} groups (×$numberOfCleaners cleaners)');
-          for (final tool in categorizedTools.teamTools) {
-            debugPrint('      Team: ${tool.baseName} × ${tool.totalQuantity}');
-          }
-          for (final tool in categorizedTools.individualTools) {
+                '   Team tools: ${categorizedTools.teamTools.length} groups');
             debugPrint(
-                '      Individual: ${tool.baseName} × ${tool.totalQuantity}');
+                '   Individual tools: ${categorizedTools.individualTools.length} groups');
+            debugPrint('   Extras: ${categorizedTools.extras.length} groups');
+            debugPrint(
+                '   Accessories: ${categorizedTools.accessories.length} groups');
+          } else {
+            debugPrint(
+                '   No pre-defined tools, auto-calculating based on manDays');
+
+            // Check if tool settings are loaded
+            if (toolSettingsProvider.settings.teamTools.isEmpty &&
+                toolSettingsProvider.settings.individualTools.isEmpty) {
+              debugPrint(
+                  '   ⚠️ WARNING: Tool settings are empty! Loading now...');
+              await toolSettingsProvider.loadSettings();
+            }
+
+            // Check if inventory is loaded
+            if (inventoryProvider.tools.isEmpty) {
+              debugPrint('   ⚠️ WARNING: Inventory is empty! Loading now...');
+              await inventoryProvider.initialize();
+            }
+
+            debugPrint(
+                '   Tool settings: ${toolSettingsProvider.settings.teamTools.length} team tools, ${toolSettingsProvider.settings.individualTools.length} individual tools');
+            debugPrint(
+                '   Inventory: ${inventoryProvider.tools.length} tools available');
+
+            // Calculate categorized tools: team tools (constant) + individual tools (per cleaner)
+            categorizedTools = toolSettingsProvider.calculateCategorizedTools(
+              numberOfCleaners,
+              inventoryProvider.tools,
+            );
+
+            debugPrint(
+                '   Team tools calculated: ${categorizedTools.teamTools.length} groups');
+            debugPrint(
+                '   Individual tools calculated: ${categorizedTools.individualTools.length} groups (×$numberOfCleaners cleaners)');
+            for (final tool in categorizedTools.teamTools) {
+              debugPrint(
+                  '      Team: ${tool.baseName} × ${tool.totalQuantity}');
+            }
+            for (final tool in categorizedTools.individualTools) {
+              debugPrint(
+                  '      Individual: ${tool.baseName} × ${tool.totalQuantity}');
+            }
           }
 
           // Determine job type
@@ -293,9 +338,13 @@ class _MyAppState extends State<MyApp> {
             status: 'pending',
             createdAt: DateTime.now(),
           );
-          await happySunProjectProvider.createProject(project);
-          debugPrint('   Happy Sun project created: ${project.clientName}');
-          debugPrint('✅ Happy Sun Sync: Complete for ${jobListItem.id}');
+
+          // Pass jobListItemId to createProject to use as document ID
+          debugPrint('   📤 Calling happySunProjectProvider.createProject...');
+          debugPrint('   Project ID will be: ${jobListItem.id}');
+          await happySunProjectProvider.createProject(project, jobListItem.id);
+          debugPrint('   ✅ Happy Sun project created: ${project.clientName}');
+          debugPrint('✅ ========== HAPPY SUN SYNC COMPLETE ==========\n');
         } catch (e) {
           debugPrint('❌ Happy Sun Sync Error (onAdded): $e');
         }
@@ -307,7 +356,8 @@ class _MyAppState extends State<MyApp> {
                   oldItem.client != newItem.client ||
                   oldItem.collectionAddress != newItem.collectionAddress ||
                   oldItem.area != newItem.area ||
-                  oldItem.jobStatusId != newItem.jobStatusId) &&
+                  oldItem.jobStatusId != newItem.jobStatusId ||
+                  oldItem.toolsNeeded != newItem.toolsNeeded) &&
               (newItem.jobType == JobType.windowCleaning ||
                   newItem.jobType == JobType.solarPanelCleaning)) {
             final existingProject =
@@ -315,9 +365,15 @@ class _MyAppState extends State<MyApp> {
             if (existingProject != null) {
               final numberOfCleaners = newItem.manDays.ceil();
 
-              // Recalculate tools if manDays changed
+              // Determine which tools to use
               CategorizedTools? updatedToolsNeeded;
-              if (oldItem.manDays != newItem.manDays) {
+              if (newItem.toolsNeeded != null) {
+                // Use pre-defined tools from job item
+                debugPrint('   Using updated pre-defined tools from job item');
+                updatedToolsNeeded = newItem.toolsNeeded;
+              } else if (oldItem.manDays != newItem.manDays) {
+                // Recalculate tools only if manDays changed and no pre-defined tools
+                debugPrint('   Recalculating tools due to manDays change');
                 updatedToolsNeeded =
                     toolSettingsProvider.calculateCategorizedTools(
                   numberOfCleaners,
@@ -440,7 +496,7 @@ class _MyAppState extends State<MyApp> {
   void _refreshApp() {
     // For web, reload the page
     if (kIsWeb) {
-      html.window.location.reload();
+      reloadPage();
     }
   }
 

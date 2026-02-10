@@ -4,12 +4,16 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/job_list_item.dart';
 import '../models/collection_job.dart';
+import '../models/happy_sun_shared.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/job_list_status_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/collection_schedule_provider.dart';
+import '../providers/inventory_provider.dart';
+import '../providers/tool_settings_provider.dart';
 import '../services/job_assignment_service.dart';
 import 'job_assignment_preview_dialog.dart';
+import 'happy_sun_tools_dialog.dart';
 
 class AddEditJobDialog extends StatefulWidget {
   final JobListItem? jobToEdit;
@@ -50,11 +54,21 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   DateTime? _selectedDate;
   DateTime? _selectedCollectionDate;
 
+  // Tools needed for Happy Sun jobs (window/solar cleaning)
+  CategorizedTools? _toolsNeeded;
+
   @override
   void initState() {
     super.initState();
 
     final job = widget.jobToEdit;
+    debugPrint('\n📋 AddEditJobDialog: Opening dialog');
+    debugPrint('   Mode: ${job != null ? "EDIT" : "CREATE"}');
+    if (job != null) {
+      debugPrint('   Job ID: ${job.id}');
+      debugPrint('   Job Type: ${job.jobType.displayName}');
+      debugPrint('   Client: ${job.client}');
+    }
 
     // Initialize controllers with existing values or empty
     _invoiceController = TextEditingController(text: job?.invoice ?? '');
@@ -99,6 +113,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     // Initialize dates - null for new jobs, existing values for editing
     _selectedDate = job?.date;
     _selectedCollectionDate = job?.collectionDate;
+
+    // Initialize tools needed for Happy Sun jobs
+    _toolsNeeded = job?.toolsNeeded;
   }
 
   @override
@@ -1088,70 +1105,99 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                 ),
                               ]),
                               const SizedBox(height: 16),
-                              // Row 7: Quantity Distributed
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: TextFormField(
-                                      controller:
-                                          _quantityDistributedController,
-                                      decoration: InputDecoration(
-                                        labelText: (_selectedJobType ==
-                                                    JobType.junkCollection ||
-                                                _selectedJobType ==
-                                                    JobType.furnitureMove ||
-                                                _selectedJobType ==
-                                                    JobType.trailerTowing)
-                                            ? "Time Slot"
-                                            : 'Quantity Distributed',
-                                        border: const OutlineInputBorder(),
-                                      ),
-                                      keyboardType: TextInputType.number,
-                                      inputFormatters: [
-                                        FilteringTextInputFormatter.digitsOnly
-                                      ],
-                                    ),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    child: TextFormField(
-                                      controller: _invoiceDetailsController,
-                                      decoration: const InputDecoration(
-                                        labelText: 'Invoice Details',
-                                        border: OutlineInputBorder(),
-                                      ),
-                                      maxLines: 1,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 16),
 
-                              // Row 8: Invoice Details, Report Addresses, Who to Invoice
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: TextFormField(
-                                      controller: _reportAddressesController,
-                                      decoration: const InputDecoration(
-                                        labelText: 'Report Addresses',
-                                        border: OutlineInputBorder(),
+                              // Conditionally show fields based on job type
+                              if (_selectedJobType != JobType.windowCleaning &&
+                                  _selectedJobType !=
+                                      JobType.solarPanelCleaning) ...[
+                                // Row 7: Quantity Distributed & Invoice Details
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: TextFormField(
+                                        controller:
+                                            _quantityDistributedController,
+                                        decoration: InputDecoration(
+                                          labelText: (_selectedJobType ==
+                                                      JobType.junkCollection ||
+                                                  _selectedJobType ==
+                                                      JobType.furnitureMove ||
+                                                  _selectedJobType ==
+                                                      JobType.trailerTowing)
+                                              ? "Time Slot"
+                                              : 'Quantity Distributed',
+                                          border: const OutlineInputBorder(),
+                                        ),
+                                        keyboardType: TextInputType.number,
+                                        inputFormatters: [
+                                          FilteringTextInputFormatter.digitsOnly
+                                        ],
                                       ),
-                                      maxLines: 1,
+                                    ),
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: TextFormField(
+                                        controller: _invoiceDetailsController,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Invoice Details',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        maxLines: 1,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 16),
+
+                                // Row 8: Report Addresses & Who to Invoice
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: TextFormField(
+                                        controller: _reportAddressesController,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Report Addresses',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        maxLines: 1,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: TextFormField(
+                                        controller: _whoToInvoiceController,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Who to Invoice',
+                                          border: OutlineInputBorder(),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+
+                              // Tools Needed button for window/solar cleaning
+                              if (_selectedJobType == JobType.windowCleaning ||
+                                  _selectedJobType ==
+                                      JobType.solarPanelCleaning) ...[
+                                const SizedBox(height: 16),
+                                OutlinedButton.icon(
+                                  onPressed: _showToolsDialog,
+                                  icon: const Icon(Icons.build),
+                                  label: Text(
+                                    _toolsNeeded != null &&
+                                            _toolsNeeded!.totalCount > 0
+                                        ? 'Tools Needed (${_toolsNeeded!.totalCount})'
+                                        : 'Add Tools Needed',
+                                  ),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 12,
                                     ),
                                   ),
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    child: TextFormField(
-                                      controller: _whoToInvoiceController,
-                                      decoration: const InputDecoration(
-                                        labelText: 'Who to Invoice',
-                                        border: OutlineInputBorder(),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -1336,11 +1382,18 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   }
 
   void _saveJob() async {
+    debugPrint('\n💾 AddEditJobDialog._saveJob: Started');
+    debugPrint('   Job Type: ${_selectedJobType.displayName}');
+    debugPrint('   Client: ${_clientController.text.trim()}');
+    debugPrint(
+        '   Tools Needed: ${_toolsNeeded != null ? "Yes (${_toolsNeeded!.totalCount} tools)" : "No"}');
+
     if (_formKey.currentState!.validate()) {
       setState(() {
         _isProcessing = true;
       });
 
+      debugPrint('   Creating JobListItem object...');
       final jobListItem = JobListItem(
         id: widget.jobToEdit?.id ?? '',
         invoice: _invoiceController.text.trim(),
@@ -1361,11 +1414,19 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         invoiceDetails: _invoiceDetailsController.text.trim(),
         reportAddresses: _reportAddressesController.text.trim(),
         whoToInvoice: _whoToInvoiceController.text.trim(),
+        toolsNeeded: _toolsNeeded,
       );
+      debugPrint('   ✅ JobListItem created');
+      debugPrint('   - Job Type: ${jobListItem.jobType.displayName}');
+      debugPrint('   - Has Tools: ${jobListItem.toolsNeeded != null}');
 
       try {
         // If editing existing job
         if (widget.jobToEdit != null) {
+          debugPrint(
+              '   📝 Editing existing job - returning JobListItem to caller');
+          debugPrint(
+              '   No direct DB write from dialog - JobList/JobListGrid handles update');
           // Check if this is a collection job and if time/date changed
           if ((_selectedJobType == JobType.junkCollection ||
                   _selectedJobType == JobType.furnitureMove ||
@@ -1382,6 +1443,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         if (_selectedJobType == JobType.junkCollection ||
             _selectedJobType == JobType.furnitureMove ||
             _selectedJobType == JobType.trailerTowing) {
+          debugPrint('   🚚 Collection job type - returning to caller');
+          debugPrint(
+              '   No direct DB write - JobList/JobListGrid handles creation');
           // Collection jobs are automatically derived from job list data
           // Just save the job and it will appear in collection schedule
           if (mounted) {
@@ -1389,6 +1453,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
           }
           return;
         } else {
+          debugPrint('   📅 Non-collection job - showing assignment preview');
           // For other job types, show regular assignment preview
           await _showJobAssignmentPreview(jobListItem);
         }
@@ -1403,6 +1468,11 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   }
 
   void _saveJobWithoutAllocation() async {
+    debugPrint('\n💾 AddEditJobDialog._saveJobWithoutAllocation: Started');
+    debugPrint(
+        '   ⚠️ WARNING: This method calls JobListProvider.addJobListItem directly!');
+    debugPrint('   Job Type: ${_selectedJobType.displayName}');
+
     if (_formKey.currentState!.validate()) {
       setState(() {
         _isProcessing = true;
@@ -1432,7 +1502,12 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
       try {
         // Save the job to database but skip automatic schedule allocation
+        debugPrint(
+            '   🔥 Calling JobListProvider.addJobListItem (direct DB write)');
+        debugPrint(
+            '   This will trigger Happy Sun sync if window/solar cleaning!');
         await context.read<JobListProvider>().addJobListItem(jobListItem);
+        debugPrint('   ✅ JobListProvider.addJobListItem completed');
 
         // Return job with a special flag to indicate skip allocation
         Navigator.of(context).pop({'job': jobListItem, 'skipAllocation': true});
@@ -1717,5 +1792,89 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     // Check if the timeSlot falls within the job's duration
     return checkIndex >= jobStartIndex &&
         checkIndex < (jobStartIndex + job.timeSlots);
+  }
+
+  void _showToolsDialog() async {
+    debugPrint('\n🔧 AddEditJobDialog._showToolsDialog: Opening tools dialog');
+    debugPrint('   Job Type: ${_selectedJobType.displayName}');
+    debugPrint(
+        '   Current tools: ${_toolsNeeded != null ? "${_toolsNeeded!.totalCount} tools" : "None"}');
+
+    // Validate form before opening tools dialog
+    if (!_formKey.currentState!.validate()) {
+      // Scroll to top to show validation errors
+      _scrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+      return;
+    }
+
+    final inventoryProvider = context.read<InventoryProvider>();
+    final toolSettingsProvider = context.read<ToolSettingsProvider>();
+
+    // Initialize inventory if needed
+    if (inventoryProvider.tools.isEmpty && !inventoryProvider.isLoading) {
+      await inventoryProvider.initialize();
+    }
+
+    // Initialize tool settings if needed
+    if (toolSettingsProvider.settings.teamTools.isEmpty &&
+        toolSettingsProvider.settings.individualTools.isEmpty) {
+      await toolSettingsProvider.loadSettings();
+    }
+
+    if (!mounted) return;
+
+    // Auto-calculate tools based on manDays if not already set
+    CategorizedTools initialTools;
+    if (_toolsNeeded == null) {
+      final numberOfCleaners =
+          (double.tryParse(_manDaysController.text) ?? 0).ceil();
+
+      if (numberOfCleaners > 0) {
+        // Calculate categorized tools: team tools (constant) + individual tools (per cleaner) + accessories
+        initialTools = toolSettingsProvider.calculateCategorizedTools(
+          numberOfCleaners,
+          inventoryProvider.tools,
+        );
+
+        debugPrint(
+            '🔧 Auto-calculated tools for $numberOfCleaners cleaner(s):');
+        debugPrint('   Team tools: ${initialTools.teamTools.length} groups');
+        debugPrint(
+            '   Individual tools: ${initialTools.individualTools.length} groups');
+        debugPrint('   Extras: ${initialTools.extras.length} groups');
+        debugPrint('   Accessories: ${initialTools.accessories.length} groups');
+      } else {
+        initialTools = CategorizedTools.empty();
+      }
+    } else {
+      initialTools = _toolsNeeded!;
+    }
+
+    // Show tools dialog
+    final result = await showDialog<CategorizedTools>(
+      context: context,
+      builder: (context) => HappySunToolsDialog(
+        currentTools: initialTools,
+        availableTools: inventoryProvider.tools,
+      ),
+    );
+
+    if (result != null) {
+      debugPrint('   ✅ Tools dialog returned with tools');
+      debugPrint('   Team tools: ${result.teamTools.length}');
+      debugPrint('   Individual tools: ${result.individualTools.length}');
+      debugPrint('   Extras: ${result.extras.length}');
+      debugPrint('   Accessories: ${result.accessories.length}');
+      debugPrint('   Total count: ${result.totalCount}');
+      setState(() {
+        _toolsNeeded = result;
+      });
+    } else {
+      debugPrint('   ❌ Tools dialog cancelled');
+    }
   }
 }

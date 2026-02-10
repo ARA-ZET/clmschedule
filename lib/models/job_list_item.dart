@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'job_list_item_update.dart';
 import 'custom_polygon.dart';
 import 'job_reminder.dart';
+import 'happy_sun_shared.dart';
 
 // Legacy enum for backwards compatibility during migration
 enum JobListStatus {
@@ -107,6 +108,8 @@ class JobListItem {
   final List<JobListItemUpdate> updates; // Track all changes
   final List<CustomPolygon> customPolygons; // Custom polygons for map areas
   final List<JobReminder> reminders; // List of reminders for invoice chase
+  final CategorizedTools?
+      toolsNeeded; // Tools needed for Happy Sun jobs (window/solar cleaning)
 
   JobListItem({
     required this.id,
@@ -131,6 +134,7 @@ class JobListItem {
     this.updates = const [], // Default to empty list
     this.customPolygons = const [], // Default to empty list
     this.reminders = const [], // Default to empty list
+    this.toolsNeeded, // Optional tools for Happy Sun jobs
   });
 
   // Create from Firestore
@@ -219,6 +223,10 @@ class JobListItem {
       updates: updates,
       customPolygons: customPolygons,
       reminders: reminders,
+      toolsNeeded: data['toolsNeeded'] != null
+          ? CategorizedTools.fromMap(
+              data['toolsNeeded'] as Map<String, dynamic>)
+          : null,
     );
   }
 
@@ -247,6 +255,7 @@ class JobListItem {
       'customPolygons':
           customPolygons.map((polygon) => polygon.toMap()).toList(),
       'reminders': reminders.map((reminder) => reminder.toMap()).toList(),
+      if (toolsNeeded != null) 'toolsNeeded': toolsNeeded!.toMap(),
     };
   }
 
