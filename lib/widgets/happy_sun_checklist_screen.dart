@@ -869,8 +869,6 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
 
         return ListView.builder(
           padding: const EdgeInsets.all(12),
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
           itemCount: sortedGroups.length,
           itemBuilder: (context, index) {
             final entry = sortedGroups[index];

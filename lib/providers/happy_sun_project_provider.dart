@@ -382,6 +382,21 @@ class HappySunProjectProvider extends ChangeNotifier {
     }
   }
 
+  // Update project fields (generic update)
+  Future<bool> updateProjectFields(String projectId, DateTime projectDate,
+      Map<String, dynamic> fields) async {
+    try {
+      _error = null;
+      await _projectService.updateProjectFields(projectId, fields);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
   // Update team members
   Future<bool> updateTeamMembers(
       String projectId, List<String> teamMemberIds) async {

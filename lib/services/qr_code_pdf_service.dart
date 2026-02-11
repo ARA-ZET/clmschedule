@@ -99,7 +99,7 @@ class QrCodePdfService {
                       ),
                       // Text labels - 20% of cell
                       pw.Expanded(
-                        flex: 2,
+                        flex: 3,
                         child: pw.Padding(
                           padding: const pw.EdgeInsets.symmetric(
                               horizontal: 4, vertical: 2),
@@ -109,7 +109,7 @@ class QrCodePdfService {
                               pw.Text(
                                 tool.toolId,
                                 style: pw.TextStyle(
-                                  fontSize: 14,
+                                  fontSize: 18,
                                   fontWeight: pw.FontWeight.bold,
                                   font: fontBold,
                                 ),
@@ -119,8 +119,8 @@ class QrCodePdfService {
                               pw.Text(
                                 tool.name,
                                 style: pw.TextStyle(
-                                  fontSize: 11,
-                                  font: fontRegular,
+                                  fontSize: 18,
+                                  font: fontBold,
                                 ),
                                 textAlign: pw.TextAlign.center,
                                 maxLines: 2,

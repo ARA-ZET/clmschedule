@@ -17,9 +17,44 @@ class QrCodePrintPreviewDialog extends StatefulWidget {
 }
 
 class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
-  int _codesPerRow = 3;
+  int _codesPerRow = 4;
   double _qrSize = 150.0;
   bool _isGenerating = false;
+  late Set<String> _selectedToolIds;
+  bool _isSelectionExpanded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Initially select all tools
+    _selectedToolIds = widget.tools.map((t) => t.id).toSet();
+  }
+
+  bool get _allSelected => _selectedToolIds.length == widget.tools.length;
+  bool get _someSelected => _selectedToolIds.isNotEmpty && !_allSelected;
+
+  void _toggleAll() {
+    setState(() {
+      if (_allSelected) {
+        _selectedToolIds.clear();
+      } else {
+        _selectedToolIds = widget.tools.map((t) => t.id).toSet();
+      }
+    });
+  }
+
+  void _toggleTool(String toolId) {
+    setState(() {
+      if (_selectedToolIds.contains(toolId)) {
+        _selectedToolIds.remove(toolId);
+      } else {
+        _selectedToolIds.add(toolId);
+      }
+    });
+  }
+
+  List<InventoryTool> get _selectedTools =>
+      widget.tools.where((t) => _selectedToolIds.contains(t.id)).toList();
 
   @override
   Widget build(BuildContext context) {
@@ -67,7 +102,7 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
                           ),
                         ),
                         Text(
-                          '${widget.tools.length} tools',
+                          '${_selectedToolIds.length} of ${widget.tools.length} tools selected',
                           style: const TextStyle(
                             fontSize: 12,
                             color: Colors.white70,
@@ -96,6 +131,183 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // Tool Selection Header - Collapsable
+                  InkWell(
+                    onTap: () {
+                      setState(() {
+                        _isSelectionExpanded = !_isSelectionExpanded;
+                      });
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                _isSelectionExpanded
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                                size: 24,
+                              ),
+                              const SizedBox(width: 8),
+                              const Text(
+                                'Tool Selection',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.orange.withOpacity(0.2),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Text(
+                                  '${_selectedToolIds.length}/${widget.tools.length}',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.orange,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          TextButton.icon(
+                            onPressed: _toggleAll,
+                            icon: Icon(
+                              _allSelected
+                                  ? Icons.check_box
+                                  : (_someSelected
+                                      ? Icons.indeterminate_check_box
+                                      : Icons.check_box_outline_blank),
+                              size: 20,
+                            ),
+                            label: Text(
+                                _allSelected ? 'Deselect All' : 'Select All'),
+                            style: TextButton.styleFrom(
+                              foregroundColor: Colors.orange,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  // Collapsable Tool Grid
+                  if (_isSelectionExpanded) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      constraints: const BoxConstraints(maxHeight: 300),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.grey.shade300),
+                      ),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          // Calculate how many items can fit per row
+                          const minItemWidth = 200.0;
+                          final crossAxisCount =
+                              (constraints.maxWidth / minItemWidth)
+                                  .floor()
+                                  .clamp(1, 6);
+
+                          return GridView.builder(
+                            padding: const EdgeInsets.all(8),
+                            gridDelegate:
+                                SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: crossAxisCount,
+                              childAspectRatio: 4,
+                              crossAxisSpacing: 8,
+                              mainAxisSpacing: 8,
+                            ),
+                            shrinkWrap: true,
+                            itemCount: widget.tools.length,
+                            itemBuilder: (context, index) {
+                              final tool = widget.tools[index];
+                              final isSelected =
+                                  _selectedToolIds.contains(tool.id);
+                              return InkWell(
+                                onTap: () => _toggleTool(tool.id),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: isSelected
+                                        ? Colors.orange.shade50
+                                        : Colors.grey.shade50,
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(
+                                      color: isSelected
+                                          ? Colors.orange
+                                          : Colors.grey.shade300,
+                                      width: isSelected ? 2 : 1,
+                                    ),
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 8,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          isSelected
+                                              ? Icons.check_box
+                                              : Icons.check_box_outline_blank,
+                                          color: isSelected
+                                              ? Colors.orange
+                                              : Colors.grey,
+                                          size: 20,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.center,
+                                            children: [
+                                              Text(
+                                                tool.toolId,
+                                                style: TextStyle(
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: isSelected
+                                                      ? Colors.orange.shade900
+                                                      : Colors.black87,
+                                                ),
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              Text(
+                                                tool.name,
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: Colors.grey.shade600,
+                                                ),
+                                                overflow: TextOverflow.ellipsis,
+                                                maxLines: 1,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                  const Divider(height: 32),
                   const Text(
                     'Layout Settings',
                     style: TextStyle(
@@ -119,8 +331,8 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
                             ),
                             Slider(
                               value: _codesPerRow.toDouble(),
-                              min: 2,
-                              max: 5,
+                              min: 4,
+                              max: 8,
                               divisions: 3,
                               label: '$_codesPerRow',
                               onChanged: (value) {
@@ -175,7 +387,7 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            'Approximate: ${(_codesPerRow * ((MediaQuery.of(context).size.height - 300) / _qrSize).floor()).round()} codes per page',
+                            'Approximate: ${(_codesPerRow * ((MediaQuery.of(context).size.height - 300) / _qrSize).floor()).round()} codes per page (${_selectedToolIds.length} selected)',
                             style: TextStyle(
                               fontSize: 12,
                               color: Colors.blue.shade700,
@@ -240,7 +452,7 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
                               ),
                               const SizedBox(height: 8),
                               Text(
-                                'Creating QR codes for ${widget.tools.length} tools',
+                                'Creating QR codes for ${_selectedToolIds.length} tools',
                                 style: TextStyle(
                                   fontSize: 14,
                                   color: Colors.grey.shade600,
@@ -280,7 +492,9 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
                   ),
                   const SizedBox(width: 12),
                   ElevatedButton.icon(
-                    onPressed: _isGenerating ? null : _generatePdf,
+                    onPressed: _isGenerating || _selectedToolIds.isEmpty
+                        ? null
+                        : _generatePdf,
                     icon: _isGenerating
                         ? const SizedBox(
                             width: 16,
@@ -291,8 +505,9 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
                             ),
                           )
                         : const Icon(Icons.picture_as_pdf),
-                    label:
-                        Text(_isGenerating ? 'Generating...' : 'Download PDF'),
+                    label: Text(_isGenerating
+                        ? 'Generating...'
+                        : 'Download PDF (${_selectedToolIds.length})'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.orange,
                       foregroundColor: Colors.white,
@@ -325,15 +540,18 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
     final rowsPerPage = (availableHeight / itemWidth).floor();
     final itemsPerPage = itemsPerRow * rowsPerPage;
 
+    // Only show selected tools
+    final toolsToShow = _selectedTools;
+
     // Group tools by page
     final pages = <List<InventoryTool>>[];
-    for (int i = 0; i < widget.tools.length; i += itemsPerPage) {
+    for (int i = 0; i < toolsToShow.length; i += itemsPerPage) {
       pages.add(
-        widget.tools.sublist(
+        toolsToShow.sublist(
           i,
-          (i + itemsPerPage) < widget.tools.length
+          (i + itemsPerPage) < toolsToShow.length
               ? i + itemsPerPage
-              : widget.tools.length,
+              : toolsToShow.length,
         ),
       );
     }
@@ -369,7 +587,6 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
   Widget _buildQrCodePreview(InventoryTool tool, double size) {
     return Container(
       width: size,
-      height: size,
       decoration: BoxDecoration(
         border: Border.all(color: Colors.grey.shade400, width: 1),
         color: Colors.white,
@@ -378,40 +595,45 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Expanded(
-            flex: 7,
+          // QR Code
+          SizedBox(
+            width: size - 16,
+            height: size - 16,
             child: QrImageView(
               data: tool.qrCode,
               version: QrVersions.auto,
             ),
           ),
-          const SizedBox(height: 8),
-          Expanded(
-            flex: 2,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  tool.toolId,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  textAlign: TextAlign.center,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  tool.name,
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: Colors.grey.shade700,
-                  ),
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
+          const SizedBox(height: 12),
+          // Tool ID - Bold and prominent
+          Container(
+            width: size - 16,
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Text(
+              tool.toolId,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.5,
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          // Tool Name - Bold
+          Container(
+            width: size - 16,
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Text(
+              tool.name,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
         ],
@@ -420,21 +642,33 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
   }
 
   Future<void> _generatePdf() async {
+    if (_selectedToolIds.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please select at least one tool to print'),
+          backgroundColor: Colors.orange,
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
     setState(() => _isGenerating = true);
 
     try {
       await QrCodePdfService.downloadQrCodePdf(
-        widget.tools,
+        _selectedTools,
         codesPerRow: _codesPerRow,
         qrSize: _qrSize,
       );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('PDF generated successfully!'),
+          SnackBar(
+            content: Text(
+                'PDF generated successfully with ${_selectedToolIds.length} QR codes!'),
             backgroundColor: Colors.green,
-            duration: Duration(seconds: 2),
+            duration: const Duration(seconds: 2),
           ),
         );
         Navigator.pop(context);

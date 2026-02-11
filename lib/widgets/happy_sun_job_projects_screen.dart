@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:video_player/video_player.dart';
+import 'package:image/image.dart' as img;
+import 'dart:typed_data';
 import '../models/happy_sun_project.dart';
 import '../models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData, GroupedToolItem, ToolChecklistItem
 import '../models/inventory_tool.dart';
@@ -636,19 +641,79 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
           jobListItem.jobType.displayName,
         ),
         const SizedBox(height: 16),
-        OutlinedButton.icon(
-          onPressed: () => _showToolsDialog(context, project),
-          icon: Icon(project.toolsNeeded != null ? Icons.build : Icons.edit,
-              size: 18),
-          label: Text(
-            project.toolsNeeded != null
-                ? 'Tools Needed (${project.toolsNeeded!.totalCount})'
-                : 'Add Tools',
-          ),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: Colors.orange,
-            side: const BorderSide(color: Colors.orange),
-          ),
+        // Row with three buttons
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => _showToolsDialog(context, project),
+                icon: Icon(
+                    project.toolsNeeded != null ? Icons.build : Icons.edit,
+                    size: 18),
+                label: Text(
+                  project.toolsNeeded != null
+                      ? 'Tools (${project.toolsNeeded!.totalCount})'
+                      : 'Add Tools',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.orange,
+                  side: const BorderSide(color: Colors.orange),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => _handleBeforeImages(context, project),
+                icon: Icon(
+                    project.beforeImages != null &&
+                            project.beforeImages!.isNotEmpty
+                        ? Icons.photo_library
+                        : Icons.add_photo_alternate,
+                    size: 18),
+                label: Text(
+                  project.beforeImages != null &&
+                          project.beforeImages!.isNotEmpty
+                      ? 'Before (${project.beforeImages!.length})'
+                      : 'Before',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.blue,
+                  side: const BorderSide(color: Colors.blue),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => _handleAfterImages(context, project),
+                icon: Icon(
+                    project.afterImages != null &&
+                            project.afterImages!.isNotEmpty
+                        ? Icons.photo_camera
+                        : Icons.add_a_photo,
+                    size: 18),
+                label: Text(
+                  project.afterImages != null && project.afterImages!.isNotEmpty
+                      ? 'After (${project.afterImages!.length})'
+                      : 'After',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.green,
+                  side: const BorderSide(color: Colors.green),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -2050,6 +2115,817 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
       default:
         return Icons.build;
     }
+  }
+
+  // Handle before images - open viewer
+  void _handleBeforeImages(BuildContext context, HappySunProject project) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => _ImageViewerScreen(
+          project: project,
+          imageType: 'before',
+          title: 'Before Images',
+          addButtonText: 'Add from Gallery',
+        ),
+      ),
+    );
+  }
+
+  // Handle after images - open viewer
+  void _handleAfterImages(BuildContext context, HappySunProject project) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => _ImageViewerScreen(
+          project: project,
+          imageType: 'after',
+          title: 'After Images',
+          addButtonText: 'Take Photo',
+        ),
+      ),
+    );
+  }
+}
+
+// Image Viewer Screen - View and add before/after images
+class _ImageViewerScreen extends StatefulWidget {
+  final HappySunProject project;
+  final String imageType; // 'before' or 'after'
+  final String title;
+  final String addButtonText;
+
+  const _ImageViewerScreen({
+    required this.project,
+    required this.imageType,
+    required this.title,
+    required this.addButtonText,
+  });
+
+  @override
+  State<_ImageViewerScreen> createState() => _ImageViewerScreenState();
+}
+
+class _ImageViewerScreenState extends State<_ImageViewerScreen> {
+  late PageController _pageController;
+  int _currentPage = 0;
+  bool _isUploading = false;
+  double _uploadProgress = 0.0;
+  String _uploadStatus = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController();
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  List<String> get _images {
+    return widget.imageType == 'before'
+        ? (widget.project.beforeImages ?? [])
+        : (widget.project.afterImages ?? []);
+  }
+
+  Future<void> _addImages() async {
+    try {
+      final picker = ImagePicker();
+      List<XFile> pickedFiles = [];
+
+      if (widget.imageType == 'before') {
+        // Show dialog to choose between image and video
+        final mediaType = await showDialog<String>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Add Media'),
+            content: const Text('What would you like to add?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'image'),
+                child: const Text('Images'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'video'),
+                child: const Text('Video'),
+              ),
+            ],
+          ),
+        );
+
+        if (mediaType == null) return;
+
+        if (mediaType == 'image') {
+          pickedFiles = await picker.pickMultiImage();
+        } else {
+          final pickedFile =
+              await picker.pickVideo(source: ImageSource.gallery);
+          if (pickedFile != null) {
+            pickedFiles = [pickedFile];
+          }
+        }
+      } else {
+        // For after, show choice between camera photo or video
+        final mediaType = await showDialog<String>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Capture Media'),
+            content: const Text('What would you like to capture?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'image'),
+                child: const Text('Photo'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'video'),
+                child: const Text('Video'),
+              ),
+            ],
+          ),
+        );
+
+        if (mediaType == null) return;
+
+        if (mediaType == 'image') {
+          final pickedFile = await picker.pickImage(
+              source: ImageSource.camera, imageQuality: 80);
+          if (pickedFile != null) {
+            pickedFiles = [pickedFile];
+          }
+        } else {
+          final pickedFile = await picker.pickVideo(source: ImageSource.camera);
+          if (pickedFile != null) {
+            pickedFiles = [pickedFile];
+          }
+        }
+      }
+
+      if (pickedFiles.isEmpty) return;
+
+      if (!mounted) return;
+
+      setState(() {
+        _isUploading = true;
+        _uploadProgress = 0.0;
+        _uploadStatus = 'Preparing upload...';
+      });
+
+      final projectProvider = context.read<HappySunProjectProvider>();
+      final List<String> uploadedUrls = [];
+
+      // Upload images to Firebase Storage
+      for (int i = 0; i < pickedFiles.length; i++) {
+        final pickedFile = pickedFiles[i];
+        setState(() {
+          _uploadStatus = 'Processing file ${i + 1}/${pickedFiles.length}...';
+        });
+
+        Uint8List bytes = await pickedFile.readAsBytes();
+        final fileName = DateTime.now().millisecondsSinceEpoch.toString();
+
+        // Get file extension from the picked file, default to jpg if not available
+        String extension = 'jpg';
+        if (pickedFile.name.contains('.')) {
+          extension = pickedFile.name.split('.').last.toLowerCase();
+        } else if (pickedFile.path.contains('.')) {
+          extension = pickedFile.path.split('.').last.toLowerCase();
+        }
+
+        // Convert HEIC/HEIF images to PNG for better browser compatibility
+        if (['heic', 'heif'].contains(extension)) {
+          try {
+            setState(() {
+              _uploadStatus = 'Converting ${extension.toUpperCase()} to PNG...';
+            });
+            final image = img.decodeImage(bytes);
+            if (image != null) {
+              bytes = Uint8List.fromList(img.encodePng(image));
+              extension = 'png';
+            }
+          } catch (e) {
+            print('Error converting HEIC to PNG: $e');
+            // Continue with original if conversion fails
+          }
+        }
+
+        final monthFolder =
+            '${widget.project.scheduledDate.year}-${widget.project.scheduledDate.month.toString().padLeft(2, '0')}';
+        final ref = FirebaseStorage.instance.ref().child(
+            'happySunProjects/$monthFolder/${widget.project.id}/${widget.imageType}/$fileName.$extension');
+
+        // Set metadata with correct content type
+        final metadata = SettableMetadata(
+          contentType: _getContentType(extension),
+        );
+
+        setState(() {
+          _uploadStatus = 'Uploading ${i + 1}/${pickedFiles.length}...';
+        });
+
+        // Upload with progress tracking
+        final uploadTask = ref.putData(bytes, metadata);
+
+        uploadTask.snapshotEvents.listen((TaskSnapshot snapshot) {
+          final progress = snapshot.bytesTransferred / snapshot.totalBytes;
+          if (mounted) {
+            setState(() {
+              _uploadProgress = progress;
+            });
+          }
+        });
+
+        await uploadTask;
+        final url = await ref.getDownloadURL();
+        uploadedUrls.add(url);
+      }
+
+      // Update project with new images
+      final updatedImages = [
+        ..._images,
+        ...uploadedUrls,
+      ];
+
+      final fieldName =
+          widget.imageType == 'before' ? 'beforeImages' : 'afterImages';
+      await projectProvider.updateProjectFields(
+        widget.project.id,
+        widget.project.scheduledDate,
+        {fieldName: updatedImages},
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _isUploading = false;
+        _uploadProgress = 0.0;
+        _uploadStatus = '';
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              '${uploadedUrls.length} media file(s) uploaded successfully'),
+          backgroundColor: Colors.green,
+        ),
+      );
+
+      // Navigate to first new image
+      if (uploadedUrls.isNotEmpty) {
+        _pageController.animateToPage(
+          _images.length - uploadedUrls.length,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+        );
+      }
+    } catch (e, stackTrace) {
+      print('Upload error: $e');
+      print('Stack trace: $stackTrace');
+      if (!mounted) return;
+      setState(() {
+        _isUploading = false;
+        _uploadProgress = 0.0;
+        _uploadStatus = '';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error uploading: ${e.toString()}'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  Future<void> _deleteImage(int index) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Image'),
+        content: const Text('Are you sure you want to delete this image?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      final projectProvider = context.read<HappySunProjectProvider>();
+      final updatedImages = List<String>.from(_images)..removeAt(index);
+
+      final fieldName =
+          widget.imageType == 'before' ? 'beforeImages' : 'afterImages';
+      await projectProvider.updateProjectFields(
+        widget.project.id,
+        widget.project.scheduledDate,
+        {fieldName: updatedImages},
+      );
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Image deleted'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+
+      // Navigate to previous page if current page is deleted
+      if (_currentPage >= updatedImages.length) {
+        final newPage = updatedImages.isEmpty ? 0 : updatedImages.length - 1;
+        _pageController.jumpToPage(newPage);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error deleting image: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final totalPages = _images.length + 1; // Images + add page
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.title),
+        backgroundColor:
+            widget.imageType == 'before' ? Colors.blue : Colors.green,
+        actions: [
+          if (_currentPage < _images.length)
+            IconButton(
+              icon: const Icon(Icons.delete),
+              onPressed: () => _deleteImage(_currentPage),
+              tooltip: 'Delete Image',
+            ),
+        ],
+      ),
+      body: Stack(
+        children: [
+          PageView.builder(
+            controller: _pageController,
+            onPageChanged: (page) {
+              setState(() => _currentPage = page);
+            },
+            itemCount: totalPages,
+            itemBuilder: (context, index) {
+              // Last page is the add button
+              if (index == _images.length) {
+                return _buildAddImagePage();
+              }
+
+              // Regular image/video pages
+              return _buildMediaPage(_images[index]);
+            },
+          ),
+          // Navigation arrows
+          if (totalPages > 1)
+            Positioned.fill(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  if (_currentPage > 0)
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back_ios, size: 40),
+                      color: Colors.white,
+                      onPressed: () {
+                        _pageController.previousPage(
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOut,
+                        );
+                      },
+                    )
+                  else
+                    const SizedBox(width: 48),
+                  if (_currentPage < totalPages - 1)
+                    IconButton(
+                      icon: const Icon(Icons.arrow_forward_ios, size: 40),
+                      color: Colors.white,
+                      onPressed: () {
+                        _pageController.nextPage(
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOut,
+                        );
+                      },
+                    )
+                  else
+                    const SizedBox(width: 48),
+                ],
+              ),
+            ),
+          // Page indicator
+          Positioned(
+            bottom: 16,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  '${_currentPage + 1} / $totalPages',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMediaPage(String mediaUrl) {
+    if (_isVideo(mediaUrl)) {
+      return _VideoPlayerWidget(videoUrl: mediaUrl);
+    }
+
+    return InteractiveViewer(
+      minScale: 0.5,
+      maxScale: 4.0,
+      child: Center(
+        child: Image.network(
+          mediaUrl,
+          fit: BoxFit.contain,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return Center(
+              child: CircularProgressIndicator(
+                value: loadingProgress.expectedTotalBytes != null
+                    ? loadingProgress.cumulativeBytesLoaded /
+                        loadingProgress.expectedTotalBytes!
+                    : null,
+              ),
+            );
+          },
+          errorBuilder: (context, error, stackTrace) {
+            return const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.broken_image, size: 64, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text(
+                    'Failed to load image',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAddImagePage() {
+    return Container(
+      color: Colors.grey.shade100,
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              widget.imageType == 'before'
+                  ? Icons.add_photo_alternate
+                  : Icons.add_a_photo,
+              size: 120,
+              color: widget.imageType == 'before' ? Colors.blue : Colors.green,
+            ),
+            const SizedBox(height: 32),
+            if (_isUploading) ...[
+              SizedBox(
+                width: 200,
+                child: Column(
+                  children: [
+                    LinearProgressIndicator(
+                      value: _uploadProgress,
+                      backgroundColor: Colors.grey.shade300,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        widget.imageType == 'before'
+                            ? Colors.blue
+                            : Colors.green,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${(_uploadProgress * 100).toInt()}%',
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _uploadStatus,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey.shade600,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            if (!_isUploading)
+              ElevatedButton.icon(
+                onPressed: _addImages,
+                icon: Icon(
+                  widget.imageType == 'before'
+                      ? Icons.photo_library
+                      : Icons.camera_alt,
+                ),
+                label: Text(widget.addButtonText),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor:
+                      widget.imageType == 'before' ? Colors.blue : Colors.green,
+                  foregroundColor: Colors.white,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                  textStyle: const TextStyle(fontSize: 18),
+                ),
+              ),
+            if (_images.isEmpty) ...[
+              const SizedBox(height: 24),
+              Text(
+                'No ${widget.imageType} images yet',
+                style: TextStyle(
+                  fontSize: 16,
+                  color: Colors.grey.shade600,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _getContentType(String extension) {
+    switch (extension.toLowerCase()) {
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'png':
+        return 'image/png';
+      case 'gif':
+        return 'image/gif';
+      case 'webp':
+        return 'image/webp';
+      case 'heic':
+        return 'image/heic';
+      case 'heif':
+        return 'image/heif';
+      case 'bmp':
+        return 'image/bmp';
+      case 'tiff':
+      case 'tif':
+        return 'image/tiff';
+      case 'mp4':
+        return 'video/mp4';
+      case 'mov':
+        return 'video/quicktime';
+      case 'avi':
+        return 'video/x-msvideo';
+      case 'mkv':
+        return 'video/x-matroska';
+      case 'webm':
+        return 'video/webm';
+      case '3gp':
+        return 'video/3gpp';
+      default:
+        return 'image/jpeg'; // Default fallback
+    }
+  }
+
+  bool _isVideo(String url) {
+    final extension = url.split('.').last.toLowerCase().split('?').first;
+    return ['mp4', 'mov', 'avi', 'mkv', 'webm', '3gp'].contains(extension);
+  }
+}
+
+// Video Player Widget for playing videos with controls
+class _VideoPlayerWidget extends StatefulWidget {
+  final String videoUrl;
+
+  const _VideoPlayerWidget({required this.videoUrl});
+
+  @override
+  State<_VideoPlayerWidget> createState() => _VideoPlayerWidgetState();
+}
+
+class _VideoPlayerWidgetState extends State<_VideoPlayerWidget> {
+  late VideoPlayerController _controller;
+  bool _isInitialized = false;
+  bool _hasError = false;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeVideo();
+  }
+
+  Future<void> _initializeVideo() async {
+    try {
+      print('🎥 Initializing video player for: ${widget.videoUrl}');
+
+      // Parse and validate the URL
+      final uri = Uri.parse(widget.videoUrl);
+      print('   Parsed URI: $uri');
+      print('   Scheme: ${uri.scheme}');
+      print('   Host: ${uri.host}');
+
+      _controller = VideoPlayerController.networkUrl(
+        uri,
+        videoPlayerOptions: VideoPlayerOptions(
+          mixWithOthers: true,
+          allowBackgroundPlayback: false,
+        ),
+      );
+
+      _controller.addListener(() {
+        if (_controller.value.hasError) {
+          final errorDesc =
+              _controller.value.errorDescription ?? 'Unknown error';
+          print('❌ Video player error: $errorDesc');
+          print(
+              '   Error type: ${_controller.value.errorDescription.runtimeType}');
+          if (mounted) {
+            setState(() {
+              _hasError = true;
+              _errorMessage = errorDesc;
+            });
+          }
+        }
+      });
+
+      print('   Initializing controller...');
+      await _controller.initialize();
+      print('✅ Video initialized successfully');
+      print('   Duration: ${_controller.value.duration}');
+      print('   Size: ${_controller.value.size}');
+      print('   Aspect Ratio: ${_controller.value.aspectRatio}');
+
+      if (mounted) {
+        setState(() => _isInitialized = true);
+        // Auto play on load
+        _controller.play();
+      }
+    } catch (e, stackTrace) {
+      print('❌ Error initializing video: $e');
+      print('   Error type: ${e.runtimeType}');
+      print('   Stack trace: $stackTrace');
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _errorMessage = e.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_hasError) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, size: 64, color: Colors.red),
+              const SizedBox(height: 16),
+              const Text(
+                'Failed to load video',
+                style: TextStyle(
+                  color: Colors.grey,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _errorMessage ?? 'Unknown error',
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Video URL: ${widget.videoUrl}',
+                style: TextStyle(color: Colors.grey.shade500, fontSize: 10),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (!_isInitialized) {
+      return const Center(
+        child: CircularProgressIndicator(),
+      );
+    }
+
+    return Center(
+      child: AspectRatio(
+        aspectRatio: _controller.value.aspectRatio,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            VideoPlayer(_controller),
+            // Play/Pause overlay
+            _buildControlsOverlay(),
+            // Progress bar at bottom
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: _buildProgressBar(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildControlsOverlay() {
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          if (_controller.value.isPlaying) {
+            _controller.pause();
+          } else {
+            _controller.play();
+          }
+        });
+      },
+      child: Container(
+        color: Colors.transparent,
+        child: Center(
+          child: AnimatedOpacity(
+            opacity: _controller.value.isPlaying ? 0.0 : 1.0,
+            duration: const Duration(milliseconds: 300),
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                _controller.value.isPlaying ? Icons.pause : Icons.play_arrow,
+                color: Colors.white,
+                size: 50,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProgressBar() {
+    return VideoProgressIndicator(
+      _controller,
+      allowScrubbing: true,
+      colors: VideoProgressColors(
+        playedColor: Colors.blue,
+        bufferedColor: Colors.grey,
+        backgroundColor: Colors.white24,
+      ),
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+    );
   }
 }
 

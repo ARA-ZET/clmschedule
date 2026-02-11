@@ -372,13 +372,29 @@ class _MyAppState extends State<MyApp> {
                 debugPrint('   Using updated pre-defined tools from job item');
                 updatedToolsNeeded = newItem.toolsNeeded;
               } else if (oldItem.manDays != newItem.manDays) {
-                // Recalculate tools only if manDays changed and no pre-defined tools
-                debugPrint('   Recalculating tools due to manDays change');
-                updatedToolsNeeded =
+                // Recalculate ONLY individual tools when manDays changes
+                // Keep team tools, extras, and accessories unchanged
+                debugPrint(
+                    '   Recalculating ONLY individual tools due to manDays change');
+                debugPrint('   Preserving: team tools, extras, accessories');
+
+                // Calculate full tools to get the new individual tools
+                final fullCalculation =
                     toolSettingsProvider.calculateCategorizedTools(
                   numberOfCleaners,
                   inventoryProvider.tools,
                 );
+
+                // Merge: keep existing team/extras/accessories, use new individual tools
+                updatedToolsNeeded = CategorizedTools(
+                  teamTools: existingProject.toolsNeeded?.teamTools ?? [],
+                  individualTools: fullCalculation.individualTools,
+                  extras: existingProject.toolsNeeded?.extras ?? [],
+                  accessories: existingProject.toolsNeeded?.accessories ?? [],
+                );
+
+                debugPrint(
+                    '   Updated individual tools: ${fullCalculation.individualTools.length} groups');
               }
 
               final updatedProject = existingProject.copyWith(

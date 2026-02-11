@@ -266,7 +266,9 @@ class HappySunProject {
   // Notes and observations from job execution
   final String? notes;
   final String? weatherConditions;
-  final List<String>? photoUrls;
+  final List<String>? photoUrls; // Legacy field
+  final List<String>? beforeImages; // Images before job
+  final List<String>? afterImages; // Images after job completion
 
   // Checklist data from job execution
   final ChecklistData? checklistData;
@@ -299,6 +301,8 @@ class HappySunProject {
     this.notes,
     this.weatherConditions,
     this.photoUrls,
+    this.beforeImages,
+    this.afterImages,
     this.checklistData,
     required this.statusId,
     this.checkout,
@@ -343,6 +347,8 @@ class HappySunProject {
       notes: data['notes'],
       weatherConditions: data['weatherConditions'],
       photoUrls: (data['photoUrls'] as List<dynamic>?)?.cast<String>(),
+      beforeImages: (data['beforeImages'] as List<dynamic>?)?.cast<String>(),
+      afterImages: (data['afterImages'] as List<dynamic>?)?.cast<String>(),
       checklistData: data['checklistData'] != null
           ? ChecklistData.fromMap(data['checklistData'] as Map<String, dynamic>)
           : null,
@@ -376,6 +382,8 @@ class HappySunProject {
       'notes': notes,
       'weatherConditions': weatherConditions,
       'photoUrls': photoUrls,
+      'beforeImages': beforeImages,
+      'afterImages': afterImages,
       'checklistData': checklistData?.toMap(),
       'statusId': statusId,
       'checkout': checkout?.toMap(),
@@ -404,6 +412,8 @@ class HappySunProject {
     String? notes,
     String? weatherConditions,
     List<String>? photoUrls,
+    List<String>? beforeImages,
+    List<String>? afterImages,
     ChecklistData? checklistData,
     String? statusId,
     ProjectCheckout? checkout,
@@ -430,6 +440,8 @@ class HappySunProject {
       notes: notes ?? this.notes,
       weatherConditions: weatherConditions ?? this.weatherConditions,
       photoUrls: photoUrls ?? this.photoUrls,
+      beforeImages: beforeImages ?? this.beforeImages,
+      afterImages: afterImages ?? this.afterImages,
       checklistData: checklistData ?? this.checklistData,
       statusId: statusId ?? this.statusId,
       checkout: checkout ?? this.checkout,

@@ -765,237 +765,447 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
 
             return Card(
               margin: const EdgeInsets.only(bottom: 8),
-              child: InkWell(
-                onTap: () => _showManualSelection(
-                  context,
-                  inventoryProvider,
-                  tool.baseName,
-                  tool.category,
-                  entry.type,
-                  needed,
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Row(
-                    children: [
-                      Container(
+              color: isComplete ? Colors.green.shade600 : null,
+              child: isComplete
+                  ? ExpansionTile(
+                      tilePadding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 4),
+                      leading: Container(
                         width: 36,
                         height: 36,
                         decoration: BoxDecoration(
-                          color: entry.color.withOpacity(0.1),
+                          color: Colors.white.withOpacity(0.2),
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Icon(
                           _getCategoryIcon(tool.category),
-                          color: entry.color,
+                          color: Colors.white,
                           size: 14,
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    tool.baseName,
-                                    style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.bold,
-                                    ),
+                      title: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              tool.baseName,
+                              style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white),
+                            ),
+                          ),
+                          Icon(
+                            Icons.check_circle,
+                            size: 16,
+                            color: Colors.white,
+                          ),
+                        ],
+                      ),
+                      subtitle: Text(
+                        tool.category,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.white,
+                        ),
+                      ),
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.check_circle,
+                                    size: 14,
+                                    color: Colors.white,
                                   ),
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 6,
-                                    vertical: 2,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: entry.color.withOpacity(0.2),
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                  child: Text(
-                                    entry.type,
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    'Taken: $taken / $needed',
                                     style: TextStyle(
-                                      fontSize: 9,
-                                      fontWeight: FontWeight.bold,
-                                      color: entry.color,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                      color: Colors.white,
                                     ),
                                   ),
+                                ],
+                              ),
+                              if (takenIds.isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 3,
+                                  runSpacing: 3,
+                                  children: takenIds.map((id) {
+                                    final readableId = _getReadableToolId(
+                                        id, inventoryProvider.tools);
+                                    return Chip(
+                                      label: Text(
+                                        readableId,
+                                        style: const TextStyle(fontSize: 9),
+                                      ),
+                                      deleteIcon:
+                                          const Icon(Icons.close, size: 12),
+                                      onDeleted: () =>
+                                          _removeToolById(tool.baseName, id),
+                                      visualDensity: VisualDensity.compact,
+                                      padding: EdgeInsets.zero,
+                                      materialTapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    );
+                                  }).toList(),
                                 ),
                               ],
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              tool.category,
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.grey.shade600,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            Row(
-                              children: [
-                                Icon(
-                                  isComplete
-                                      ? Icons.check_circle
-                                      : Icons.radio_button_unchecked,
-                                  size: 14,
-                                  color:
-                                      isComplete ? Colors.green : Colors.orange,
-                                ),
-                                const SizedBox(width: 6),
-                                Text(
-                                  'Taken: $taken / $needed',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                    color: isComplete
-                                        ? Colors.green
-                                        : Colors.orange,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            if (takenIds.isNotEmpty) ...[
-                              const SizedBox(height: 6),
-                              Wrap(
-                                spacing: 3,
-                                runSpacing: 3,
-                                children: takenIds.map((id) {
-                                  final readableId = _getReadableToolId(
-                                      id, inventoryProvider.tools);
-                                  return Chip(
-                                    label: Text(
-                                      readableId,
-                                      style: const TextStyle(fontSize: 9),
-                                    ),
-                                    deleteIcon:
-                                        const Icon(Icons.close, size: 12),
-                                    onDeleted: () =>
-                                        _removeToolById(tool.baseName, id),
-                                    visualDensity: VisualDensity.compact,
-                                    padding: EdgeInsets.zero,
-                                    materialTapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                  );
-                                }).toList(),
-                              ),
-                            ],
 
-                            // Show accessories that need to be checked
-                            ...(() {
-                              final accessories = <Widget>[];
+                              // Show accessories that need to be checked
+                              ...(() {
+                                final accessories = <Widget>[];
 
-                              // Get required accessories for this tool baseName
-                              final requiredAccessories =
-                                  _getRequiredAccessoriesForTool(
-                                      tool.baseName, inventoryProvider.tools);
+                                // Get required accessories for this tool baseName
+                                final requiredAccessories =
+                                    _getRequiredAccessoriesForTool(
+                                        tool.baseName, inventoryProvider.tools);
 
-                              if (requiredAccessories.isNotEmpty &&
-                                  takenIds.isNotEmpty) {
-                                accessories.add(const SizedBox(height: 12));
-                                accessories.add(
-                                  Container(
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(
-                                      color: Colors.orange.shade50,
-                                      borderRadius: BorderRadius.circular(8),
-                                      border: Border.all(
-                                          color: Colors.orange.shade200),
-                                    ),
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            Icon(Icons.extension,
-                                                size: 14,
-                                                color: Colors.orange.shade700),
-                                            const SizedBox(width: 6),
-                                            Text(
-                                              'Accessories needed for ${takenIds.length} × ${tool.baseName}:',
-                                              style: TextStyle(
-                                                fontSize: 11,
-                                                fontWeight: FontWeight.bold,
-                                                color: Colors.orange.shade700,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                        const SizedBox(height: 8),
-                                        ...requiredAccessories
-                                            .map((accessoryReq) {
-                                          final neededQty =
-                                              accessoryReq.quantity *
-                                                  takenIds.length;
-                                          final takenQty =
-                                              _getAccessoriesTakenCount(
-                                                  accessoryReq.baseName);
-                                          final isComplete =
-                                              takenQty >= neededQty;
-
-                                          return Padding(
-                                            padding: const EdgeInsets.only(
-                                                bottom: 6),
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  isComplete
-                                                      ? Icons.check_circle
-                                                      : Icons
-                                                          .radio_button_unchecked,
+                                if (requiredAccessories.isNotEmpty &&
+                                    takenIds.isNotEmpty) {
+                                  accessories.add(const SizedBox(height: 12));
+                                  accessories.add(
+                                    Container(
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.orange.shade50,
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                            color: Colors.orange.shade200),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Icon(Icons.extension,
                                                   size: 14,
-                                                  color: isComplete
-                                                      ? Colors.green
-                                                      : Colors.orange,
+                                                  color:
+                                                      Colors.orange.shade700),
+                                              const SizedBox(width: 6),
+                                              Text(
+                                                'Accessories needed for ${takenIds.length} × ${tool.baseName}:',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: Colors.orange.shade700,
                                                 ),
-                                                const SizedBox(width: 6),
-                                                Expanded(
-                                                  child: Text(
-                                                    '${accessoryReq.baseName}: $takenQty / $neededQty',
-                                                    style: TextStyle(
-                                                      fontSize: 11,
-                                                      color: isComplete
-                                                          ? Colors
-                                                              .green.shade700
-                                                          : Colors
-                                                              .orange.shade700,
-                                                      fontWeight: isComplete
-                                                          ? FontWeight.w600
-                                                          : FontWeight.normal,
+                                              ),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 8),
+                                          ...requiredAccessories
+                                              .map((accessoryReq) {
+                                            final neededQty =
+                                                accessoryReq.quantity *
+                                                    takenIds.length;
+                                            final takenQty =
+                                                _getAccessoriesTakenCount(
+                                                    accessoryReq.baseName);
+                                            final isComplete =
+                                                takenQty >= neededQty;
+
+                                            return Padding(
+                                              padding: const EdgeInsets.only(
+                                                  bottom: 6),
+                                              child: Row(
+                                                children: [
+                                                  Icon(
+                                                    isComplete
+                                                        ? Icons.check_circle
+                                                        : Icons
+                                                            .radio_button_unchecked,
+                                                    size: 14,
+                                                    color: isComplete
+                                                        ? Colors.green
+                                                        : Colors.orange,
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                  Expanded(
+                                                    child: Text(
+                                                      '${accessoryReq.baseName}: $takenQty / $neededQty',
+                                                      style: TextStyle(
+                                                        fontSize: 11,
+                                                        color: isComplete
+                                                            ? Colors
+                                                                .green.shade700
+                                                            : Colors.orange
+                                                                .shade700,
+                                                        fontWeight: isComplete
+                                                            ? FontWeight.w600
+                                                            : FontWeight.normal,
+                                                      ),
                                                     ),
                                                   ),
-                                                ),
-                                                Text(
-                                                  '(${accessoryReq.quantity} each)',
-                                                  style: TextStyle(
-                                                    fontSize: 9,
-                                                    color: Colors.grey.shade600,
+                                                  Text(
+                                                    '(${accessoryReq.quantity} each)',
+                                                    style: TextStyle(
+                                                      fontSize: 9,
+                                                      color:
+                                                          Colors.grey.shade600,
+                                                    ),
                                                   ),
-                                                ),
-                                              ],
-                                            ),
-                                          );
-                                        }),
-                                      ],
+                                                ],
+                                              ),
+                                            );
+                                          }),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                }
+                                return accessories;
+                              })(),
+                            ],
+                          ),
+                        ),
+                      ],
+                    )
+                  : InkWell(
+                      onTap: () => _showManualSelection(
+                        context,
+                        inventoryProvider,
+                        tool.baseName,
+                        tool.category,
+                        entry.type,
+                        needed,
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 36,
+                              height: 36,
+                              decoration: BoxDecoration(
+                                color: entry.color.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Icon(
+                                _getCategoryIcon(tool.category),
+                                color: entry.color,
+                                size: 14,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          tool.baseName,
+                                          style: const TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 2,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: entry.color.withOpacity(0.2),
+                                          borderRadius:
+                                              BorderRadius.circular(10),
+                                        ),
+                                        child: Text(
+                                          entry.type,
+                                          style: TextStyle(
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.bold,
+                                            color: entry.color,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    tool.category,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600,
                                     ),
                                   ),
-                                );
-                              }
-                              return accessories;
-                            })(),
+                                  const SizedBox(height: 6),
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        Icons.radio_button_unchecked,
+                                        size: 14,
+                                        color: Colors.orange,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        'Taken: $taken / $needed',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w500,
+                                          color: Colors.orange,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  if (takenIds.isNotEmpty) ...[
+                                    const SizedBox(height: 6),
+                                    Wrap(
+                                      spacing: 3,
+                                      runSpacing: 3,
+                                      children: takenIds.map((id) {
+                                        final readableId = _getReadableToolId(
+                                            id, inventoryProvider.tools);
+                                        return Chip(
+                                          label: Text(
+                                            readableId,
+                                            style: const TextStyle(fontSize: 9),
+                                          ),
+                                          deleteIcon:
+                                              const Icon(Icons.close, size: 12),
+                                          onDeleted: () => _removeToolById(
+                                              tool.baseName, id),
+                                          visualDensity: VisualDensity.compact,
+                                          padding: EdgeInsets.zero,
+                                          materialTapTargetSize:
+                                              MaterialTapTargetSize.shrinkWrap,
+                                        );
+                                      }).toList(),
+                                    ),
+                                  ],
+
+                                  // Show accessories that need to be checked
+                                  ...(() {
+                                    final accessories = <Widget>[];
+
+                                    // Get required accessories for this tool baseName
+                                    final requiredAccessories =
+                                        _getRequiredAccessoriesForTool(
+                                            tool.baseName,
+                                            inventoryProvider.tools);
+
+                                    if (requiredAccessories.isNotEmpty &&
+                                        takenIds.isNotEmpty) {
+                                      accessories
+                                          .add(const SizedBox(height: 12));
+                                      accessories.add(
+                                        Container(
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: BoxDecoration(
+                                            color: Colors.orange.shade50,
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            border: Border.all(
+                                                color: Colors.orange.shade200),
+                                          ),
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                children: [
+                                                  Icon(Icons.extension,
+                                                      size: 14,
+                                                      color: Colors
+                                                          .orange.shade700),
+                                                  const SizedBox(width: 6),
+                                                  Text(
+                                                    'Accessories needed for ${takenIds.length} × ${tool.baseName}:',
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                      color: Colors
+                                                          .orange.shade700,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 8),
+                                              ...requiredAccessories
+                                                  .map((accessoryReq) {
+                                                final neededQty =
+                                                    accessoryReq.quantity *
+                                                        takenIds.length;
+                                                final takenQty =
+                                                    _getAccessoriesTakenCount(
+                                                        accessoryReq.baseName);
+                                                final isComplete =
+                                                    takenQty >= neededQty;
+
+                                                return Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                          bottom: 6),
+                                                  child: Row(
+                                                    children: [
+                                                      Icon(
+                                                        isComplete
+                                                            ? Icons.check_circle
+                                                            : Icons
+                                                                .radio_button_unchecked,
+                                                        size: 14,
+                                                        color: isComplete
+                                                            ? Colors.green
+                                                            : Colors.orange,
+                                                      ),
+                                                      const SizedBox(width: 6),
+                                                      Expanded(
+                                                        child: Text(
+                                                          '${accessoryReq.baseName}: $takenQty / $neededQty',
+                                                          style: TextStyle(
+                                                            fontSize: 11,
+                                                            color: isComplete
+                                                                ? Colors.green
+                                                                    .shade700
+                                                                : Colors.orange
+                                                                    .shade700,
+                                                            fontWeight:
+                                                                isComplete
+                                                                    ? FontWeight
+                                                                        .w600
+                                                                    : FontWeight
+                                                                        .normal,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                      Text(
+                                                        '(${accessoryReq.quantity} each)',
+                                                        style: TextStyle(
+                                                          fontSize: 9,
+                                                          color: Colors
+                                                              .grey.shade600,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                );
+                                              }),
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                    return accessories;
+                                  })(),
+                                ],
+                              ),
+                            ),
+                            const Icon(Icons.chevron_right, color: Colors.grey),
                           ],
                         ),
                       ),
-                      const Icon(Icons.chevron_right, color: Colors.grey),
-                    ],
-                  ),
-                ),
-              ),
+                    ),
             );
           },
         );
@@ -1023,6 +1233,9 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) {
           final takenIds = _toolsTaken[baseName] ?? [];
+          // Get image URL from first tool (all tools with same basename share same image)
+          final imageUrl =
+              availableTools.isNotEmpty ? availableTools.first.imageUrl : null;
 
           return AlertDialog(
             insetPadding: isMobile ? EdgeInsets.zero : const EdgeInsets.all(40),
@@ -1094,6 +1307,60 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
                         },
                       ),
                     ),
+                  // Show single image at the bottom for all tools with this basename
+                  if (imageUrl != null && imageUrl.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    const Divider(),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Tool Reference Image:',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.network(
+                        imageUrl,
+                        height: 200,
+                        width: double.infinity,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            height: 200,
+                            color: Colors.grey.shade200,
+                            child: const Center(
+                              child: Icon(
+                                Icons.broken_image,
+                                color: Colors.grey,
+                                size: 48,
+                              ),
+                            ),
+                          );
+                        },
+                        loadingBuilder: (context, child, loadingProgress) {
+                          if (loadingProgress == null) {
+                            return child;
+                          }
+                          return Container(
+                            height: 200,
+                            color: Colors.grey.shade100,
+                            child: Center(
+                              child: CircularProgressIndicator(
+                                value: loadingProgress.expectedTotalBytes !=
+                                        null
+                                    ? loadingProgress.cumulativeBytesLoaded /
+                                        loadingProgress.expectedTotalBytes!
+                                    : null,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

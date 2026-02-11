@@ -8,6 +8,12 @@ service firebase.storage {
       allow write: if request.auth != null; // Only authenticated users can upload
     }
     
+    // Allow authenticated users to read and write Happy Sun project images/videos
+    match /happySunProjects/{allPaths=**} {
+      allow read: if true; // Anyone can read (for displaying images/videos)
+      allow write: if request.auth != null; // Only authenticated users can upload
+    }
+    
     // Deny access to all other paths
     match /{allPaths=**} {
       allow read, write: if false;

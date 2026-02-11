@@ -3,6 +3,12 @@
     "origin": ["*"],
     "method": ["GET", "HEAD", "PUT", "POST", "DELETE"],
     "maxAgeSeconds": 3600,
-    "responseHeader": ["Content-Type", "Access-Control-Allow-Origin", "x-goog-resumable"]
+    "responseHeader": [
+      "Content-Type",
+      "Access-Control-Allow-Origin",
+      "x-goog-resumable",
+      "Content-Range",
+      "Accept-Ranges"
+    ]
   }
 ]
