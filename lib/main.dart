@@ -4,6 +4,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:provider/provider.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'config/flavor_config.dart';
 import 'providers/toggler_provider.dart';
 import 'providers/schedule_provider.dart';
 import 'providers/collection_schedule_provider.dart';
@@ -47,6 +48,12 @@ import 'services/job_list_preferences_service.dart';
 import 'services/user_service.dart';
 import 'services/chat_service.dart';
 import 'services/inventory_service.dart';
+import 'services/connectivity_service.dart';
+import 'services/happy_sun_local_storage.dart';
+import 'services/happy_sun_sync_service.dart';
+import 'services/inventory_local_storage.dart';
+import 'services/image_cache_service.dart';
+import 'services/inventory_sync_service.dart';
 import 'models/command.dart';
 import 'firebase_options.dart';
 import 'utils/web_reload.dart'
@@ -94,7 +101,9 @@ void main() async {
     // Authentication Provider (must be first for initialization)
     ChangeNotifierProvider(create: (context) => AuthProvider()),
 
-    ChangeNotifierProvider(create: (context) => ScheduleProvider()),
+    // ScheduleProvider only for CLM flavor (Happy Sun doesn't use Schedule Grid)
+    if (FlavorConfig.instance.isCLM)
+      ChangeNotifierProvider(create: (context) => ScheduleProvider()),
     ChangeNotifierProvider(create: (context) => ScaleProvider()),
     ChangeNotifierProvider(create: (context) => VehicleDriverProvider()),
     ChangeNotifierProvider(create: (context) => MapViewProvider()),
@@ -118,6 +127,7 @@ void main() async {
     Provider(
       create: (context) => ChatService(FirebaseFirestore.instance),
     ),
+    // InventoryService for all flavors (Happy Sun needs it)
     Provider(
       create: (context) => InventoryService(FirebaseFirestore.instance),
     ),
@@ -166,18 +176,19 @@ void main() async {
             authProvider,
           ),
     ),
-    // CollectionScheduleProvider no longer automatically updates with JobListProvider changes
-    // It uses lazy loading - only loads data when tab is opened
-    ChangeNotifierProxyProvider<JobListProvider, CollectionScheduleProvider>(
-      create: (context) => CollectionScheduleProvider(
-        jobListProvider: context.read<JobListProvider>(),
+    // CollectionScheduleProvider only for clm flavor
+    if (FlavorConfig.instance.isCLM)
+      ChangeNotifierProxyProvider<JobListProvider, CollectionScheduleProvider>(
+        create: (context) => CollectionScheduleProvider(
+          jobListProvider: context.read<JobListProvider>(),
+        ),
+        update: (context, jobListProvider, previous) {
+          // Always return the existing instance to prevent rebuilds on every JobListProvider change
+          // Collection schedule will manually refresh when needed via refresh() method
+          return previous!;
+        },
       ),
-      update: (context, jobListProvider, previous) {
-        // Always return the existing instance to prevent rebuilds on every JobListProvider change
-        // Collection schedule will manually refresh when needed via refresh() method
-        return previous!;
-      },
-    ),
+    // HappySun providers for both flavors (but Happy Sun flavor focuses on it)
     ChangeNotifierProvider(
       create: (context) => InventoryProvider(
         context.read<InventoryService>(),
@@ -206,6 +217,16 @@ class _MyAppState extends State<MyApp> {
   late final VersionService _versionService;
   bool _isInitialized = false;
 
+  // Offline services for Happy Sun flavor
+  ConnectivityService? _connectivityService;
+  HappySunLocalStorage? _localStorage;
+  HappySunSyncService? _syncService;
+
+  // Inventory offline services for Happy Sun flavor
+  InventoryLocalStorage? _inventoryLocalStorage;
+  ImageCacheService? _imageCacheService;
+  InventorySyncService? _inventorySyncService;
+
   @override
   void initState() {
     super.initState();
@@ -213,6 +234,7 @@ class _MyAppState extends State<MyApp> {
     // Initialize all providers asynchronously in parallel
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _initializeProvidersAsync();
+      // Set up Happy Sun sync for both flavors (both have Happy Sun features)
       _setupHappySunSync();
     });
   }
@@ -434,15 +456,85 @@ class _MyAppState extends State<MyApp> {
   Future<void> _initializeProvidersAsync() async {
     if (_isInitialized) return;
 
-    // Run all provider initializations in parallel for fast startup
-    await Future.wait([
+    // Initialize offline services for Happy Sun flavor
+    if (FlavorConfig.instance.isHappySun) {
+      try {
+        debugPrint('📱 Initializing offline services for Happy Sun...');
+
+        // Initialize connectivity service
+        _connectivityService = ConnectivityService();
+        await _connectivityService!.initialize();
+
+        // Initialize project local storage
+        _localStorage = HappySunLocalStorage();
+        await _localStorage!.initialize();
+
+        // Initialize inventory offline services
+        _inventoryLocalStorage = InventoryLocalStorage();
+        await _inventoryLocalStorage!.initialize();
+
+        _imageCacheService = ImageCacheService();
+        await _imageCacheService!.initialize();
+
+        // Get providers
+        final happySunProvider = context.read<HappySunProjectProvider>();
+        final inventoryProvider = context.read<InventoryProvider>();
+        final inventoryService = context.read<InventoryService>();
+
+        // Initialize project sync service
+        _syncService = HappySunSyncService(
+          firebaseService: happySunProvider.projectService,
+          localStorage: _localStorage!,
+          connectivityService: _connectivityService!,
+        );
+        _syncService!.initialize();
+
+        // Initialize inventory sync service
+        _inventorySyncService = InventorySyncService(
+          firebaseService: inventoryService,
+          localStorage: _inventoryLocalStorage!,
+          imageCacheService: _imageCacheService!,
+          connectivityService: _connectivityService!,
+        );
+        await _inventorySyncService!.initialize();
+
+        // Configure providers with offline services
+        happySunProvider.setOfflineServices(
+          localStorage: _localStorage!,
+          syncService: _syncService!,
+          connectivityService: _connectivityService!,
+        );
+
+        inventoryProvider.setOfflineServices(_inventorySyncService);
+
+        debugPrint('✅ All offline services initialized and configured');
+        debugPrint(
+            '   - Projects: ${_localStorage!.getAllProjects().length} cached');
+        debugPrint(
+            '   - Tools: ${_inventoryLocalStorage!.getAllTools().length} cached');
+        debugPrint(
+            '   - Images: ${_inventoryLocalStorage!.getCacheStats()['cachedImagesCount']} cached');
+      } catch (e) {
+        debugPrint('❌ Error initializing offline services: $e');
+      }
+    }
+
+    // Build initialization list based on flavor
+    final List<Future<void>> initializations = [
       context.read<AuthProvider>().initialize(),
-      context.read<ScheduleProvider>().initialize(),
       context.read<JobListProvider>().initialize(),
       context.read<InventoryProvider>().initialize(),
       context.read<ToolSettingsProvider>().loadSettings(),
-      // CollectionScheduleProvider loads lazily when tab opens (depends on JobListProvider data)
-    ]);
+    ];
+
+    // Only initialize ScheduleProvider for CLM flavor
+    if (FlavorConfig.instance.isCLM) {
+      initializations.add(context.read<ScheduleProvider>().initialize());
+    }
+
+    // Run all provider initializations in parallel for fast startup
+    await Future.wait(initializations);
+    // CollectionScheduleProvider loads lazily when tab opens (depends on JobListProvider data)
 
     // Initialize version checking for web only
     if (kIsWeb && mounted) {
@@ -521,32 +613,43 @@ class _MyAppState extends State<MyApp> {
     if (kIsWeb) {
       _versionService.dispose();
     }
+    // Dispose offline services for Happy Sun
+    if (FlavorConfig.instance.isHappySun) {
+      _connectivityService?.dispose();
+      _localStorage?.dispose();
+      _syncService?.dispose();
+      _inventoryLocalStorage?.dispose();
+      _inventorySyncService?.dispose();
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'CLM DASHBOARD',
+      title: FlavorConfig.instance.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor:
+              FlavorConfig.instance.isHappySun ? Colors.orange : Colors.blue,
+        ),
         useMaterial3: true,
       ),
       home: _isInitialized
           ? AuthGate(
               child: const DashboardScreen(),
             )
-          : const Scaffold(
+          : Scaffold(
               body: Center(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    CircularProgressIndicator(),
-                    SizedBox(height: 16),
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: 16),
                     Text(
-                      'Loading CLM Dashboard...',
-                      style: TextStyle(fontSize: 16),
+                      'Loading ${FlavorConfig.instance.appName}...',
+                      style: const TextStyle(fontSize: 16),
                     ),
                   ],
                 ),
@@ -568,11 +671,18 @@ class _DashboardScreenState extends State<DashboardScreen>
   late TabController _tabController;
   int _currentTabIndex = 0;
 
+  // Dynamic tab count based on flavor
+  int get _tabCount {
+    // CLM flavor: Schedule + Job List + Collection Schedule + Happy Sun = 4 tabs
+    // Happy Sun flavor: Happy Sun only = 1 tab (simplified for solar projects only)
+    return FlavorConfig.instance.isCLM ? 4 : 1;
+  }
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(
-      length: 4,
+      length: _tabCount,
       vsync: this,
       animationDuration: Duration.zero, // Remove tab animation
     );
@@ -603,217 +713,241 @@ class _DashboardScreenState extends State<DashboardScreen>
 
     return Scaffold(
         backgroundColor: const Color.fromARGB(255, 222, 222, 222),
-        appBar: AppBar(
-          leading: isSmallScreen
-              ? null
-              : const Padding(
-                  padding: EdgeInsets.only(left: 16.0),
-                  child: Center(
-                    child: Text(
-                      'CLM DASHBOARD',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-          leadingWidth: isSmallScreen ? 0 : 200,
-          automaticallyImplyLeading: false,
-          backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-          title: TabBar(
-            controller: _tabController,
-            isScrollable: isSmallScreen, // Scrollable on mobile
-            labelColor: Colors.black,
-            unselectedLabelColor: Colors.black54,
-            indicatorColor: Colors.black,
-            dividerColor: Colors.transparent,
-            splashFactory: NoSplash.splashFactory,
-            overlayColor: WidgetStateProperty.all(Colors.transparent),
-            tabAlignment:
-                isSmallScreen ? TabAlignment.start : TabAlignment.fill,
-            labelPadding: EdgeInsets.symmetric(
-              horizontal: isSmallScreen ? 12 : 16,
-            ),
-            tabs: [
-              Tab(text: isSmallScreen ? 'Schedule' : 'Schedule'),
-              Tab(text: isSmallScreen ? 'Jobs' : 'Job List'),
-              Tab(text: isSmallScreen ? 'Collection' : 'Collection Schedule'),
-              Tab(text: isSmallScreen ? 'Solar' : 'Happy Sun'),
-            ],
-          ),
-          actions: [
-            // Distributor management - always visible
-            if (!isMediumScreen)
-              IconButton(
-                icon: const Icon(Icons.people),
-                onPressed: () {
-                  showDialog(
-                    context: context,
-                    builder: (context) => const DistributorManagementDialog(),
-                  );
-                },
-                tooltip: 'Manage Distributors',
-              ),
-            // Hide debug/seed buttons on mobile
-            if (!isSmallScreen) ...[
-              IconButton(
-                icon: const Icon(Icons.data_array),
-                onPressed: () async {},
-                tooltip: 'Add sample schedule data',
-              ),
-              IconButton(
-                icon: const Icon(Icons.list_alt),
-                onPressed: () async {},
-                tooltip: 'Add sample job list data',
-              ),
-              IconButton(
-                icon: const Icon(Icons.map),
-                onPressed: () async {
-                  final workAreaService = context.read<WorkAreaService>();
-                  try {
-                    final workAreas = await workAreaService.createFromKml(
-                      'craig.kml',
-                    );
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            'Imported ${workAreas.length} work areas from KML file',
+        appBar: FlavorConfig.instance.isHappySun
+            ? null // No AppBar for Happy Sun (sign-out moved to project screen)
+            : AppBar(
+                leading: isSmallScreen
+                    ? null
+                    : const Padding(
+                        padding: EdgeInsets.only(left: 16.0),
+                        child: Center(
+                          child: Text(
+                            'CLM DASHBOARD',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
                         ),
-                      );
-                    }
-                  } catch (e) {
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Error importing KML data: $e')),
-                      );
-                    }
-                  }
-                },
-                tooltip: 'Import KML data',
-              ),
-            ],
-            // Settings menu - always visible
-            PopupMenuButton<String>(
-              icon: const Icon(Icons.settings),
-              tooltip: 'Settings',
-              onSelected: (String value) async {
-                if (value == 'distributors' && isMediumScreen) {
-                  showDialog(
-                    context: context,
-                    builder: (context) => const DistributorManagementDialog(),
-                  );
-                } else if (value == 'scale') {
-                  showDialog(
-                    context: context,
-                    builder: (context) => const ScaleSettingsDialog(),
-                  );
-                } else if (value == 'status') {
-                  showDialog(
-                    context: context,
-                    builder: (context) => const JobStatusManagementDialog(),
-                  );
-                } else if (value == 'job_list_status') {
-                  showDialog(
-                    context: context,
-                    builder: (context) => const JobListStatusManagementDialog(),
-                  );
-                } else if (value == 'invoice_status') {
-                  showDialog(
-                    context: context,
-                    builder: (context) => const InvoiceStatusManagementDialog(),
-                  );
-                } else if (value == 'signout') {
-                  final confirmed = await showDialog<bool>(
-                    context: context,
-                    builder: (context) => AlertDialog(
-                      title: const Text('Sign Out'),
-                      content: const Text('Are you sure you want to sign out?'),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.of(context).pop(false),
-                          child: const Text('Cancel'),
-                        ),
-                        TextButton(
-                          onPressed: () => Navigator.of(context).pop(true),
-                          child: const Text('Sign Out'),
-                        ),
-                      ],
+                      ),
+                leadingWidth: isSmallScreen ? 0 : 200,
+                automaticallyImplyLeading: false,
+                backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+                title: TabBar(
+                  controller: _tabController,
+                  isScrollable: isSmallScreen, // Scrollable on mobile
+                  labelColor: Colors.black,
+                  unselectedLabelColor: Colors.black54,
+                  indicatorColor: Colors.black,
+                  dividerColor: Colors.transparent,
+                  splashFactory: NoSplash.splashFactory,
+                  overlayColor: WidgetStateProperty.all(Colors.transparent),
+                  tabAlignment:
+                      isSmallScreen ? TabAlignment.start : TabAlignment.fill,
+                  labelPadding: EdgeInsets.symmetric(
+                    horizontal: isSmallScreen ? 12 : 16,
+                  ),
+                  tabs: [
+                    Tab(text: isSmallScreen ? 'Schedule' : 'Schedule'),
+                    Tab(text: isSmallScreen ? 'Jobs' : 'Job List'),
+                    Tab(
+                        text: isSmallScreen
+                            ? 'Collection'
+                            : 'Collection Schedule'),
+                    Tab(text: isSmallScreen ? 'Solar' : 'Happy Sun'),
+                  ],
+                ),
+                actions: [
+                  // Distributor management - always visible
+                  if (!isMediumScreen)
+                    IconButton(
+                      icon: const Icon(Icons.people),
+                      onPressed: () {
+                        showDialog(
+                          context: context,
+                          builder: (context) =>
+                              const DistributorManagementDialog(),
+                        );
+                      },
+                      tooltip: 'Manage Distributors',
                     ),
-                  );
+                  // Hide debug/seed buttons on mobile
+                  if (!isSmallScreen) ...[
+                    IconButton(
+                      icon: const Icon(Icons.data_array),
+                      onPressed: () async {},
+                      tooltip: 'Add sample schedule data',
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.list_alt),
+                      onPressed: () async {},
+                      tooltip: 'Add sample job list data',
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.map),
+                      onPressed: () async {
+                        final workAreaService = context.read<WorkAreaService>();
+                        try {
+                          final workAreas = await workAreaService.createFromKml(
+                            'craig.kml',
+                          );
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'Imported ${workAreas.length} work areas from KML file',
+                                ),
+                              ),
+                            );
+                          }
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                  content:
+                                      Text('Error importing KML data: $e')),
+                            );
+                          }
+                        }
+                      },
+                      tooltip: 'Import KML data',
+                    ),
+                  ],
+                  // Settings menu - always visible
+                  PopupMenuButton<String>(
+                    icon: const Icon(Icons.settings),
+                    tooltip: 'Settings',
+                    onSelected: (String value) async {
+                      if (value == 'distributors' && isMediumScreen) {
+                        showDialog(
+                          context: context,
+                          builder: (context) =>
+                              const DistributorManagementDialog(),
+                        );
+                      } else if (value == 'scale') {
+                        showDialog(
+                          context: context,
+                          builder: (context) => const ScaleSettingsDialog(),
+                        );
+                      } else if (value == 'status') {
+                        showDialog(
+                          context: context,
+                          builder: (context) =>
+                              const JobStatusManagementDialog(),
+                        );
+                      } else if (value == 'job_list_status') {
+                        showDialog(
+                          context: context,
+                          builder: (context) =>
+                              const JobListStatusManagementDialog(),
+                        );
+                      } else if (value == 'invoice_status') {
+                        showDialog(
+                          context: context,
+                          builder: (context) =>
+                              const InvoiceStatusManagementDialog(),
+                        );
+                      } else if (value == 'signout') {
+                        final confirmed = await showDialog<bool>(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: const Text('Sign Out'),
+                            content: const Text(
+                                'Are you sure you want to sign out?'),
+                            actions: [
+                              TextButton(
+                                onPressed: () =>
+                                    Navigator.of(context).pop(false),
+                                child: const Text('Cancel'),
+                              ),
+                              TextButton(
+                                onPressed: () =>
+                                    Navigator.of(context).pop(true),
+                                child: const Text('Sign Out'),
+                              ),
+                            ],
+                          ),
+                        );
 
-                  if (confirmed == true && context.mounted) {
-                    await context.read<AuthProvider>().signOut();
-                  }
-                }
-              },
-              itemBuilder: (BuildContext context) => [
-                // Add Distributors to menu on mobile/tablet
-                if (isMediumScreen)
-                  const PopupMenuItem<String>(
-                    value: 'distributors',
-                    child: ListTile(
-                      leading: Icon(Icons.people),
-                      title: Text('Manage Distributors'),
-                      contentPadding: EdgeInsets.zero,
-                    ),
+                        if (confirmed == true && context.mounted) {
+                          await context.read<AuthProvider>().signOut();
+                        }
+                      }
+                    },
+                    itemBuilder: (BuildContext context) => [
+                      // Add Distributors to menu on mobile/tablet
+                      if (isMediumScreen)
+                        const PopupMenuItem<String>(
+                          value: 'distributors',
+                          child: ListTile(
+                            leading: Icon(Icons.people),
+                            title: Text('Manage Distributors'),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                      if (isMediumScreen) const PopupMenuDivider(),
+                      const PopupMenuItem<String>(
+                        value: 'scale',
+                        child: ListTile(
+                          leading: Icon(Icons.zoom_in),
+                          title: Text('Interface Scale'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem<String>(
+                        value: 'status',
+                        child: ListTile(
+                          leading: Icon(Icons.label),
+                          title: Text('Job Statuses'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem<String>(
+                        value: 'job_list_status',
+                        child: ListTile(
+                          leading: Icon(Icons.list_alt),
+                          title: Text('Job List Statuses'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem<String>(
+                        value: 'invoice_status',
+                        child: ListTile(
+                          leading: Icon(Icons.receipt),
+                          title: Text('Invoice Statuses'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuDivider(),
+                      const PopupMenuItem<String>(
+                        value: 'signout',
+                        child: ListTile(
+                          leading: Icon(Icons.logout, color: Colors.red),
+                          title: Text('Sign Out',
+                              style: TextStyle(color: Colors.red)),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                    ],
                   ),
-                if (isMediumScreen) const PopupMenuDivider(),
-                const PopupMenuItem<String>(
-                  value: 'scale',
-                  child: ListTile(
-                    leading: Icon(Icons.zoom_in),
-                    title: Text('Interface Scale'),
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                ),
-                const PopupMenuItem<String>(
-                  value: 'status',
-                  child: ListTile(
-                    leading: Icon(Icons.label),
-                    title: Text('Job Statuses'),
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                ),
-                const PopupMenuItem<String>(
-                  value: 'job_list_status',
-                  child: ListTile(
-                    leading: Icon(Icons.list_alt),
-                    title: Text('Job List Statuses'),
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                ),
-                const PopupMenuItem<String>(
-                  value: 'invoice_status',
-                  child: ListTile(
-                    leading: Icon(Icons.receipt),
-                    title: Text('Invoice Statuses'),
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                ),
-                const PopupMenuDivider(),
-                const PopupMenuItem<String>(
-                  value: 'signout',
-                  child: ListTile(
-                    leading: Icon(Icons.logout, color: Colors.red),
-                    title:
-                        Text('Sign Out', style: TextStyle(color: Colors.red)),
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
+                ],
+              ),
         body: IndexedStack(
           index: _currentTabIndex,
           children: [
-            const ScheduleTab(),
-            const JobListTab(),
-            const CollectionScheduleTab(),
-            const HappySunTab(),
+            // CLM flavor has all tabs: Schedule, Job List, Collection Schedule, Happy Sun
+            if (FlavorConfig.instance.isCLM) ...[
+              const ScheduleTab(),
+              const JobListTab(),
+              const CollectionScheduleTab(),
+              const HappySunTab(),
+            ],
+            // Happy Sun flavor only has Happy Sun tab (Job List filtered in background)
+            // Wrap in SafeArea to avoid system UI overlays (status bar, navigation bar)
+            if (FlavorConfig.instance.isHappySun)
+              const SafeArea(
+                child: HappySunTab(),
+              ),
           ],
         ),
         floatingActionButton: Consumer2<ChatProvider, AuthProvider>(

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'dart:io';
 import '../providers/inventory_provider.dart';
 import '../models/inventory_tool.dart';
 import 'tool_details_dialog.dart';
@@ -428,17 +429,7 @@ class GroupedToolCard extends StatelessWidget {
                   borderRadius:
                       const BorderRadius.vertical(top: Radius.circular(4)),
                 ),
-                child: firstTool.imageUrl != null
-                    ? Image.network(
-                        firstTool.imageUrl!,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) {
-                          return Icon(Icons.construction,
-                              size: isMobile ? 48 : 64, color: Colors.grey);
-                        },
-                      )
-                    : Icon(Icons.construction,
-                        size: isMobile ? 48 : 64, color: Colors.grey),
+                child: _buildToolImage(firstTool, isMobile),
               ),
             ),
             // Details
@@ -574,6 +565,39 @@ class GroupedToolCard extends StatelessWidget {
       ),
     );
   }
+
+  /// Build tool image widget that handles both cached (offline) and network images
+  Widget _buildToolImage(InventoryTool tool, bool isMobile) {
+    // Priority: Local cached image > Network image > Placeholder icon
+    if (tool.localImagePath != null && tool.localImagePath!.isNotEmpty) {
+      return Image.file(
+        File(tool.localImagePath!),
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) {
+          // If cached image fails, try network or show icon
+          return _buildNetworkOrIconImage(tool, isMobile);
+        },
+      );
+    }
+
+    return _buildNetworkOrIconImage(tool, isMobile);
+  }
+
+  Widget _buildNetworkOrIconImage(InventoryTool tool, bool isMobile) {
+    if (tool.imageUrl != null && tool.imageUrl!.isNotEmpty) {
+      return Image.network(
+        tool.imageUrl!,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) {
+          return Icon(Icons.construction,
+              size: isMobile ? 48 : 64, color: Colors.grey);
+        },
+      );
+    }
+
+    return Icon(Icons.construction,
+        size: isMobile ? 48 : 64, color: Colors.grey);
+  }
 }
 
 // Detail screen showing all individual tools with same base name
@@ -695,17 +719,7 @@ class ToolCard extends StatelessWidget {
                   borderRadius:
                       const BorderRadius.vertical(top: Radius.circular(4)),
                 ),
-                child: tool.imageUrl != null
-                    ? Image.network(
-                        tool.imageUrl!,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) {
-                          return Icon(Icons.construction,
-                              size: isMobile ? 48 : 64, color: Colors.grey);
-                        },
-                      )
-                    : Icon(Icons.construction,
-                        size: isMobile ? 48 : 64, color: Colors.grey),
+                child: _buildToolImage(tool, isMobile),
               ),
             ),
             // Details
@@ -791,5 +805,38 @@ class ToolCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// Build tool image widget that handles both cached (offline) and network images
+  Widget _buildToolImage(InventoryTool tool, bool isMobile) {
+    // Priority: Local cached image > Network image > Placeholder icon
+    if (tool.localImagePath != null && tool.localImagePath!.isNotEmpty) {
+      return Image.file(
+        File(tool.localImagePath!),
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) {
+          // If cached image fails, try network or show icon
+          return _buildNetworkOrIconImage(tool, isMobile);
+        },
+      );
+    }
+
+    return _buildNetworkOrIconImage(tool, isMobile);
+  }
+
+  Widget _buildNetworkOrIconImage(InventoryTool tool, bool isMobile) {
+    if (tool.imageUrl != null && tool.imageUrl!.isNotEmpty) {
+      return Image.network(
+        tool.imageUrl!,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) {
+          return Icon(Icons.construction,
+              size: isMobile ? 48 : 64, color: Colors.grey);
+        },
+      );
+    }
+
+    return Icon(Icons.construction,
+        size: isMobile ? 48 : 64, color: Colors.grey);
   }
 }

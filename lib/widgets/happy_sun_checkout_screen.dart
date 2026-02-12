@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import '../models/happy_sun_shared.dart';
 import '../models/happy_sun_project.dart';
 import '../models/inventory_tool.dart';
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
+import 'happy_sun_qr_scanner_widget.dart';
 
 class HappySunCheckoutScreen extends StatefulWidget {
   final HappySunProject project;
@@ -23,8 +23,7 @@ class HappySunCheckoutScreen extends StatefulWidget {
 class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  MobileScannerController? _scannerController;
-  bool _isScanning = false;
+  final GlobalKey<HappySunQRScannerWidgetState> _scannerKey = GlobalKey();
 
   // Track tools taken with actual tool IDs
   final Map<String, List<String>> _toolsTaken =
@@ -45,19 +44,14 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
 
     // Auto-start scanner when scan tab is selected
     _tabController.addListener(() {
-      if (_tabController.index == 0 && !_isScanning) {
-        _startScanning();
-      } else if (_tabController.index != 0 && _isScanning) {
-        _stopScanning();
+      if (_tabController.index == 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scannerKey.currentState?.startScanning();
+        });
+      } else {
+        _scannerKey.currentState?.stopScanning();
       }
     });
-
-    // Start scanner immediately if on scan tab
-    if (_tabController.index == 0) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _startScanning();
-      });
-    }
   }
 
   void _initializeToolsTaken() {
@@ -81,7 +75,6 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
   @override
   void dispose() {
     _tabController.dispose();
-    _scannerController?.dispose();
     _scanMessageTimer?.cancel();
     super.dispose();
   }
@@ -513,85 +506,12 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
       builder: (context, inventoryProvider, child) {
         return Column(
           children: [
-            // Scanner area (fixed height)
-            SizedBox(
-              height: 300,
-              child: Container(
-                margin: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey.shade300, width: 2),
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: _isScanning && _scannerController != null
-                      ? Stack(
-                          children: [
-                            MobileScanner(
-                              controller: _scannerController,
-                              onDetect: (capture) => _handleBarcodeScan(
-                                  capture, inventoryProvider),
-                            ),
-                            // Scan overlay
-                            Center(
-                              child: Container(
-                                width: 250,
-                                height: 250,
-                                decoration: BoxDecoration(
-                                  border: Border.all(
-                                    color: Colors.green,
-                                    width: 3,
-                                  ),
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.end,
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(
-                                        color: Colors.black.withOpacity(0.7),
-                                        borderRadius: const BorderRadius.only(
-                                          bottomLeft: Radius.circular(8),
-                                          bottomRight: Radius.circular(8),
-                                        ),
-                                      ),
-                                      child: Text(
-                                        _scanMessage,
-                                        style: TextStyle(
-                                          color: _scanMessageColor,
-                                          fontSize: 12,
-                                        ),
-                                        textAlign: TextAlign.center,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ],
-                        )
-                      : Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              const CircularProgressIndicator(
-                                color: Colors.orange,
-                              ),
-                              const SizedBox(height: 16),
-                              Text(
-                                'Initializing camera...',
-                                style: TextStyle(
-                                  color: Colors.grey.shade600,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                ),
-              ),
+            // Scanner widget
+            HappySunQRScannerWidget(
+              key: _scannerKey,
+              onScan: _handleBarcodeScan,
+              instructionText: _scanMessage,
+              autoStart: false,
             ),
             // Recently scanned (scrollable and takes remaining space)
             if (_toolsTaken.isNotEmpty) ...[
@@ -638,64 +558,40 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
     );
   }
 
-  void _startScanning() {
-    setState(() {
-      _isScanning = true;
-      _scannerController = MobileScannerController(
-        detectionSpeed: DetectionSpeed.noDuplicates,
+  void _handleBarcodeScan(String code) {
+    final inventoryProvider = context.read<InventoryProvider>();
+
+    // Find the tool in inventory by QR code or tool ID
+    try {
+      final tool = inventoryProvider.tools.firstWhere(
+        (t) => t.qrCode == code || t.toolId == code,
       );
-    });
-  }
 
-  void _stopScanning() {
-    setState(() {
-      _isScanning = false;
-      _scannerController?.dispose();
-      _scannerController = null;
-    });
-  }
+      final baseName = _extractBaseName(tool.name);
 
-  void _handleBarcodeScan(
-      BarcodeCapture capture, InventoryProvider inventoryProvider) {
-    final List<Barcode> barcodes = capture.barcodes;
-
-    for (final barcode in barcodes) {
-      final String? code = barcode.rawValue;
-
-      if (code == null || code.isEmpty) continue;
-
-      // Find the tool in inventory by QR code or tool ID
-      try {
-        final tool = inventoryProvider.tools.firstWhere(
-          (t) => t.qrCode == code || t.toolId == code,
-        );
-
-        final baseName = _extractBaseName(tool.name);
-
-        // Check if tool is already scanned
-        if (_toolsTaken[baseName]?.contains(tool.id) == true) {
-          _showScanError('Tool already scanned: ${tool.name}');
-          continue;
-        }
-
-        // Check if tool is in use by another job
-        if (tool.isInUse && tool.currentProject != widget.project.id) {
-          _showScanError('Tool is currently in use on another job');
-          continue;
-        }
-
-        // Add the tool
-        _addToolById(tool.id, baseName);
-
-        // Show success feedback
-        _showScanSuccess('Added: ${tool.name}');
-
-        // Vibrate or provide haptic feedback
-        // HapticFeedback.mediumImpact(); // Uncomment if you want haptic feedback
-      } catch (e) {
-        // Tool not found
-        _showScanError('Tool not found: $code');
+      // Check if tool is already scanned
+      if (_toolsTaken[baseName]?.contains(tool.id) == true) {
+        _showScanError('Tool already scanned: ${tool.name}');
+        return;
       }
+
+      // Check if tool is in use by another job
+      if (tool.isInUse && tool.currentProject != widget.project.id) {
+        _showScanError('Tool is currently in use on another job');
+        return;
+      }
+
+      // Add the tool
+      _addToolById(tool.id, baseName);
+
+      // Show success feedback
+      _showScanSuccess('Added: ${tool.name}');
+
+      // Vibrate or provide haptic feedback
+      // HapticFeedback.mediumImpact(); // Uncomment if you want haptic feedback
+    } catch (e) {
+      // Tool not found
+      _showScanError('Tool not found: $code');
     }
   }
 

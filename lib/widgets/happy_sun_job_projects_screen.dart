@@ -12,6 +12,8 @@ import '../models/job_list_item.dart';
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/inventory_provider.dart';
+import '../providers/auth_provider.dart';
+import '../config/flavor_config.dart';
 import 'happy_sun_checkout_screen.dart';
 import 'happy_sun_checklist_screen.dart';
 import 'happy_sun_checkin_screen.dart';
@@ -79,6 +81,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 
         return Column(
           children: [
+            // Sync status banner (Happy Sun offline support)
+            if (FlavorConfig.instance.isHappySun)
+              _buildSyncStatusBanner(happySunProvider),
             // Top bar with tabs and month filters
             Material(
               elevation: 2,
@@ -151,6 +156,40 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                                   horizontal: 12, vertical: 8),
                             ),
                           ),
+                          // Sign out button for Happy Sun flavor
+                          if (FlavorConfig.instance.isHappySun) ...[
+                            const SizedBox(width: 16),
+                            IconButton(
+                              icon: const Icon(Icons.logout, color: Colors.red),
+                              tooltip: 'Sign Out',
+                              onPressed: () async {
+                                final confirmed = await showDialog<bool>(
+                                  context: context,
+                                  builder: (context) => AlertDialog(
+                                    title: const Text('Sign Out'),
+                                    content: const Text(
+                                        'Are you sure you want to sign out?'),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.of(context).pop(false),
+                                        child: const Text('Cancel'),
+                                      ),
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.of(context).pop(true),
+                                        child: const Text('Sign Out'),
+                                      ),
+                                    ],
+                                  ),
+                                );
+
+                                if (confirmed == true && context.mounted) {
+                                  await context.read<AuthProvider>().signOut();
+                                }
+                              },
+                            ),
+                          ],
                         ],
                       ),
               ),
@@ -187,6 +226,95 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
       default:
         return 'all';
     }
+  }
+
+  Widget _buildSyncStatusBanner(HappySunProjectProvider provider) {
+    final syncStatus = provider.syncStatus;
+    if (syncStatus == null) return const SizedBox.shrink();
+
+    final isOnline = syncStatus['isOnline'] as bool;
+    final pendingChanges = syncStatus['pendingChanges'] as int;
+
+    // Show offline indicator with pending changes count
+    if (!isOnline && pendingChanges > 0) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.orange.shade700,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.1),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.cloud_off, color: Colors.white, size: 20),
+            const SizedBox(width: 12),
+            Flexible(
+              child: Text(
+                'Offline - $pendingChanges change${pendingChanges > 1 ? "s" : ""} will sync when online',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w500,
+                  fontSize: 14,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // Show syncing indicator
+    if (isOnline && pendingChanges > 0) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.blue.shade700,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.1),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation(Colors.white),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Flexible(
+              child: Text(
+                'Syncing $pendingChanges change${pendingChanges > 1 ? "s" : ""}...',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w500,
+                  fontSize: 14,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return const SizedBox.shrink();
   }
 
   Widget _buildMobileHeader(
@@ -254,6 +382,37 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(),
             ),
+            // Sign out button for Happy Sun flavor (mobile)
+            if (FlavorConfig.instance.isHappySun)
+              IconButton(
+                icon: const Icon(Icons.logout, color: Colors.red, size: 20),
+                tooltip: 'Sign Out',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: () async {
+                  final confirmed = await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('Sign Out'),
+                      content: const Text('Are you sure you want to sign out?'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(false),
+                          child: const Text('Cancel'),
+                        ),
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(true),
+                          child: const Text('Sign Out'),
+                        ),
+                      ],
+                    ),
+                  );
+
+                  if (confirmed == true && context.mounted) {
+                    await context.read<AuthProvider>().signOut();
+                  }
+                },
+              ),
           ],
         ),
       ],

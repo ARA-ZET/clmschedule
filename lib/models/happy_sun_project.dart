@@ -48,12 +48,20 @@ class ProjectCheckout {
     this.checkedOutBy,
   });
 
+  // Helper to parse DateTime from either Timestamp or String
+  static DateTime? _parseDateTime(dynamic value) {
+    if (value == null) return null;
+    if (value is Timestamp) return value.toDate();
+    if (value is String) return DateTime.tryParse(value);
+    return null;
+  }
+
   factory ProjectCheckout.fromMap(Map<String, dynamic>? data) {
     if (data == null) {
       return ProjectCheckout();
     }
     return ProjectCheckout(
-      checkoutTime: (data['checkoutTime'] as Timestamp?)?.toDate(),
+      checkoutTime: _parseDateTime(data['checkoutTime']),
       tools: (data['tools'] as List<dynamic>?)
               ?.map((tool) =>
                   CheckedOutTool.fromMap(tool as Map<String, dynamic>))
@@ -154,7 +162,7 @@ class ProjectChecklist {
       return ProjectChecklist();
     }
     return ProjectChecklist(
-      checklistTime: (data['checklistTime'] as Timestamp?)?.toDate(),
+      checklistTime: ProjectCheckout._parseDateTime(data['checklistTime']),
       items: (data['items'] as List<dynamic>?)
               ?.map(
                   (item) => ChecklistItem.fromMap(item as Map<String, dynamic>))
@@ -202,7 +210,7 @@ class ProjectCheckin {
       return ProjectCheckin();
     }
     return ProjectCheckin(
-      checkinTime: (data['checkinTime'] as Timestamp?)?.toDate(),
+      checkinTime: ProjectCheckout._parseDateTime(data['checkinTime']),
       returnedTools: (data['returnedTools'] as List<dynamic>?)
               ?.map((tool) =>
                   CheckedOutTool.fromMap(tool as Map<String, dynamic>))
@@ -324,12 +332,11 @@ class HappySunProject {
       jobListItemId: data['jobListItemId'] ?? id,
       clientName: data['clientName'] ?? '',
       address: data['address'] ?? '',
-      scheduledDate:
-          (data['scheduledDate'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      scheduledDate: _parseDateTime(data['scheduledDate']) ?? DateTime.now(),
       scheduledTime: data['scheduledTime'],
       numberOfTeamMembers: data['numberOfTeamMembers'] ?? 1,
       status: data['status'] ?? 'pending',
-      createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      createdAt: _parseDateTime(data['createdAt']) ?? DateTime.now(),
       updatedAt: _parseDateTime(data['updatedAt']),
       jobType: data['jobType'] ?? 'windowCleaning',
       toolsNeeded: data['toolsNeeded'] != null
@@ -342,8 +349,8 @@ class HappySunProject {
           : null,
       teamMemberIds:
           (data['teamMemberIds'] as List<dynamic>?)?.cast<String>() ?? [],
-      startTime: (data['startTime'] as Timestamp?)?.toDate(),
-      endTime: (data['endTime'] as Timestamp?)?.toDate(),
+      startTime: _parseDateTime(data['startTime']),
+      endTime: _parseDateTime(data['endTime']),
       notes: data['notes'],
       weatherConditions: data['weatherConditions'],
       photoUrls: (data['photoUrls'] as List<dynamic>?)?.cast<String>(),

@@ -51,6 +51,7 @@ class InventoryTool {
   final String name;
   final String description;
   final String? imageUrl;
+  final String? localImagePath; // Local cached image path for offline access
   final String category;
   final String toolId; // Unique TOOL#ID like TOOL#001
   final String qrCode;
@@ -71,6 +72,7 @@ class InventoryTool {
     required this.name,
     required this.description,
     this.imageUrl,
+    this.localImagePath,
     required this.category,
     required this.toolId,
     required this.qrCode,
@@ -85,17 +87,26 @@ class InventoryTool {
     this.isAccessory = false,
   });
 
+  // Helper to parse DateTime from either Timestamp or String
+  static DateTime? _parseDateTime(dynamic value) {
+    if (value == null) return null;
+    if (value is Timestamp) return value.toDate();
+    if (value is String) return DateTime.tryParse(value);
+    return null;
+  }
+
   factory InventoryTool.fromMap(String id, Map<String, dynamic> data) {
     return InventoryTool(
       id: id,
       name: data['name'] ?? '',
       description: data['description'] ?? '',
       imageUrl: data['imageUrl'],
+      localImagePath: data['localImagePath'],
       category: data['category'] ?? 'General',
       toolId: data['toolId'] ?? id,
       qrCode: data['qrCode'] ?? id,
-      createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
-      lastUsed: (data['lastUsed'] as Timestamp?)?.toDate(),
+      createdAt: _parseDateTime(data['createdAt']) ?? DateTime.now(),
+      lastUsed: _parseDateTime(data['lastUsed']),
       isInUse: data['isInUse'] ?? false,
       currentProject: data['currentProject'],
       toolType: _parseToolType(data),
@@ -146,6 +157,7 @@ class InventoryTool {
       'name': name,
       'description': description,
       'imageUrl': imageUrl,
+      'localImagePath': localImagePath,
       'category': category,
       'toolId': toolId,
       'qrCode': qrCode,
@@ -166,6 +178,7 @@ class InventoryTool {
     String? name,
     String? description,
     String? imageUrl,
+    String? localImagePath,
     String? category,
     String? toolId,
     String? qrCode,
@@ -184,6 +197,7 @@ class InventoryTool {
       name: name ?? this.name,
       description: description ?? this.description,
       imageUrl: imageUrl ?? this.imageUrl,
+      localImagePath: localImagePath ?? this.localImagePath,
       category: category ?? this.category,
       toolId: toolId ?? this.toolId,
       qrCode: qrCode ?? this.qrCode,

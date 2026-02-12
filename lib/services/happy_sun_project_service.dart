@@ -65,7 +65,6 @@ class HappySunProjectService {
           '   Document path: /happySunProjects/$monthDocId/projects/$jobListItemId');
       return jobListItemId;
     } catch (e) {
-      print('Error creating project: $e');
       rethrow;
     }
   }
@@ -88,7 +87,7 @@ class HappySunProjectService {
       }
       return null;
     } catch (e) {
-      print('Error getting project: $e');
+      // Error handled by provider layer
       rethrow;
     }
   }
@@ -137,7 +136,6 @@ class HappySunProjectService {
 
       await projectDoc.update(updatedData);
     } catch (e) {
-      print('Error updating project: $e');
       rethrow;
     }
   }
@@ -159,7 +157,7 @@ class HappySunProjectService {
 
       await projectDoc.update(fields);
     } catch (e) {
-      print('Error updating project fields: $e');
+      // Error handled by provider layer
       rethrow;
     }
   }
@@ -175,7 +173,6 @@ class HappySunProjectService {
         'status': 'in-progress',
       });
     } catch (e) {
-      print('Error performing checkout: $e');
       rethrow;
     }
   }
@@ -190,7 +187,6 @@ class HappySunProjectService {
         'checklist': checklist.toMap(),
       });
     } catch (e) {
-      print('Error performing checklist: $e');
       rethrow;
     }
   }
@@ -206,7 +202,6 @@ class HappySunProjectService {
         'status': 'completed',
       });
     } catch (e) {
-      print('Error performing checkin: $e');
       rethrow;
     }
   }
@@ -229,7 +224,6 @@ class HappySunProjectService {
 
       debugPrint('✅ HappySunProjectService: Deleted project $projectId');
     } catch (e) {
-      print('Error deleting project: $e');
       rethrow;
     }
   }
@@ -239,7 +233,6 @@ class HappySunProjectService {
     try {
       await updateProjectFields(projectId, {'status': status});
     } catch (e) {
-      print('Error updating project status: $e');
       rethrow;
     }
   }
@@ -269,7 +262,6 @@ class HappySunProjectService {
         'startTime': Timestamp.fromDate(startTime),
       });
     } catch (e) {
-      print('Error updating start time: $e');
       rethrow;
     }
   }
@@ -281,7 +273,6 @@ class HappySunProjectService {
         'endTime': Timestamp.fromDate(endTime),
       });
     } catch (e) {
-      print('Error updating end time: $e');
       rethrow;
     }
   }
@@ -291,7 +282,6 @@ class HappySunProjectService {
     try {
       await updateProjectFields(projectId, {'notes': notes});
     } catch (e) {
-      print('Error updating notes: $e');
       rethrow;
     }
   }
@@ -303,7 +293,6 @@ class HappySunProjectService {
       await updateProjectFields(
           projectId, {'weatherConditions': weatherConditions});
     } catch (e) {
-      print('Error updating weather conditions: $e');
       rethrow;
     }
   }
@@ -319,7 +308,6 @@ class HappySunProjectService {
       final updatedPhotoUrls = [...?project.photoUrls, photoUrl];
       await updateProjectFields(projectId, {'photoUrls': updatedPhotoUrls});
     } catch (e) {
-      print('Error adding photo URL: $e');
       rethrow;
     }
   }
@@ -336,7 +324,6 @@ class HappySunProjectService {
           project.photoUrls?.where((url) => url != photoUrl).toList() ?? [];
       await updateProjectFields(projectId, {'photoUrls': updatedPhotoUrls});
     } catch (e) {
-      print('Error removing photo URL: $e');
       rethrow;
     }
   }
@@ -349,7 +336,6 @@ class HappySunProjectService {
         'toolsUsedCategorized': toolsUsed.toMap(),
       });
     } catch (e) {
-      print('Error updating tools used: $e');
       rethrow;
     }
   }
@@ -360,7 +346,6 @@ class HappySunProjectService {
     try {
       await updateProjectFields(projectId, {'teamMemberIds': teamMemberIds});
     } catch (e) {
-      print('Error updating team members: $e');
       rethrow;
     }
   }
@@ -378,7 +363,6 @@ class HappySunProjectService {
         await updateProjectFields(projectId, {'teamMemberIds': updatedMembers});
       }
     } catch (e) {
-      print('Error adding team member: $e');
       rethrow;
     }
   }
@@ -395,7 +379,6 @@ class HappySunProjectService {
           project.teamMemberIds.where((id) => id != memberId).toList();
       await updateProjectFields(projectId, {'teamMemberIds': updatedMembers});
     } catch (e) {
-      print('Error removing team member: $e');
       rethrow;
     }
   }
@@ -408,7 +391,6 @@ class HappySunProjectService {
         'checklistData': checklistData.toMap(),
       });
     } catch (e) {
-      print('Error updating checklist data: $e');
       rethrow;
     }
   }
@@ -419,7 +401,6 @@ class HappySunProjectService {
     try {
       await updateProjectFields(projectId, {'statusId': statusId});
     } catch (e) {
-      print('Error syncing status: $e');
       rethrow;
     }
   }

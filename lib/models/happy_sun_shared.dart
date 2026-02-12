@@ -63,6 +63,14 @@ class ChecklistData {
     this.summary = '',
   });
 
+  /// Helper to parse DateTime from either Timestamp or String
+  static DateTime? _parseDateTime(dynamic value) {
+    if (value == null) return null;
+    if (value is Timestamp) return value.toDate();
+    if (value is String) return DateTime.tryParse(value);
+    return null;
+  }
+
   factory ChecklistData.fromMap(Map<String, dynamic> data) {
     return ChecklistData(
       items: (data['items'] as List<dynamic>?)
@@ -70,8 +78,7 @@ class ChecklistData {
                   ToolChecklistItem.fromMap(item as Map<String, dynamic>))
               .toList() ??
           [],
-      completedAt:
-          (data['completedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      completedAt: _parseDateTime(data['completedAt']) ?? DateTime.now(),
       completedBy: data['completedBy'] ?? '',
       totalTools: data['totalTools'] ?? 0,
       verifiedCount: data['verifiedCount'] ?? 0,
@@ -117,7 +124,7 @@ class HappySunToolUsage {
       toolName: data['toolName'] ?? '',
       category: data['category'] ?? 'General',
       quantity: data['quantity'] ?? 1,
-      usedAt: (data['usedAt'] as Timestamp?)?.toDate(),
+      usedAt: ChecklistData._parseDateTime(data['usedAt']),
     );
   }
 

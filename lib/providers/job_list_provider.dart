@@ -5,6 +5,7 @@ import '../models/job_list_item.dart';
 import '../models/job_list_item_update.dart';
 import '../models/job_reminder.dart';
 import '../services/job_list_service.dart';
+import '../config/flavor_config.dart';
 import 'auth_provider.dart';
 
 class JobListProvider extends ChangeNotifier {
@@ -128,6 +129,14 @@ class JobListProvider extends ChangeNotifier {
     }
 
     var filtered = _getMergedJobListItems();
+
+    // Happy Sun flavor: Only show window cleaning and solar panel jobs
+    if (FlavorConfig.instance.isHappySun) {
+      filtered = filtered.where((item) {
+        return item.jobType == JobType.windowCleaning ||
+               item.jobType == JobType.solarPanelCleaning;
+      }).toList();
+    }
 
     // Apply search filter
     if (_searchQuery.isNotEmpty) {
@@ -254,8 +263,15 @@ class JobListProvider extends ChangeNotifier {
     print(
         'JobListProvider: Setting up listener for month: ${_jobListService.getMonthlyDocumentId(_currentMonth)}');
 
+    // For Happy Sun flavor, only listen to window cleaning and solar panel jobs
+    List<JobType>? jobTypesFilter;
+    if (FlavorConfig.instance.isHappySun) {
+      jobTypesFilter = [JobType.windowCleaning, JobType.solarPanelCleaning];
+      print('JobListProvider: Happy Sun flavor - filtering to window cleaning & solar panel jobs only');
+    }
+
     _jobListSubscription =
-        _jobListService.getJobListItems(_currentMonth).listen(
+        _jobListService.getJobListItems(_currentMonth, jobTypesFilter).listen(
       (jobListItems) {
         print(
             'JobListProvider: Received ${jobListItems.length} job list items via snapshot');

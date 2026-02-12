@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import '../models/happy_sun_project.dart';
 import '../models/inventory_tool.dart';
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
+import 'happy_sun_qr_scanner_widget.dart';
 
 class HappySunCheckinScreen extends StatefulWidget {
   final HappySunProject project;
@@ -21,8 +21,7 @@ class HappySunCheckinScreen extends StatefulWidget {
 class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  MobileScannerController? _scannerController;
-  bool _isScanning = false;
+  final GlobalKey<HappySunQRScannerWidgetState> _scannerKey = GlobalKey();
 
   final Map<String, _ToolCheckinStatus> _toolStatus = {}; // toolId -> status
   bool _isChecking = false;
@@ -35,25 +34,19 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
 
     // Auto-start scanner when scan tab is selected
     _tabController.addListener(() {
-      if (_tabController.index == 0 && !_isScanning) {
-        _startScanning();
-      } else if (_tabController.index != 0 && _isScanning) {
-        _stopScanning();
+      if (_tabController.index == 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scannerKey.currentState?.startScanning();
+        });
+      } else {
+        _scannerKey.currentState?.stopScanning();
       }
     });
-
-    // Start scanner immediately if on scan tab
-    if (_tabController.index == 0) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _startScanning();
-      });
-    }
   }
 
   @override
   void dispose() {
     _tabController.dispose();
-    _scannerController?.dispose();
     super.dispose();
   }
 
@@ -95,61 +88,37 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
     }
   }
 
-  void _startScanning() {
-    setState(() {
-      _isScanning = true;
-      _scannerController = MobileScannerController(
-        detectionSpeed: DetectionSpeed.noDuplicates,
+  void _handleBarcodeScan(String code) {
+    final inventoryProvider = context.read<InventoryProvider>();
+
+    // Find the tool in inventory by QR code or tool ID
+    try {
+      final tool = inventoryProvider.tools.firstWhere(
+        (t) => t.qrCode == code || t.toolId == code,
       );
-    });
-  }
 
-  void _stopScanning() {
-    setState(() {
-      _isScanning = false;
-      _scannerController?.dispose();
-      _scannerController = null;
-    });
-  }
-
-  void _handleBarcodeScan(
-      BarcodeCapture capture, InventoryProvider inventoryProvider) {
-    final List<Barcode> barcodes = capture.barcodes;
-
-    for (final barcode in barcodes) {
-      final String? code = barcode.rawValue;
-
-      if (code == null || code.isEmpty) continue;
-
-      // Find the tool in inventory by QR code or tool ID
-      try {
-        final tool = inventoryProvider.tools.firstWhere(
-          (t) => t.qrCode == code || t.toolId == code,
-        );
-
-        // Check if tool is in the check-in list
-        if (!_toolStatus.containsKey(tool.id)) {
-          _showScanError('This tool is not in the check-in list');
-          continue;
-        }
-
-        // Check if already returned
-        if (_toolStatus[tool.id]!.isReturned) {
-          _showScanError('Tool already checked in: ${tool.name}');
-          continue;
-        }
-
-        // Mark as returned
-        setState(() {
-          _toolStatus[tool.id]!.isReturned = true;
-        });
-
-        // Show success feedback
-        _showScanSuccess('Checked in: ${tool.name}');
-      } catch (e) {
-        // Tool not found
-        _showScanError('Tool not found or not in list: $code');
+      // Check if tool is in the check-in list
+      if (!_toolStatus.containsKey(tool.id)) {
+        _showScanError('This tool is not in the check-in list');
+        return;
       }
+
+      // Check if already returned
+      if (_toolStatus[tool.id]!.isReturned) {
+        _showScanError('Tool already checked in: ${tool.name}');
+        return;
+      }
+
+      // Mark as returned
+      setState(() {
+        _toolStatus[tool.id]!.isReturned = true;
+      });
+
+      // Show success feedback
+      _showScanSuccess('Checked in: ${tool.name}');
+    } catch (e) {
+      // Tool not found
+      _showScanError('Tool not found or not in list: $code');
     }
   }
 
@@ -377,105 +346,12 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
       builder: (context, inventoryProvider, child) {
         return Column(
           children: [
-            // Scanner area
-            Expanded(
-              child: Container(
-                margin: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey.shade300, width: 2),
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: _isScanning && _scannerController != null
-                      ? Stack(
-                          children: [
-                            MobileScanner(
-                              controller: _scannerController,
-                              onDetect: (capture) => _handleBarcodeScan(
-                                  capture, inventoryProvider),
-                            ),
-                            // Scan overlay
-                            Center(
-                              child: Container(
-                                width: 250,
-                                height: 250,
-                                decoration: BoxDecoration(
-                                  border: Border.all(
-                                    color: Colors.green,
-                                    width: 3,
-                                  ),
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                            ),
-                            // Instructions
-                            Positioned(
-                              top: 50,
-                              left: 0,
-                              right: 0,
-                              child: Container(
-                                padding: const EdgeInsets.all(12),
-                                margin:
-                                    const EdgeInsets.symmetric(horizontal: 20),
-                                decoration: BoxDecoration(
-                                  color: Colors.black.withOpacity(0.7),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: const Text(
-                                  'Scan tool QR code or ID',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        )
-                      : const Center(
-                          child: CircularProgressIndicator(
-                            color: Colors.white,
-                          ),
-                        ),
-                ),
-              ),
-            ),
-            // Scanner controls
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  if (_isScanning)
-                    ElevatedButton.icon(
-                      onPressed: _stopScanning,
-                      icon: const Icon(Icons.stop),
-                      label: const Text('Stop Scanning'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 24, vertical: 12),
-                      ),
-                    )
-                  else
-                    ElevatedButton.icon(
-                      onPressed: _startScanning,
-                      icon: const Icon(Icons.qr_code_scanner),
-                      label: const Text('Start Scanning'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.purple,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 24, vertical: 12),
-                      ),
-                    ),
-                ],
-              ),
+            // Scanner widget
+            HappySunQRScannerWidget(
+              key: _scannerKey,
+              onScan: _handleBarcodeScan,
+              instructionText: 'Scan tool QR code or ID',
+              autoStart: false,
             ),
           ],
         );

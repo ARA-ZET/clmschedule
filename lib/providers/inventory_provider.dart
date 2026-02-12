@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'dart:async';
 import '../models/inventory_tool.dart';
 import '../services/inventory_service.dart';
+import '../services/inventory_sync_service.dart';
 
 class InventoryProvider extends ChangeNotifier {
   final InventoryService _inventoryService;
@@ -14,7 +15,31 @@ class InventoryProvider extends ChangeNotifier {
   String? _error;
   StreamSubscription<List<InventoryTool>>? _toolsSubscription;
 
+  // Offline support (Happy Sun flavor only)
+  InventorySyncService? _syncService;
+  bool _isOfflineMode = false;
+
   InventoryProvider(this._inventoryService);
+
+  // Getters for offline support
+  InventorySyncService? get syncService => _syncService;
+  bool get isOfflineMode => _isOfflineMode;
+  bool get isOnline {
+    if (_syncService == null) return true;
+    return _syncService!.connectivityService.isOnline;
+  }
+
+  bool get isSyncing => _syncService?.isSyncing ?? false;
+  DateTime? get lastSyncTime => _syncService?.lastSyncTime;
+
+  /// Set offline services (call from main.dart for Happy Sun flavor)
+  void setOfflineServices(InventorySyncService? syncService) {
+    _syncService = syncService;
+    _isOfflineMode = syncService != null;
+    debugPrint(
+        'InventoryProvider: Offline mode ${_isOfflineMode ? "ENABLED" : "DISABLED"}');
+    notifyListeners();
+  }
 
   // Getters
   List<InventoryTool> get tools => _tools;
@@ -67,20 +92,64 @@ class InventoryProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      _toolsSubscription?.cancel();
-      _toolsSubscription = _inventoryService.getTools().listen(
-        (tools) {
-          _tools = tools;
-          _isLoading = false;
-          _error = null;
-          notifyListeners();
-        },
-        onError: (error) {
-          _error = error.toString();
+      // Offline-first approach for Happy Sun flavor
+      if (_isOfflineMode && _syncService != null) {
+        debugPrint('🔄 Inventory: Loading from local storage first...');
+
+        // Load from local storage immediately (fast)
+        final localTools = _syncService!.getLocalTools();
+        if (localTools.isNotEmpty) {
+          _tools = localTools;
           _isLoading = false;
           notifyListeners();
-        },
-      );
+          debugPrint(
+              '✅ Inventory: Loaded ${localTools.length} tools from cache (~instant)');
+        }
+
+        // Then listen to Firebase for updates (if online)
+        if (isOnline) {
+          debugPrint('📡 Inventory: Listening to Firebase for updates...');
+          _toolsSubscription?.cancel();
+          _toolsSubscription = _inventoryService.getTools().listen(
+            (tools) {
+              // Inject cached image paths into tools from Firebase
+              _tools = _injectCachedImagePaths(tools);
+              _isLoading = false;
+              _error = null;
+              notifyListeners();
+              debugPrint(
+                  '✅ Inventory: Updated from Firebase (${tools.length} tools)');
+            },
+            onError: (error) {
+              debugPrint('⚠️ Inventory: Firebase error: $error');
+              // Keep local data, don't show error if we have cached data
+              if (_tools.isEmpty) {
+                _error = error.toString();
+              }
+              _isLoading = false;
+              notifyListeners();
+            },
+          );
+        } else {
+          debugPrint('📡 Inventory: Offline - using cached data only');
+        }
+      } else {
+        // Standard Firebase-only approach (CLM flavor)
+        _toolsSubscription?.cancel();
+        _toolsSubscription = _inventoryService.getTools().listen(
+          (tools) {
+            _tools = tools;
+            _isLoading = false;
+            _error = null;
+            notifyListeners();
+          },
+          onError: (error) {
+            _error = error.toString();
+            _isLoading = false;
+            notifyListeners();
+          },
+        );
+      }
     } catch (e) {
       _error = e.toString();
       _isLoading = false;
@@ -216,12 +285,66 @@ class InventoryProvider extends ChangeNotifier {
   // Get tool by QR code
   Future<InventoryTool?> getToolByQrCode(String qrCode) async {
     try {
+      // Offline mode: search in local cache first
+      if (_isOfflineMode && !isOnline) {
+        debugPrint('🔍 Searching for QR code in local cache: $qrCode');
+        final tool = _tools.firstWhere(
+          (t) => t.qrCode == qrCode,
+          orElse: () => throw Exception('Tool not found'),
+        );
+        return tool;
+      }
+
       return await _inventoryService.getToolByQrCode(qrCode);
     } catch (e) {
       _error = e.toString();
       notifyListeners();
       return null;
     }
+  }
+
+  /// Get cached image path for a tool (offline support)
+  String? getCachedImagePath(String toolId) {
+    if (_syncService != null) {
+      return _syncService!.getCachedImagePath(toolId);
+    }
+    return null;
+  }
+
+  /// Check if tool has cached image
+  bool hasImageCached(String toolId) {
+    if (_syncService != null) {
+      return _syncService!.hasImageCached(toolId);
+    }
+    return false;
+  }
+
+  /// Force sync inventory (manual refresh)
+  Future<void> forceSync() async {
+    if (_syncService != null && isOnline) {
+      try {
+        await _syncService!.syncInventory();
+        debugPrint('✅ Inventory: Manual sync completed');
+      } catch (e) {
+        _error = 'Sync failed: $e';
+        notifyListeners();
+        rethrow;
+      }
+    }
+  }
+
+  /// Get sync status information
+  Map<String, dynamic> getSyncStatus() {
+    if (_syncService != null) {
+      return _syncService!.getSyncStatus();
+    }
+    return {
+      'isOnline': true,
+      'isSyncing': false,
+      'lastSyncTime': null,
+      'cachedToolsCount': 0,
+      'cachedImagesCount': 0,
+    };
   }
 
   // Assign tool to project
@@ -335,6 +458,19 @@ class InventoryProvider extends ChangeNotifier {
       notifyListeners();
       rethrow;
     }
+  }
+
+  /// Inject cached image paths into tools for offline display
+  List<InventoryTool> _injectCachedImagePaths(List<InventoryTool> tools) {
+    if (_syncService == null) return tools;
+
+    return tools.map((tool) {
+      final cachedPath = _syncService!.getCachedImagePath(tool.id);
+      if (cachedPath != null && tool.localImagePath != cachedPath) {
+        return tool.copyWith(localImagePath: cachedPath);
+      }
+      return tool;
+    }).toList();
   }
 
   @override

@@ -3,9 +3,21 @@ import 'dart:async';
 import '../models/happy_sun_project.dart';
 import '../models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
 import '../services/happy_sun_project_service.dart';
+import '../services/happy_sun_local_storage.dart';
+import '../services/happy_sun_sync_service.dart';
+import '../services/connectivity_service.dart';
+import '../config/flavor_config.dart';
 
 class HappySunProjectProvider extends ChangeNotifier {
   final HappySunProjectService _projectService = HappySunProjectService();
+
+  // Offline support services (nullable for CLM flavor compatibility)
+  HappySunLocalStorage? _localStorage;
+  HappySunSyncService? _syncService;
+  ConnectivityService? _connectivityService;
+
+  // Getter for project service (needed by sync service)
+  HappySunProjectService get projectService => _projectService;
 
   List<HappySunProject> _projects = [];
   bool _isLoading = false;
@@ -17,6 +29,22 @@ class HappySunProjectProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
   DateTime get currentMonth => _currentMonth;
+
+  // Sync status for offline support
+  Map<String, dynamic>? get syncStatus => _syncService?.getSyncStatus();
+  bool get isOnline => _connectivityService?.isOnline ?? true;
+
+  /// Set offline services (called after they're initialized in main.dart)
+  void setOfflineServices({
+    required HappySunLocalStorage localStorage,
+    required HappySunSyncService syncService,
+    required ConnectivityService connectivityService,
+  }) {
+    _localStorage = localStorage;
+    _syncService = syncService;
+    _connectivityService = connectivityService;
+    debugPrint('📱 HappySunProjectProvider: Offline services configured');
+  }
 
   HappySunProjectProvider() {
     _initializeProjects();
@@ -31,7 +59,21 @@ class HappySunProjectProvider extends ChangeNotifier {
   void _initializeProjects() {
     debugPrint(
         '\n📦 HappySunProjectProvider: Initializing projects for ${_currentMonth.year}-${_currentMonth.month}');
+    _error = null; // Clear any previous errors
     _setLoading(true);
+
+    // Load from local storage first (instant, offline-first)
+    if (FlavorConfig.instance.isHappySun && _localStorage != null) {
+      final localProjects = _localStorage!.getProjectsForMonth(_currentMonth);
+      if (localProjects.isNotEmpty) {
+        debugPrint(
+            '   💾 Loaded ${localProjects.length} projects from local storage');
+        _projects = localProjects;
+        _setLoading(false);
+        notifyListeners();
+      }
+    }
+
     _projectsSubscription?.cancel(); // Cancel previous subscription
     debugPrint('   Setting up stream listener for projects subcollection...');
     _projectsSubscription =
@@ -43,15 +85,60 @@ class HappySunProjectProvider extends ChangeNotifier {
           debugPrint('      - ${project.id}: ${project.clientName}');
         }
         _projects = projects;
+
+        // Save to local storage for offline access
+        if (FlavorConfig.instance.isHappySun && _localStorage != null) {
+          _localStorage!.saveProjects(projects);
+        }
+
+        _error = null; // Clear error on successful load
         _setLoading(false);
         notifyListeners();
       },
       onError: (error) {
-        debugPrint('   ❌ Error loading projects: $error');
-        debugPrint(
-            '   This could be old array-format data - clearing projects list');
-        _projects = []; // Clear corrupted data
-        _error = error.toString();
+        debugPrint('   ⚠️ Error loading projects from Firebase: $error');
+
+        // Check if error is due to being offline (unavailable/permission-denied are common offline errors)
+        final errorString = error.toString().toLowerCase();
+        final isOfflineError = errorString.contains('unavailable') ||
+            errorString.contains('failed to get document') ||
+            errorString.contains('connection') ||
+            errorString.contains('network');
+
+        if (isOfflineError) {
+          debugPrint('   📴 Offline error detected - using cached data');
+          // Keep the locally cached projects, don't set error
+          if (_projects.isEmpty &&
+              FlavorConfig.instance.isHappySun &&
+              _localStorage != null) {
+            // Try to load from local storage if we don't have any projects yet
+            final localProjects =
+                _localStorage!.getProjectsForMonth(_currentMonth);
+            if (localProjects.isNotEmpty) {
+              debugPrint(
+                  '   💾 Loaded ${localProjects.length} projects from cache');
+              _projects = localProjects;
+            }
+          }
+
+          // If we have projects (either from cache or previously loaded), clear any existing error
+          if (_projects.isNotEmpty) {
+            debugPrint(
+                '   ✅ Using ${_projects.length} cached projects, clearing error');
+            _error = null;
+          } else {
+            // No cached data available while offline
+            debugPrint('   ⚠️ No cached data available');
+            _error =
+                'Offline: No cached data available. Please connect to the internet.';
+          }
+        } else {
+          // Real error (not offline) - show error message
+          debugPrint('   ❌ Non-offline error - clearing projects');
+          _projects = [];
+          _error = error.toString();
+        }
+
         _setLoading(false);
         notifyListeners();
       },
@@ -76,11 +163,22 @@ class HappySunProjectProvider extends ChangeNotifier {
       debugPrint(StackTrace.current.toString().split('\n').take(5).join('\n'));
 
       _error = null;
-      final projectId =
-          await _projectService.createProject(project, jobListItemId);
-      debugPrint('   ✅ Provider: Project created successfully');
-      notifyListeners();
-      return projectId;
+
+      // Offline-first approach for Happy Sun flavor
+      if (FlavorConfig.instance.isHappySun && _syncService != null) {
+        final projectId =
+            await _syncService!.createProjectOffline(project, jobListItemId);
+        debugPrint('   ✅ Provider: Project saved offline-first');
+        notifyListeners();
+        return projectId;
+      } else {
+        // Online-only for CLM flavor
+        final projectId =
+            await _projectService.createProject(project, jobListItemId);
+        debugPrint('   ✅ Provider: Project created successfully');
+        notifyListeners();
+        return projectId;
+      }
     } catch (e) {
       debugPrint('   ❌ Provider: Error creating project: $e');
       _error = e.toString();
@@ -93,10 +191,38 @@ class HappySunProjectProvider extends ChangeNotifier {
   Future<bool> updateProject(HappySunProject project) async {
     try {
       _error = null;
-      await _projectService.updateProject(project);
+
+      // Try to update online first
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.updateProject(project);
+        } catch (e) {
+          // If online but Firebase fails, save locally
+          debugPrint('⚠️ Firebase update failed, saving locally: $e');
+          if (_localStorage != null && _syncService != null) {
+            await _localStorage!.saveProject(project);
+            await _syncService!.markForSync(project.id, 'update');
+          }
+        }
+      } else {
+        // Offline: save locally and mark for sync
+        debugPrint('📴 Offline: Saving project locally for sync later');
+        if (_localStorage != null && _syncService != null) {
+          await _localStorage!.saveProject(project);
+          await _syncService!.markForSync(project.id, 'update');
+        }
+      }
+
+      // Update local list
+      final index = _projects.indexWhere((p) => p.id == project.id);
+      if (index != -1) {
+        _projects[index] = project;
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error updating project: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -118,10 +244,27 @@ class HappySunProjectProvider extends ChangeNotifier {
         notes: notes,
         checkedOutBy: userId,
       );
-      await _projectService.performCheckout(projectId, checkout);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.performCheckout(projectId, checkout);
+        } catch (e) {
+          debugPrint('⚠️ Firebase checkout failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'checkout');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Checkout will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'checkout');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error performing checkout: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -145,10 +288,27 @@ class HappySunProjectProvider extends ChangeNotifier {
         notes: notes,
         checkedBy: userId,
       );
-      await _projectService.performChecklist(projectId, checklist);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.performChecklist(projectId, checklist);
+        } catch (e) {
+          debugPrint('⚠️ Firebase checklist failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'checklist');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Checklist will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'checklist');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error performing checklist: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -172,10 +332,27 @@ class HappySunProjectProvider extends ChangeNotifier {
         notes: notes,
         checkedInBy: userId,
       );
-      await _projectService.performCheckin(projectId, checkin);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.performCheckin(projectId, checkin);
+        } catch (e) {
+          debugPrint('⚠️ Firebase checkin failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'checkin');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Checkin will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'checkin');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error performing checkin: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -190,8 +367,22 @@ class HappySunProjectProvider extends ChangeNotifier {
       // Remove from local list immediately for instant UI update
       _projects.removeWhere((project) => project.id == projectId);
 
-      // Delete from Firestore
-      await _projectService.deleteProject(projectId);
+      // Delete from Firebase or queue for sync
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.deleteProject(projectId);
+        } catch (e) {
+          debugPrint('⚠️ Firebase deleteProject failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'delete');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Project deletion will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'delete');
+        }
+      }
 
       notifyListeners();
       return true;
@@ -207,10 +398,28 @@ class HappySunProjectProvider extends ChangeNotifier {
   Future<bool> updateProjectStatus(String projectId, String status) async {
     try {
       _error = null;
-      await _projectService.updateProjectStatus(projectId, status);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.updateProjectStatus(projectId, status);
+        } catch (e) {
+          debugPrint(
+              '⚠️ Firebase updateProjectStatus failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'updateStatus');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Status update will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'updateStatus');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error updating project status: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -266,10 +475,28 @@ class HappySunProjectProvider extends ChangeNotifier {
   Future<bool> updateStartTime(String projectId, DateTime startTime) async {
     try {
       _error = null;
-      await _projectService.updateStartTime(projectId, startTime);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.updateStartTime(projectId, startTime);
+        } catch (e) {
+          debugPrint(
+              '⚠️ Firebase updateStartTime failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'updateStartTime');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Start time update will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'updateStartTime');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error updating start time: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -280,10 +507,27 @@ class HappySunProjectProvider extends ChangeNotifier {
   Future<bool> updateEndTime(String projectId, DateTime endTime) async {
     try {
       _error = null;
-      await _projectService.updateEndTime(projectId, endTime);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.updateEndTime(projectId, endTime);
+        } catch (e) {
+          debugPrint('⚠️ Firebase updateEndTime failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'updateEndTime');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: End time update will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'updateEndTime');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error updating end time: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -294,10 +538,27 @@ class HappySunProjectProvider extends ChangeNotifier {
   Future<bool> updateNotes(String projectId, String notes) async {
     try {
       _error = null;
-      await _projectService.updateNotes(projectId, notes);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.updateNotes(projectId, notes);
+        } catch (e) {
+          debugPrint('⚠️ Firebase updateNotes failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'updateNotes');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Notes update will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'updateNotes');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error updating notes: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -324,10 +585,27 @@ class HappySunProjectProvider extends ChangeNotifier {
   Future<bool> addPhotoUrl(String projectId, String photoUrl) async {
     try {
       _error = null;
-      await _projectService.addPhotoUrl(projectId, photoUrl);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.addPhotoUrl(projectId, photoUrl);
+        } catch (e) {
+          debugPrint('⚠️ Firebase addPhotoUrl failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'addPhotoUrl');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Photo URL will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'addPhotoUrl');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error adding photo URL: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -338,10 +616,27 @@ class HappySunProjectProvider extends ChangeNotifier {
   Future<bool> removePhotoUrl(String projectId, String photoUrl) async {
     try {
       _error = null;
-      await _projectService.removePhotoUrl(projectId, photoUrl);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.removePhotoUrl(projectId, photoUrl);
+        } catch (e) {
+          debugPrint('⚠️ Firebase removePhotoUrl failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'removePhotoUrl');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Photo removal will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'removePhotoUrl');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error removing photo URL: $e');
       _error = e.toString();
       notifyListeners();
       return false;
@@ -387,10 +682,28 @@ class HappySunProjectProvider extends ChangeNotifier {
       Map<String, dynamic> fields) async {
     try {
       _error = null;
-      await _projectService.updateProjectFields(projectId, fields);
+
+      if (_connectivityService?.isOnline ?? true) {
+        try {
+          await _projectService.updateProjectFields(projectId, fields);
+        } catch (e) {
+          debugPrint(
+              '⚠️ Firebase updateProjectFields failed, marking for sync: $e');
+          if (_syncService != null) {
+            await _syncService!.markForSync(projectId, 'updateFields');
+          }
+        }
+      } else {
+        debugPrint('📴 Offline: Project field updates will sync later');
+        if (_syncService != null) {
+          await _syncService!.markForSync(projectId, 'updateFields');
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
+      debugPrint('❌ Error updating project fields: $e');
       _error = e.toString();
       notifyListeners();
       return false;

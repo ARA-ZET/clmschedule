@@ -17,10 +17,16 @@ class JobListService {
   // Get all job list items for current month
   // In debug mode: limits to 20 items for faster development
   // In release mode: loads all items
-  Stream<List<JobListItem>> getJobListItems([DateTime? date]) {
+  // Optional jobTypes parameter to filter by specific job types at Firebase level
+  Stream<List<JobListItem>> getJobListItems(
+      [DateTime? date, List<JobType>? jobTypes]) {
     final targetDate = date ?? DateTime.now();
     if (kDebugMode) {
       print('JobListService: Getting job list items for date: $targetDate');
+      if (jobTypes != null && jobTypes.isNotEmpty) {
+        print(
+            'JobListService: Filtering by job types: ${jobTypes.map((t) => t.name).join(", ")}');
+      }
       print('DEBUG MODE: Limiting to 20 job list items');
     }
     if (kDebugMode) {
@@ -31,9 +37,26 @@ class JobListService {
     // Ensure monthly document exists when streaming
     _monthlyService.ensureJobListMonthlyDocExists(targetDate);
 
-    // Build query with optional limit for debug mode
-    Query query = _getJobListItemsCollection(targetDate)
-        .orderBy('date', descending: true);
+    // Build query
+    Query query = _getJobListItemsCollection(targetDate);
+
+    // Add jobType filter if specified (Firebase-level filtering)
+    if (jobTypes != null && jobTypes.isNotEmpty) {
+      // Convert JobType enum to string values for Firebase query
+      // Use .name (enum name) not .displayName since Firebase stores enum.name
+      final jobTypeStrings = jobTypes.map((type) => type.name).toList();
+      query = query.where('jobType', whereIn: jobTypeStrings);
+      if (kDebugMode) {
+        print(
+            'JobListService: Applying whereIn filter with values: $jobTypeStrings');
+      }
+      // Note: Combining whereIn with orderBy requires a composite index in Firebase
+      // For now, skip orderBy when filtering to avoid index requirement
+      // TODO: Create composite index for (jobType, date) in Firebase Console
+    } else {
+      // Only apply orderBy when not filtering (avoids index requirement)
+      query = query.orderBy('date', descending: true);
+    }
 
     // In debug mode, limit to 20 items
     if (kDebugMode) {

@@ -33,6 +33,10 @@ android {
         jvmTarget = JavaVersion.VERSION_11.toString()
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.clmschedule"
@@ -45,6 +49,28 @@ android {
         
         // Inject Google Maps API key
         manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = googleMapsApiKey
+    }
+
+    flavorDimensions += "app"
+    
+    productFlavors {
+        create("clm") {
+            dimension = "app"
+            // Use same base applicationId for Firebase compatibility
+            versionNameSuffix = "-clm"
+            manifestPlaceholders["appName"] = "CLM Schedule"
+            buildConfigField("boolean", "ENABLE_HAPPY_SUN", "true")
+            buildConfigField("boolean", "ENABLE_COLLECTION_SCHEDULE", "true")
+        }
+        
+        create("happysun") {
+            dimension = "app"
+            // Use same base applicationId for Firebase compatibility
+            versionNameSuffix = "-happysun"
+            manifestPlaceholders["appName"] = "Happy Sun"
+            buildConfigField("boolean", "ENABLE_HAPPY_SUN", "true")
+            buildConfigField("boolean", "ENABLE_COLLECTION_SCHEDULE", "false")
+        }
     }
 
     buildTypes {
