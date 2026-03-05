@@ -1,11 +1,11 @@
 {
-    "name": "clmschedule",
-    "short_name": "clmschedule",
+    "name": "CLM Schedule",
+    "short_name": "CLM Schedule",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
+    "background_color": "#FFFFFF",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "CLM Schedule - Enterprise scheduling application for distributor job management",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

@@ -4,6 +4,7 @@ import '../models/happy_sun_project.dart';
 import '../models/inventory_tool.dart';
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
+import '../services/sound_service.dart';
 import 'happy_sun_qr_scanner_widget.dart';
 
 class HappySunCheckinScreen extends StatefulWidget {
@@ -25,6 +26,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
 
   final Map<String, _ToolCheckinStatus> _toolStatus = {}; // toolId -> status
   bool _isChecking = false;
+  bool _hasUnsavedChanges = false;
 
   @override
   void initState() {
@@ -51,6 +53,12 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
   }
 
   void _initializeToolStatus() {
+    // Load existing check-in progress if available
+    final existingCheckin = widget.project.checkin;
+    final returnedToolsMap = existingCheckin != null
+        ? {for (var tool in existingCheckin.returnedTools) tool.toolId: true}
+        : <String, bool>{};
+
     // Use checklist data if available
     if (widget.project.checklistData != null) {
       for (final item in widget.project.checklistData!.items) {
@@ -58,7 +66,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
           toolId: item.toolId,
           baseName: item.baseName,
           category: item.category,
-          isReturned: false,
+          isReturned: returnedToolsMap[item.toolId] ?? false,
           checklistStatus: item.status, // present, broken, missing
           checklistNotes: item.notes,
         );
@@ -78,7 +86,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
               toolId: toolId,
               baseName: tool.baseName,
               category: tool.category,
-              isReturned: false,
+              isReturned: returnedToolsMap[toolId] ?? false,
               checklistStatus: 'present',
               checklistNotes: '',
             );
@@ -99,59 +107,84 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
 
       // Check if tool is in the check-in list
       if (!_toolStatus.containsKey(tool.id)) {
-        _showScanError('This tool is not in the check-in list');
+        _scannerKey.currentState?.showErrorFeedback();
+        _showScanError('❌ Not in check-in list: ${tool.name}');
         return;
       }
 
       // Check if already returned
       if (_toolStatus[tool.id]!.isReturned) {
-        _showScanError('Tool already checked in: ${tool.name}');
+        _scannerKey.currentState?.showErrorFeedback();
+        _showScanError('✓ Already checked in: ${tool.name}');
         return;
       }
 
       // Mark as returned
       setState(() {
         _toolStatus[tool.id]!.isReturned = true;
+        _hasUnsavedChanges = true;
       });
 
       // Show success feedback
-      _showScanSuccess('Checked in: ${tool.name}');
+      _scannerKey.currentState?.showSuccessFeedback();
+      _showScanSuccess('✅ Checked in: ${tool.name}');
     } catch (e) {
       // Tool not found
-      _showScanError('Tool not found or not in list: $code');
+      _scannerKey.currentState?.showErrorFeedback();
+      _showScanError('❓ Tool not found: $code');
     }
   }
 
   void _showScanSuccess(String message) {
+    // Play success sound
+    SoundService().playSuccess();
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
           children: [
-            const Icon(Icons.check_circle, color: Colors.white),
+            const Icon(Icons.check_circle, color: Colors.white, size: 20),
             const SizedBox(width: 8),
-            Expanded(child: Text(message)),
+            Expanded(
+              child: Text(
+                message,
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              ),
+            ),
           ],
         ),
         backgroundColor: Colors.green,
-        duration: const Duration(seconds: 2),
+        duration: const Duration(milliseconds: 1500),
         behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
       ),
     );
   }
 
   void _showScanError(String message) {
+    // Play warning sound
+    SoundService().playWarning();
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
           children: [
-            const Icon(Icons.error, color: Colors.white),
+            const Icon(Icons.error, color: Colors.white, size: 20),
             const SizedBox(width: 8),
-            Expanded(child: Text(message)),
+            Expanded(
+              child: Text(
+                message,
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              ),
+            ),
           ],
         ),
         backgroundColor: Colors.red,
-        duration: const Duration(seconds: 2),
+        duration: const Duration(milliseconds: 2000),
         behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
       ),
     );
   }
@@ -189,6 +222,51 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
   bool _areAllToolsReturned() =>
       _toolStatus.values.every((status) => status.isReturned);
 
+  Future<void> _saveProgress() async {
+    setState(() => _isChecking = true);
+
+    try {
+      final checkinData = _buildCheckinData(isCompleted: false);
+      final jobProvider = context.read<HappySunProjectProvider>();
+
+      await jobProvider.performCheckin(
+        projectId: widget.project.id,
+        checkin: checkinData,
+      );
+
+      setState(() {
+        _hasUnsavedChanges = false;
+        _isChecking = false;
+      });
+
+      // Play success sound
+      SoundService().playSuccess();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Progress saved'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      setState(() => _isChecking = false);
+
+      // Play warning sound
+      SoundService().playWarning();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error saving: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _completeCheckin() async {
     if (!_areAllToolsReturned()) {
       final confirm = await showDialog<bool>(
@@ -222,6 +300,7 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
     setState(() => _isChecking = true);
 
     try {
+      final checkinData = _buildCheckinData(isCompleted: true);
       final jobProvider = context.read<HappySunProjectProvider>();
       final inventoryProvider = context.read<InventoryProvider>();
 
@@ -231,6 +310,12 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
           .map((entry) => entry.key)
           .toList();
 
+      // Save check-in data
+      await jobProvider.performCheckin(
+        projectId: widget.project.id,
+        checkin: checkinData,
+      );
+
       // Record end time for the job
       await jobProvider.updateEndTime(
         widget.project.id,
@@ -239,6 +324,9 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
 
       // Mark tools as available in inventory
       await inventoryProvider.checkInTools(returnedToolIds);
+
+      // Play success sound
+      SoundService().playSuccess();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -251,6 +339,10 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
       }
     } catch (e) {
       setState(() => _isChecking = false);
+
+      // Play warning sound
+      SoundService().playWarning();
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -262,98 +354,242 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
     }
   }
 
+  ProjectCheckin _buildCheckinData({required bool isCompleted}) {
+    // Get returned tools
+    final returnedToolIds = _toolStatus.entries
+        .where((entry) => entry.value.isReturned)
+        .map((entry) => entry.key)
+        .toList();
+
+    // Get missing tools
+    final missingToolIds = _toolStatus.entries
+        .where((entry) => !entry.value.isReturned)
+        .map((entry) => entry.key)
+        .toList();
+
+    // Convert tool statuses to CheckedOutTool format
+    final returnedTools = returnedToolIds.map((toolId) {
+      final status = _toolStatus[toolId]!;
+      return CheckedOutTool(
+        toolId: toolId,
+        toolName: status.baseName,
+        category: status.category,
+        quantity: 1,
+      );
+    }).toList();
+
+    return ProjectCheckin(
+      checkinTime: DateTime.now(),
+      returnedTools: returnedTools,
+      missingTools: missingToolIds,
+      notes: null,
+      checkedInBy: 'Current User', // TODO: Get from auth
+      isCompleted: isCompleted,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final isCompleted = widget.project.endTime != null;
+    final isCompleted = widget.project.checkin?.isCompleted == true;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(isCompleted ? 'Check-in (Completed)' : 'Check-in Tools'),
-        backgroundColor: isCompleted ? Colors.green : Colors.purple,
-        foregroundColor: Colors.white,
-        bottom: !isCompleted
-            ? TabBar(
-                controller: _tabController,
-                labelColor: Colors.white,
-                unselectedLabelColor: Colors.white70,
-                indicatorColor: Colors.white,
-                tabs: const [
-                  Tab(icon: Icon(Icons.qr_code_scanner), text: 'Scan'),
-                  Tab(icon: Icon(Icons.assignment_return), text: 'Check-in'),
-                ],
-              )
-            : null,
-        actions: isCompleted
-            ? [
-                Padding(
-                  padding: const EdgeInsets.only(right: 16),
-                  child: Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: const [
-                          Icon(Icons.check_circle,
-                              color: Colors.green, size: 16),
-                          SizedBox(width: 4),
-                          Text(
-                            'Completed',
-                            style: TextStyle(
-                              color: Colors.green,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
+    return WillPopScope(
+      onWillPop: () async {
+        if (_hasUnsavedChanges) {
+          final result = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Unsaved Changes'),
+              content: const Text(
+                  'You have unsaved changes. Do you want to save before leaving?'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Discard'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Save'),
+                ),
+              ],
+            ),
+          );
+
+          if (result == true) {
+            await _saveProgress();
+          }
+        }
+        return true;
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(
+            isCompleted ? 'Check-in (Completed)' : 'Check-in Tools',
+            style: const TextStyle(fontSize: 16),
+          ),
+          backgroundColor: isCompleted ? Colors.green : Colors.purple,
+          foregroundColor: Colors.white,
+          bottom: !isCompleted
+              ? TabBar(
+                  controller: _tabController,
+                  labelColor: Colors.white,
+                  unselectedLabelColor: Colors.white70,
+                  indicatorColor: Colors.white,
+                  tabs: const [
+                    Tab(
+                      icon: Icon(Icons.qr_code_scanner, size: 20),
+                      text: 'Scan',
+                      height: 48,
+                    ),
+                    Tab(
+                      icon: Icon(Icons.assignment_return, size: 20),
+                      text: 'Check-in',
+                      height: 48,
+                    ),
+                  ],
+                )
+              : null,
+          actions: [
+            if (isCompleted)
+              Padding(
+                padding: const EdgeInsets.only(right: 16),
+                child: Center(
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(Icons.check_circle, color: Colors.green, size: 16),
+                        SizedBox(width: 4),
+                        Text(
+                          'Completed',
+                          style: TextStyle(
+                            color: Colors.green,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
                           ),
-                        ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              )
+            else if (_hasUnsavedChanges)
+              Padding(
+                padding: const EdgeInsets.only(right: 16),
+                child: Center(
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Text(
+                      'Unsaved',
+                      style: TextStyle(
+                        color: Colors.purple,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
                   ),
                 ),
-              ]
-            : null,
-      ),
-      body: isCompleted
-          ? Column(
-              children: [
-                Expanded(child: _buildCheckinTab()),
-                _buildBottomActions(),
-              ],
-            )
-          : Column(
-              children: [
-                Expanded(
-                  child: TabBarView(
-                    controller: _tabController,
-                    children: [
-                      _buildScanTab(),
-                      _buildCheckinTab(),
-                    ],
-                  ),
+              ),
+          ],
+        ),
+        body: SafeArea(
+          child: isCompleted
+              ? Column(
+                  children: [
+                    Expanded(child: _buildCheckinTab()),
+                    _buildBottomActions(),
+                  ],
+                )
+              : Column(
+                  children: [
+                    Expanded(
+                      child: TabBarView(
+                        controller: _tabController,
+                        children: [
+                          _buildScanTab(),
+                          _buildCheckinTab(),
+                        ],
+                      ),
+                    ),
+                    _buildBottomActions(),
+                  ],
                 ),
-                _buildBottomActions(),
-              ],
-            ),
+        ),
+      ),
     );
   }
 
   Widget _buildScanTab() {
     return Consumer<InventoryProvider>(
       builder: (context, inventoryProvider, child) {
-        return Column(
-          children: [
-            // Scanner widget
-            HappySunQRScannerWidget(
-              key: _scannerKey,
-              onScan: _handleBarcodeScan,
-              instructionText: 'Scan tool QR code or ID',
-              autoStart: false,
-            ),
-          ],
+        final isScanning = _scannerKey.currentState?.isScanning ?? false;
+        return SingleChildScrollView(
+          child: Column(
+            children: [
+              // Scanner widget
+              HappySunQRScannerWidget(
+                key: _scannerKey,
+                onScan: _handleBarcodeScan,
+                instructionText: 'Scan tool QR code or ID',
+                autoStart: false,
+              ),
+              // Scanner controls
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    if (isScanning)
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          _scannerKey.currentState?.stopScanning();
+                          setState(() {});
+                        },
+                        icon: const Icon(Icons.stop, size: 18),
+                        label: const Text(
+                          'Stop',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.red,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                        ),
+                      )
+                    else
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          _scannerKey.currentState?.startScanning();
+                          setState(() {});
+                        },
+                        icon: const Icon(Icons.qr_code_scanner, size: 18),
+                        label: const Text(
+                          'Start Scanning',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.purple,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -738,45 +974,6 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
     );
   }
 
-  Widget _buildInfoTile(String label, String value, IconData icon) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.15),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: Colors.white, size: 20),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: Colors.white70,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  value,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildCompactInfoTile(IconData icon, String value) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -908,31 +1105,44 @@ class _HappySunCheckinScreenState extends State<HappySunCheckinScreen>
               ],
             ),
             const SizedBox(height: 10),
-            // Complete button
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: !_isChecking ? _completeCheckin : null,
-                icon: _isChecking
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Icon(Icons.check_circle, size: 18),
-                label: Text(
-                  _isChecking ? 'Checking in...' : 'Complete Check-in',
-                  style: const TextStyle(fontSize: 13),
+            // Buttons
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _hasUnsavedChanges && !_isChecking
+                        ? _saveProgress
+                        : null,
+                    icon: _isChecking
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save, size: 16),
+                    label: const Text('Save Progress',
+                        style: TextStyle(fontSize: 12)),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                    ),
+                  ),
                 ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.purple,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed:
+                        allReturned && !_isChecking ? _completeCheckin : null,
+                    icon: const Icon(Icons.check_circle, size: 16),
+                    label:
+                        const Text('Complete', style: TextStyle(fontSize: 12)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.purple,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
           ],
         ],

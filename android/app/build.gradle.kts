@@ -71,6 +71,16 @@ android {
             buildConfigField("boolean", "ENABLE_HAPPY_SUN", "true")
             buildConfigField("boolean", "ENABLE_COLLECTION_SCHEDULE", "false")
         }
+
+        create("trackEditor") {
+            dimension = "app"
+            // Shares the same Firebase project (clmschedule) as all other flavors.
+            // Uses the main google-services.json — no separate Firebase app needed.
+            versionNameSuffix = "-trackEditor"
+            manifestPlaceholders["appName"] = "CLM Track Editor"
+            buildConfigField("boolean", "ENABLE_HAPPY_SUN", "false")
+            buildConfigField("boolean", "ENABLE_COLLECTION_SCHEDULE", "false")
+        }
     }
 
     buildTypes {

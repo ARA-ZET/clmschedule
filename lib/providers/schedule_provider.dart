@@ -38,9 +38,31 @@ class ScheduleProvider extends ChangeNotifier {
       : _firestoreService = firestoreService ?? FirestoreService();
   // Don't initialize streams in constructor - let it be done async
 
-  // Initialize streams asynchronously without blocking
+  // Initialize streams asynchronously without blocking (full app)
   Future<void> initialize() async {
     await _initStreamsAsync();
+  }
+
+  /// Lightweight init for the track editor flavor.
+  /// Fetches distributors once (no ongoing streams) — jobs are read
+  /// on-demand via [fetchJobsForDistributorAndDate].
+  Future<void> initForTrackEditor() async {
+    try {
+      _distributors = await _firestoreService.streamDistributors().first;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('ScheduleProvider.initForTrackEditor: $e');
+    }
+  }
+
+  /// One-time read of all work areas from Firestore.
+  Future<List<WorkArea>> fetchWorkAreas() async {
+    try {
+      return await _firestoreService.streamWorkAreas().first;
+    } catch (e) {
+      debugPrint('ScheduleProvider.fetchWorkAreas: $e');
+      return [];
+    }
   }
 
   // Load data streams asynchronously and concurrently
@@ -498,6 +520,18 @@ class ScheduleProvider extends ChangeNotifier {
   bool get canRedo => false;
   String? get nextUndoDescription => null;
   String? get nextRedoDescription => null;
+
+  /// Fetch jobs directly from Firestore for a specific date and distributor.
+  /// Uses a one-time read so it works regardless of debug/release stream scope.
+  Future<List<Job>> fetchJobsForDistributorAndDate(
+    String distributorId,
+    DateTime date,
+  ) async {
+    // Normalize to midnight local to ensure we target the right daily doc.
+    final localDate = DateTime(date.year, date.month, date.day);
+    final jobs = await _firestoreService.fetchJobsForDate(localDate);
+    return jobs.where((j) => j.distributorId == distributorId).toList();
+  }
 
   Future<bool> undo() async {
     return false;

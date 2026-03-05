@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'dart:async';
 
 /// Reusable QR scanner widget for Happy Sun checkout, checklist, and checkin flows.
 ///
@@ -31,6 +33,13 @@ class HappySunQRScannerWidget extends StatefulWidget {
 class HappySunQRScannerWidgetState extends State<HappySunQRScannerWidget> {
   MobileScannerController? _scannerController;
   bool _isScanning = false;
+  String? _lastScannedCode;
+  DateTime? _lastScanTime;
+  Color _overlayColor = Colors.green;
+  Timer? _overlayResetTimer;
+
+  // Debounce: prevent same code from being scanned within 2 seconds
+  static const _scanDebounceMs = 2000;
 
   @override
   void initState() {
@@ -45,6 +54,7 @@ class HappySunQRScannerWidgetState extends State<HappySunQRScannerWidget> {
   @override
   void dispose() {
     stopScanning();
+    _overlayResetTimer?.cancel();
     super.dispose();
   }
 
@@ -55,7 +65,9 @@ class HappySunQRScannerWidgetState extends State<HappySunQRScannerWidget> {
     setState(() {
       _isScanning = true;
       _scannerController = MobileScannerController(
-        detectionSpeed: DetectionSpeed.noDuplicates,
+        detectionSpeed: DetectionSpeed.normal, // Faster detection
+        facing: CameraFacing.back,
+        torchEnabled: false,
       );
     });
   }
@@ -84,16 +96,75 @@ class HappySunQRScannerWidgetState extends State<HappySunQRScannerWidget> {
       final String? code = barcode.rawValue;
 
       if (code != null && code.isNotEmpty) {
+        // Check if this is a duplicate scan within debounce period
+        final now = DateTime.now();
+        if (_lastScannedCode == code && _lastScanTime != null) {
+          final timeSinceLastScan =
+              now.difference(_lastScanTime!).inMilliseconds;
+          if (timeSinceLastScan < _scanDebounceMs) {
+            // Skip duplicate scan
+            return;
+          }
+        }
+
+        // Update last scan info
+        _lastScannedCode = code;
+        _lastScanTime = now;
+
+        // Trigger haptic feedback for scan detection
+        HapticFeedback.lightImpact();
+
+        // Call the parent callback
         widget.onScan(code);
       }
     }
   }
 
+  /// Show success feedback (green flash)
+  void showSuccessFeedback() {
+    if (!mounted) return;
+
+    setState(() {
+      _overlayColor = Colors.green;
+    });
+
+    HapticFeedback.mediumImpact();
+
+    _overlayResetTimer?.cancel();
+    _overlayResetTimer = Timer(const Duration(milliseconds: 500), () {
+      if (mounted) {
+        setState(() {
+          _overlayColor = Colors.green;
+        });
+      }
+    });
+  }
+
+  /// Show error feedback (red flash)
+  void showErrorFeedback() {
+    if (!mounted) return;
+
+    setState(() {
+      _overlayColor = Colors.red;
+    });
+
+    HapticFeedback.vibrate();
+
+    _overlayResetTimer?.cancel();
+    _overlayResetTimer = Timer(const Duration(milliseconds: 800), () {
+      if (mounted) {
+        setState(() {
+          _overlayColor = Colors.green;
+        });
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 400,
-      margin: const EdgeInsets.all(16),
+      height: 320,
+      margin: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.black,
         borderRadius: BorderRadius.circular(12),
@@ -110,12 +181,13 @@ class HappySunQRScannerWidgetState extends State<HappySunQRScannerWidget> {
                   ),
                   // Scan overlay frame
                   Center(
-                    child: Container(
-                      width: 250,
-                      height: 250,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 300),
+                      width: 200,
+                      height: 200,
                       decoration: BoxDecoration(
                         border: Border.all(
-                          color: Colors.green,
+                          color: _overlayColor,
                           width: 3,
                         ),
                         borderRadius: BorderRadius.circular(12),
@@ -125,23 +197,23 @@ class HappySunQRScannerWidgetState extends State<HappySunQRScannerWidget> {
                   // Instructions overlay
                   if (widget.instructionText != null)
                     Positioned(
-                      top: 50,
+                      top: 40,
                       left: 0,
                       right: 0,
                       child: Container(
-                        padding: const EdgeInsets.all(12),
-                        margin: const EdgeInsets.symmetric(horizontal: 20),
+                        padding: const EdgeInsets.all(8),
+                        margin: const EdgeInsets.symmetric(horizontal: 16),
                         decoration: BoxDecoration(
                           color: Colors.black.withOpacity(0.7),
-                          borderRadius: BorderRadius.circular(8),
+                          borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
                           widget.instructionText!,
                           textAlign: TextAlign.center,
                           style: const TextStyle(
                             color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
@@ -155,12 +227,12 @@ class HappySunQRScannerWidgetState extends State<HappySunQRScannerWidget> {
                     const CircularProgressIndicator(
                       color: Colors.orange,
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 12),
                     Text(
                       'Initializing camera...',
                       style: TextStyle(
                         color: Colors.grey.shade600,
-                        fontSize: 14,
+                        fontSize: 12,
                       ),
                     ),
                   ],

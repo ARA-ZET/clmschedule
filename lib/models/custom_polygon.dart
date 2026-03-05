@@ -7,11 +7,19 @@ class CustomPolygon {
   final List<LatLng> points;
   final Color color;
 
+  /// Fill opacity: 0.0 (transparent) … 1.0 (solid). Default 0.35.
+  final double fillOpacity;
+
+  /// Border stroke width in pixels. Default 2.
+  final int strokeWidth;
+
   const CustomPolygon({
     required this.name,
     required this.description,
     required this.points,
     required this.color,
+    this.fillOpacity = 0.35,
+    this.strokeWidth = 2,
   });
 
   // Create from Map (for Firestore)
@@ -27,6 +35,8 @@ class CustomPolygon {
               .toList() ??
           [],
       color: Color(data['color'] as int? ?? Colors.blue.value),
+      fillOpacity: (data['fillOpacity'] as num?)?.toDouble() ?? 0.35,
+      strokeWidth: (data['strokeWidth'] as num?)?.toInt() ?? 2,
     );
   }
 
@@ -42,6 +52,8 @@ class CustomPolygon {
               })
           .toList(),
       'color': color.toARGB32(),
+      'fillOpacity': fillOpacity,
+      'strokeWidth': strokeWidth,
     };
   }
 
@@ -51,12 +63,16 @@ class CustomPolygon {
     String? description,
     List<LatLng>? points,
     Color? color,
+    double? fillOpacity,
+    int? strokeWidth,
   }) {
     return CustomPolygon(
       name: name ?? this.name,
       description: description ?? this.description,
       points: points ?? this.points,
       color: color ?? this.color,
+      fillOpacity: fillOpacity ?? this.fillOpacity,
+      strokeWidth: strokeWidth ?? this.strokeWidth,
     );
   }
 
@@ -68,17 +84,18 @@ class CustomPolygon {
     VoidCallback? onTap,
   }) {
     Color strokeColor = color;
-    Color fillColor = color.withOpacity(0.2);
-    int strokeWidth = 2;
+    Color fillColor = color.withValues(alpha: fillOpacity);
+    int sw = strokeWidth;
 
     if (isEditing) {
       strokeColor = Colors.red;
-      fillColor = Colors.red.withOpacity(0.1);
-      strokeWidth = 5;
+      fillColor = Colors.red.withValues(alpha: 0.1);
+      sw = 5;
     } else if (isSelected) {
-      strokeColor = Colors.red;
-      fillColor = Colors.red.withOpacity(0.1);
-      strokeWidth = 4;
+      // Very bright highlight so the selected polygon stands out
+      strokeColor = Colors.green;
+      fillColor = Colors.green.withValues(alpha: 0.3);
+      sw = 5;
     }
 
     return Polygon(
@@ -86,7 +103,7 @@ class CustomPolygon {
       points: points,
       fillColor: fillColor,
       strokeColor: strokeColor,
-      strokeWidth: strokeWidth,
+      strokeWidth: sw,
       onTap: onTap,
     );
   }

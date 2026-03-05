@@ -2,6 +2,14 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Maps Testing (Maps Flavor) ⚡",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main_maps.dart",
+      "args": ["--dart-define=FLAVOR=maps"],
+      "flutterMode": "debug"
+    },
+    {
       "name": "CLM Schedule (CLM Flavor)",
       "request": "launch",
       "type": "dart",
@@ -16,6 +24,14 @@
       "program": "lib/main_happysun.dart",
       "args": ["--dart-define=FLAVOR=happysun"],
       "flutterMode": "debug"
+    },
+    {
+      "name": "Maps Testing (Maps Flavor - Release)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main_maps.dart",
+      "args": ["--dart-define=FLAVOR=maps"],
+      "flutterMode": "release"
     },
     {
       "name": "CLM Schedule (CLM Flavor - Release)",

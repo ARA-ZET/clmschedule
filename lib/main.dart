@@ -1,3 +1,4 @@
+import 'package:clmschedule/shareable_maps/providers/map_gesture_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -22,6 +23,9 @@ import 'providers/inventory_provider.dart';
 import 'providers/happy_sun_project_provider.dart';
 import 'providers/app_version_provider.dart';
 import 'providers/tool_settings_provider.dart';
+import 'shareable_maps/providers/shareable_map_provider.dart';
+import 'shareable_maps/providers/shareable_maps_gallery_provider.dart';
+import 'shareable_maps/widgets/shareable_maps_gallery.dart';
 import 'models/job_list_item.dart';
 import 'models/happy_sun_project.dart';
 import 'models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
@@ -40,6 +44,22 @@ import 'widgets/chat_admin_panel.dart';
 import 'widgets/app_update_dialog.dart';
 import 'widgets/happy_sun_inventory_view.dart';
 import 'widgets/happy_sun_job_projects_screen.dart';
+import 'shareable_maps/widgets/shareable_map_editor.dart';
+import 'shareable_maps/adapters/work_area_adapter.dart';
+import 'shareable_maps/adapters/firestore_adapter.dart';
+import 'shareable_maps/services/shareable_maps_firestore_service.dart';
+import 'shareable_maps/services/map_link_service.dart';
+import 'widgets/suburb_list_screen.dart';
+import 'track_editor/pages/track_editor_screen.dart';
+import 'track_editor/providers/te_files_provider.dart';
+import 'track_editor/providers/te_points_in_polygon_provider.dart';
+import 'track_editor/providers/te_polygons_provider.dart';
+import 'track_editor/providers/te_processing_provider.dart';
+import 'track_editor/providers/te_map_layer_provider.dart';
+import 'track_editor/providers/te_tabs_provider.dart';
+import 'track_editor/providers/te_tracks_provider.dart';
+import 'track_editor/providers/te_waypoints_provider.dart';
+import 'track_editor/providers/te_mode_provider.dart';
 import 'services/version_service.dart';
 import 'utils/seed_data.dart';
 import 'services/work_area_service.dart';
@@ -58,6 +78,7 @@ import 'models/command.dart';
 import 'firebase_options.dart';
 import 'utils/web_reload.dart'
     if (dart.library.io) 'utils/web_reload_stub.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
 
 // Simple test command for debugging undo functionality
 class TestCommand extends Command {
@@ -81,6 +102,7 @@ class TestCommand extends Command {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  usePathUrlStrategy();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   // Enable offline persistence for non-web platforms
@@ -106,6 +128,16 @@ void main() async {
       ChangeNotifierProvider(create: (context) => ScheduleProvider()),
     ChangeNotifierProvider(create: (context) => ScaleProvider()),
     ChangeNotifierProvider(create: (context) => VehicleDriverProvider()),
+    // Track Editor providers
+    ChangeNotifierProvider(create: (_) => TEModeProvider()),
+    ChangeNotifierProvider(create: (_) => TEFilesProvider()),
+    ChangeNotifierProvider(create: (_) => TETabsProvider()),
+    ChangeNotifierProvider(create: (_) => TEPolygonsProvider()),
+    ChangeNotifierProvider(create: (_) => TEWaypointsProvider()),
+    ChangeNotifierProvider(create: (_) => TETracksProvider()),
+    ChangeNotifierProvider(create: (_) => TEPointsInPolygonProvider()),
+    ChangeNotifierProvider(create: (_) => TEProcessingProvider()),
+    ChangeNotifierProvider(create: (_) => TEMapLayerProvider()),
     ChangeNotifierProvider(create: (context) => MapViewProvider()),
     ChangeNotifierProvider(
       create: (context) => TogglerProvider(),
@@ -202,6 +234,13 @@ void main() async {
     ),
     ChangeNotifierProvider(
       create: (context) => AppVersionProvider(),
+    ),
+    ChangeNotifierProvider(create: (context) => MapGestureProvider()),
+    ChangeNotifierProvider(
+      create: (context) => ShareableMapProvider(),
+    ),
+    ChangeNotifierProvider(
+      create: (context) => ShareableMapsGalleryProvider(),
     ),
   ], child: const MyApp()));
 }
@@ -636,25 +675,144 @@ class _MyAppState extends State<MyApp> {
         ),
         useMaterial3: true,
       ),
-      home: _isInitialized
-          ? AuthGate(
-              child: const DashboardScreen(),
-            )
-          : Scaffold(
-              body: Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const CircularProgressIndicator(),
-                    const SizedBox(height: 16),
-                    Text(
-                      'Loading ${FlavorConfig.instance.appName}...',
-                      style: const TextStyle(fontSize: 16),
-                    ),
-                  ],
-                ),
-              ),
+      onGenerateRoute: (settings) {
+        final uri = Uri.parse(settings.name ?? '');
+        // Handle deep links: /map/{shareCode}
+        if (uri.pathSegments.length == 2 && uri.pathSegments[0] == 'map') {
+          final shareCode = uri.pathSegments[1];
+          return MaterialPageRoute(
+            builder: (_) => _isInitialized
+                ? _DeepLinkMapLoader(shareCode: shareCode)
+                : _buildLoadingScaffold(),
+          );
+        }
+        // Default route (dashboard)
+        return MaterialPageRoute(
+          builder: (_) => _isInitialized
+              ? AuthGate(child: const DashboardScreen())
+              : _buildLoadingScaffold(),
+        );
+      },
+    );
+  }
+
+  Widget _buildLoadingScaffold() {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text(
+              'Loading ${FlavorConfig.instance.appName}...',
+              style: const TextStyle(fontSize: 16),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Stateful widget that resolves a share code and opens the map editor.
+class _DeepLinkMapLoader extends StatefulWidget {
+  final String shareCode;
+  const _DeepLinkMapLoader({required this.shareCode});
+
+  @override
+  State<_DeepLinkMapLoader> createState() => _DeepLinkMapLoaderState();
+}
+
+class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolveAndOpen();
+  }
+
+  Future<void> _resolveAndOpen() async {
+    try {
+      final linkService = MapLinkService();
+      final linkData = await linkService.resolveShareCode(widget.shareCode);
+      if (linkData == null) {
+        setState(() {
+          _loading = false;
+          _error = 'Map not found. The link may have expired or been deleted.';
+        });
+        return;
+      }
+
+      if (!mounted) return;
+
+      // Load the map via the Firestore adapter
+      final service = ShareableMapsFirestoreService();
+      final adapter = FirestoreMapAdapter.existing(
+        docId: linkData.mapId,
+        monthKey: linkData.monthKey,
+        service: service,
+      );
+
+      final provider = context.read<ShareableMapProvider>();
+      await provider.loadFromAdapter(adapter);
+
+      if (mounted) {
+        // Replace the deep-link loader with the editor
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const ShareableMapEditor()),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'Failed to load map: $e';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Loading shared map...', style: TextStyle(fontSize: 16)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.error_outline, size: 64, color: Colors.red),
+            const SizedBox(height: 16),
+            Text(
+              _error ?? 'Something went wrong',
+              style: const TextStyle(fontSize: 16),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Go Back'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -758,6 +916,74 @@ class _DashboardScreenState extends State<DashboardScreen>
                   ],
                 ),
                 actions: [
+                  // Track Editor
+                  IconButton(
+                    icon: const Icon(Icons.route),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const TrackEditorScreen(),
+                        ),
+                      );
+                    },
+                    tooltip: 'Track Editor',
+                  ),
+                  // Shareable Maps - open gallery / dashboard
+                  IconButton(
+                    icon: const Icon(Icons.map_outlined),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const ShareableMapsGallery(),
+                        ),
+                      );
+                    },
+                    tooltip: 'My Maps',
+                  ),
+                  // Work Areas - open map editor with all work area polygons
+                  IconButton(
+                    icon: const Icon(Icons.layers),
+                    onPressed: () async {
+                      final provider = context.read<ShareableMapProvider>();
+                      try {
+                        await provider
+                            .loadFromAdapter(WorkAreaCollectionAdapter());
+                        if (context.mounted) {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const ShareableMapEditor(),
+                            ),
+                          );
+                        }
+                      } catch (e) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Failed to load work areas: $e'),
+                              backgroundColor: Colors.red.shade800,
+                            ),
+                          );
+                        }
+                      }
+                    },
+                    tooltip: 'Edit Work Areas',
+                  ),
+                  // Geocoding tool
+                  IconButton(
+                    icon: const Icon(Icons.location_searching),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const SuburbListScreen(),
+                        ),
+                      );
+                    },
+                    tooltip: 'Geocoding Tool',
+                  ),
                   // Distributor management - always visible
                   if (!isMediumScreen)
                     IconButton(

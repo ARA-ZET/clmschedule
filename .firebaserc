@@ -1,5 +1,18 @@
 {
   "projects": {
     "default": "clmappdashboard"
-  }
+  },
+  "targets": {
+    "clmschedule": {
+      "hosting": {
+        "maps": [
+          "clm-maps"
+        ],
+        "main": [
+          "clmschedule"
+        ]
+      }
+    }
+  },
+  "etags": {}
 }

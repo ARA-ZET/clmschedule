@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- CLM Schedule flavor splash screen -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Blue gradient background for CLM -->
+    <item>
+        <shape>
+            <gradient
+                android:angle="135"
+                android:startColor="#0175C2"
+                android:endColor="#0a9fdb"
+                android:type="linear" />
+        </shape>
+    </item>
+
+    <!-- Centered logo -->
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@mipmap/launch_image" />
+    </item>
+</layer-list>

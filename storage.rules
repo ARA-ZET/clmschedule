@@ -14,6 +14,12 @@ service firebase.storage {
       allow write: if request.auth != null; // Only authenticated users can upload
     }
     
+    // Allow authenticated users to upload map thumbnails; anyone can view them
+    match /mapThumbnails/{imageName} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+    
     // Deny access to all other paths
     match /{allPaths=**} {
       allow read, write: if false;

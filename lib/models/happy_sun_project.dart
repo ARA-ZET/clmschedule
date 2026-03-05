@@ -196,6 +196,8 @@ class ProjectCheckin {
   final List<String> missingTools; // Tool IDs that weren't returned
   final String? notes;
   final String? checkedInBy; // User ID who performed checkin
+  final bool
+      isCompleted; // True when check-in is completed, false for saved progress
 
   ProjectCheckin({
     this.checkinTime,
@@ -203,6 +205,7 @@ class ProjectCheckin {
     this.missingTools = const [],
     this.notes,
     this.checkedInBy,
+    this.isCompleted = false,
   });
 
   factory ProjectCheckin.fromMap(Map<String, dynamic>? data) {
@@ -220,6 +223,7 @@ class ProjectCheckin {
           (data['missingTools'] as List<dynamic>?)?.cast<String>() ?? [],
       notes: data['notes'],
       checkedInBy: data['checkedInBy'],
+      isCompleted: data['isCompleted'] ?? false,
     );
   }
 
@@ -231,6 +235,7 @@ class ProjectCheckin {
       'missingTools': missingTools,
       'notes': notes,
       'checkedInBy': checkedInBy,
+      'isCompleted': isCompleted,
     };
   }
 

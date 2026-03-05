@@ -5,6 +5,7 @@ import '../models/happy_sun_project.dart';
 import '../models/inventory_tool.dart';
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
+import '../services/sound_service.dart';
 import 'happy_sun_qr_scanner_widget.dart';
 
 class HappySunChecklistScreen extends StatefulWidget {
@@ -100,13 +101,15 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
 
       // Check if tool is in the checklist
       if (!_toolStatus.containsKey(tool.id)) {
-        _showScanError('This tool is not in the checklist');
+        _scannerKey.currentState?.showErrorFeedback();
+        _showScanError('❌ Not in checklist: ${tool.name}');
         return;
       }
 
       // Check if already verified
       if (_toolStatus[tool.id]!.isVerified) {
-        _showScanError('Tool already verified: ${tool.name}');
+        _scannerKey.currentState?.showErrorFeedback();
+        _showScanError('✓ Already verified: ${tool.name}');
         return;
       }
 
@@ -120,43 +123,65 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
       });
 
       // Show success feedback
-      _showScanSuccess('Verified: ${tool.name}');
+      _scannerKey.currentState?.showSuccessFeedback();
+      _showScanSuccess('✅ Verified: ${tool.name}');
     } catch (e) {
       // Tool not found
-      _showScanError('Tool not found or not in checklist: $code');
+      _scannerKey.currentState?.showErrorFeedback();
+      _showScanError('❓ Tool not found: $code');
     }
   }
 
   void _showScanSuccess(String message) {
+    // Play success sound
+    SoundService().playSuccess();
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
           children: [
-            const Icon(Icons.check_circle, color: Colors.white),
+            const Icon(Icons.check_circle, color: Colors.white, size: 20),
             const SizedBox(width: 8),
-            Expanded(child: Text(message)),
+            Expanded(
+              child: Text(
+                message,
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              ),
+            ),
           ],
         ),
         backgroundColor: Colors.green,
-        duration: const Duration(seconds: 2),
+        duration: const Duration(milliseconds: 1500),
         behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
       ),
     );
   }
 
   void _showScanError(String message) {
+    // Play warning sound
+    SoundService().playWarning();
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
           children: [
-            const Icon(Icons.error, color: Colors.white),
+            const Icon(Icons.error, color: Colors.white, size: 20),
             const SizedBox(width: 8),
-            Expanded(child: Text(message)),
+            Expanded(
+              child: Text(
+                message,
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              ),
+            ),
           ],
         ),
         backgroundColor: Colors.red,
-        duration: const Duration(seconds: 2),
+        duration: const Duration(milliseconds: 2000),
         behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
       ),
     );
   }
@@ -180,7 +205,8 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     setState(() => _isSaving = true);
 
     try {
-      final checklistData = _buildChecklistData();
+      // Save as progress (not completed)
+      final checklistData = _buildChecklistData(isCompleted: false);
       final jobProvider = context.read<HappySunProjectProvider>();
 
       await jobProvider.updateChecklistData(
@@ -193,16 +219,23 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
         _isSaving = false;
       });
 
+      // Play success sound
+      SoundService().playSuccess();
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Checklist saved'),
+            content: Text('Progress saved'),
             backgroundColor: Colors.green,
           ),
         );
       }
     } catch (e) {
       setState(() => _isSaving = false);
+
+      // Play warning sound
+      SoundService().playWarning();
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -256,13 +289,17 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     setState(() => _isSaving = true);
 
     try {
-      final checklistData = _buildChecklistData();
+      // Save as completed
+      final checklistData = _buildChecklistData(isCompleted: true);
       final jobProvider = context.read<HappySunProjectProvider>();
 
       await jobProvider.updateChecklistData(
         widget.project.id,
         checklistData,
       );
+
+      // Play success sound
+      SoundService().playSuccess();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -275,6 +312,10 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
       }
     } catch (e) {
       setState(() => _isSaving = false);
+
+      // Play warning sound
+      SoundService().playWarning();
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -286,7 +327,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     }
   }
 
-  ChecklistData _buildChecklistData() {
+  ChecklistData _buildChecklistData({required bool isCompleted}) {
     final items = _toolStatus.values
         .map((status) => ToolChecklistItem(
               toolId: status.toolId,
@@ -307,6 +348,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
       brokenCount: _getBrokenCount(),
       missingCount: _getMissingCount(),
       summary: _buildChecklistSummary(),
+      isCompleted: isCompleted,
     );
   }
 
@@ -391,26 +433,38 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text(widget.project.checklistData != null
-              ? 'Checklist (Completed)'
-              : 'Pre-Departure Checklist'),
-          backgroundColor:
-              widget.project.checklistData != null ? Colors.green : Colors.blue,
+          title: Text(
+            widget.project.checklistData?.isCompleted == true
+                ? 'Checklist (Completed)'
+                : 'Pre-Departure Checklist',
+            style: const TextStyle(fontSize: 16),
+          ),
+          backgroundColor: widget.project.checklistData?.isCompleted == true
+              ? Colors.green
+              : Colors.blue,
           foregroundColor: Colors.white,
-          bottom: widget.project.checklistData == null
+          bottom: widget.project.checklistData?.isCompleted != true
               ? TabBar(
                   controller: _tabController,
                   labelColor: Colors.white,
                   unselectedLabelColor: Colors.white70,
                   indicatorColor: Colors.white,
                   tabs: const [
-                    Tab(icon: Icon(Icons.qr_code_scanner), text: 'Scan'),
-                    Tab(icon: Icon(Icons.checklist), text: 'Checklist'),
+                    Tab(
+                      icon: Icon(Icons.qr_code_scanner, size: 20),
+                      text: 'Scan',
+                      height: 48,
+                    ),
+                    Tab(
+                      icon: Icon(Icons.checklist, size: 20),
+                      text: 'Checklist',
+                      height: 48,
+                    ),
                   ],
                 )
               : null,
           actions: [
-            if (widget.project.checklistData != null)
+            if (widget.project.checklistData?.isCompleted == true)
               Padding(
                 padding: const EdgeInsets.only(right: 16),
                 child: Center(
@@ -463,35 +517,37 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
               ),
           ],
         ),
-        body: widget.project.checklistData != null
-            ? Column(
-                children: [
-                  Expanded(child: _buildChecklistTab()),
-                  _buildBottomActions(),
-                ],
-              )
-            : LayoutBuilder(
-                builder: (context, constraints) {
-                  // Calculate available height for TabBarView (subtract approximate bottom actions height)
-                  final tabViewHeight = constraints.maxHeight - 120;
+        body: SafeArea(
+          child: widget.project.checklistData?.isCompleted == true
+              ? Column(
+                  children: [
+                    Expanded(child: _buildChecklistTab()),
+                    _buildBottomActions(),
+                  ],
+                )
+              : LayoutBuilder(
+                  builder: (context, constraints) {
+                    // Calculate available height for TabBarView (subtract approximate bottom actions height)
+                    final tabViewHeight = constraints.maxHeight - 120;
 
-                  return Column(
-                    children: [
-                      SizedBox(
-                        height: tabViewHeight,
-                        child: TabBarView(
-                          controller: _tabController,
-                          children: [
-                            _buildScanTab(),
-                            _buildChecklistTab(),
-                          ],
+                    return Column(
+                      children: [
+                        SizedBox(
+                          height: tabViewHeight,
+                          child: TabBarView(
+                            controller: _tabController,
+                            children: [
+                              _buildScanTab(),
+                              _buildChecklistTab(),
+                            ],
+                          ),
                         ),
-                      ),
-                      _buildBottomActions(),
-                    ],
-                  );
-                },
-              ),
+                        _buildBottomActions(),
+                      ],
+                    );
+                  },
+                ),
+        ),
       ),
     );
   }
@@ -499,16 +555,64 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
   Widget _buildScanTab() {
     return Consumer<InventoryProvider>(
       builder: (context, inventoryProvider, child) {
-        return Column(
-          children: [
-            // Scanner widget
-            HappySunQRScannerWidget(
-              key: _scannerKey,
-              onScan: _handleBarcodeScan,
-              instructionText: 'Scan tool QR code or ID',
-              autoStart: false,
-            ),
-          ],
+        final isScanning = _scannerKey.currentState?.isScanning ?? false;
+        return SingleChildScrollView(
+          child: Column(
+            children: [
+              // Scanner widget
+              HappySunQRScannerWidget(
+                key: _scannerKey,
+                onScan: _handleBarcodeScan,
+                instructionText: 'Scan tool QR code or ID',
+                autoStart: false,
+              ),
+              // Scanner controls
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    if (isScanning)
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          _scannerKey.currentState?.stopScanning();
+                          setState(() {});
+                        },
+                        icon: const Icon(Icons.stop, size: 18),
+                        label: const Text(
+                          'Stop',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.red,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                        ),
+                      )
+                    else
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          _scannerKey.currentState?.startScanning();
+                          setState(() {});
+                        },
+                        icon: const Icon(Icons.qr_code_scanner, size: 18),
+                        label: const Text(
+                          'Start Scanning',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blue,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -518,7 +622,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     return Column(
       children: [
         // Completion banner if already completed
-        if (widget.project.checklistData != null) ...[
+        if (widget.project.checklistData?.isCompleted == true) ...[
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(16),
@@ -559,12 +663,42 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
             ),
           ),
         ],
+        // Progress saved banner (if saved but not completed)
+        if (widget.project.checklistData != null &&
+            widget.project.checklistData?.isCompleted != true) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade50,
+              border: Border(
+                bottom: BorderSide(color: Colors.blue.shade200, width: 2),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.save, color: Colors.blue, size: 20),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Progress saved - Resume checking tools',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.blue.shade700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
         // Checklist details banner
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
             gradient: LinearGradient(
-              colors: widget.project.checklistData != null
+              colors: widget.project.checklistData?.isCompleted == true
                   ? [Colors.green.shade700, Colors.green.shade500]
                   : [Colors.blue.shade700, Colors.blue.shade500],
               begin: Alignment.topLeft,
@@ -1069,6 +1203,11 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
   }
 
   Widget _buildBottomActions() {
+    // Don't show actions if checklist is already completed
+    if (widget.project.checklistData?.isCompleted == true) {
+      return const SizedBox.shrink();
+    }
+
     final allChecked = _areAllToolsChecked();
     final progress =
         _getTotalTools() > 0 ? _getVerifiedCount() / _getTotalTools() : 0.0;

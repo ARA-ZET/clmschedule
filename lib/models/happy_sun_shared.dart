@@ -51,6 +51,8 @@ class ChecklistData {
   final int brokenCount;
   final int missingCount;
   final String summary;
+  final bool
+      isCompleted; // True when checklist is completed, false for saved progress
 
   ChecklistData({
     required this.items,
@@ -61,6 +63,7 @@ class ChecklistData {
     required this.brokenCount,
     required this.missingCount,
     this.summary = '',
+    this.isCompleted = false,
   });
 
   /// Helper to parse DateTime from either Timestamp or String
@@ -85,6 +88,7 @@ class ChecklistData {
       brokenCount: data['brokenCount'] ?? 0,
       missingCount: data['missingCount'] ?? 0,
       summary: data['summary'] ?? '',
+      isCompleted: data['isCompleted'] ?? false,
     );
   }
 
@@ -98,6 +102,7 @@ class ChecklistData {
       'brokenCount': brokenCount,
       'missingCount': missingCount,
       'summary': summary,
+      'isCompleted': isCompleted,
     };
   }
 }

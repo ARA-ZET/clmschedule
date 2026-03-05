@@ -32,7 +32,7 @@ fi
 
 # Step 2: Deploy to Firebase Hosting
 echo -e "\n${BLUE}Step 2: Deploying to Firebase Hosting...${NC}"
-firebase deploy --only hosting
+firebase deploy --only hosting:main --project clmschedule
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Deployment successful${NC}"

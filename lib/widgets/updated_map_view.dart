@@ -2072,7 +2072,8 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
       final mapViewProvider =
           Provider.of<MapViewProvider>(context, listen: false);
       // Parse KML data using KmlParserService
-      final polygons = await KmlParserService.parseKmlData(kmlBytes, fileName);
+      final result = await KmlParserService.parseKmlData(kmlBytes, fileName);
+      final polygons = result.polygons;
 
       if (polygons.isNotEmpty) {
         // Add polygons to provider
@@ -2084,7 +2085,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
         // Select the first new polygon
         if (mapViewProvider.selectedPolygonIndex == null &&
             currentPolygons.isNotEmpty) {
-          final newPolygonIndex = (currentPolygons.length - polygons.length);
+          final newPolygonIndex = currentPolygons.length - polygons.length;
           mapViewProvider.selectPolygon(newPolygonIndex);
         }
 

@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/happy_sun_shared.dart';
@@ -6,6 +5,7 @@ import '../models/happy_sun_project.dart';
 import '../models/inventory_tool.dart';
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
+import '../services/sound_service.dart';
 import 'happy_sun_qr_scanner_widget.dart';
 
 class HappySunCheckoutScreen extends StatefulWidget {
@@ -30,11 +30,6 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
       {}; // baseName -> [toolId1, toolId2, ...]
   bool _isSaving = false;
   bool _hasUnsavedChanges = false;
-
-  // Scan feedback
-  String _scanMessage = 'Align QR code within frame';
-  Color _scanMessageColor = Colors.white;
-  Timer? _scanMessageTimer;
 
   @override
   void initState() {
@@ -75,7 +70,6 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
   @override
   void dispose() {
     _tabController.dispose();
-    _scanMessageTimer?.cancel();
     super.dispose();
   }
 
@@ -329,6 +323,54 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
     });
   }
 
+  Future<String?> _showUnsavedChangesDialog() async {
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Unsaved Changes'),
+        content: const Text(
+            'You have unsaved checkout progress. What would you like to do?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'cancel'),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'discard'),
+            child: const Text(
+              'Discard',
+              style: TextStyle(color: Colors.red),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, 'save'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.orange,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Save Progress'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _handleBackNavigation() async {
+    if (_hasUnsavedChanges) {
+      final result = await _showUnsavedChangesDialog();
+
+      if (result == 'save') {
+        await _saveProgress();
+        if (mounted) Navigator.pop(context);
+      } else if (result == 'discard') {
+        if (mounted) Navigator.pop(context);
+      }
+      // If cancel or null, do nothing (stay on screen)
+    } else {
+      Navigator.pop(context);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isMobile = MediaQuery.of(context).size.width < 600;
@@ -336,27 +378,16 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
     return WillPopScope(
       onWillPop: () async {
         if (_hasUnsavedChanges) {
-          final result = await showDialog<bool>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: const Text('Unsaved Changes'),
-              content: const Text(
-                  'You have unsaved changes. Do you want to save before leaving?'),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text('Discard'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  child: const Text('Save'),
-                ),
-              ],
-            ),
-          );
+          final result = await _showUnsavedChangesDialog();
 
-          if (result == true) {
+          if (result == 'save') {
             await _saveProgress();
+            return true;
+          } else if (result == 'discard') {
+            return true;
+          } else {
+            // Cancel or null (dismissed dialog)
+            return false;
           }
         }
         return true;
@@ -448,7 +479,7 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
           Row(
             children: [
               IconButton(
-                onPressed: () => Navigator.pop(context),
+                onPressed: _handleBackNavigation,
                 icon: const Icon(Icons.arrow_back, color: Colors.white),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
@@ -504,14 +535,60 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
   Widget _buildScanTab() {
     return Consumer<InventoryProvider>(
       builder: (context, inventoryProvider, child) {
+        final isScanning = _scannerKey.currentState?.isScanning ?? false;
         return Column(
           children: [
             // Scanner widget
             HappySunQRScannerWidget(
               key: _scannerKey,
               onScan: _handleBarcodeScan,
-              instructionText: _scanMessage,
+              instructionText: 'Scan tool QR code or ID',
               autoStart: false,
+            ),
+            // Scanner controls
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (isScanning)
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        _scannerKey.currentState?.stopScanning();
+                        setState(() {});
+                      },
+                      icon: const Icon(Icons.stop, size: 18),
+                      label: const Text(
+                        'Stop',
+                        style: TextStyle(fontSize: 13),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
+                      ),
+                    )
+                  else
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        _scannerKey.currentState?.startScanning();
+                        setState(() {});
+                      },
+                      icon: const Icon(Icons.qr_code_scanner, size: 18),
+                      label: const Text(
+                        'Start Scanning',
+                        style: TextStyle(fontSize: 13),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
+                      ),
+                    ),
+                ],
+              ),
             ),
             // Recently scanned (scrollable and takes remaining space)
             if (_toolsTaken.isNotEmpty) ...[
@@ -571,13 +648,15 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
 
       // Check if tool is already scanned
       if (_toolsTaken[baseName]?.contains(tool.id) == true) {
-        _showScanError('Tool already scanned: ${tool.name}');
+        _scannerKey.currentState?.showErrorFeedback();
+        _showScanError('❌ Already scanned: ${tool.name}');
         return;
       }
 
       // Check if tool is in use by another job
       if (tool.isInUse && tool.currentProject != widget.project.id) {
-        _showScanError('Tool is currently in use on another job');
+        _scannerKey.currentState?.showErrorFeedback();
+        _showScanError('🔒 Tool in use by another project');
         return;
       }
 
@@ -585,48 +664,67 @@ class _HappySunCheckoutScreenState extends State<HappySunCheckoutScreen>
       _addToolById(tool.id, baseName);
 
       // Show success feedback
-      _showScanSuccess('Added: ${tool.name}');
-
-      // Vibrate or provide haptic feedback
-      // HapticFeedback.mediumImpact(); // Uncomment if you want haptic feedback
+      _scannerKey.currentState?.showSuccessFeedback();
+      _showScanSuccess('✅ Added: ${tool.name}');
     } catch (e) {
       // Tool not found
-      _showScanError('Tool not found: $code');
+      _scannerKey.currentState?.showErrorFeedback();
+      _showScanError('❓ Tool not found: $code');
     }
   }
 
   void _showScanSuccess(String message) {
-    _scanMessageTimer?.cancel();
-    setState(() {
-      _scanMessage = message;
-      _scanMessageColor = Colors.green;
-    });
+    // Play success sound
+    SoundService().playSuccess();
 
-    _scanMessageTimer = Timer(const Duration(seconds: 1), () {
-      if (mounted) {
-        setState(() {
-          _scanMessage = 'Align QR code within frame';
-          _scanMessageColor = Colors.white;
-        });
-      }
-    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.check_circle, color: Colors.white, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: Colors.green,
+        duration: const Duration(milliseconds: 1500),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
+      ),
+    );
   }
 
   void _showScanError(String message) {
-    _scanMessageTimer?.cancel();
-    setState(() {
-      _scanMessage = message;
-      _scanMessageColor = Colors.red;
-    });
+    // Play warning sound
+    SoundService().playWarning();
 
-    _scanMessageTimer = Timer(const Duration(seconds: 1), () {
-      if (mounted) {
-        setState(() {
-          _scanMessage = 'Align QR code within frame';
-          _scanMessageColor = Colors.white;
-        });
-      }
-    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.error, color: Colors.white, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: Colors.red,
+        duration: const Duration(milliseconds: 2000),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
+      ),
+    );
   }
 
   Widget _buildToolsTakenTab() {

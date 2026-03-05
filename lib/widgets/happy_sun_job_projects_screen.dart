@@ -628,8 +628,8 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 
     // Determine status icons
     final hasCheckout = project.startTime != null;
-    final hasChecklist = project.checklistData != null;
-    final hasCheckin = project.endTime != null;
+    final hasChecklist = project.checklistData?.isCompleted == true;
+    final hasCheckin = project.checkin?.isCompleted == true;
 
     return Column(
       children: [
@@ -799,6 +799,46 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
           'Type',
           jobListItem.jobType.displayName,
         ),
+        // Special Instructions section (if available)
+        if (jobListItem.specialInstructions.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.blue.shade200),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.info_outline,
+                        size: 16, color: Colors.blue.shade700),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Special Instructions',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blue.shade700,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  jobListItem.specialInstructions,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 16),
         // Row with three buttons
         Row(
@@ -954,8 +994,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
   }
 
   Widget _buildChecklistSection(BuildContext context, HappySunProject project) {
-    final hasChecklist = project.endTime == null && project.startTime != null;
-    final isComplete = project.endTime != null;
+    final hasStarted = project.startTime != null;
+    final isComplete = project.checklistData?.isCompleted == true;
+    final hasProgress = project.checklistData != null && !isComplete;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -965,13 +1006,13 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
             Icon(
               isComplete
                   ? Icons.check_circle
-                  : hasChecklist
+                  : hasProgress
                       ? Icons.pending
                       : Icons.radio_button_unchecked,
               color: isComplete
                   ? Colors.green
-                  : hasChecklist
-                      ? Colors.orange
+                  : hasProgress
+                      ? Colors.blue
                       : Colors.grey,
               size: 20,
             ),
@@ -986,27 +1027,36 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
           ],
         ),
         const SizedBox(height: 12),
-        if (project.startTime == null) ...[
+        if (!hasStarted) ...[
           const Text(
             'Complete checkout first',
             style: TextStyle(color: Colors.grey),
           ),
-        ] else if (project.checklistData != null)
+        ] else if (isComplete)
           ..._buildChecklistDetails(context, project, project.checklistData!)
-        else if (isComplete) ...[
-          _buildDetailRow('Status', 'Completed (No Checklist)'),
-          if (project.notes != null) _buildDetailRow('Notes', project.notes!),
+        else if (hasProgress) ...[
+          _buildDetailRow('Status', 'In Progress'),
+          const SizedBox(height: 8),
+          ElevatedButton.icon(
+            onPressed: () => _handleChecklist(context, project),
+            icon: const Icon(Icons.checklist, size: 18),
+            label: const Text('Resume Checklist'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.blue,
+              foregroundColor: Colors.white,
+            ),
+          ),
         ] else ...[
-          // Job in progress - checklist not done yet
+          // Job started but checklist not done yet
           const Text(
-            'Checklist not completed',
+            'Checklist not started',
             style: TextStyle(color: Colors.orange),
           ),
           const SizedBox(height: 8),
           ElevatedButton.icon(
             onPressed: () => _handleChecklist(context, project),
             icon: const Icon(Icons.checklist, size: 18),
-            label: const Text('Do Checklist'),
+            label: const Text('Start Checklist'),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.blue,
               foregroundColor: Colors.white,
@@ -1018,7 +1068,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
   }
 
   Widget _buildCheckinSection(BuildContext context, HappySunProject project) {
-    final hasCheckin = project.endTime != null;
+    final hasStarted = project.checklistData?.isCompleted == true;
+    final isComplete = project.checkin?.isCompleted == true;
+    final hasProgress = project.checkin != null && !isComplete;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1026,8 +1078,16 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
         Row(
           children: [
             Icon(
-              hasCheckin ? Icons.check_circle : Icons.radio_button_unchecked,
-              color: hasCheckin ? Colors.green : Colors.grey,
+              isComplete
+                  ? Icons.check_circle
+                  : hasProgress
+                      ? Icons.pending
+                      : Icons.radio_button_unchecked,
+              color: isComplete
+                  ? Colors.green
+                  : hasProgress
+                      ? Colors.purple
+                      : Colors.grey,
               size: 20,
             ),
             const SizedBox(width: 8),
@@ -1041,11 +1101,12 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
           ],
         ),
         const SizedBox(height: 12),
-        if (hasCheckin) ...[
-          _buildDetailRow(
-            'Time',
-            '${project.endTime!.hour.toString().padLeft(2, '0')}:${project.endTime!.minute.toString().padLeft(2, '0')}',
-          ),
+        if (isComplete) ...[
+          if (project.endTime != null)
+            _buildDetailRow(
+              'Time',
+              '${project.endTime!.hour.toString().padLeft(2, '0')}:${project.endTime!.minute.toString().padLeft(2, '0')}',
+            ),
           if (project.workDuration != null)
             _buildDetailRow(
               'Duration',
@@ -1061,12 +1122,27 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
               foregroundColor: Colors.green,
             ),
           ),
+        ] else if (hasProgress) ...[
+          const Text(
+            'Check-in in progress',
+            style: TextStyle(color: Colors.purple, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
+          ElevatedButton.icon(
+            onPressed: () => _handleCheckin(context, project),
+            icon: const Icon(Icons.edit, size: 18),
+            label: const Text('Resume Check-in'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.purple,
+              foregroundColor: Colors.white,
+            ),
+          ),
         ] else if (project.startTime == null) ...[
           const Text(
             'Complete checkout first',
             style: TextStyle(color: Colors.grey),
           ),
-        ] else if (project.checklistData == null) ...[
+        ] else if (!hasStarted) ...[
           const Text(
             'Complete checklist first',
             style: TextStyle(color: Colors.grey),

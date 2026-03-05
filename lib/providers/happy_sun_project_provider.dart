@@ -318,20 +318,10 @@ class HappySunProjectProvider extends ChangeNotifier {
   // Perform checkin
   Future<bool> performCheckin({
     required String projectId,
-    required List<CheckedOutTool> returnedTools,
-    List<String> missingTools = const [],
-    String? notes,
-    required String userId,
+    required ProjectCheckin checkin,
   }) async {
     try {
       _error = null;
-      final checkin = ProjectCheckin(
-        checkinTime: DateTime.now(),
-        returnedTools: returnedTools,
-        missingTools: missingTools,
-        notes: notes,
-        checkedInBy: userId,
-      );
 
       if (_connectivityService?.isOnline ?? true) {
         try {

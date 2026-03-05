@@ -1,5 +1,4 @@
 import 'package:clmschedule/providers/toggler_provider.dart';
-import 'package:clmschedule/widgets/updated_map_view.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/job.dart';
@@ -10,6 +9,9 @@ import 'print_map_view.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/scale_provider.dart';
+import '../shareable_maps/providers/shareable_map_provider.dart';
+import '../shareable_maps/adapters/schedule_job_adapter.dart';
+import '../shareable_maps/widgets/shareable_map_editor.dart';
 
 class JobCard extends StatelessWidget {
   final Job job;
@@ -835,44 +837,67 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
 
                   if (!context.mounted) return;
 
-                  final result =
-                      await Navigator.of(context).push<List<CustomPolygon>>(
+                  // Use the ShareableMapEditor with ScheduleJobAdapter
+                  final mapProvider = context.read<ShareableMapProvider>();
+                  final scheduleProvider = context.read<ScheduleProvider>();
+
+                  // Resolve distributor name for the map editor title
+                  String? distributorName;
+                  try {
+                    final distributor = scheduleProvider.distributors
+                        .firstWhere((d) => d.id == widget.job.distributorId);
+                    distributorName = distributor.name;
+                  } catch (_) {}
+
+                  // Create a save callback that updates the job via ScheduleProvider
+                  final adapter = ScheduleJobAdapter(
+                    job: widget.job,
+                    distributorName: distributorName,
+                    onSave: (polygons, workingAreaNames) async {
+                      final freshJob = scheduleProvider.jobs.firstWhere(
+                        (j) => j.id == widget.job.id,
+                        orElse: () => widget.job,
+                      );
+                      final modifiedJob = freshJob.copyWith(
+                        workingAreas: workingAreaNames,
+                        workMaps: polygons,
+                      );
+                      await scheduleProvider.updateJobWithUndo(
+                        freshJob,
+                        modifiedJob,
+                        freshJob.date,
+                      );
+                    },
+                  );
+
+                  await mapProvider.loadFromAdapter(adapter);
+
+                  if (!context.mounted) return;
+
+                  await Navigator.of(context).push(
                     MaterialPageRoute(
                       fullscreenDialog: true,
-                      builder: (BuildContext context) => UpdatedMapView(
-                        jobId: widget.job.id,
-                        customPolygons: _localWorkMaps,
-                        title: widget.job.clientsDisplay,
-                        isEditable: true,
-                      ),
+                      builder: (_) => const ShareableMapEditor(),
                     ),
                   );
 
-                  if (result != null && context.mounted) {
-                    try {
-                      setState(() {
-                        _localWorkMaps = result;
-                        _hasUnsavedChanges =
-                            false; // Clear unsaved changes since we're auto-saving
-                      });
-                      // Immediately save the changes to the database
-                      widget.onWorkAreasChanged(_localWorkMaps);
-                    } catch (e) {
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Failed to save work area: $e'),
-                            backgroundColor: Colors.red.shade800,
-                          ),
-                        );
-                      }
-                    }
+                  // After returning from editor, update local state
+                  if (context.mounted) {
+                    // Get fresh job data from provider
+                    final freshJob = scheduleProvider.jobs.firstWhere(
+                      (j) => j.id == widget.job.id,
+                      orElse: () => widget.job,
+                    );
+                    setState(() {
+                      _localWorkMaps = List.from(freshJob.workMaps);
+                      _hasUnsavedChanges = false;
+                    });
                   }
                 } catch (e) {
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(
-                        content: Text('Failed to open map: $e'),
+                        content: Text('Failed to open map editor: $e'),
                         backgroundColor: Colors.red.shade800,
                       ),
                     );

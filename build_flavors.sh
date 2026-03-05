@@ -3,7 +3,7 @@
 # Build script for CLM Schedule app flavors
 # Usage: ./build_flavors.sh [flavor] [build_type]
 #
-# Flavors: clm, happysun
+# Flavors: clm, happysun, maps
 # Build types: debug, release, run
 
 set -e
@@ -23,9 +23,9 @@ echo -e "${GREEN}================================${NC}"
 echo ""
 
 # Validate flavor
-if [[ "$FLAVOR" != "clm" && "$FLAVOR" != "happysun" ]]; then
+if [[ "$FLAVOR" != "clm" && "$FLAVOR" != "happysun" && "$FLAVOR" != "maps" && "$FLAVOR" != "trackEditor" ]]; then
     echo -e "${RED}Error: Invalid flavor '$FLAVOR'${NC}"
-    echo "Valid flavors: clm, happysun"
+    echo "Valid flavors: clm, happysun, maps, trackEditor"
     exit 1
 fi
 
@@ -68,6 +68,11 @@ case $BUILD_TYPE in
     run)
         echo -e "${GREEN}Running app on device...${NC}"
         flutter run --flavor "$FLAVOR" --target "$TARGET_FILE" --dart-define="$DART_DEFINE"
+        ;;
+
+    web)
+        echo -e "${GREEN}Running app on Chrome (web)...${NC}"
+        flutter run -d chrome --target "$TARGET_FILE" --dart-define="$DART_DEFINE"
         ;;
     
     *)

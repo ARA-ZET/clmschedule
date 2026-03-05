@@ -8,6 +8,9 @@ import '../providers/job_list_preferences_provider.dart';
 import '../providers/job_list_status_provider.dart';
 import '../providers/invoice_status_provider.dart';
 import '../providers/scale_provider.dart';
+import '../shareable_maps/providers/shareable_map_provider.dart';
+import '../shareable_maps/adapters/job_list_area_adapter.dart';
+import '../shareable_maps/widgets/shareable_map_editor.dart';
 import 'add_edit_job_dialog.dart';
 import 'editable_table_cell.dart';
 import 'multi_select_status_filter.dart';
@@ -705,11 +708,36 @@ class JobListDataCellsBuilder extends StatelessWidget {
     // Area
     if (prefsProvider.isColumnVisible('area')) {
       cells.add(DataCell(
-        LinkCell(
-          value: item.area,
-          onSave: (value) => onUpdateField(item, 'area', value),
+        SizedBox(
           width: JobListColumnConfig.getWidth('area'),
-          maxLines: 2,
+          child: Row(
+            children: [
+              Expanded(
+                child: LinkCell(
+                  value: item.area,
+                  onSave: (value) => onUpdateField(item, 'area', value),
+                  width: JobListColumnConfig.getWidth('area') - 28,
+                  maxLines: 2,
+                ),
+              ),
+              SizedBox(
+                width: 24,
+                child: IconButton(
+                  icon: Icon(
+                    Icons.edit_location_alt,
+                    size: 16,
+                    color: item.customPolygons.isNotEmpty
+                        ? Colors.blue
+                        : Colors.grey,
+                  ),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  tooltip: 'Edit area on map',
+                  onPressed: () => _openJobListAreaEditor(context, item),
+                ),
+              ),
+            ],
+          ),
         ),
       ));
     }
@@ -933,6 +961,53 @@ class JobListDataCellsBuilder extends StatelessWidget {
     }
 
     return cells;
+  }
+
+  void _openJobListAreaEditor(BuildContext context, JobListItem item) async {
+    try {
+      final mapProvider = context.read<ShareableMapProvider>();
+
+      final adapter = JobListAreaAdapter(
+        item: item,
+        onSave: (polygons, areaLink) async {
+          final updatedItem = item.copyWith(
+            customPolygons: polygons,
+            area: areaLink ?? item.area,
+          );
+          final jobListProvider = context.read<JobListProvider>();
+          final jobListStatusProvider = context.read<JobListStatusProvider>();
+          final invoiceStatusProvider = context.read<InvoiceStatusProvider>();
+          await jobListProvider.updateJobListItemWithTracking(
+            item,
+            updatedItem,
+            resolveJobStatusLabel: (statusId) =>
+                jobListStatusProvider.getStatusById(statusId)?.label,
+            resolveInvoiceStatusLabel: (statusId) =>
+                invoiceStatusProvider.getStatusById(statusId)?.label,
+          );
+        },
+      );
+
+      await mapProvider.loadFromAdapter(adapter);
+
+      if (!context.mounted) return;
+
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => const ShareableMapEditor(),
+        ),
+      );
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to open map editor: $e'),
+            backgroundColor: Colors.red.shade800,
+          ),
+        );
+      }
+    }
   }
 
   @override
