@@ -241,7 +241,7 @@ class JobListProvider extends ChangeNotifier {
       await _setupCurrentMonthListener();
     } catch (error) {
       _error = 'Failed to initialize data: $error';
-      print('JobListProvider: Initialization error: $error');
+      debugPrint('JobListProvider: Initialization error: $error');
       notifyListeners();
     }
   }
@@ -260,20 +260,20 @@ class JobListProvider extends ChangeNotifier {
     _jobListSubscription?.cancel();
 
     // Debug logging
-    print(
+    debugPrint(
         'JobListProvider: Setting up listener for month: ${_jobListService.getMonthlyDocumentId(_currentMonth)}');
 
     // For Happy Sun flavor, only listen to window cleaning and solar panel jobs
     List<JobType>? jobTypesFilter;
     if (FlavorConfig.instance.isHappySun) {
       jobTypesFilter = [JobType.windowCleaning, JobType.solarPanelCleaning];
-      print('JobListProvider: Happy Sun flavor - filtering to window cleaning & solar panel jobs only');
+      debugPrint('JobListProvider: Happy Sun flavor - filtering to window cleaning & solar panel jobs only');
     }
 
     _jobListSubscription =
         _jobListService.getJobListItems(_currentMonth, jobTypesFilter).listen(
       (jobListItems) {
-        print(
+        debugPrint(
             'JobListProvider: Received ${jobListItems.length} job list items via snapshot');
 
         // Store previous known IDs before updating
@@ -311,7 +311,7 @@ class JobListProvider extends ChangeNotifier {
         notifyListeners();
       },
       onError: (error) {
-        print('JobListProvider: Snapshot error: $error');
+        debugPrint('JobListProvider: Snapshot error: $error');
         _error = error.toString();
         _isLoading = false;
         notifyListeners();
@@ -337,13 +337,13 @@ class JobListProvider extends ChangeNotifier {
     try {
       // Set up listener for new month
       await _setupCurrentMonthListener();
-      print('JobListProvider: Successfully changed from $oldMonth to $month');
+      debugPrint('JobListProvider: Successfully changed from $oldMonth to $month');
     } catch (error) {
       // Revert on error
       _currentMonth = oldMonth;
       _error =
           'Failed to load data for ${_jobListService.getMonthlyDocumentId(month)}: $error';
-      print('JobListProvider: Error changing month: $error');
+      debugPrint('JobListProvider: Error changing month: $error');
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -416,7 +416,7 @@ class JobListProvider extends ChangeNotifier {
 
     // Check if there's actually a change
     if (currentItem != null && _areJobItemsEqual(currentItem, jobListItem)) {
-      print(
+      debugPrint(
           'JobListProvider: No changes detected for item ${jobListItem.id}, skipping update');
       return;
     }
@@ -424,12 +424,12 @@ class JobListProvider extends ChangeNotifier {
     // Debug reminder changes
     if (currentItem != null &&
         !_areRemindersEqual(currentItem.reminders, jobListItem.reminders)) {
-      print('JobListProvider: Reminders changed for item ${jobListItem.id}');
-      print('  Old reminders count: ${currentItem.reminders.length}');
-      print('  New reminders count: ${jobListItem.reminders.length}');
+      debugPrint('JobListProvider: Reminders changed for item ${jobListItem.id}');
+      debugPrint('  Old reminders count: ${currentItem.reminders.length}');
+      debugPrint('  New reminders count: ${jobListItem.reminders.length}');
     }
 
-    print(
+    debugPrint(
         'JobListProvider: Changes detected for item ${jobListItem.id}, processing update');
 
     // Store the update locally
@@ -555,7 +555,7 @@ class JobListProvider extends ChangeNotifier {
           final needsMove = originalMonth != newMonth;
 
           if (needsMove) {
-            print(
+            debugPrint(
                 'JobListProvider: Job ${updatedJob.client} needs to move from $originalMonth to $newMonth');
             // Use the new move method that handles cross-month updates
             await _jobListService.moveJobListItemToMonth(
@@ -587,7 +587,7 @@ class JobListProvider extends ChangeNotifier {
           await _jobListService.updateJobListItem(updatedJob, updatedJob.date);
         }
       } catch (error) {
-        print(
+        debugPrint(
             'JobListProvider: Error processing update for ${entry.value.client}: $error');
 
         // Only retry if it's not a RangeError or if the job hasn't been moved
@@ -607,7 +607,7 @@ class JobListProvider extends ChangeNotifier {
           });
         } else {
           // For RangeErrors, just log and continue - likely the job was moved
-          print(
+          debugPrint(
               'JobListProvider: RangeError for ${entry.value.client}, possibly job was moved to different month');
           _error =
               null; // Clear the error since this is expected for moved jobs
@@ -714,7 +714,7 @@ class JobListProvider extends ChangeNotifier {
         final newMonth = _jobListService.getMonthlyDocumentId(jobListItem.date);
 
         if (originalMonth != newMonth) {
-          print(
+          debugPrint(
               'JobListProvider: Immediate update moving job ${jobListItem.client} from $originalMonth to $newMonth');
           // Use the move method for cross-month updates
           await _jobListService.moveJobListItemToMonth(
@@ -729,7 +729,7 @@ class JobListProvider extends ChangeNotifier {
         await _jobListService.updateJobListItem(jobListItem, jobListItem.date);
       }
     } catch (error) {
-      print(
+      debugPrint(
           'JobListProvider: Error in immediate update for ${jobListItem.client}: $error');
 
       // Don't rethrow RangeErrors for moved jobs
@@ -738,7 +738,7 @@ class JobListProvider extends ChangeNotifier {
         notifyListeners();
         rethrow;
       } else {
-        print(
+        debugPrint(
             'JobListProvider: RangeError in immediate update, possibly job was moved');
         _error = null; // Clear the error since this is expected for moved jobs
         notifyListeners();
@@ -1101,10 +1101,23 @@ class JobListProvider extends ChangeNotifier {
   }
 
   // Load last checked time from database
+  // Waits briefly for auth to be ready since this runs in parallel with AuthProvider.initialize()
   Future<void> _loadLastCheckedTimeFromDatabase() async {
     try {
-      final currentUser = _authProvider.user;
-      if (currentUser == null) return;
+      // If user isn't available yet (parallel init race), wait briefly for auth
+      var currentUser = _authProvider.user;
+      if (currentUser == null) {
+        // Wait up to 5 seconds for auth to complete
+        for (int i = 0; i < 10; i++) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          currentUser = _authProvider.user;
+          if (currentUser != null) break;
+        }
+        if (currentUser == null) {
+          debugPrint('JobListProvider: Auth not ready, skipping last checked time load');
+          return;
+        }
+      }
 
       final userDoc = await FirebaseFirestore.instance
           .collection('users')
@@ -1119,7 +1132,7 @@ class JobListProvider extends ChangeNotifier {
         }
       }
     } catch (e) {
-      print('JobListProvider: Error loading last checked time: $e');
+      debugPrint('JobListProvider: Error loading last checked time: $e');
     }
   }
 
@@ -1148,11 +1161,12 @@ class JobListProvider extends ChangeNotifier {
           'lastCheckedTime': Timestamp.fromDate(time),
         }, SetOptions(merge: true));
       } catch (e2) {
-        print('JobListProvider: Error saving last checked time: $e2');
+        debugPrint('JobListProvider: Error saving last checked time: $e2');
       }
     }
   }
 
+  // Refresh the last checked time for updates
   // Refresh the last checked time for updates
   Future<void> refreshLastCheckedTime() async {
     _isRefreshingLastChecked = true;
@@ -1164,13 +1178,11 @@ class JobListProvider extends ChangeNotifier {
 
       // Save to database
       await _saveLastCheckedTimeToDatabase(now);
-
-      notifyListeners();
     } catch (e) {
-      print('JobListProvider: Error refreshing last checked time: $e');
+      debugPrint('JobListProvider: Error refreshing last checked time: $e');
     } finally {
       _isRefreshingLastChecked = false;
-      notifyListeners();
+      notifyListeners(); // Single notification after all state changes
     }
   }
 

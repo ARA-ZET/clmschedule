@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart';
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
@@ -183,38 +182,78 @@ class FirestoreService {
     return controller.stream;
   }
 
+  // Stream all jobs for an entire month using a SINGLE collection listener.
+  // This replaces 28-31 individual document listeners with 1 query listener.
+  // Fires whenever ANY day document in the month changes.
+  Stream<List<Job>> streamJobsForMonth(DateTime month) {
+    final monthlyId = _dailyService.getMonthlyDocumentId(month);
+
+    return _firestore
+        .collection('schedules')
+        .doc(monthlyId)
+        .collection('days')
+        .snapshots()
+        .map((querySnapshot) {
+      final allJobs = <Job>[];
+      for (final doc in querySnapshot.docs) {
+        final data = doc.data();
+        final jobsArray = data['jobs'] as List<dynamic>?;
+        if (jobsArray != null) {
+          for (final jobData in jobsArray) {
+            allJobs.add(Job.fromArrayElement(jobData as Map<String, dynamic>));
+          }
+        }
+      }
+      return allJobs;
+    });
+  }
+
   // Stream of all jobs for current month (optimized for monthly view)
   // In debug mode: loads only this week's jobs for faster development
-  // In release mode: loads full month
+  // In release mode: uses single collection listener (1 instead of 28-31)
   Stream<List<Job>> streamJobs([DateTime? date]) {
     final targetDate = date ?? DateTime.now();
-
-    if (kDebugMode) {
-      // Debug mode: Load only this week (Monday to Sunday)
-      final now = targetDate;
-      final weekday = now.weekday; // Monday = 1, Sunday = 7
-      final weekStart =
-          now.subtract(Duration(days: weekday - 1)); // Go back to Monday
-      final weekEnd = weekStart.add(const Duration(days: 6)); // Go to Sunday
-
-      print(
-          'DEBUG MODE: Loading jobs for this week only (${weekStart.toString().split(' ')[0]} to ${weekEnd.toString().split(' ')[0]})');
-      return streamJobsForDateRange(weekStart, weekEnd);
-    } else {
-      // Release mode: Load full month
-      final monthStart = DateTime(targetDate.year, targetDate.month, 1);
-      final monthEnd = DateTime(targetDate.year, targetDate.month + 1, 0);
-      return streamJobsForDateRange(monthStart, monthEnd);
-    }
+    // Single collection listener per month (optimized — 1 listener instead of 28-31)
+    return streamJobsForMonth(targetDate);
   }
 
   // Stream jobs for optimized range (current month + next month only)
+  // Uses 2 collection listeners instead of 56-62 individual ones.
   Stream<List<Job>> streamJobsExtendedRange([DateTime? date]) {
     final targetDate = date ?? DateTime.now();
-    final currentMonthStart = DateTime(targetDate.year, targetDate.month, 1);
-    final nextMonthEnd = DateTime(targetDate.year, targetDate.month + 2, 0);
+    final currentMonth = DateTime(targetDate.year, targetDate.month);
+    final nextMonth = DateTime(targetDate.year, targetDate.month + 1);
 
-    return streamJobsForDateRange(currentMonthStart, nextMonthEnd);
+    // Combine two monthly collection streams
+    late StreamController<List<Job>> controller;
+    List<Job> currentMonthJobs = [];
+    List<Job> nextMonthJobs = [];
+    final subscriptions = <StreamSubscription>[];
+
+    controller = StreamController<List<Job>>(
+      onListen: () {
+        subscriptions.add(streamJobsForMonth(currentMonth).listen((jobs) {
+          currentMonthJobs = jobs;
+          if (!controller.isClosed) {
+            controller.add([...currentMonthJobs, ...nextMonthJobs]);
+          }
+        }));
+        subscriptions.add(streamJobsForMonth(nextMonth).listen((jobs) {
+          nextMonthJobs = jobs;
+          if (!controller.isClosed) {
+            controller.add([...currentMonthJobs, ...nextMonthJobs]);
+          }
+        }));
+      },
+      onCancel: () {
+        for (final sub in subscriptions) {
+          sub.cancel();
+        }
+        subscriptions.clear();
+      },
+    );
+
+    return controller.stream;
   }
 
   // Fetch jobs for a specific date (one-time, not streaming)
@@ -348,6 +387,7 @@ class FirestoreService {
   }
 
   // Move a job between different dates (handles cross-day/cross-month moves)
+  // Uses WriteBatch for atomic operation - job is never lost even on failure.
   Future<void> moveJobBetweenDates(Job originalJob, Job updatedJob,
       DateTime originalDate, DateTime newDate) async {
     // If it's the same date, just do a regular update
@@ -358,17 +398,35 @@ class FirestoreService {
       return;
     }
 
-    // Different dates - need to remove from original and add to new
+    // Different dates - need to remove from original and add to new ATOMICALLY
 
     // Ensure both daily documents exist
     await _dailyService.ensureScheduleDailyDocExists(originalDate);
     await _dailyService.ensureScheduleDailyDocExists(newDate);
 
-    // Remove from original date
-    await deleteJob(originalJob.id, originalDate);
+    final sourceDoc = _dailyService.getScheduleDailyDoc(originalDate);
+    final destDoc = _dailyService.getScheduleDailyDoc(newDate);
 
-    // Add to new date with updated properties
-    await addJob(updatedJob, newDate);
+    // Read both documents
+    final sourceSnapshot = await sourceDoc.get();
+    final destSnapshot = await destDoc.get();
+
+    // Build updated source array (remove the job)
+    final sourceData = sourceSnapshot.data() as Map<String, dynamic>? ?? {};
+    final sourceJobs =
+        List<Map<String, dynamic>>.from(sourceData['jobs'] ?? []);
+    sourceJobs.removeWhere((j) => j['id'] == originalJob.id);
+
+    // Build updated destination array (add the job)
+    final destData = destSnapshot.data() as Map<String, dynamic>? ?? {};
+    final destJobs = List<Map<String, dynamic>>.from(destData['jobs'] ?? []);
+    destJobs.add(updatedJob.toMap());
+
+    // Atomic batch write - both succeed or both fail
+    final batch = _firestore.batch();
+    batch.update(sourceDoc, {'jobs': sourceJobs});
+    batch.update(destDoc, {'jobs': destJobs});
+    await batch.commit();
   }
 
   // Delete a job

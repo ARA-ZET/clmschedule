@@ -30,7 +30,6 @@ class ScheduleJobCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheduleProvider = context.read<ScheduleProvider>();
     final scaleProvider = context.read<ScaleProvider>();
 
     return DragTarget<Job>(
@@ -46,20 +45,20 @@ class ScheduleJobCell extends StatelessWidget {
         );
 
         // DEBUG: Log dragged job data
-        print('=== DRAG AND DROP DEBUG ===');
-        print('Dragged Job (FRESH from provider):');
-        print('  ID: ${draggedJob.id}');
-        print('  StatusId: ${draggedJob.statusId}');
-        print('  Clients: ${draggedJob.clients}');
-        print('  WorkingAreas: ${draggedJob.workingAreas}');
-        print('  WorkMaps count: ${draggedJob.workMaps.length}');
-        print('  DistributorId: ${draggedJob.distributorId}');
-        print('  Date: ${draggedJob.date}');
-        print('Target:');
-        print('  DistributorId: ${distributor.id}');
-        print('  Distributor Name: ${distributor.name}');
-        print('  Date: $date');
-        print('===========================');
+        debugPrint('=== DRAG AND DROP DEBUG ===');
+        debugPrint('Dragged Job (FRESH from provider):');
+        debugPrint('  ID: ${draggedJob.id}');
+        debugPrint('  StatusId: ${draggedJob.statusId}');
+        debugPrint('  Clients: ${draggedJob.clients}');
+        debugPrint('  WorkingAreas: ${draggedJob.workingAreas}');
+        debugPrint('  WorkMaps count: ${draggedJob.workMaps.length}');
+        debugPrint('  DistributorId: ${draggedJob.distributorId}');
+        debugPrint('  Date: ${draggedJob.date}');
+        debugPrint('Target:');
+        debugPrint('  DistributorId: ${distributor.id}');
+        debugPrint('  Distributor Name: ${distributor.name}');
+        debugPrint('  Date: $date');
+        debugPrint('===========================');
 
         // Check if dropping on the same day and distributor (no changes)
         final isSameDayAndDistributor =
@@ -103,12 +102,12 @@ class ScheduleJobCell extends StatelessWidget {
             orElse: () => jobs.first,
           );
 
-          print('=== TARGET JOB (FRESH) ===');
-          print('  ID: ${targetJob.id}');
-          print('  Clients: ${targetJob.clients}');
-          print('  WorkingAreas: ${targetJob.workingAreas}');
-          print('  WorkMaps: ${targetJob.workMaps.length}');
-          print('==========================');
+          debugPrint('=== TARGET JOB (FRESH) ===');
+          debugPrint('  ID: ${targetJob.id}');
+          debugPrint('  Clients: ${targetJob.clients}');
+          debugPrint('  WorkingAreas: ${targetJob.workingAreas}');
+          debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
+          debugPrint('==========================');
 
           // Show confirmation dialog
           final action = await showDialog<DropAction>(
@@ -125,14 +124,14 @@ class ScheduleJobCell extends StatelessWidget {
 
           if (action == DropAction.swap) {
             // Swap the jobs using undo/redo command
-            print('=== SWAP JOBS DEBUG ===');
-            print('DraggedJob:');
-            print('  Clients: ${draggedJob.clients}');
-            print('  WorkMaps: ${draggedJob.workMaps.length}');
-            print('TargetJob:');
-            print('  Clients: ${targetJob.clients}');
-            print('  WorkMaps: ${targetJob.workMaps.length}');
-            print('======================');
+            debugPrint('=== SWAP JOBS DEBUG ===');
+            debugPrint('DraggedJob:');
+            debugPrint('  Clients: ${draggedJob.clients}');
+            debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
+            debugPrint('TargetJob:');
+            debugPrint('  Clients: ${targetJob.clients}');
+            debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
+            debugPrint('======================');
 
             await scheduleProvider.swapJobsWithUndo(
               draggedJob,
@@ -141,15 +140,15 @@ class ScheduleJobCell extends StatelessWidget {
             );
           } else if (action == DropAction.addToExisting) {
             // Combine the jobs - merge clients, working areas, and polygons
-            print('=== COMBINE JOBS DEBUG ===');
-            print('Before combine - DraggedJob:');
-            print('  Clients: ${draggedJob.clients}');
-            print('  WorkingAreas: ${draggedJob.workingAreas}');
-            print('  WorkMaps: ${draggedJob.workMaps.length}');
-            print('Before combine - TargetJob:');
-            print('  Clients: ${targetJob.clients}');
-            print('  WorkingAreas: ${targetJob.workingAreas}');
-            print('  WorkMaps: ${targetJob.workMaps.length}');
+            debugPrint('=== COMBINE JOBS DEBUG ===');
+            debugPrint('Before combine - DraggedJob:');
+            debugPrint('  Clients: ${draggedJob.clients}');
+            debugPrint('  WorkingAreas: ${draggedJob.workingAreas}');
+            debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
+            debugPrint('Before combine - TargetJob:');
+            debugPrint('  Clients: ${targetJob.clients}');
+            debugPrint('  WorkingAreas: ${targetJob.workingAreas}');
+            debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
 
             final combinedClients = <String>{
               ...targetJob.clients,
@@ -167,10 +166,10 @@ class ScheduleJobCell extends StatelessWidget {
               ...draggedJob.workMaps,
             ];
 
-            print('After combine:');
-            print('  Combined Clients: $combinedClients');
-            print('  Combined WorkingAreas: $combinedWorkingAreas');
-            print('  Combined WorkMaps count: ${combinedWorkMaps.length}');
+            debugPrint('After combine:');
+            debugPrint('  Combined Clients: $combinedClients');
+            debugPrint('  Combined WorkingAreas: $combinedWorkingAreas');
+            debugPrint('  Combined WorkMaps count: ${combinedWorkMaps.length}');
 
             // Create combined job with target job's status preserved
             final combinedJob = targetJob.copyWith(
@@ -179,11 +178,11 @@ class ScheduleJobCell extends StatelessWidget {
               workMaps: combinedWorkMaps,
             );
 
-            print('CombinedJob after copyWith:');
-            print('  Clients: ${combinedJob.clients}');
-            print('  WorkingAreas: ${combinedJob.workingAreas}');
-            print('  WorkMaps: ${combinedJob.workMaps.length}');
-            print('=========================');
+            debugPrint('CombinedJob after copyWith:');
+            debugPrint('  Clients: ${combinedJob.clients}');
+            debugPrint('  WorkingAreas: ${combinedJob.workingAreas}');
+            debugPrint('  WorkMaps: ${combinedJob.workMaps.length}');
+            debugPrint('=========================');
 
             // Use undo/redo command for combine operation
             await scheduleProvider.combineJobsWithUndo(
@@ -194,17 +193,17 @@ class ScheduleJobCell extends StatelessWidget {
             );
           } else if (action == DropAction.copy) {
             // Copy & Combine - preserve source job, create combined job at target
-            print('=== COPY & COMBINE DEBUG ===');
-            print('Before combine - DraggedJob:');
-            print('  ID: ${draggedJob.id}');
-            print('  Clients: ${draggedJob.clients}');
-            print('  WorkingAreas: ${draggedJob.workingAreas}');
-            print('  WorkMaps: ${draggedJob.workMaps.length}');
-            print('Before combine - TargetJob:');
-            print('  ID: ${targetJob.id}');
-            print('  Clients: ${targetJob.clients}');
-            print('  WorkingAreas: ${targetJob.workingAreas}');
-            print('  WorkMaps: ${targetJob.workMaps.length}');
+            debugPrint('=== COPY & COMBINE DEBUG ===');
+            debugPrint('Before combine - DraggedJob:');
+            debugPrint('  ID: ${draggedJob.id}');
+            debugPrint('  Clients: ${draggedJob.clients}');
+            debugPrint('  WorkingAreas: ${draggedJob.workingAreas}');
+            debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
+            debugPrint('Before combine - TargetJob:');
+            debugPrint('  ID: ${targetJob.id}');
+            debugPrint('  Clients: ${targetJob.clients}');
+            debugPrint('  WorkingAreas: ${targetJob.workingAreas}');
+            debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
 
             final combinedClients = <String>{
               ...targetJob.clients,
@@ -222,10 +221,10 @@ class ScheduleJobCell extends StatelessWidget {
               ...draggedJob.workMaps,
             ];
 
-            print('After combining arrays:');
-            print('  Combined Clients: $combinedClients');
-            print('  Combined WorkingAreas: $combinedWorkingAreas');
-            print('  Combined WorkMaps count: ${combinedWorkMaps.length}');
+            debugPrint('After combining arrays:');
+            debugPrint('  Combined Clients: $combinedClients');
+            debugPrint('  Combined WorkingAreas: $combinedWorkingAreas');
+            debugPrint('  Combined WorkMaps count: ${combinedWorkMaps.length}');
 
             // Create combined job with target job's status preserved
             final combinedJob = targetJob.copyWith(
@@ -234,12 +233,12 @@ class ScheduleJobCell extends StatelessWidget {
               workMaps: combinedWorkMaps,
             );
 
-            print('CombinedJob after copyWith:');
-            print('  ID: ${combinedJob.id}');
-            print('  Clients: ${combinedJob.clients}');
-            print('  WorkingAreas: ${combinedJob.workingAreas}');
-            print('  WorkMaps: ${combinedJob.workMaps.length}');
-            print('============================');
+            debugPrint('CombinedJob after copyWith:');
+            debugPrint('  ID: ${combinedJob.id}');
+            debugPrint('  Clients: ${combinedJob.clients}');
+            debugPrint('  WorkingAreas: ${combinedJob.workingAreas}');
+            debugPrint('  WorkMaps: ${combinedJob.workMaps.length}');
+            debugPrint('============================');
 
             // Use undo/redo command for copy & combine operation
             await scheduleProvider.copyAndCombineJobsWithUndo(
@@ -250,26 +249,26 @@ class ScheduleJobCell extends StatelessWidget {
           }
         } else {
           // If target cell is empty, just move the dragged job
-          print('=== SIMPLE MOVE DEBUG ===');
-          print('Original draggedJob before copyWith:');
-          print('  ID: ${draggedJob.id}');
-          print('  Clients: ${draggedJob.clients}');
-          print('  WorkingAreas: ${draggedJob.workingAreas}');
-          print('  WorkMaps count: ${draggedJob.workMaps.length}');
+          debugPrint('=== SIMPLE MOVE DEBUG ===');
+          debugPrint('Original draggedJob before copyWith:');
+          debugPrint('  ID: ${draggedJob.id}');
+          debugPrint('  Clients: ${draggedJob.clients}');
+          debugPrint('  WorkingAreas: ${draggedJob.workingAreas}');
+          debugPrint('  WorkMaps count: ${draggedJob.workMaps.length}');
 
           final movedJob = draggedJob.copyWith(
             distributorId: distributor.id,
             date: date,
           );
 
-          print('After copyWith - movedJob:');
-          print('  ID: ${movedJob.id}');
-          print('  Clients: ${movedJob.clients}');
-          print('  WorkingAreas: ${movedJob.workingAreas}');
-          print('  WorkMaps count: ${movedJob.workMaps.length}');
-          print('  DistributorId: ${movedJob.distributorId}');
-          print('  Date: ${movedJob.date}');
-          print('========================');
+          debugPrint('After copyWith - movedJob:');
+          debugPrint('  ID: ${movedJob.id}');
+          debugPrint('  Clients: ${movedJob.clients}');
+          debugPrint('  WorkingAreas: ${movedJob.workingAreas}');
+          debugPrint('  WorkMaps count: ${movedJob.workMaps.length}');
+          debugPrint('  DistributorId: ${movedJob.distributorId}');
+          debugPrint('  Date: ${movedJob.date}');
+          debugPrint('========================');
 
           // Use undo/redo command for simple move operation
           await scheduleProvider.updateJobWithUndo(

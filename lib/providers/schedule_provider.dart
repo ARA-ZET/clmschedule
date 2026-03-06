@@ -16,6 +16,29 @@ class ScheduleProvider extends ChangeNotifier {
   List<WorkArea> _workAreas = [];
   DateTime _currentMonth = DateTime.now();
 
+  // Cached combined jobs list — invalidated when either month's data changes
+  List<Job>? _cachedJobs;
+
+  // Cached job lookup map: "distributorId:YYYY-MM-DD" → List<Job>
+  // Provides O(1) lookups for cellBuilder instead of O(N) linear scans
+  Map<String, List<Job>>? _jobLookupMap;
+
+  // Cached Schedule object — rebuilt only when jobs change
+  Schedule? _cachedSchedule;
+
+  // Monotonic version counter — increments on every data change.
+  // Used by the grid Selector for O(1) deterministic change detection.
+  int _jobsVersion = 0;
+  int get jobsVersion => _jobsVersion;
+
+  /// Invalidate all derived caches. Call whenever raw job data changes.
+  void _invalidateCaches() {
+    _cachedJobs = null;
+    _jobLookupMap = null;
+    _cachedSchedule = null;
+    _jobsVersion++;
+  }
+
   // Streams subscriptions
   StreamSubscription<List<Distributor>>? _distributorsSubscription;
   StreamSubscription<List<Job>>? _currentMonthJobsSubscription;
@@ -24,9 +47,21 @@ class ScheduleProvider extends ChangeNotifier {
 
   // Getters
   List<Distributor> get distributors => _distributors;
-  List<Job> get jobs => [..._currentMonthJobs, ..._nextMonthJobs];
+  List<Job> get jobs => _cachedJobs ??= [..._currentMonthJobs, ..._nextMonthJobs];
   List<WorkArea> get workAreas => _workAreas;
-  Schedule get schedule => Schedule(distributors: _distributors, jobs: jobs);
+  Schedule get schedule => _cachedSchedule ??= Schedule(distributors: _distributors, jobs: jobs);
+
+  /// Build (or return cached) lookup map for O(1) cell queries.
+  Map<String, List<Job>> get _lookupMap {
+    if (_jobLookupMap != null) return _jobLookupMap!;
+    final map = <String, List<Job>>{};
+    for (final job in jobs) {
+      final key = '${job.distributorId}:${job.date.year}-${job.date.month.toString().padLeft(2, '0')}-${job.date.day.toString().padLeft(2, '0')}';
+      (map[key] ??= []).add(job);
+    }
+    _jobLookupMap = map;
+    return map;
+  }
   DateTime get currentMonth => _currentMonth;
   String get currentMonthDisplay =>
       _firestoreService.getMonthlyDocumentId(_currentMonth);
@@ -67,67 +102,101 @@ class ScheduleProvider extends ChangeNotifier {
 
   // Load data streams asynchronously and concurrently
   Future<void> _initStreamsAsync() async {
-    await _loadDataForMonthAsync(_currentMonth);
+    // Set up global streams once (distributors + work areas)
+    _setupGlobalStreams();
+    // Set up month-specific job streams
+    _loadJobStreamsForMonth(_currentMonth);
   }
 
-  // Load data for a specific month (and next month) - async version
-  Future<void> _loadDataForMonthAsync(DateTime month) async {
-    // Cancel existing subscriptions
-    _distributorsSubscription?.cancel();
+  /// Set up distributors and workAreas streams.
+  /// These are global (not month-specific) and only need to be created once.
+  void _setupGlobalStreams() {
+    // Listen to distributors stream from root collection (not monthly)
+    _distributorsSubscription =
+        _firestoreService.streamDistributors().listen(
+      (distributors) {
+        _distributors = distributors;
+        _cachedSchedule = null; // Schedule depends on distributors
+        notifyListeners();
+      },
+      onError: (error) {
+        debugPrint('ScheduleProvider: Distributors stream error: $error');
+      },
+    );
+
+    // Listen to work areas stream from root collection (not monthly)
+    _workAreasSubscription =
+        _firestoreService.streamWorkAreas().listen(
+      (workAreas) {
+        _workAreas = workAreas;
+        notifyListeners();
+      },
+      onError: (error) {
+        debugPrint('ScheduleProvider: WorkAreas stream error: $error');
+      },
+    );
+  }
+
+  // Load job streams for a specific month (and next month)
+  // Only tears down and recreates the two job subscriptions.
+  void _loadJobStreamsForMonth(DateTime month) {
+    // Cancel ONLY job subscriptions (not global distributors/workAreas)
     _currentMonthJobsSubscription?.cancel();
     _nextMonthJobsSubscription?.cancel();
-    _workAreasSubscription?.cancel();
+
+    // Clear stale data from previous month so the lookup map
+    // doesn't contain old-month entries while new streams start.
+    _currentMonthJobs = [];
+    _nextMonthJobs = [];
+
+    // Invalidate all derived caches
+    _invalidateCaches();
 
     // Calculate next month
     final nextMonth = DateTime(month.year, month.month + 1);
 
-    print(
-        'ScheduleProvider: Starting streams for current month: ${_firestoreService.getMonthlyDocumentId(month)} and next month: ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
+    debugPrint(
+        'ScheduleProvider: Starting job streams for current month: ${_firestoreService.getMonthlyDocumentId(month)} and next month: ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
 
-    // Start all streams concurrently without blocking
-    await Future.microtask(() {
-      // Listen to distributors stream from root collection (not monthly)
-      _distributorsSubscription =
-          _firestoreService.streamDistributors().listen((
-        distributors,
-      ) {
-        _distributors = distributors;
-        notifyListeners();
-      });
-
-      // Listen to jobs stream for the current month
-      _currentMonthJobsSubscription =
-          _firestoreService.streamJobs(month).listen((jobs) {
+    // Listen to jobs stream for the current month — set up synchronously
+    _currentMonthJobsSubscription =
+        _firestoreService.streamJobs(month).listen(
+      (jobs) {
         _currentMonthJobs = jobs;
-        print(
+        _invalidateCaches();
+        debugPrint(
             'ScheduleProvider: Received ${jobs.length} jobs for current month ${_firestoreService.getMonthlyDocumentId(month)}');
         notifyListeners();
-      });
+      },
+      onError: (error) {
+        debugPrint(
+            'ScheduleProvider: Current month jobs stream error: $error');
+      },
+    );
 
-      // Listen to jobs stream for the next month
-      _nextMonthJobsSubscription =
-          _firestoreService.streamJobs(nextMonth).listen((jobs) {
+    // Listen to jobs stream for the next month
+    _nextMonthJobsSubscription =
+        _firestoreService.streamJobs(nextMonth).listen(
+      (jobs) {
         _nextMonthJobs = jobs;
-        print(
+        _invalidateCaches();
+        debugPrint(
             'ScheduleProvider: Received ${jobs.length} jobs for next month ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
         notifyListeners();
-      });
-
-      // Listen to work areas stream from root collection (not monthly)
-      _workAreasSubscription = _firestoreService.streamWorkAreas().listen((
-        workAreas,
-      ) {
-        _workAreas = workAreas;
-        notifyListeners();
-      });
-    });
+      },
+      onError: (error) {
+        debugPrint(
+            'ScheduleProvider: Next month jobs stream error: $error');
+      },
+    );
   }
 
   // Change current month
   void setCurrentMonth(DateTime month) {
     if (_currentMonth != month) {
       _currentMonth = month;
-      _loadDataForMonthAsync(_currentMonth);
+      _invalidateCaches();
+      _loadJobStreamsForMonth(_currentMonth);
       notifyListeners();
     }
   }
@@ -259,9 +328,9 @@ class ScheduleProvider extends ChangeNotifier {
   Future<void> addJob(Job job) async {
     try {
       await _firestoreService.addJob(job, job.date);
-      print('Successfully added job for ${job.date}');
+      debugPrint('Successfully added job for ${job.date}');
     } catch (e) {
-      print('Error adding job: $e');
+      debugPrint('Error adding job: $e');
       rethrow;
     }
   }
@@ -270,9 +339,9 @@ class ScheduleProvider extends ChangeNotifier {
     try {
       // Update Firestore directly - stream will handle local state update
       await _firestoreService.updateJob(job, job.date);
-      print('Successfully updated job ${job.id}');
+      debugPrint('Successfully updated job ${job.id}');
     } catch (e) {
-      print('Error updating job: $e');
+      debugPrint('Error updating job: $e');
       rethrow;
     }
   }
@@ -283,9 +352,9 @@ class ScheduleProvider extends ChangeNotifier {
       final job = jobs.where((j) => j.id == jobId).firstOrNull;
       final jobDate = targetDate ?? job?.date ?? _currentMonth;
       await _firestoreService.deleteJob(jobId, jobDate);
-      print('Successfully deleted job $jobId');
+      debugPrint('Successfully deleted job $jobId');
     } catch (e) {
-      print('Error deleting job: $e');
+      debugPrint('Error deleting job: $e');
       rethrow;
     }
   }
@@ -298,9 +367,9 @@ class ScheduleProvider extends ChangeNotifier {
         originalJob.date,
         movedJob.date,
       );
-      print('Successfully moved job ${originalJob.id}');
+      debugPrint('Successfully moved job ${originalJob.id}');
     } catch (e) {
-      print('Error moving job: $e');
+      debugPrint('Error moving job: $e');
       rethrow;
     }
   }
@@ -308,7 +377,8 @@ class ScheduleProvider extends ChangeNotifier {
   // Helper methods
 
   List<Job> getJobsForDistributorAndDate(String distributorId, DateTime date) {
-    return schedule.getJobsForDistributorAndDate(distributorId, date);
+    final key = '$distributorId:${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+    return _lookupMap[key] ?? const [];
   }
 
   List<Job> getJobsForDistributor(String distributorId) {
@@ -343,31 +413,31 @@ class ScheduleProvider extends ChangeNotifier {
   Future<void> updateJobWithUndo(
       Job originalJob, Job modifiedJob, DateTime targetDate) async {
     // Bypass command pattern - update job directly
-    print('=== UPDATE JOB WITH UNDO DEBUG ===');
-    print('OriginalJob:');
-    print('  ID: ${originalJob.id}');
-    print('  Clients: ${originalJob.clients}');
-    print('  WorkingAreas: ${originalJob.workingAreas}');
-    print('  WorkMaps: ${originalJob.workMaps.length}');
-    print('  Date: ${originalJob.date}');
-    print('ModifiedJob:');
-    print('  ID: ${modifiedJob.id}');
-    print('  Clients: ${modifiedJob.clients}');
-    print('  WorkingAreas: ${modifiedJob.workingAreas}');
-    print('  WorkMaps: ${modifiedJob.workMaps.length}');
-    print('  Date: ${modifiedJob.date}');
-    print('==================================');
+    debugPrint('=== UPDATE JOB WITH UNDO DEBUG ===');
+    debugPrint('OriginalJob:');
+    debugPrint('  ID: ${originalJob.id}');
+    debugPrint('  Clients: ${originalJob.clients}');
+    debugPrint('  WorkingAreas: ${originalJob.workingAreas}');
+    debugPrint('  WorkMaps: ${originalJob.workMaps.length}');
+    debugPrint('  Date: ${originalJob.date}');
+    debugPrint('ModifiedJob:');
+    debugPrint('  ID: ${modifiedJob.id}');
+    debugPrint('  Clients: ${modifiedJob.clients}');
+    debugPrint('  WorkingAreas: ${modifiedJob.workingAreas}');
+    debugPrint('  WorkMaps: ${modifiedJob.workMaps.length}');
+    debugPrint('  Date: ${modifiedJob.date}');
+    debugPrint('==================================');
 
     // Check if we're moving the job to a different date
     if (originalJob.date.year != modifiedJob.date.year ||
         originalJob.date.month != modifiedJob.date.month ||
         originalJob.date.day != modifiedJob.date.day) {
       // Move between dates
-      print('Moving job between dates');
+      debugPrint('Moving job between dates');
       await moveJobBetweenDates(originalJob, modifiedJob);
     } else {
       // Regular update
-      print('Regular update (same date)');
+      debugPrint('Regular update (same date)');
       await updateJob(modifiedJob);
     }
   }
@@ -389,23 +459,23 @@ class ScheduleProvider extends ChangeNotifier {
     final job = jobs.firstWhere((j) => j.id == jobId);
 
     // Debug logging
-    print('=== UPDATE JOB STATUS DEBUG ===');
-    print('Original job:');
-    print('  ID: ${job.id}');
-    print('  StatusId: ${job.statusId}');
-    print('  Clients: ${job.clients}');
-    print('  WorkingAreas: ${job.workingAreas}');
-    print('  WorkMaps count: ${job.workMaps.length}');
+    debugPrint('=== UPDATE JOB STATUS DEBUG ===');
+    debugPrint('Original job:');
+    debugPrint('  ID: ${job.id}');
+    debugPrint('  StatusId: ${job.statusId}');
+    debugPrint('  Clients: ${job.clients}');
+    debugPrint('  WorkingAreas: ${job.workingAreas}');
+    debugPrint('  WorkMaps count: ${job.workMaps.length}');
 
     final updatedJob = job.copyWith(statusId: newStatusId);
 
-    print('Updated job after copyWith:');
-    print('  ID: ${updatedJob.id}');
-    print('  StatusId: ${updatedJob.statusId}');
-    print('  Clients: ${updatedJob.clients}');
-    print('  WorkingAreas: ${updatedJob.workingAreas}');
-    print('  WorkMaps count: ${updatedJob.workMaps.length}');
-    print('===============================');
+    debugPrint('Updated job after copyWith:');
+    debugPrint('  ID: ${updatedJob.id}');
+    debugPrint('  StatusId: ${updatedJob.statusId}');
+    debugPrint('  Clients: ${updatedJob.clients}');
+    debugPrint('  WorkingAreas: ${updatedJob.workingAreas}');
+    debugPrint('  WorkMaps count: ${updatedJob.workMaps.length}');
+    debugPrint('===============================');
 
     await updateJob(updatedJob);
   }
@@ -413,17 +483,17 @@ class ScheduleProvider extends ChangeNotifier {
   Future<void> swapJobsWithUndo(
       Job draggedJob, Job targetJob, DateTime targetDate) async {
     // Bypass command pattern - swap jobs directly
-    print('=== SWAP JOBS PROVIDER DEBUG ===');
-    print('DraggedJob before swap:');
-    print('  ID: ${draggedJob.id}');
-    print('  Clients: ${draggedJob.clients}');
-    print('  WorkMaps: ${draggedJob.workMaps.length}');
-    print('  DistributorId: ${draggedJob.distributorId}');
-    print('TargetJob before swap:');
-    print('  ID: ${targetJob.id}');
-    print('  Clients: ${targetJob.clients}');
-    print('  WorkMaps: ${targetJob.workMaps.length}');
-    print('  DistributorId: ${targetJob.distributorId}');
+    debugPrint('=== SWAP JOBS PROVIDER DEBUG ===');
+    debugPrint('DraggedJob before swap:');
+    debugPrint('  ID: ${draggedJob.id}');
+    debugPrint('  Clients: ${draggedJob.clients}');
+    debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
+    debugPrint('  DistributorId: ${draggedJob.distributorId}');
+    debugPrint('TargetJob before swap:');
+    debugPrint('  ID: ${targetJob.id}');
+    debugPrint('  Clients: ${targetJob.clients}');
+    debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
+    debugPrint('  DistributorId: ${targetJob.distributorId}');
 
     // Swap distributor IDs
     final swappedDraggedJob =
@@ -431,16 +501,16 @@ class ScheduleProvider extends ChangeNotifier {
     final swappedTargetJob =
         targetJob.copyWith(distributorId: draggedJob.distributorId);
 
-    print('After copyWith:');
-    print('SwappedDraggedJob:');
-    print('  Clients: ${swappedDraggedJob.clients}');
-    print('  WorkMaps: ${swappedDraggedJob.workMaps.length}');
-    print('  DistributorId: ${swappedDraggedJob.distributorId}');
-    print('SwappedTargetJob:');
-    print('  Clients: ${swappedTargetJob.clients}');
-    print('  WorkMaps: ${swappedTargetJob.workMaps.length}');
-    print('  DistributorId: ${swappedTargetJob.distributorId}');
-    print('===============================');
+    debugPrint('After copyWith:');
+    debugPrint('SwappedDraggedJob:');
+    debugPrint('  Clients: ${swappedDraggedJob.clients}');
+    debugPrint('  WorkMaps: ${swappedDraggedJob.workMaps.length}');
+    debugPrint('  DistributorId: ${swappedDraggedJob.distributorId}');
+    debugPrint('SwappedTargetJob:');
+    debugPrint('  Clients: ${swappedTargetJob.clients}');
+    debugPrint('  WorkMaps: ${swappedTargetJob.workMaps.length}');
+    debugPrint('  DistributorId: ${swappedTargetJob.distributorId}');
+    debugPrint('===============================');
 
     await updateJob(swappedDraggedJob);
     await updateJob(swappedTargetJob);
@@ -449,17 +519,17 @@ class ScheduleProvider extends ChangeNotifier {
   Future<void> combineJobsWithUndo(Job draggedJob, Job targetJob,
       Job combinedJob, DateTime targetDate) async {
     // Bypass command pattern - combine jobs directly
-    print('=== COMBINE JOBS PROVIDER DEBUG ===');
-    print('DraggedJob to delete:');
-    print('  ID: ${draggedJob.id}');
-    print('  Clients: ${draggedJob.clients}');
-    print('  WorkMaps: ${draggedJob.workMaps.length}');
-    print('CombinedJob to save:');
-    print('  ID: ${combinedJob.id}');
-    print('  Clients: ${combinedJob.clients}');
-    print('  WorkingAreas: ${combinedJob.workingAreas}');
-    print('  WorkMaps: ${combinedJob.workMaps.length}');
-    print('===================================');
+    debugPrint('=== COMBINE JOBS PROVIDER DEBUG ===');
+    debugPrint('DraggedJob to delete:');
+    debugPrint('  ID: ${draggedJob.id}');
+    debugPrint('  Clients: ${draggedJob.clients}');
+    debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
+    debugPrint('CombinedJob to save:');
+    debugPrint('  ID: ${combinedJob.id}');
+    debugPrint('  Clients: ${combinedJob.clients}');
+    debugPrint('  WorkingAreas: ${combinedJob.workingAreas}');
+    debugPrint('  WorkMaps: ${combinedJob.workMaps.length}');
+    debugPrint('===================================');
 
     await deleteJob(draggedJob.id, targetDate);
     await updateJob(combinedJob);
@@ -468,17 +538,17 @@ class ScheduleProvider extends ChangeNotifier {
   Future<void> copyAndCombineJobsWithUndo(
       Job targetJob, Job combinedJob, DateTime targetDate) async {
     // Bypass command pattern - copy and combine jobs directly
-    print('=== COPY & COMBINE PROVIDER DEBUG ===');
-    print('TargetJob (will keep in place):');
-    print('  ID: ${targetJob.id}');
-    print('  Clients: ${targetJob.clients}');
-    print('  WorkMaps: ${targetJob.workMaps.length}');
-    print('CombinedJob (to save):');
-    print('  ID: ${combinedJob.id}');
-    print('  Clients: ${combinedJob.clients}');
-    print('  WorkingAreas: ${combinedJob.workingAreas}');
-    print('  WorkMaps: ${combinedJob.workMaps.length}');
-    print('=====================================');
+    debugPrint('=== COPY & COMBINE PROVIDER DEBUG ===');
+    debugPrint('TargetJob (will keep in place):');
+    debugPrint('  ID: ${targetJob.id}');
+    debugPrint('  Clients: ${targetJob.clients}');
+    debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
+    debugPrint('CombinedJob (to save):');
+    debugPrint('  ID: ${combinedJob.id}');
+    debugPrint('  Clients: ${combinedJob.clients}');
+    debugPrint('  WorkingAreas: ${combinedJob.workingAreas}');
+    debugPrint('  WorkMaps: ${combinedJob.workMaps.length}');
+    debugPrint('=====================================');
 
     await updateJob(combinedJob);
   }

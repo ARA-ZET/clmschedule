@@ -15,8 +15,6 @@ class JobListService {
   }
 
   // Get all job list items for current month
-  // In debug mode: limits to 20 items for faster development
-  // In release mode: loads all items
   // Optional jobTypes parameter to filter by specific job types at Firebase level
   Stream<List<JobListItem>> getJobListItems(
       [DateTime? date, List<JobType>? jobTypes]) {
@@ -27,7 +25,6 @@ class JobListService {
         print(
             'JobListService: Filtering by job types: ${jobTypes.map((t) => t.name).join(", ")}');
       }
-      print('DEBUG MODE: Limiting to 20 job list items');
     }
     if (kDebugMode) {
       print(
@@ -56,11 +53,6 @@ class JobListService {
     } else {
       // Only apply orderBy when not filtering (avoids index requirement)
       query = query.orderBy('date', descending: true);
-    }
-
-    // In debug mode, limit to 20 items
-    if (kDebugMode) {
-      query = query.limit(20);
     }
 
     return query.snapshots().map((snapshot) {

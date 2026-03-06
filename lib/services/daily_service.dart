@@ -3,6 +3,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 class DailyService {
   final FirebaseFirestore _firestore;
 
+  // Cache of known-existing document IDs to avoid redundant Firestore reads.
+  // Once a doc is confirmed to exist (or created), we skip future checks.
+  final Set<String> _knownScheduleDocIds = {};
+  final Set<String> _knownJobListDocIds = {};
+  final Set<String> _knownCollectionScheduleDocIds = {};
+
   DailyService(this._firestore);
 
   /// Generate monthly document ID from date
@@ -140,14 +146,20 @@ class DailyService {
   // DOCUMENT EXISTENCE MANAGEMENT
 
   /// Ensure daily document exists for schedules (creates if not present)
+  /// Uses in-memory cache to avoid redundant Firestore reads.
   Future<void> ensureScheduleDailyDocExists(DateTime date) async {
+    final dateKey = getDailyDocumentId(date);
+
+    // Skip if we've already confirmed this doc exists this session
+    if (_knownScheduleDocIds.contains(dateKey)) return;
+
     final doc = getScheduleDailyDoc(date);
     final docSnapshot = await doc.get();
 
     if (!docSnapshot.exists) {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
-        'date': getDailyDocumentId(date),
+        'date': dateKey,
         'timestamp': Timestamp.fromDate(date),
         'jobs': [], // Initialize with empty jobs array
       });
@@ -161,17 +173,26 @@ class DailyService {
         await doc.update({'jobs': []});
       }
     }
+
+    // Mark as known-existing so future calls skip the read
+    _knownScheduleDocIds.add(dateKey);
   }
 
   /// Ensure daily document exists for job lists (creates if not present)
+  /// Uses in-memory cache to avoid redundant Firestore reads.
   Future<void> ensureJobListDailyDocExists(DateTime date) async {
+    final dateKey = getDailyDocumentId(date);
+
+    // Skip if we've already confirmed this doc exists this session
+    if (_knownJobListDocIds.contains(dateKey)) return;
+
     final doc = getJobListDailyDoc(date);
     final docSnapshot = await doc.get();
 
     if (!docSnapshot.exists) {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
-        'date': getDailyDocumentId(date),
+        'date': dateKey,
         'timestamp': Timestamp.fromDate(date),
         'items': [], // Initialize with empty items array
       });
@@ -185,17 +206,26 @@ class DailyService {
         await doc.update({'items': []});
       }
     }
+
+    // Mark as known-existing so future calls skip the read
+    _knownJobListDocIds.add(dateKey);
   }
 
   /// Ensure daily document exists for collection schedules (creates if not present)
+  /// Uses in-memory cache to avoid redundant Firestore reads.
   Future<void> ensureCollectionScheduleDailyDocExists(DateTime date) async {
+    final dateKey = getDailyDocumentId(date);
+
+    // Skip if we've already confirmed this doc exists this session
+    if (_knownCollectionScheduleDocIds.contains(dateKey)) return;
+
     final doc = getCollectionScheduleDailyDoc(date);
     final docSnapshot = await doc.get();
 
     if (!docSnapshot.exists) {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
-        'date': getDailyDocumentId(date),
+        'date': dateKey,
         'timestamp': Timestamp.fromDate(date),
         'collectionJobs': [], // Initialize with empty collection jobs array
       });
@@ -209,6 +239,9 @@ class DailyService {
         await doc.update({'collectionJobs': []});
       }
     }
+
+    // Mark as known-existing so future calls skip the read
+    _knownCollectionScheduleDocIds.add(dateKey);
   }
 
   // PRIVATE MONTHLY INDEX MANAGEMENT
@@ -370,6 +403,13 @@ class DailyService {
     final day = int.tryParse(parts[2]) ?? DateTime.now().day;
 
     return DateTime(year, month, day);
+  }
+
+  /// Clear all doc existence caches (e.g., on user sign-out or for testing)
+  void clearDocExistenceCache() {
+    _knownScheduleDocIds.clear();
+    _knownJobListDocIds.clear();
+    _knownCollectionScheduleDocIds.clear();
   }
 
   /// Get date range for a monthly document

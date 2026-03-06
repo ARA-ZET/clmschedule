@@ -71,46 +71,39 @@ class JobCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<ScaleProvider, ScheduleProvider>(
-      builder: (context, scaleProvider, scheduleProvider, child) {
-        // Get fresh job data from provider to ensure we have latest changes
-        final freshJob = scheduleProvider.jobs.firstWhere(
-          (j) => j.id == job.id,
-          orElse: () => job, // Fallback to original if not found
-        );
+    // No Consumer needed — the parent grid Selector already rebuilds cells
+    // when jobs/scale change, passing fresh data via constructor.
+    // Only watch providers that change independently of the grid rebuild cycle.
+    final isFullscreen = context.watch<TogglerProvider>().isFullview;
+    final statusColor = _getStatusColor(context);
 
-        final isFullscreen = context.watch<TogglerProvider>().isFullview;
-        final statusColor = _getStatusColor(context);
+    return Card(
+      margin: const EdgeInsets.all(1),
+      color: statusColor,
+      child: Padding(
+        padding: const EdgeInsets.all(3),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Client section
+            _JobClientSection(job: job),
 
-        return Card(
-          margin: const EdgeInsets.all(1),
-          color: statusColor,
-          child: Padding(
-            padding: const EdgeInsets.all(3),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Client section - use fresh job data
-                _JobClientSection(job: freshJob),
-
-                if (isFullscreen) ...[
-                  const _JobDivider(),
-                  // Work area section - use fresh job data
-                  _JobWorkAreaSection(job: freshJob),
-                  const _JobDivider(),
-                  // Status and actions section - use fresh job data
-                  _JobActionsSection(
-                    job: freshJob,
-                    statusColor: statusColor,
-                    onPrintMap: () => _printMapLink(context),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        );
-      },
+            if (isFullscreen) ...[
+              const _JobDivider(),
+              // Work area section
+              _JobWorkAreaSection(job: job),
+              const _JobDivider(),
+              // Status and actions section
+              _JobActionsSection(
+                job: job,
+                statusColor: statusColor,
+                onPrintMap: () => _printMapLink(context),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
@@ -312,9 +305,10 @@ class _JobStatusButton extends StatelessWidget {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Change Status'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: statusProvider.statuses.map((status) {
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: statusProvider.statuses.map((status) {
             final isSelected = status.id == job.statusId;
             return ListTile(
               dense: true,
@@ -346,6 +340,7 @@ class _JobStatusButton extends StatelessWidget {
               },
             );
           }).toList(),
+          ),
         ),
       ),
     );

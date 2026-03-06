@@ -18,7 +18,7 @@ class _ScheduleGridData {
   final String currentMonthDisplay;
   final double scale;
   final int jobsCount; // Track job count to trigger rebuilds
-  final int jobsHash; // Track job modifications
+  final int jobsVersion; // Monotonic version counter from provider
 
   const _ScheduleGridData({
     required this.distributors,
@@ -27,7 +27,7 @@ class _ScheduleGridData {
     required this.currentMonthDisplay,
     required this.scale,
     required this.jobsCount,
-    required this.jobsHash,
+    required this.jobsVersion,
   });
 
   @override
@@ -41,7 +41,7 @@ class _ScheduleGridData {
           currentMonthDisplay == other.currentMonthDisplay &&
           scale == other.scale &&
           jobsCount == other.jobsCount &&
-          jobsHash == other.jobsHash;
+          jobsVersion == other.jobsVersion;
 
   @override
   int get hashCode =>
@@ -51,7 +51,7 @@ class _ScheduleGridData {
       currentMonthDisplay.hashCode ^
       scale.hashCode ^
       jobsCount.hashCode ^
-      jobsHash.hashCode;
+      jobsVersion.hashCode;
 }
 
 class ScheduleGrid extends StatefulWidget {
@@ -192,15 +192,6 @@ class _ScheduleGridState extends State<ScheduleGrid> {
     return Selector<ScheduleProvider, _ScheduleGridData>(
       selector: (_, scheduleProvider) {
         final jobs = scheduleProvider.jobs;
-        // Create a hash from job IDs and their key properties to detect changes
-        final jobsHash = jobs.fold<int>(
-            0,
-            (hash, job) =>
-                hash ^
-                job.id.hashCode ^
-                job.distributorId.hashCode ^
-                job.date.hashCode ^
-                job.statusId.hashCode);
 
         return _ScheduleGridData(
           distributors: scheduleProvider.distributors,
@@ -209,7 +200,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
           currentMonthDisplay: scheduleProvider.currentMonthDisplay,
           scale: context.read<ScaleProvider>().scale,
           jobsCount: jobs.length,
-          jobsHash: jobsHash,
+          jobsVersion: scheduleProvider.jobsVersion,
         );
       },
       builder: (context, gridData, child) {
@@ -447,12 +438,14 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                   distributor.id, date);
 
                           return TableViewCell(
-                            child: ScheduleJobCell(
-                              distributor: distributor,
-                              date: date,
-                              jobs: jobs,
-                              cellWidth: cellWidth,
-                              rowHeight: rowHeight,
+                            child: RepaintBoundary(
+                              child: ScheduleJobCell(
+                                distributor: distributor,
+                                date: date,
+                                jobs: jobs,
+                                cellWidth: cellWidth,
+                                rowHeight: rowHeight,
+                              ),
                             ),
                           );
                         }

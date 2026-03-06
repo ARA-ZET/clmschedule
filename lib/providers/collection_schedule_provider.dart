@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../models/collection_job.dart';
 import '../models/job_list_item.dart';
@@ -20,10 +19,6 @@ class CollectionScheduleProvider extends ChangeNotifier {
   // Key: "vehicleType_yyyy-MM-dd_timeSlot", Value: List of jobs occupying that slot
   final Map<String, List<CollectionJob>> _timeSlotCache = {};
 
-  // Stream subscriptions
-  StreamSubscription<List<WorkArea>>? _workAreasSubscription;
-  StreamSubscription? _jobListSubscription;
-
   // Getters
   List<CollectionJob> get collectionJobs => _collectionJobs;
   List<CollectionJob> get currentMonthCollectionJobs =>
@@ -39,8 +34,21 @@ class CollectionScheduleProvider extends ChangeNotifier {
     FirestoreService? firestoreService,
     required JobListProvider jobListProvider,
   })  : _firestoreService = firestoreService ?? FirestoreService(),
-        _jobListProvider = jobListProvider;
-  // Don't initialize streams in constructor - let it be lazy loaded
+        _jobListProvider = jobListProvider {
+    // Listen to JobListProvider changes so collection schedule auto-updates
+    // when jobs are added, edited, or deleted in the job list.
+    _jobListProvider.addListener(_onJobListChanged);
+  }
+
+  /// Called when JobListProvider data changes. Rebuilds collection jobs
+  /// and time slot cache if we're already initialized.
+  void _onJobListChanged() {
+    if (!_isInitialized) return;
+
+    _buildCollectionJobs();
+    _rebuildTimeSlotCache();
+    notifyListeners();
+  }
 
   // Manual initialization - call this when the tab is opened
   Future<void> initialize() async {
@@ -60,7 +68,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   // Load data for a specific month - now does one-time load instead of streaming
   Future<void> _loadDataForMonth(DateTime month) async {
-    print(
+    debugPrint(
         'CollectionScheduleProvider: Loading data for month: ${_firestoreService.getMonthlyDocumentId(month)}');
 
     // Filter and convert job list items to collection jobs (one-time operation)
@@ -86,7 +94,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
         .map((job) => _jobListItemToCollectionJob(job))
         .toList();
 
-    print(
+    debugPrint(
         'CollectionScheduleProvider: Built ${_collectionJobs.length} collection jobs from job list');
   }
 
@@ -128,7 +136,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
       }
     }
 
-    print(
+    debugPrint(
         'CollectionScheduleProvider: Pre-computed time slot cache with ${_timeSlotCache.length} entries');
   }
 
@@ -137,10 +145,10 @@ class CollectionScheduleProvider extends ChangeNotifier {
     try {
       // Get the first emission from the stream for one-time fetch
       _workAreas = await _firestoreService.streamWorkAreas().first;
-      print(
+      debugPrint(
           'CollectionScheduleProvider: Loaded ${_workAreas.length} work areas');
     } catch (e) {
-      print('CollectionScheduleProvider: Error loading work areas: $e');
+      debugPrint('CollectionScheduleProvider: Error loading work areas: $e');
     }
   }
 
@@ -283,11 +291,11 @@ class CollectionScheduleProvider extends ChangeNotifier {
   }
 
   // Month navigation methods
-  void setCurrentMonth(DateTime month) {
+  Future<void> setCurrentMonth(DateTime month) async {
     if (_currentMonth != month) {
       _currentMonth = month;
-      _loadDataForMonth(_currentMonth);
-      notifyListeners();
+      await _loadDataForMonth(_currentMonth);
+      // notifyListeners() already called inside _loadDataForMonth
     }
   }
 
@@ -353,7 +361,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
   Future<String> addCollectionJob(CollectionJob job) async {
     // Collection jobs are now automatically derived from job list
     // This method is deprecated - modify the job list instead
-    print(
+    debugPrint(
         'addCollectionJob is deprecated - collection jobs are now derived from job list data');
     return job.id;
   }
@@ -363,7 +371,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
   Future<void> updateCollectionJob(CollectionJob job) async {
     // Collection jobs are now automatically derived from job list
     // This method is deprecated - modify the job list instead
-    print(
+    debugPrint(
         'updateCollectionJob is deprecated - collection jobs are now derived from job list data');
   }
 
@@ -373,9 +381,9 @@ class CollectionScheduleProvider extends ChangeNotifier {
       final job = collectionJobs.where((j) => j.id == jobId).firstOrNull;
       final jobDate = job?.date ?? _currentMonth;
       await _firestoreService.deleteCollectionJob(jobId, jobDate);
-      print('Successfully deleted collection job $jobId');
+      debugPrint('Successfully deleted collection job $jobId');
     } catch (e) {
-      print('Error deleting collection job: $e');
+      debugPrint('Error deleting collection job: $e');
       rethrow;
     }
   }
@@ -384,7 +392,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
     try {
       return collectionJobs.where((job) => job.id == jobId).firstOrNull;
     } catch (e) {
-      print('Error finding collection job by ID $jobId: $e');
+      debugPrint('Error finding collection job by ID $jobId: $e');
       return null;
     }
   }
@@ -609,8 +617,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    _workAreasSubscription?.cancel();
-    _jobListSubscription?.cancel();
+    _jobListProvider.removeListener(_onJobListChanged);
     super.dispose();
   }
 }
