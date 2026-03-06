@@ -47,21 +47,25 @@ class ScheduleProvider extends ChangeNotifier {
 
   // Getters
   List<Distributor> get distributors => _distributors;
-  List<Job> get jobs => _cachedJobs ??= [..._currentMonthJobs, ..._nextMonthJobs];
+  List<Job> get jobs =>
+      _cachedJobs ??= [..._currentMonthJobs, ..._nextMonthJobs];
   List<WorkArea> get workAreas => _workAreas;
-  Schedule get schedule => _cachedSchedule ??= Schedule(distributors: _distributors, jobs: jobs);
+  Schedule get schedule =>
+      _cachedSchedule ??= Schedule(distributors: _distributors, jobs: jobs);
 
   /// Build (or return cached) lookup map for O(1) cell queries.
   Map<String, List<Job>> get _lookupMap {
     if (_jobLookupMap != null) return _jobLookupMap!;
     final map = <String, List<Job>>{};
     for (final job in jobs) {
-      final key = '${job.distributorId}:${job.date.year}-${job.date.month.toString().padLeft(2, '0')}-${job.date.day.toString().padLeft(2, '0')}';
+      final key =
+          '${job.distributorId}:${job.date.year}-${job.date.month.toString().padLeft(2, '0')}-${job.date.day.toString().padLeft(2, '0')}';
       (map[key] ??= []).add(job);
     }
     _jobLookupMap = map;
     return map;
   }
+
   DateTime get currentMonth => _currentMonth;
   String get currentMonthDisplay =>
       _firestoreService.getMonthlyDocumentId(_currentMonth);
@@ -112,8 +116,7 @@ class ScheduleProvider extends ChangeNotifier {
   /// These are global (not month-specific) and only need to be created once.
   void _setupGlobalStreams() {
     // Listen to distributors stream from root collection (not monthly)
-    _distributorsSubscription =
-        _firestoreService.streamDistributors().listen(
+    _distributorsSubscription = _firestoreService.streamDistributors().listen(
       (distributors) {
         _distributors = distributors;
         _cachedSchedule = null; // Schedule depends on distributors
@@ -125,8 +128,7 @@ class ScheduleProvider extends ChangeNotifier {
     );
 
     // Listen to work areas stream from root collection (not monthly)
-    _workAreasSubscription =
-        _firestoreService.streamWorkAreas().listen(
+    _workAreasSubscription = _firestoreService.streamWorkAreas().listen(
       (workAreas) {
         _workAreas = workAreas;
         notifyListeners();
@@ -159,8 +161,7 @@ class ScheduleProvider extends ChangeNotifier {
         'ScheduleProvider: Starting job streams for current month: ${_firestoreService.getMonthlyDocumentId(month)} and next month: ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
 
     // Listen to jobs stream for the current month — set up synchronously
-    _currentMonthJobsSubscription =
-        _firestoreService.streamJobs(month).listen(
+    _currentMonthJobsSubscription = _firestoreService.streamJobs(month).listen(
       (jobs) {
         _currentMonthJobs = jobs;
         _invalidateCaches();
@@ -169,14 +170,12 @@ class ScheduleProvider extends ChangeNotifier {
         notifyListeners();
       },
       onError: (error) {
-        debugPrint(
-            'ScheduleProvider: Current month jobs stream error: $error');
+        debugPrint('ScheduleProvider: Current month jobs stream error: $error');
       },
     );
 
     // Listen to jobs stream for the next month
-    _nextMonthJobsSubscription =
-        _firestoreService.streamJobs(nextMonth).listen(
+    _nextMonthJobsSubscription = _firestoreService.streamJobs(nextMonth).listen(
       (jobs) {
         _nextMonthJobs = jobs;
         _invalidateCaches();
@@ -185,8 +184,7 @@ class ScheduleProvider extends ChangeNotifier {
         notifyListeners();
       },
       onError: (error) {
-        debugPrint(
-            'ScheduleProvider: Next month jobs stream error: $error');
+        debugPrint('ScheduleProvider: Next month jobs stream error: $error');
       },
     );
   }
@@ -377,7 +375,8 @@ class ScheduleProvider extends ChangeNotifier {
   // Helper methods
 
   List<Job> getJobsForDistributorAndDate(String distributorId, DateTime date) {
-    final key = '$distributorId:${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+    final key =
+        '$distributorId:${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
     return _lookupMap[key] ?? const [];
   }
 

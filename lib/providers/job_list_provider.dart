@@ -134,7 +134,7 @@ class JobListProvider extends ChangeNotifier {
     if (FlavorConfig.instance.isHappySun) {
       filtered = filtered.where((item) {
         return item.jobType == JobType.windowCleaning ||
-               item.jobType == JobType.solarPanelCleaning;
+            item.jobType == JobType.solarPanelCleaning;
       }).toList();
     }
 
@@ -267,7 +267,8 @@ class JobListProvider extends ChangeNotifier {
     List<JobType>? jobTypesFilter;
     if (FlavorConfig.instance.isHappySun) {
       jobTypesFilter = [JobType.windowCleaning, JobType.solarPanelCleaning];
-      debugPrint('JobListProvider: Happy Sun flavor - filtering to window cleaning & solar panel jobs only');
+      debugPrint(
+          'JobListProvider: Happy Sun flavor - filtering to window cleaning & solar panel jobs only');
     }
 
     _jobListSubscription =
@@ -337,7 +338,8 @@ class JobListProvider extends ChangeNotifier {
     try {
       // Set up listener for new month
       await _setupCurrentMonthListener();
-      debugPrint('JobListProvider: Successfully changed from $oldMonth to $month');
+      debugPrint(
+          'JobListProvider: Successfully changed from $oldMonth to $month');
     } catch (error) {
       // Revert on error
       _currentMonth = oldMonth;
@@ -424,7 +426,8 @@ class JobListProvider extends ChangeNotifier {
     // Debug reminder changes
     if (currentItem != null &&
         !_areRemindersEqual(currentItem.reminders, jobListItem.reminders)) {
-      debugPrint('JobListProvider: Reminders changed for item ${jobListItem.id}');
+      debugPrint(
+          'JobListProvider: Reminders changed for item ${jobListItem.id}');
       debugPrint('  Old reminders count: ${currentItem.reminders.length}');
       debugPrint('  New reminders count: ${jobListItem.reminders.length}');
     }
@@ -1114,7 +1117,8 @@ class JobListProvider extends ChangeNotifier {
           if (currentUser != null) break;
         }
         if (currentUser == null) {
-          debugPrint('JobListProvider: Auth not ready, skipping last checked time load');
+          debugPrint(
+              'JobListProvider: Auth not ready, skipping last checked time load');
           return;
         }
       }

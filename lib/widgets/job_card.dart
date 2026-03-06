@@ -309,37 +309,37 @@ class _JobStatusButton extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: statusProvider.statuses.map((status) {
-            final isSelected = status.id == job.statusId;
-            return ListTile(
-              dense: true,
-              title: Text(status.label),
-              tileColor: isSelected ? status.color.withOpacity(0.3) : null,
-              leading: Container(
-                width: 20,
-                height: 20,
-                decoration: BoxDecoration(
-                  color: status.color,
-                  shape: BoxShape.circle,
+              final isSelected = status.id == job.statusId;
+              return ListTile(
+                dense: true,
+                title: Text(status.label),
+                tileColor: isSelected ? status.color.withOpacity(0.3) : null,
+                leading: Container(
+                  width: 20,
+                  height: 20,
+                  decoration: BoxDecoration(
+                    color: status.color,
+                    shape: BoxShape.circle,
+                  ),
                 ),
-              ),
-              onTap: () {
-                // Get fresh job data from provider to avoid stale state
-                final scheduleProvider = context.read<ScheduleProvider>();
-                final freshJob = scheduleProvider.jobs.firstWhere(
-                  (j) => j.id == job.id,
-                  orElse: () => job,
-                );
-                final originalJob = freshJob;
-                final modifiedJob = freshJob.copyWith(statusId: status.id);
-                scheduleProvider.updateJobWithUndo(
-                  originalJob,
-                  modifiedJob,
-                  freshJob.date,
-                );
-                Navigator.of(context).pop();
-              },
-            );
-          }).toList(),
+                onTap: () {
+                  // Get fresh job data from provider to avoid stale state
+                  final scheduleProvider = context.read<ScheduleProvider>();
+                  final freshJob = scheduleProvider.jobs.firstWhere(
+                    (j) => j.id == job.id,
+                    orElse: () => job,
+                  );
+                  final originalJob = freshJob;
+                  final modifiedJob = freshJob.copyWith(statusId: status.id);
+                  scheduleProvider.updateJobWithUndo(
+                    originalJob,
+                    modifiedJob,
+                    freshJob.date,
+                  );
+                  Navigator.of(context).pop();
+                },
+              );
+            }).toList(),
           ),
         ),
       ),
