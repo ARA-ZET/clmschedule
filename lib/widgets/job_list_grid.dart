@@ -674,9 +674,11 @@ class JobListDataCellsBuilder extends StatelessWidget {
         Consumer<JobTypeProvider>(
           builder: (context, jobTypeProvider, child) {
             final jobTypes = jobTypeProvider.jobTypes;
-            final currentLabel = jobTypeProvider.getJobTypeLabel(item.jobTypeId);
+            final currentLabel =
+                jobTypeProvider.getJobTypeLabel(item.jobTypeId);
             // Ensure current value is in the list
-            final hasCurrentValue = jobTypes.any((jt) => jt.id == item.jobTypeId);
+            final hasCurrentValue =
+                jobTypes.any((jt) => jt.id == item.jobTypeId);
             return SizedBox(
               width: JobListColumnConfig.getWidth('jobType'),
               child: DropdownButton<String>(
@@ -1603,7 +1605,8 @@ class _JobListGridState extends State<JobListGrid> {
                                                         child: EditableDateCell(
                                                           value: item.date,
                                                           width: 80,
-                                                          jobTypeId: item.jobTypeId,
+                                                          jobTypeId:
+                                                              item.jobTypeId,
                                                           jobData: {
                                                             'id': item.id,
                                                             'quantity':

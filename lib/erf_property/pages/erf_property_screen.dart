@@ -190,8 +190,7 @@ class _ErfPropertyScreenState extends State<ErfPropertyScreen> {
                           ? const SizedBox(
                               width: 20,
                               height: 20,
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2),
+                              child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.search),
                     ),
@@ -205,8 +204,7 @@ class _ErfPropertyScreenState extends State<ErfPropertyScreen> {
                   margin: const EdgeInsets.symmetric(horizontal: 12),
                   color: Colors.teal.shade50,
                   child: ListTile(
-                    leading:
-                        const Icon(Icons.location_on, color: Colors.teal),
+                    leading: const Icon(Icons.location_on, color: Colors.teal),
                     title: Text(_searchResult!.displayLabel),
                     subtitle: Text(
                       'ERF ${_searchResult!.erfNumber} · ${_searchResult!.minRegion}\n'
@@ -216,8 +214,7 @@ class _ErfPropertyScreenState extends State<ErfPropertyScreen> {
                     trailing: IconButton(
                       icon: const Icon(Icons.map, color: Colors.teal),
                       tooltip: 'View on map',
-                      onPressed: () =>
-                          _openMap(properties: [_searchResult!]),
+                      onPressed: () => _openMap(properties: [_searchResult!]),
                     ),
                   ),
                 ),

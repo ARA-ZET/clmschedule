@@ -108,8 +108,8 @@ class JobListItemUpdate {
     if (value is DateTime) {
       // For date fields, check if we should show time based on job type
       if (fieldName == 'date' || fieldName == 'collectionDate') {
-        final shouldShowTime =
-            _shouldShowTime(jobTypeId) && (value.hour != 0 || value.minute != 0);
+        final shouldShowTime = _shouldShowTime(jobTypeId) &&
+            (value.hour != 0 || value.minute != 0);
         if (shouldShowTime) {
           return _formatDateTimeReadable(value);
         }

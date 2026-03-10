@@ -1056,8 +1056,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                       } else if (value == 'job_types') {
                         showDialog(
                           context: context,
-                          builder: (context) =>
-                              const JobTypeManagementDialog(),
+                          builder: (context) => const JobTypeManagementDialog(),
                         );
                       } else if (value == 'signout') {
                         final confirmed = await showDialog<bool>(
@@ -1475,7 +1474,6 @@ class ScheduleScreen extends StatelessWidget {
             TextButton(onPressed: () {}, child: const Text("Job List"))
           ],
         ),
-
       ),
       body: const ScheduleGrid(),
     );

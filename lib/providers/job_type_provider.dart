@@ -59,10 +59,7 @@ class JobTypeProvider extends ChangeNotifier {
       order: _getNextOrder(),
     );
 
-    await _firestore
-        .collection('customJobTypes')
-        .doc(id)
-        .set(jobType.toMap());
+    await _firestore.collection('customJobTypes').doc(id).set(jobType.toMap());
 
     _jobTypes.add(jobType);
     _sortJobTypes();

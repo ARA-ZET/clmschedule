@@ -115,10 +115,7 @@ class CustomJobType {
           isDefault: true,
           order: 9),
       CustomJobType(
-          id: 'postering',
-          label: 'Postering',
-          isDefault: true,
-          order: 10),
+          id: 'postering', label: 'Postering', isDefault: true, order: 10),
     ];
   }
 }

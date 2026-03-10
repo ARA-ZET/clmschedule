@@ -60,8 +60,7 @@ class _JobTypeManagementDialogState extends State<JobTypeManagementDialog> {
       if (_isAdding) {
         await provider.addJobType(_labelController.text.trim());
       } else if (_editingId != null) {
-        await provider.updateJobType(
-            _editingId!, _labelController.text.trim());
+        await provider.updateJobType(_editingId!, _labelController.text.trim());
       }
       _cancelEdit();
     } catch (e) {
@@ -146,16 +145,14 @@ class _JobTypeManagementDialogState extends State<JobTypeManagementDialog> {
                           jobType.isDefault
                               ? Icons.lock_outline
                               : Icons.work_outline,
-                          color:
-                              jobType.isDefault ? Colors.grey : Colors.blue,
+                          color: jobType.isDefault ? Colors.grey : Colors.blue,
                           size: 20,
                         ),
                         title: Text(
                           jobType.label,
                           style: TextStyle(
-                            fontWeight: isEditing
-                                ? FontWeight.bold
-                                : FontWeight.normal,
+                            fontWeight:
+                                isEditing ? FontWeight.bold : FontWeight.normal,
                           ),
                         ),
                         trailing: Row(

@@ -16,8 +16,7 @@ void main() async {
 
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  const flavor =
-      String.fromEnvironment('FLAVOR', defaultValue: 'erfProperty');
+  const flavor = String.fromEnvironment('FLAVOR', defaultValue: 'erfProperty');
   assert(
     flavor == 'erfProperty',
     'This entry point is for the erfProperty flavor only.',

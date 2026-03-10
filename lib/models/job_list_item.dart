@@ -411,8 +411,8 @@ class JobListItem {
         newValue: quantity,
         timestamp: DateTime.now(),
         userDisplayName: userDisplayName,
-        oldValueDisplay:
-            resolveQuantityLabel?.call(this.quantity, jobTypeId ?? this.jobTypeId),
+        oldValueDisplay: resolveQuantityLabel?.call(
+            this.quantity, jobTypeId ?? this.jobTypeId),
         newValueDisplay:
             resolveQuantityLabel?.call(quantity, jobTypeId ?? this.jobTypeId),
       ));

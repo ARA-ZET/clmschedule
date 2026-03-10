@@ -38,8 +38,9 @@ class ErfPropertyAdapter extends MapDataAdapter {
   String get adapterId => 'erf_property';
 
   @override
-  String get displayName =>
-      suburbFilter != null ? 'ERF Properties — $suburbFilter' : 'ERF Properties';
+  String get displayName => suburbFilter != null
+      ? 'ERF Properties — $suburbFilter'
+      : 'ERF Properties';
 
   @override
   MapEditorCapabilities get capabilities =>

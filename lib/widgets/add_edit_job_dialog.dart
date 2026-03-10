@@ -390,7 +390,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                             labelText: 'Job Type *',
                                             border: OutlineInputBorder(),
                                           ),
-                                          items: Provider.of<JobTypeProvider>(context, listen: false)
+                                          items: Provider.of<JobTypeProvider>(
+                                                  context,
+                                                  listen: false)
                                               .jobTypes
                                               .map((type) {
                                             return DropdownMenuItem<String>(
@@ -501,7 +503,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                               labelText: 'Job Type *',
                                               border: OutlineInputBorder(),
                                             ),
-                                            items: Provider.of<JobTypeProvider>(context, listen: false)
+                                            items: Provider.of<JobTypeProvider>(
+                                                    context,
+                                                    listen: false)
                                                 .jobTypes
                                                 .map((type) {
                                               return DropdownMenuItem<String>(
@@ -518,9 +522,12 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                 setState(() {
                                                   _selectedJobType = value;
                                                   // Reset vehicle/trailer combo when job type changes
-                                                  if (value == 'junkCollection' ||
-                                                      value == 'furnitureMove' ||
-                                                      value == 'trailerTowing') {
+                                                  if (value ==
+                                                          'junkCollection' ||
+                                                      value ==
+                                                          'furnitureMove' ||
+                                                      value ==
+                                                          'trailerTowing') {
                                                     _selectedVehicleTrailerCombo =
                                                         null;
                                                     _quantityController.text =
@@ -547,8 +554,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                 'junkCollection' ||
                                             _selectedJobType ==
                                                 'furnitureMove' ||
-                                            _selectedJobType ==
-                                                'trailerTowing')
+                                            _selectedJobType == 'trailerTowing')
                                         ? DropdownButtonFormField<String>(
                                             initialValue:
                                                 _selectedVehicleTrailerCombo,
@@ -1129,8 +1135,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
                               // Conditionally show fields based on job type
                               if (_selectedJobType != 'windowCleaning' &&
-                                  _selectedJobType !=
-                                      'solarPanelCleaning') ...[
+                                  _selectedJobType != 'solarPanelCleaning') ...[
                                 // Row 7: Quantity Distributed & Invoice Details
                                 Row(
                                   children: [
@@ -1199,8 +1204,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
                               // Tools Needed button for window/solar cleaning
                               if (_selectedJobType == 'windowCleaning' ||
-                                  _selectedJobType ==
-                                      'solarPanelCleaning') ...[
+                                  _selectedJobType == 'solarPanelCleaning') ...[
                                 const SizedBox(height: 16),
                                 OutlinedButton.icon(
                                   onPressed: _showToolsDialog,
