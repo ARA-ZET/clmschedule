@@ -359,4 +359,37 @@ class InventoryService {
 
     await batch.commit();
   }
+
+  /// Reset all tools that are marked as in-use back to available
+  Future<int> resetAllInUse() async {
+    final snapshot = await _firestore
+        .collection('inventoryTools')
+        .where('isInUse', isEqualTo: true)
+        .get();
+
+    if (snapshot.docs.isEmpty) return 0;
+
+    // Firestore batches limited to 500 writes
+    final chunks = <List<QueryDocumentSnapshot>>[];
+    for (var i = 0; i < snapshot.docs.length; i += 500) {
+      chunks.add(snapshot.docs.sublist(
+        i,
+        i + 500 > snapshot.docs.length ? snapshot.docs.length : i + 500,
+      ));
+    }
+
+    for (final chunk in chunks) {
+      final batch = _firestore.batch();
+      for (final doc in chunk) {
+        batch.update(doc.reference, {
+          'isInUse': false,
+          'currentProject': null,
+          'lastUsed': FieldValue.serverTimestamp(),
+        });
+      }
+      await batch.commit();
+    }
+
+    return snapshot.docs.length;
+  }
 }

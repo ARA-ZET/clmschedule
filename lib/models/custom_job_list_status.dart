@@ -5,12 +5,14 @@ class CustomJobListStatus {
   final String label;
   final Color color;
   final bool isDefault;
+  final List<String> hiddenForJobTypes;
 
   const CustomJobListStatus({
     required this.id,
     required this.label,
     required this.color,
     this.isDefault = false,
+    this.hiddenForJobTypes = const [],
   });
 
   // Convert from Firestore document
@@ -20,6 +22,10 @@ class CustomJobListStatus {
       label: map['label'] as String,
       color: Color(map['color'] as int),
       isDefault: map['isDefault'] as bool? ?? false,
+      hiddenForJobTypes: (map['hiddenForJobTypes'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList() ??
+          [],
     );
   }
 
@@ -30,6 +36,7 @@ class CustomJobListStatus {
       'label': label,
       'color': color.toARGB32(),
       'isDefault': isDefault,
+      'hiddenForJobTypes': hiddenForJobTypes,
     };
   }
 
@@ -39,12 +46,14 @@ class CustomJobListStatus {
     String? label,
     Color? color,
     bool? isDefault,
+    List<String>? hiddenForJobTypes,
   }) {
     return CustomJobListStatus(
       id: id ?? this.id,
       label: label ?? this.label,
       color: color ?? this.color,
       isDefault: isDefault ?? this.isDefault,
+      hiddenForJobTypes: hiddenForJobTypes ?? this.hiddenForJobTypes,
     );
   }
 
@@ -55,14 +64,24 @@ class CustomJobListStatus {
         other.id == id &&
         other.label == label &&
         other.color == color &&
-        other.isDefault == isDefault;
+        other.isDefault == isDefault &&
+        _listEquals(other.hiddenForJobTypes, hiddenForJobTypes);
+  }
+
+  static bool _listEquals(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   @override
-  int get hashCode => Object.hash(id, label, color, isDefault);
+  int get hashCode => Object.hash(
+      id, label, color, isDefault, Object.hashAll(hiddenForJobTypes));
 
   @override
   String toString() {
-    return 'CustomJobListStatus(id: $id, label: $label, color: $color, isDefault: $isDefault)';
+    return 'CustomJobListStatus(id: $id, label: $label, color: $color, isDefault: $isDefault, hiddenForJobTypes: $hiddenForJobTypes)';
   }
 }

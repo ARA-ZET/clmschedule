@@ -63,8 +63,12 @@ class TEProcessingPanel extends StatelessWidget {
                           ),
                         )
                       : const Icon(Icons.upload_file, size: 18),
-                  label: const Text('Select GPX Files'),
-                  onPressed: proc.loading ? null : () => proc.pickFiles(),
+                  label: Text(proc.loading && proc.progressMessage.isNotEmpty
+                      ? proc.progressMessage
+                      : 'Select GPX Files'),
+                  onPressed: (proc.loading || proc.openingTabs)
+                      ? null
+                      : () => proc.pickFiles(),
                   style: FilledButton.styleFrom(
                     backgroundColor: Colors.blueGrey.shade600,
                     padding: const EdgeInsets.symmetric(vertical: 10),
@@ -75,7 +79,9 @@ class TEProcessingPanel extends StatelessWidget {
               ),
               if (hasFiles)
                 IconButton.outlined(
-                  onPressed: proc.clearFiles,
+                  onPressed: (proc.loading || proc.openingTabs)
+                      ? null
+                      : proc.clearFiles,
                   icon: const Icon(Icons.clear_all, size: 20),
                   tooltip: 'Clear all files',
                   style: IconButton.styleFrom(
@@ -86,6 +92,43 @@ class TEProcessingPanel extends StatelessWidget {
             ],
           ),
 
+          // ── Progress indicator during tab opening ───────────────────────
+          if (proc.openingTabs) ...[
+            Column(
+              spacing: 6,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  spacing: 8,
+                  children: [
+                    const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    Text(
+                      proc.progressMessage,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.blueGrey.shade700,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: proc.openProgress,
+                    minHeight: 6,
+                    backgroundColor: Colors.blueGrey.shade100,
+                    valueColor: AlwaysStoppedAnimation(Colors.green.shade600),
+                  ),
+                ),
+              ],
+            ),
+          ],
+
           // ── Nothing staged yet ──────────────────────────────────────────
           if (!hasFiles)
             _EmptyHint(
@@ -94,7 +137,7 @@ class TEProcessingPanel extends StatelessWidget {
             ),
 
           // ── Matched pairs ───────────────────────────────────────────────
-          if (pairs.isNotEmpty && !proc.tabsOpened) ...[
+          if (pairs.isNotEmpty && !proc.tabsOpened && !proc.openingTabs) ...[
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [

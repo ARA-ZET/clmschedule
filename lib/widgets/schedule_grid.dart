@@ -7,6 +7,7 @@ import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 import '../models/distributor.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/scale_provider.dart';
+import 'date_schedule_map_page.dart';
 import 'month_navigation_widget.dart';
 import 'schedule_job_cell.dart';
 
@@ -19,6 +20,7 @@ class _ScheduleGridData {
   final double scale;
   final int jobsCount; // Track job count to trigger rebuilds
   final int jobsVersion; // Monotonic version counter from provider
+  final bool isFullscreen;
 
   const _ScheduleGridData({
     required this.distributors,
@@ -28,6 +30,7 @@ class _ScheduleGridData {
     required this.scale,
     required this.jobsCount,
     required this.jobsVersion,
+    required this.isFullscreen,
   });
 
   @override
@@ -41,7 +44,8 @@ class _ScheduleGridData {
           currentMonthDisplay == other.currentMonthDisplay &&
           scale == other.scale &&
           jobsCount == other.jobsCount &&
-          jobsVersion == other.jobsVersion;
+          jobsVersion == other.jobsVersion &&
+          isFullscreen == other.isFullscreen;
 
   @override
   int get hashCode =>
@@ -51,7 +55,8 @@ class _ScheduleGridData {
       currentMonthDisplay.hashCode ^
       scale.hashCode ^
       jobsCount.hashCode ^
-      jobsVersion.hashCode;
+      jobsVersion.hashCode ^
+      isFullscreen.hashCode;
 }
 
 class ScheduleGrid extends StatefulWidget {
@@ -94,6 +99,32 @@ class _ScheduleGridState extends State<ScheduleGrid> {
       'Dec',
     ];
     return months[month - 1];
+  }
+
+  /// Opens the date schedule map page with distributor tabs.
+  Future<void> _openDateMap(BuildContext context, DateTime date) async {
+    final scheduleProvider = context.read<ScheduleProvider>();
+
+    final jobs = scheduleProvider.getJobsForDate(date);
+    final jobsWithMaps = jobs.where((j) => j.workMaps.isNotEmpty).toList();
+
+    if (jobsWithMaps.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No map areas for this day')),
+      );
+      return;
+    }
+
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => DateScheduleMapPage(
+          date: date,
+          jobs: jobsWithMaps,
+          distributors: scheduleProvider.distributors,
+        ),
+      ),
+    );
   }
 
   // Generate list of days for the current month, plus next month if it has jobs
@@ -186,7 +217,10 @@ class _ScheduleGridState extends State<ScheduleGrid> {
 
   @override
   Widget build(BuildContext context) {
-    final isFullscreen = context.watch<TogglerProvider>().isFullview;
+    // Watch TogglerProvider so build() re-runs on toggle, causing the Selector
+    // below to re-evaluate _ScheduleGridData (which includes isFullscreen).
+    // The Selector then rebuilds its subtree atomically only when the value changed.
+    context.watch<TogglerProvider>();
 
     // Use Selector to only rebuild when specific data changes
     return Selector<ScheduleProvider, _ScheduleGridData>(
@@ -201,6 +235,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
           scale: context.read<ScaleProvider>().scale,
           jobsCount: jobs.length,
           jobsVersion: scheduleProvider.jobsVersion,
+          isFullscreen: context.read<TogglerProvider>().isFullviewSchedule,
         );
       },
       builder: (context, gridData, child) {
@@ -216,8 +251,9 @@ class _ScheduleGridState extends State<ScheduleGrid> {
         final dates = _getDates(gridData.currentMonth, scheduleProvider);
         final distributors = gridData.distributors;
 
-        final double rowHeight =
-            isFullscreen ? 92.0 * gridData.scale : 40.0 * gridData.scale;
+        final double rowHeight = gridData.isFullscreen
+            ? 92.0 * gridData.scale
+            : 40.0 * gridData.scale;
 
         // Scroll to today's date when data is loaded
         _scrollToToday(dates);
@@ -232,33 +268,9 @@ class _ScheduleGridState extends State<ScheduleGrid> {
               onCurrentMonth: scheduleProvider.goToCurrentMonth,
               onMonthSelected: scheduleProvider.goToMonth,
               availableMonths: scheduleProvider.getAvailableMonths(),
+              mode: Mode.schedule,
             ),
 
-            // Week navigation removed - using month navigation only
-            // Table scroll hint
-            // Container(
-            //   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            //   child: Row(
-            //     children: [
-            //       Icon(Icons.swipe_left, size: 16, color: Colors.grey[600]),
-            //       const SizedBox(width: 4),
-            //       Text(
-            //         'Scroll horizontally and vertically to view all schedule data',
-            //         style: TextStyle(
-            //           fontSize: 12,
-            //           color: Colors.grey[600],
-            //           fontStyle: FontStyle.italic,
-            //         ),
-            //       ),
-            //       const Spacer(),
-            //       Icon(Icons.swipe_right, size: 16, color: Colors.grey[600]),
-            //       const SizedBox(width: 8),
-            //       Icon(Icons.swipe_up, size: 16, color: Colors.grey[600]),
-            //       Icon(Icons.swipe_down, size: 16, color: Colors.grey[600]),
-            //     ],
-            //   ),
-            // ),
-            // Grid
             Expanded(
               child: Scrollbar(
                 controller: _horizontalScrollController,
@@ -376,23 +388,42 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                       .primaryColor
                                       .withOpacity(0.2)
                                   : null,
-                              child: Center(
-                                child: FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  child: Text(
-                                    '${DateFormat('EEE').format(date)} ${date.day} ${_getMonthAbbreviation(date.month)}',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleSmall
-                                        ?.copyWith(
-                                          fontWeight:
-                                              isToday ? FontWeight.bold : null,
-                                          color: isToday
-                                              ? Theme.of(context).primaryColor
-                                              : null,
-                                        ),
-                                    textAlign: TextAlign.center,
-                                  ),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text(
+                                      '${DateFormat('EEE').format(date)} ${date.day} ${_getMonthAbbreviation(date.month)}',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleSmall
+                                          ?.copyWith(
+                                            fontWeight: isToday
+                                                ? FontWeight.bold
+                                                : null,
+                                            color: isToday
+                                                ? Theme.of(context).primaryColor
+                                                : null,
+                                          ),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    SizedBox(
+                                      height: scaleProvider.smallIconSize,
+                                      width: scaleProvider.smallIconSize,
+                                      child: IconButton(
+                                        padding: EdgeInsets.zero,
+                                        iconSize:
+                                            scaleProvider.smallIconSize - 2,
+                                        icon: const Icon(Icons.map_outlined),
+                                        tooltip: 'View all areas for this day',
+                                        onPressed: () =>
+                                            _openDateMap(context, date),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ),
@@ -445,6 +476,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
                                 jobs: jobs,
                                 cellWidth: cellWidth,
                                 rowHeight: rowHeight,
+                                isFullscreen: gridData.isFullscreen,
                               ),
                             ),
                           );

@@ -473,6 +473,18 @@ class InventoryProvider extends ChangeNotifier {
     }).toList();
   }
 
+  /// Reset all tools marked as in-use back to available
+  Future<int> resetAllInUse() async {
+    try {
+      final count = await _inventoryService.resetAllInUse();
+      return count;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      rethrow;
+    }
+  }
+
   @override
   void dispose() {
     _toolsSubscription?.cancel();

@@ -14,6 +14,7 @@ import '../models/tab_item.dart';
 import '../../models/distributor.dart';
 import '../../models/custom_polygon.dart';
 import '../../providers/schedule_provider.dart';
+import '../services/point_in_polygon.dart';
 import 'te_tabs_provider.dart';
 
 class TEProcessingProvider extends ChangeNotifier {
@@ -26,6 +27,16 @@ class TEProcessingProvider extends ChangeNotifier {
 
   bool _tabsOpened = false;
   bool get tabsOpened => _tabsOpened;
+
+  /// Progress during batch tab opening (0.0 – 1.0).
+  double _openProgress = 0;
+  double get openProgress => _openProgress;
+
+  bool _openingTabs = false;
+  bool get openingTabs => _openingTabs;
+
+  String _progressMessage = '';
+  String get progressMessage => _progressMessage;
 
   // ── Derived ────────────────────────────────────────────────────────────────
   List<TEGpxMatchedPair> get matchedPairs {
@@ -77,12 +88,19 @@ class TEProcessingProvider extends ChangeNotifier {
       );
       if (result != null) {
         _tabsOpened = false;
-        for (final pf in result.files) {
+        _progressMessage = 'Parsing files...';
+        notifyListeners();
+        final total = result.files.length;
+        for (var i = 0; i < total; i++) {
+          final pf = result.files[i];
           final bytes = pf.bytes;
           if (bytes == null) continue;
-          final entry = TEGpxFileEntry.parse(pf.name, bytes);
+          _progressMessage = 'Parsing ${i + 1} of $total...';
+          notifyListeners();
+          final entry = await parseGpxFileAsync(pf.name, bytes);
           _files.add(entry);
         }
+        _progressMessage = '';
       }
     } catch (e) {
       debugPrint('❌ TEProcessingProvider.pickFiles: $e');
@@ -128,9 +146,28 @@ class TEProcessingProvider extends ChangeNotifier {
     TETabsProvider tabsProvider,
     ScheduleProvider scheduleProvider,
   ) async {
-    for (final pair in matchedPairs) {
-      await _openPairAsTab(pair, tabsProvider, scheduleProvider);
+    final pairs = matchedPairs;
+    if (pairs.isEmpty) return;
+
+    _openingTabs = true;
+    _openProgress = 0;
+    _progressMessage = 'Preparing tabs...';
+    notifyListeners();
+
+    final newTabs = <TETabItem>[];
+    for (var i = 0; i < pairs.length; i++) {
+      _openProgress = (i + 1) / pairs.length;
+      _progressMessage = 'Loading ${i + 1} of ${pairs.length}...';
+      notifyListeners();
+      final tab = await _buildTabForPair(pairs[i], scheduleProvider);
+      newTabs.add(tab);
     }
+
+    tabsProvider.addTabsBatch(newTabs);
+
+    _openingTabs = false;
+    _openProgress = 0;
+    _progressMessage = '';
     _tabsOpened = true;
     notifyListeners();
   }
@@ -140,49 +177,35 @@ class TEProcessingProvider extends ChangeNotifier {
     TETabsProvider tabsProvider,
     ScheduleProvider scheduleProvider,
   ) async {
+    final tab = await _buildTabForPair(pair, scheduleProvider);
+    tabsProvider.addTab(tab);
+    tabsProvider.selectTab(tabsProvider.tabs.length - 1);
+  }
+
+  /// Build a [TETabItem] from a matched pair, resolving schedule data.
+  Future<TETabItem> _buildTabForPair(
+    TEGpxMatchedPair pair,
+    ScheduleProvider scheduleProvider,
+  ) async {
     debugPrint('──────────────────────────────────────────');
-    debugPrint('📂 Opening tab for pair: "${pair.matchKey}"');
+    debugPrint('📂 Building tab for pair: "${pair.matchKey}"');
 
-    // 1. Extract the date from the first timestamped track point.
     final trackDate = _extractTrackDate(pair.trackFile.tracks);
-    debugPrint(
-        '📅 Track date: ${trackDate != null ? trackDate.toString() : "❌ not found (no timestamps in GPX)"}');
-
-    // 2. Try to find a matching distributor by name from the matchKey.
-    debugPrint(
-        '👥 Distributors available: ${scheduleProvider.distributors.map((d) => d.name).toList()}');
     final distributor =
         _matchDistributor(pair.matchKey, scheduleProvider.distributors);
-    debugPrint(distributor != null
-        ? '✅ Distributor matched: "${distributor.name}" (id: ${distributor.id})'
-        : '❌ No distributor matched for key "${pair.matchKey}"');
 
-    // 3. Fetch jobs directly from Firestore for the exact date.
-    //    This bypasses debug-mode stream limits (which only load current week).
     final workMapPolygons = <TEStyledPolygon>[];
     if (trackDate != null && distributor != null) {
       debugPrint(
-          '🔄 Fetching jobs from Firestore for ${distributor.name} on ${trackDate.toLocal().toString().substring(0, 10)}...');
+          '🔄 Fetching jobs for ${distributor.name} on ${trackDate.toLocal().toString().substring(0, 10)}...');
       final jobs = await scheduleProvider.fetchJobsForDistributorAndDate(
         distributor.id,
         trackDate,
       );
-      debugPrint('📋 Jobs found: ${jobs.length}');
       for (final job in jobs) {
-        debugPrint(
-            '   • Job ${job.id}: workMaps=${job.workMaps.length}, clients=${job.clients}');
         for (final wm in job.workMaps) {
-          debugPrint(
-              '     └─ Polygon "${wm.name}" (${wm.points.length} pts, color=${wm.color})');
           workMapPolygons.add(_customPolygonToStyled(wm));
         }
-      }
-    } else {
-      if (trackDate == null) {
-        debugPrint('⚠️  Skipping job lookup: no track date');
-      }
-      if (distributor == null) {
-        debugPrint('⚠️  Skipping job lookup: no distributor match');
       }
     }
     debugPrint('🗺  Work-map polygons loaded: ${workMapPolygons.length}');
@@ -194,11 +217,10 @@ class TEProcessingProvider extends ChangeNotifier {
       waypoints: [...pair.waypointsFile.waypoints],
       targetPolygons: [],
     );
-    tabsProvider.addTab(tab);
-    tabsProvider.selectTab(tabsProvider.tabs.length - 1);
     debugPrint(
-        '✅ Tab "${pair.tabTitle}" created — tracks: ${tab.tracks.length}, waypoints: ${tab.waypoints.length}, polygons: ${tab.polygons.length}');
+        '✅ Tab "${pair.tabTitle}" — tracks: ${tab.tracks.length}, wpts: ${tab.waypoints.length}, polys: ${tab.polygons.length}');
     debugPrint('──────────────────────────────────────────');
+    return tab;
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────

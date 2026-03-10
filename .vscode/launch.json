@@ -48,6 +48,14 @@
       "program": "lib/main_happysun.dart",
       "args": ["--dart-define=FLAVOR=happysun"],
       "flutterMode": "release"
+    },
+    {
+      "name": "ERF Property Viewer (ERF Flavor)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main_erfproperty.dart",
+      "args": ["--dart-define=FLAVOR=erfProperty"],
+      "flutterMode": "debug"
     }
   ]
 }

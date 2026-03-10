@@ -521,9 +521,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                 client: 'Unknown Client',
                 jobStatusId: project.statusId,
                 invoiceStatusId: 'pending',
-                jobType: project.isWindowCleaning
-                    ? JobType.windowCleaning
-                    : JobType.solarPanelCleaning,
+                jobTypeId: project.isWindowCleaning
+                    ? 'windowCleaning'
+                    : 'solarPanelCleaning',
                 area: '',
                 quantity: 0,
                 manDays: 0,
@@ -797,7 +797,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
         ),
         _buildDetailRow(
           'Type',
-          jobListItem.jobType.displayName,
+          jobListItem.jobTypeId,
         ),
         // Special Instructions section (if available)
         if (jobListItem.specialInstructions.isNotEmpty) ...[

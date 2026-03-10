@@ -3,14 +3,17 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/job_list_item.dart';
+import '../models/job_list_item_update.dart';
 import '../models/collection_job.dart';
 import '../models/happy_sun_shared.dart';
+import '../providers/auth_provider.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/job_list_status_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/collection_schedule_provider.dart';
 import '../providers/inventory_provider.dart';
 import '../providers/tool_settings_provider.dart';
+import '../providers/job_type_provider.dart';
 import '../services/job_assignment_service.dart';
 import 'job_assignment_preview_dialog.dart';
 import 'happy_sun_tools_dialog.dart';
@@ -47,7 +50,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
   // Dropdown values
   late String _selectedJobStatusId; // Now stores custom status ID
-  late JobType _selectedJobType;
+  late String _selectedJobType;
   String? _selectedVehicleTrailerCombo;
 
   // Date values
@@ -66,7 +69,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     debugPrint('   Mode: ${job != null ? "EDIT" : "CREATE"}');
     if (job != null) {
       debugPrint('   Job ID: ${job.id}');
-      debugPrint('   Job Type: ${job.jobType.displayName}');
+      debugPrint('   Job Type: ${job.jobTypeId}');
       debugPrint('   Client: ${job.client}');
     }
 
@@ -95,16 +98,16 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
     // Initialize dropdown values
     _selectedJobStatusId = job?.jobStatusId ?? 'standby';
-    _selectedJobType = job?.jobType ?? JobType.flyersPrintingOnly;
+    _selectedJobType = job?.jobTypeId ?? 'flyersPrintingOnly';
 
     // Initialize vehicle/trailer combo based on existing quantity for junk collection
-    if ((_selectedJobType == JobType.junkCollection) && job != null) {
+    if ((_selectedJobType == 'junkCollection') && job != null) {
       _selectedVehicleTrailerCombo =
           _getVehicleTrailerComboFromQuantity(job.quantity);
     }
     // Initialize vehicle/trailer combo based on existing quantity for junk collection
-    if ((_selectedJobType == JobType.furnitureMove ||
-            _selectedJobType == JobType.trailerTowing) &&
+    if ((_selectedJobType == 'furnitureMove' ||
+            _selectedJobType == 'trailerTowing') &&
         job != null) {
       _selectedVehicleTrailerCombo =
           _getVehicleTrailerComboFromQuantity(job.quantity);
@@ -334,8 +337,22 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                         Consumer<JobListStatusProvider>(
                                           builder:
                                               (context, statusProvider, child) {
-                                            final statuses =
-                                                statusProvider.statuses;
+                                            var statuses = statusProvider
+                                                .getStatusesForJobType(
+                                                    _selectedJobType);
+                                            // Ensure current selection stays valid
+                                            if (!statuses.any((s) =>
+                                                s.id == _selectedJobStatusId)) {
+                                              final current =
+                                                  statusProvider.getStatusById(
+                                                      _selectedJobStatusId);
+                                              if (current != null) {
+                                                statuses = [
+                                                  current,
+                                                  ...statuses
+                                                ];
+                                              }
+                                            }
                                             return DropdownButtonFormField<
                                                 String>(
                                               initialValue:
@@ -367,17 +384,19 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                           },
                                         ),
                                         const SizedBox(height: 12),
-                                        DropdownButtonFormField<JobType>(
-                                          initialValue: _selectedJobType,
+                                        DropdownButtonFormField<String>(
+                                          value: _selectedJobType,
                                           decoration: const InputDecoration(
                                             labelText: 'Job Type *',
                                             border: OutlineInputBorder(),
                                           ),
-                                          items: JobType.values.map((type) {
-                                            return DropdownMenuItem<JobType>(
-                                              value: type,
+                                          items: Provider.of<JobTypeProvider>(context, listen: false)
+                                              .jobTypes
+                                              .map((type) {
+                                            return DropdownMenuItem<String>(
+                                              value: type.id,
                                               child: Text(
-                                                type.displayName,
+                                                type.label,
                                                 maxLines: 1,
                                                 overflow: TextOverflow.ellipsis,
                                               ),
@@ -388,13 +407,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                               setState(() {
                                                 _selectedJobType = value;
                                                 // Reset vehicle/trailer combo when job type changes
-                                                if (value ==
-                                                        JobType
-                                                            .junkCollection ||
-                                                    value ==
-                                                        JobType.furnitureMove ||
-                                                    value ==
-                                                        JobType.trailerTowing) {
+                                                if (value == 'junkCollection' ||
+                                                    value == 'furnitureMove' ||
+                                                    value == 'trailerTowing') {
                                                   _selectedVehicleTrailerCombo =
                                                       null;
                                                   _quantityController.text =
@@ -427,8 +442,23 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                               Consumer<JobListStatusProvider>(
                                             builder: (context, statusProvider,
                                                 child) {
-                                              final statuses =
-                                                  statusProvider.statuses;
+                                              var statuses = statusProvider
+                                                  .getStatusesForJobType(
+                                                      _selectedJobType);
+                                              // Ensure current selection stays valid
+                                              if (!statuses.any((s) =>
+                                                  s.id ==
+                                                  _selectedJobStatusId)) {
+                                                final current = statusProvider
+                                                    .getStatusById(
+                                                        _selectedJobStatusId);
+                                                if (current != null) {
+                                                  statuses = [
+                                                    current,
+                                                    ...statuses
+                                                  ];
+                                                }
+                                              }
                                               return DropdownButtonFormField<
                                                   String>(
                                                 initialValue:
@@ -465,17 +495,19 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                         Flexible(
                                           flex: 2,
                                           child:
-                                              DropdownButtonFormField<JobType>(
-                                            initialValue: _selectedJobType,
+                                              DropdownButtonFormField<String>(
+                                            value: _selectedJobType,
                                             decoration: const InputDecoration(
                                               labelText: 'Job Type *',
                                               border: OutlineInputBorder(),
                                             ),
-                                            items: JobType.values.map((type) {
-                                              return DropdownMenuItem<JobType>(
-                                                value: type,
+                                            items: Provider.of<JobTypeProvider>(context, listen: false)
+                                                .jobTypes
+                                                .map((type) {
+                                              return DropdownMenuItem<String>(
+                                                value: type.id,
                                                 child: Text(
-                                                  type.displayName,
+                                                  type.label,
                                                   overflow:
                                                       TextOverflow.ellipsis,
                                                 ),
@@ -486,15 +518,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                 setState(() {
                                                   _selectedJobType = value;
                                                   // Reset vehicle/trailer combo when job type changes
-                                                  if (value ==
-                                                          JobType
-                                                              .junkCollection ||
-                                                      value ==
-                                                          JobType
-                                                              .furnitureMove ||
-                                                      value ==
-                                                          JobType
-                                                              .trailerTowing) {
+                                                  if (value == 'junkCollection' ||
+                                                      value == 'furnitureMove' ||
+                                                      value == 'trailerTowing') {
                                                     _selectedVehicleTrailerCombo =
                                                         null;
                                                     _quantityController.text =
@@ -518,11 +544,11 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                   Expanded(
                                     flex: 2,
                                     child: (_selectedJobType ==
-                                                JobType.junkCollection ||
+                                                'junkCollection' ||
                                             _selectedJobType ==
-                                                JobType.furnitureMove ||
+                                                'furnitureMove' ||
                                             _selectedJobType ==
-                                                JobType.trailerTowing)
+                                                'trailerTowing')
                                         ? DropdownButtonFormField<String>(
                                             initialValue:
                                                 _selectedVehicleTrailerCombo,
@@ -551,14 +577,11 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                             },
                                             validator: (value) {
                                               if ((_selectedJobType ==
-                                                          JobType
-                                                              .junkCollection ||
+                                                          'junkCollection' ||
                                                       _selectedJobType ==
-                                                          JobType
-                                                              .furnitureMove ||
+                                                          'furnitureMove' ||
                                                       _selectedJobType ==
-                                                          JobType
-                                                              .trailerTowing) &&
+                                                          'trailerTowing') &&
                                                   value == null) {
                                                 return 'Please select vehicle & trailer';
                                               }
@@ -626,11 +649,11 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                             _selectedVehicleTrailerCombo !=
                                                 null &&
                                             (_selectedJobType ==
-                                                    JobType.junkCollection ||
+                                                    'junkCollection' ||
                                                 _selectedJobType ==
-                                                    JobType.furnitureMove ||
+                                                    'furnitureMove' ||
                                                 _selectedJobType ==
-                                                    JobType.trailerTowing)) {
+                                                    'trailerTowing')) {
                                           final quantity =
                                               _getQuantityFromVehicleTrailerCombo(
                                                   _selectedVehicleTrailerCombo);
@@ -800,13 +823,11 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                                       Colors
                                                                           .red;
 
-                                                                  if (_selectedJobType == JobType.junkCollection ||
+                                                                  if (_selectedJobType == 'junkCollection' ||
                                                                       _selectedJobType ==
-                                                                          JobType
-                                                                              .furnitureMove ||
+                                                                          'furnitureMove' ||
                                                                       _selectedJobType ==
-                                                                          JobType
-                                                                              .trailerTowing) {
+                                                                          'trailerTowing') {
                                                                     // Get vehicle type from quantity
                                                                     if (_selectedVehicleTrailerCombo !=
                                                                         null) {
@@ -1107,9 +1128,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                               const SizedBox(height: 16),
 
                               // Conditionally show fields based on job type
-                              if (_selectedJobType != JobType.windowCleaning &&
+                              if (_selectedJobType != 'windowCleaning' &&
                                   _selectedJobType !=
-                                      JobType.solarPanelCleaning) ...[
+                                      'solarPanelCleaning') ...[
                                 // Row 7: Quantity Distributed & Invoice Details
                                 Row(
                                   children: [
@@ -1119,11 +1140,11 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                             _quantityDistributedController,
                                         decoration: InputDecoration(
                                           labelText: (_selectedJobType ==
-                                                      JobType.junkCollection ||
+                                                      'junkCollection' ||
                                                   _selectedJobType ==
-                                                      JobType.furnitureMove ||
+                                                      'furnitureMove' ||
                                                   _selectedJobType ==
-                                                      JobType.trailerTowing)
+                                                      'trailerTowing')
                                               ? "Time Slot"
                                               : 'Quantity Distributed',
                                           border: const OutlineInputBorder(),
@@ -1177,9 +1198,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                               ],
 
                               // Tools Needed button for window/solar cleaning
-                              if (_selectedJobType == JobType.windowCleaning ||
+                              if (_selectedJobType == 'windowCleaning' ||
                                   _selectedJobType ==
-                                      JobType.solarPanelCleaning) ...[
+                                      'solarPanelCleaning') ...[
                                 const SizedBox(height: 16),
                                 OutlinedButton.icon(
                                   onPressed: _showToolsDialog,
@@ -1381,9 +1402,62 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     );
   }
 
+  JobListItem _buildJobListItem() {
+    final bool isNew = widget.jobToEdit == null;
+
+    // Preserve existing updates, or initialize empty list
+    List<JobListItemUpdate> currentUpdates =
+        widget.jobToEdit?.updates.toList() ?? [];
+
+    // Log creation if this is a new job
+    if (isNew) {
+      final authProvider = mounted ? context.read<AuthProvider>() : null;
+      final userId = authProvider?.user?.uid ?? 'system';
+      final userName = authProvider?.appUser?.name ??
+          authProvider?.user?.displayName ??
+          'System';
+
+      currentUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'created',
+        oldValue: null,
+        newValue: 'Job created',
+        timestamp: DateTime.now(),
+        userDisplayName: userName,
+      ));
+    }
+
+    return JobListItem(
+      id: widget.jobToEdit?.id ?? '',
+      invoice: _invoiceController.text.trim(),
+      amount: double.tryParse(_amountController.text) ?? 0.0,
+      client: _clientController.text.trim(),
+      jobStatusId: _selectedJobStatusId,
+      invoiceStatusId: widget.jobToEdit?.invoiceStatusId ?? 'pending',
+      jobTypeId: _selectedJobType,
+      area: _areaController.text.trim(),
+      quantity: int.tryParse(_quantityController.text) ?? 0,
+      manDays: double.tryParse(_manDaysController.text) ?? 0.0,
+      date: _selectedDate ?? DateTime.now(),
+      collectionAddress: _collectionAddressController.text.trim(),
+      collectionDate: _selectedCollectionDate ?? DateTime(2000, 1, 1),
+      specialInstructions: _specialInstructionsController.text.trim(),
+      quantityDistributed:
+          int.tryParse(_quantityDistributedController.text) ?? 0,
+      invoiceDetails: _invoiceDetailsController.text.trim(),
+      reportAddresses: _reportAddressesController.text.trim(),
+      whoToInvoice: _whoToInvoiceController.text.trim(),
+      toolsNeeded: _toolsNeeded,
+      updates: currentUpdates,
+      customPolygons: widget.jobToEdit?.customPolygons ?? const [],
+      reminders: widget.jobToEdit?.reminders ?? const [],
+      collectionJobId: widget.jobToEdit?.collectionJobId ?? '',
+    );
+  }
+
   void _saveJob() async {
     debugPrint('\n💾 AddEditJobDialog._saveJob: Started');
-    debugPrint('   Job Type: ${_selectedJobType.displayName}');
+    debugPrint('   Job Type: $_selectedJobType');
     debugPrint('   Client: ${_clientController.text.trim()}');
     debugPrint(
         '   Tools Needed: ${_toolsNeeded != null ? "Yes (${_toolsNeeded!.totalCount} tools)" : "No"}');
@@ -1394,30 +1468,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
       });
 
       debugPrint('   Creating JobListItem object...');
-      final jobListItem = JobListItem(
-        id: widget.jobToEdit?.id ?? '',
-        invoice: _invoiceController.text.trim(),
-        amount: double.tryParse(_amountController.text) ?? 0.0,
-        client: _clientController.text.trim(),
-        jobStatusId: _selectedJobStatusId,
-        invoiceStatusId: widget.jobToEdit?.invoiceStatusId ?? 'pending',
-        jobType: _selectedJobType,
-        area: _areaController.text.trim(),
-        quantity: int.tryParse(_quantityController.text) ?? 0,
-        manDays: double.tryParse(_manDaysController.text) ?? 0.0,
-        date: _selectedDate ?? DateTime.now(),
-        collectionAddress: _collectionAddressController.text.trim(),
-        collectionDate: _selectedCollectionDate ?? DateTime(2000, 1, 1),
-        specialInstructions: _specialInstructionsController.text.trim(),
-        quantityDistributed:
-            int.tryParse(_quantityDistributedController.text) ?? 0,
-        invoiceDetails: _invoiceDetailsController.text.trim(),
-        reportAddresses: _reportAddressesController.text.trim(),
-        whoToInvoice: _whoToInvoiceController.text.trim(),
-        toolsNeeded: _toolsNeeded,
-      );
+      final jobListItem = _buildJobListItem();
       debugPrint('   ✅ JobListItem created');
-      debugPrint('   - Job Type: ${jobListItem.jobType.displayName}');
+      debugPrint('   - Job Type: ${jobListItem.jobTypeId}');
       debugPrint('   - Has Tools: ${jobListItem.toolsNeeded != null}');
 
       try {
@@ -1428,9 +1481,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
           debugPrint(
               '   No direct DB write from dialog - JobList/JobListGrid handles update');
           // Check if this is a collection job and if time/date changed
-          if ((_selectedJobType == JobType.junkCollection ||
-                  _selectedJobType == JobType.furnitureMove ||
-                  _selectedJobType == JobType.trailerTowing) &&
+          if ((_selectedJobType == 'junkCollection' ||
+                  _selectedJobType == 'furnitureMove' ||
+                  _selectedJobType == 'trailerTowing') &&
               widget.jobToEdit!.collectionJobId.isNotEmpty) {
             // Update the linked collection job if date/time changed
             // Collection job updates are now automatic via JobListProvider stream
@@ -1440,9 +1493,9 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         }
 
         // For new jobs, check if this is a collection job type
-        if (_selectedJobType == JobType.junkCollection ||
-            _selectedJobType == JobType.furnitureMove ||
-            _selectedJobType == JobType.trailerTowing) {
+        if (_selectedJobType == 'junkCollection' ||
+            _selectedJobType == 'furnitureMove' ||
+            _selectedJobType == 'trailerTowing') {
           debugPrint('   🚚 Collection job type - returning to caller');
           debugPrint(
               '   No direct DB write - JobList/JobListGrid handles creation');
@@ -1471,34 +1524,14 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
     debugPrint('\n💾 AddEditJobDialog._saveJobWithoutAllocation: Started');
     debugPrint(
         '   ⚠️ WARNING: This method calls JobListProvider.addJobListItem directly!');
-    debugPrint('   Job Type: ${_selectedJobType.displayName}');
+    debugPrint('   Job Type: $_selectedJobType');
 
     if (_formKey.currentState!.validate()) {
       setState(() {
         _isProcessing = true;
       });
 
-      final jobListItem = JobListItem(
-        id: widget.jobToEdit?.id ?? '',
-        invoice: _invoiceController.text.trim(),
-        amount: double.tryParse(_amountController.text) ?? 0.0,
-        client: _clientController.text.trim(),
-        jobStatusId: _selectedJobStatusId,
-        invoiceStatusId: widget.jobToEdit?.invoiceStatusId ?? 'pending',
-        jobType: _selectedJobType,
-        area: _areaController.text.trim(),
-        quantity: int.tryParse(_quantityController.text) ?? 0,
-        manDays: double.tryParse(_manDaysController.text) ?? 0.0,
-        date: _selectedDate ?? DateTime.now(),
-        collectionAddress: _collectionAddressController.text.trim(),
-        collectionDate: _selectedCollectionDate ?? DateTime(2000, 1, 1),
-        specialInstructions: _specialInstructionsController.text.trim(),
-        quantityDistributed:
-            int.tryParse(_quantityDistributedController.text) ?? 0,
-        invoiceDetails: _invoiceDetailsController.text.trim(),
-        reportAddresses: _reportAddressesController.text.trim(),
-        whoToInvoice: _whoToInvoiceController.text.trim(),
-      );
+      final jobListItem = _buildJobListItem();
 
       try {
         // Save the job to database but skip automatic schedule allocation
@@ -1536,27 +1569,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
         _isProcessing = true;
       });
 
-      final jobListItem = JobListItem(
-        id: widget.jobToEdit?.id ?? '',
-        invoice: _invoiceController.text.trim(),
-        amount: double.tryParse(_amountController.text) ?? 0.0,
-        client: _clientController.text.trim(),
-        jobStatusId: _selectedJobStatusId,
-        invoiceStatusId: widget.jobToEdit?.invoiceStatusId ?? 'pending',
-        jobType: _selectedJobType,
-        area: _areaController.text.trim(),
-        quantity: int.tryParse(_quantityController.text) ?? 0,
-        manDays: double.tryParse(_manDaysController.text) ?? 0.0,
-        date: _selectedDate ?? DateTime.now(),
-        collectionAddress: _collectionAddressController.text.trim(),
-        collectionDate: _selectedCollectionDate ?? DateTime(2000, 1, 1),
-        specialInstructions: _specialInstructionsController.text.trim(),
-        quantityDistributed:
-            int.tryParse(_quantityDistributedController.text) ?? 0,
-        invoiceDetails: _invoiceDetailsController.text.trim(),
-        reportAddresses: _reportAddressesController.text.trim(),
-        whoToInvoice: _whoToInvoiceController.text.trim(),
-      );
+      final jobListItem = _buildJobListItem();
 
       try {
         // For editing with automatic allocation, show assignment preview
@@ -1672,7 +1685,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   // Helper methods for vehicle/trailer combinations
   List<String> _getVehicleTrailerCombinations() {
     // For trailer towing, only show no-trailer combinations
-    if (_selectedJobType == JobType.trailerTowing) {
+    if (_selectedJobType == 'trailerTowing') {
       return [
         'Hyundai - No Trailer',
         'Mahindra - No Trailer',
@@ -1722,12 +1735,12 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   }
 
   // Helper methods for time selection
-  bool _needsTimeSelection(JobType jobType) {
-    return jobType == JobType.junkCollection ||
-        jobType == JobType.furnitureMove ||
-        jobType == JobType.trailerTowing ||
-        jobType == JobType.windowCleaning ||
-        jobType == JobType.solarPanelCleaning;
+  bool _needsTimeSelection(String jobTypeId) {
+    return jobTypeId == 'junkCollection' ||
+        jobTypeId == 'furnitureMove' ||
+        jobTypeId == 'trailerTowing' ||
+        jobTypeId == 'windowCleaning' ||
+        jobTypeId == 'solarPanelCleaning';
   }
 
   List<TimeOfDay> _getAvailableTimeSlots() {
@@ -1796,7 +1809,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
   void _showToolsDialog() async {
     debugPrint('\n🔧 AddEditJobDialog._showToolsDialog: Opening tools dialog');
-    debugPrint('   Job Type: ${_selectedJobType.displayName}');
+    debugPrint('   Job Type: $_selectedJobType');
     debugPrint(
         '   Current tools: ${_toolsNeeded != null ? "${_toolsNeeded!.totalCount} tools" : "None"}');
 

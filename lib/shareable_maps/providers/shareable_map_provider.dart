@@ -90,6 +90,7 @@ class ShareableMapProvider extends ChangeNotifier {
   bool _isSidebarVisible = true;
   bool _isWorkAreaPickerVisible = false;
   GoogleMapController? _mapController;
+  bool _pendingFitBounds = false;
 
   // Map type / style state
   MapType _mapType = MapType.normal;
@@ -1317,6 +1318,18 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Set the Google Maps controller
   void setMapController(GoogleMapController controller) {
     _mapController = controller;
+    if (_pendingFitBounds) {
+      _pendingFitBounds = false;
+      Future.delayed(const Duration(milliseconds: 300), () {
+        fitMapToBounds();
+      });
+    }
+  }
+
+  /// Request a fit-to-bounds camera animation after the next map controller
+  /// is set (i.e. after [loadFromAdapter] triggers a map rebuild).
+  void requestFitBoundsOnLoad() {
+    _pendingFitBounds = true;
   }
 
   /// Fit map to bounds

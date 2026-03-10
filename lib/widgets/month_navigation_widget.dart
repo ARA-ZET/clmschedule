@@ -9,7 +9,9 @@ class MonthNavigationWidget extends StatelessWidget {
   final VoidCallback onCurrentMonth;
   final Function(String monthId) onMonthSelected;
   final Future<List<String>> availableMonths;
-  final VoidCallback? onRefresh; // Optional refresh callback
+  final VoidCallback? onRefresh;
+  final Mode mode;
+  // Optional refresh callback
 
   const MonthNavigationWidget({
     super.key,
@@ -19,7 +21,9 @@ class MonthNavigationWidget extends StatelessWidget {
     required this.onCurrentMonth,
     required this.onMonthSelected,
     required this.availableMonths,
-    this.onRefresh, // Optional parameter
+    this.onRefresh,
+    required this.mode,
+    // Optional parameter
   });
 
   /// Generate a list of month IDs (2 before current, current, 2 after current)
@@ -72,7 +76,11 @@ class MonthNavigationWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final monthRange = _generateMonthRange(currentMonthDisplay);
-    final isFullview = context.watch<TogglerProvider>().isFullview;
+    final isFullview = mode == Mode.schedule
+        ? context.watch<TogglerProvider>().isFullviewSchedule
+        : mode == Mode.collection
+            ? context.watch<TogglerProvider>().isFullviewCollection
+            : false;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -186,7 +194,7 @@ class MonthNavigationWidget extends StatelessWidget {
             children: [
               IconButton(
                   onPressed: () {
-                    context.read<TogglerProvider>().toggleFullview();
+                    context.read<TogglerProvider>().toggleFullview(mode);
                   },
                   tooltip:
                       isFullview ? "Exit Fullscreen" : "Change to fullscreen",

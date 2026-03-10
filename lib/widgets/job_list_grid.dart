@@ -1,3 +1,4 @@
+import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -8,6 +9,7 @@ import '../providers/job_list_preferences_provider.dart';
 import '../providers/job_list_status_provider.dart';
 import '../providers/invoice_status_provider.dart';
 import '../providers/scale_provider.dart';
+import '../providers/job_type_provider.dart';
 import '../shareable_maps/providers/shareable_map_provider.dart';
 import '../shareable_maps/adapters/job_list_area_adapter.dart';
 import '../shareable_maps/widgets/shareable_map_editor.dart';
@@ -354,7 +356,7 @@ class JobListDataCellsBuilder extends StatelessWidget {
   final Function(BuildContext, JobListItem) onShowCopyDialog;
   final Function(BuildContext, JobListItem) onShowDeleteConfirmation;
   final String? Function(int) getVehicleTypeStringFromQuantity;
-  final String? Function(int, JobType) getVehicleTrailerComboFromQuantity;
+  final String? Function(int, String) getVehicleTrailerComboFromQuantity;
 
   const JobListDataCellsBuilder({
     super.key,
@@ -374,34 +376,14 @@ class JobListDataCellsBuilder extends StatelessWidget {
   List<DataCell> buildCells(BuildContext context) {
     final cells = <DataCell>[];
 
-    // Date
+    // Date — skip building (hidden behind frozen column overlay)
     if (prefsProvider.isColumnVisible('date')) {
-      cells.add(DataCell(
-        EditableDateCell(
-          value: item.date,
-          width: JobListColumnConfig.getWidth('date'),
-          jobType: item.jobType,
-          jobData: {
-            'id': item.id,
-            'quantity': item.quantity,
-            'vehicleType': getVehicleTypeStringFromQuantity(item.quantity),
-          },
-          onSave: (date) => onUpdateField(item, 'date', date),
-        ),
-      ));
+      cells.add(const DataCell(SizedBox.shrink()));
     }
 
-    // Client
+    // Client — skip building (hidden behind frozen column overlay)
     if (prefsProvider.isColumnVisible('client')) {
-      cells.add(DataCell(
-        EditableTableCell(
-          value: item.client,
-          onSave: (value) => onUpdateField(item, 'client', value),
-          width: JobListColumnConfig.getWidth('client'),
-          validator: (value) =>
-              value?.isEmpty == true ? 'Client required' : null,
-        ),
-      ));
+      cells.add(const DataCell(SizedBox.shrink()));
     }
 
     // Job Status
@@ -411,6 +393,16 @@ class JobListDataCellsBuilder extends StatelessWidget {
           builder: (context, statusProvider, child) {
             final currentStatus =
                 statusProvider.getStatusById(item.jobStatusId);
+            final filteredStatuses =
+                statusProvider.getStatusesForJobType(item.jobTypeId);
+            // Ensure current status is always in the list
+            final statuses =
+                filteredStatuses.any((s) => s.id == item.jobStatusId)
+                    ? filteredStatuses
+                    : [
+                        if (currentStatus != null) currentStatus,
+                        ...filteredStatuses,
+                      ];
             return Container(
               width: JobListColumnConfig.getWidth('jobStatus'),
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
@@ -423,17 +415,16 @@ class JobListDataCellsBuilder extends StatelessWidget {
                 borderRadius: BorderRadius.circular(4),
               ),
               child: DropdownButton<String>(
-                value:
-                    statusProvider.statuses.any((s) => s.id == item.jobStatusId)
-                        ? item.jobStatusId
-                        : null,
+                value: statuses.any((s) => s.id == item.jobStatusId)
+                    ? item.jobStatusId
+                    : null,
                 underline: const SizedBox.shrink(),
                 isDense: true,
-                items: statusProvider.statuses.map((status) {
+                isExpanded: true,
+                items: statuses.map((status) {
                   return DropdownMenuItem<String>(
                     value: status.id,
                     child: Row(
-                      mainAxisSize: MainAxisSize.min,
                       children: [
                         Container(
                           width: 12,
@@ -444,11 +435,14 @@ class JobListDataCellsBuilder extends StatelessWidget {
                             shape: BoxShape.circle,
                           ),
                         ),
-                        Text(
-                          status.label,
-                          style: TextStyle(
-                            fontSize: scaleProvider.mediumFontSize,
-                            fontWeight: FontWeight.bold,
+                        Expanded(
+                          child: Text(
+                            status.label,
+                            style: TextStyle(
+                              fontSize: scaleProvider.mediumFontSize,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
                       ],
@@ -677,30 +671,40 @@ class JobListDataCellsBuilder extends StatelessWidget {
     // Job Type
     if (prefsProvider.isColumnVisible('jobType')) {
       cells.add(DataCell(
-        SizedBox(
-          width: JobListColumnConfig.getWidth('jobType'),
-          child: DropdownButton<JobType>(
-            value: item.jobType,
-            underline: const SizedBox.shrink(),
-            isDense: true,
-            items: JobType.values.map((type) {
-              return DropdownMenuItem<JobType>(
-                value: type,
-                child: Text(
-                  type.displayName,
-                  style: TextStyle(
-                    fontSize: scaleProvider.mediumFontSize,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              );
-            }).toList(),
-            onChanged: (newType) {
-              if (newType != null) {
-                onUpdateField(item, 'jobType', newType);
-              }
-            },
-          ),
+        Consumer<JobTypeProvider>(
+          builder: (context, jobTypeProvider, child) {
+            final jobTypes = jobTypeProvider.jobTypes;
+            final currentLabel = jobTypeProvider.getJobTypeLabel(item.jobTypeId);
+            // Ensure current value is in the list
+            final hasCurrentValue = jobTypes.any((jt) => jt.id == item.jobTypeId);
+            return SizedBox(
+              width: JobListColumnConfig.getWidth('jobType'),
+              child: DropdownButton<String>(
+                value: hasCurrentValue ? item.jobTypeId : null,
+                hint: Text(currentLabel,
+                    style: TextStyle(fontSize: scaleProvider.mediumFontSize)),
+                underline: const SizedBox.shrink(),
+                isDense: true,
+                items: jobTypes.map((jt) {
+                  return DropdownMenuItem<String>(
+                    value: jt.id,
+                    child: Text(
+                      jt.label,
+                      style: TextStyle(
+                        fontSize: scaleProvider.mediumFontSize,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  );
+                }).toList(),
+                onChanged: (newTypeId) {
+                  if (newTypeId != null) {
+                    onUpdateField(item, 'jobType', newTypeId);
+                  }
+                },
+              ),
+            );
+          },
         ),
       ));
     }
@@ -747,7 +751,7 @@ class JobListDataCellsBuilder extends StatelessWidget {
       cells.add(DataCell(
         EditableVehicleComboCell(
           quantity: item.quantity,
-          jobType: item.jobType,
+          jobTypeId: item.jobTypeId,
           width: JobListColumnConfig.getWidth('quantity'),
           onSave: (quantity) {
             onUpdateField(item, 'quantity', quantity);
@@ -808,7 +812,7 @@ class JobListDataCellsBuilder extends StatelessWidget {
         EditableDateCell(
           value: item.collectionDate,
           width: JobListColumnConfig.getWidth('collectionDate'),
-          jobType: item.jobType,
+          jobTypeId: item.jobTypeId,
           jobData: {},
           onSave: (date) => onUpdateField(item, 'collectionDate', date),
         ),
@@ -898,47 +902,58 @@ class JobListDataCellsBuilder extends StatelessWidget {
       ));
     }
 
+    // Refresh / View Update History
+    if (prefsProvider.isColumnVisible('refresh')) {
+      cells.add(DataCell(
+        Center(
+          child: item.updates.isNotEmpty
+              ? Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    IconButton(
+                      icon: Icon(Icons.history,
+                          size: scaleProvider.mediumIconSize),
+                      onPressed: () => onShowUpdateHistory(context, item),
+                      tooltip: 'View Update History',
+                    ),
+                    if (jobListProvider
+                        .getUpdatesAfterLastCheck(item)
+                        .isNotEmpty)
+                      Positioned(
+                        right: 8,
+                        top: 8,
+                        child: Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: const BoxDecoration(
+                            color: Colors.orange,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Text(
+                            jobListProvider
+                                .getUpdatesAfterLastCheck(item)
+                                .length
+                                .toString(),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                )
+              : const SizedBox.shrink(),
+        ),
+      ));
+    }
+
     // Actions
     if (prefsProvider.isColumnVisible('actions')) {
       cells.add(DataCell(
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (item.updates.isNotEmpty)
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  IconButton(
-                    icon:
-                        Icon(Icons.history, size: scaleProvider.mediumIconSize),
-                    onPressed: () => onShowUpdateHistory(context, item),
-                    tooltip: 'View Update History',
-                  ),
-                  if (jobListProvider.getUpdatesAfterLastCheck(item).isNotEmpty)
-                    Positioned(
-                      right: 8,
-                      top: 8,
-                      child: Container(
-                        padding: const EdgeInsets.all(4),
-                        decoration: const BoxDecoration(
-                          color: Colors.orange,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Text(
-                          jobListProvider
-                              .getUpdatesAfterLastCheck(item)
-                              .length
-                              .toString(),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
             IconButton(
               icon: Icon(Icons.edit, size: scaleProvider.smallIconSize),
               onPressed: () => onShowEditDialog(context, item),
@@ -1157,6 +1172,7 @@ class _JobListGridState extends State<JobListGrid> {
                         onCurrentMonth: jobListProvider.goToCurrentMonth,
                         onMonthSelected: jobListProvider.goToMonth,
                         availableMonths: jobListProvider.getAvailableMonths(),
+                        mode: Mode.joblist,
                       ),
                     ),
                     // Subtle loading indicator when data is loading but items exist (refreshing)
@@ -1198,33 +1214,36 @@ class _JobListGridState extends State<JobListGrid> {
                 ),
 
                 // Search and Filter Bar - Single compact row
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      // Search field
-                      Expanded(
-                        flex: 3,
-                        child: SizedBox(
-                          height: 48,
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                  ),
+                  child: SizedBox(
+                    height: 44, // Fixed height for uniformity
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // Search field
+                        Expanded(
+                          flex: 3,
                           child: ValueListenableBuilder<bool>(
                             valueListenable:
                                 jobListProvider.isSearchingNotifier,
                             builder: (context, isSearching, child) {
                               return TextField(
                                 controller: _searchController,
+                                style: const TextStyle(fontSize: 14),
                                 decoration: InputDecoration(
+                                  isDense: true,
                                   hintText:
                                       'Search by client, invoice, or area...',
-                                  prefixIcon: Icon(Icons.search,
-                                      size: scaleProvider.mediumIconSize),
+                                  prefixIcon: Icon(Icons.search, size: 20),
                                   suffixIcon: isSearching
                                       ? Padding(
                                           padding: const EdgeInsets.all(12.0),
                                           child: SizedBox(
-                                            width: 20,
-                                            height: 20,
+                                            width: 16,
+                                            height: 16,
                                             child: CircularProgressIndicator(
                                               strokeWidth: 2,
                                               valueColor:
@@ -1235,200 +1254,168 @@ class _JobListGridState extends State<JobListGrid> {
                                           ),
                                         )
                                       : null,
-                                  border: const OutlineInputBorder(),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
                                   contentPadding: const EdgeInsets.symmetric(
-                                      vertical: 8, horizontal: 12),
+                                      vertical: 0, horizontal: 12),
                                 ),
-                                onChanged: (value) {
-                                  jobListProvider.setSearchQuery(value);
-                                },
+                                onChanged: jobListProvider.setSearchQuery,
                               );
                             },
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-
-                      // Invoice Status Filter
-                      SizedBox(
-                        width: 160,
-                        height: 48,
-                        child: MultiSelectInvoiceStatusFilter(
-                          selectedStatusIds:
-                              jobListProvider.invoiceStatusFilters,
-                          onToggle: jobListProvider.toggleInvoiceStatusFilter,
-                          onClear: () {
-                            jobListProvider.clearFilters();
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-
-                      // Simple Date Filter
-                      SizedBox(
-                        width: 220,
-                        height: 48,
-                        child: SimpleDateFilter(
-                          startDate: jobListProvider.startDate,
-                          endDate: jobListProvider.endDate,
-                          onSingleDateSelected: (date) {
-                            jobListProvider.setSimpleDateFilter(date);
-                          },
-                          onDateRangeSelected: (startDate, endDate) {
-                            jobListProvider.setSimpleDateRangeFilter(
-                                startDate, endDate);
-                          },
-                          onClear: () {
-                            jobListProvider.clearDateFilter();
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-
-                      // Job Status Filter
-                      SizedBox(
-                        width: 160,
-                        height: 48,
-                        child: MultiSelectStatusFilter(
-                          selectedStatusIds: jobListProvider.statusFilters,
-                          onToggle: jobListProvider.toggleStatusFilter,
-                          onClear: () {
-                            jobListProvider.clearFilters();
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-
-                      // Sort by date button
-                      InkWell(
-                        onTap: () {
-                          print(
-                              'Sort button tapped - current: ${jobListProvider.sortAscending}');
-                          jobListProvider.setSorting(
-                            'date',
-                            !jobListProvider.sortAscending,
-                          );
-                          print(
-                              'Sort after toggle: ${jobListProvider.sortAscending}');
-                        },
-                        child: Container(
-                          width: 140,
-                          height: 48,
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            border: Border.all(color: Colors.grey.shade400),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'Sort by Date',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                              Icon(
-                                jobListProvider.sortAscending
-                                    ? Icons.arrow_upward
-                                    : Icons.arrow_downward,
-                                size: 18,
-                                color: Colors.grey[700],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-
-                      // Action buttons - Clear and Add Job
-                      ElevatedButton.icon(
-                        onPressed: () {
-                          _searchController.clear();
-                          jobListProvider.clearFilters();
-                        },
-                        icon: Icon(Icons.clear,
-                            size: scaleProvider.smallIconSize),
-                        label: const Text('Clear',
-                            style: TextStyle(
-                                fontSize: 12, fontWeight: FontWeight.bold)),
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 4),
-                          minimumSize: const Size(0, 36),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton.icon(
-                        onPressed: _isAddingJob
-                            ? null
-                            : () => _showAddJobDialog(context),
-                        icon: _isAddingJob
-                            ? SizedBox(
-                                width: scaleProvider.smallIconSize,
-                                height: scaleProvider.smallIconSize,
-                                child: const CircularProgressIndicator(
-                                    strokeWidth: 2),
-                              )
-                            : Icon(Icons.add,
-                                size: scaleProvider.smallIconSize),
-                        label: Text(_isAddingJob ? 'Adding...' : 'Add Job',
-                            style: const TextStyle(
-                                fontSize: 12, fontWeight: FontWeight.bold)),
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 4),
-                          minimumSize: const Size(0, 36),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      // Column preferences button
-                      IconButton(
-                        icon: Icon(Icons.view_column,
-                            size: scaleProvider.mediumIconSize),
-                        onPressed: () {
-                          showDialog(
-                            context: context,
-                            builder: (context) => const JobListColumnsDialog(),
-                          );
-                        },
-                        tooltip: 'Customize Columns',
-                        style: IconButton.styleFrom(
-                          backgroundColor: Colors.grey.shade200,
-                        ),
-                      ),
-                      if (jobListProvider.pendingUpdatesCount > 0) ...[
                         const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.orange.shade100,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: Colors.orange.shade300),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.sync,
-                                  size: scaleProvider.smallIconSize,
-                                  color: Colors.orange.shade700),
-                              const SizedBox(width: 2),
-                              Text(
-                                '${jobListProvider.pendingUpdatesCount}',
-                                style: TextStyle(
-                                  fontSize: scaleProvider.smallFontSize,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.orange.shade700,
-                                ),
-                              ),
-                            ],
+
+                        // Invoice Status Filter
+                        SizedBox(
+                          width: 160,
+                          child: MultiSelectInvoiceStatusFilter(
+                            selectedStatusIds:
+                                jobListProvider.invoiceStatusFilters,
+                            onToggle: jobListProvider.toggleInvoiceStatusFilter,
+                            onClear: jobListProvider.clearFilters,
                           ),
                         ),
+                        const SizedBox(width: 8),
+
+                        // Simple Date Filter
+                        SizedBox(
+                          width: 220,
+                          child: SimpleDateFilter(
+                            startDate: jobListProvider.startDate,
+                            endDate: jobListProvider.endDate,
+                            onSingleDateSelected:
+                                jobListProvider.setSimpleDateFilter,
+                            onDateRangeSelected:
+                                jobListProvider.setSimpleDateRangeFilter,
+                            onClear: jobListProvider.clearDateFilter,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+
+                        // Job Status Filter
+                        SizedBox(
+                          width: 160,
+                          child: MultiSelectStatusFilter(
+                            selectedStatusIds: jobListProvider.statusFilters,
+                            onToggle: jobListProvider.toggleStatusFilter,
+                            onClear: jobListProvider.clearFilters,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+
+                        // Sort by date button
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            jobListProvider.setSorting(
+                              'date',
+                              !jobListProvider.sortAscending,
+                            );
+                          },
+                          style: OutlinedButton.styleFrom(
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(6)),
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                          ),
+                          icon: Icon(
+                            jobListProvider.sortAscending
+                                ? Icons.arrow_upward
+                                : Icons.arrow_downward,
+                            size: 16,
+                          ),
+                          label: const Text('Sort by Date',
+                              style: TextStyle(fontSize: 13)),
+                        ),
+                        const SizedBox(width: 8),
+
+                        // Clear Button
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            _searchController.clear();
+                            jobListProvider.clearFilters();
+                          },
+                          style: OutlinedButton.styleFrom(
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(6)),
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                          ),
+                          icon: const Icon(Icons.clear, size: 16),
+                          label: const Text('Clear',
+                              style: TextStyle(fontSize: 13)),
+                        ),
+                        const SizedBox(width: 8),
+
+                        // Add Job Button
+                        FilledButton.icon(
+                          onPressed: _isAddingJob
+                              ? null
+                              : () => _showAddJobDialog(context),
+                          style: FilledButton.styleFrom(
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(6)),
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                          ),
+                          icon: _isAddingJob
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2, color: Colors.white),
+                                )
+                              : const Icon(Icons.add, size: 18),
+                          label: Text(_isAddingJob ? 'Adding...' : 'Add Job',
+                              style: const TextStyle(
+                                  fontSize: 13, fontWeight: FontWeight.bold)),
+                        ),
+                        const SizedBox(width: 8),
+
+                        // Column preferences button
+                        IconButton.filledTonal(
+                          onPressed: () {
+                            showDialog(
+                              context: context,
+                              builder: (context) =>
+                                  const JobListColumnsDialog(),
+                            );
+                          },
+                          icon: const Icon(Icons.view_column, size: 20),
+                          tooltip: 'Customize Columns',
+                          style: IconButton.styleFrom(
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(6)),
+                          ),
+                        ),
+                        if (jobListProvider.pendingUpdatesCount > 0) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.shade100,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: Colors.orange.shade300),
+                            ),
+                            alignment: Alignment.center,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.sync,
+                                    size: 16, color: Colors.orange.shade700),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${jobListProvider.pendingUpdatesCount}',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.orange.shade700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ),
                 // Table scroll hint
@@ -1455,226 +1442,220 @@ class _JobListGridState extends State<JobListGrid> {
                 //   ),
                 // Job List Table
                 Expanded(
-                  child: jobListItems.isEmpty
+                  child: jobListProvider.isApplyingFilter
                       ? Center(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(Icons.list_alt,
-                                  size: scaleProvider.xlargeIconSize,
-                                  color: Colors.grey),
+                              const CircularProgressIndicator(),
                               const SizedBox(height: 16),
                               Text(
-                                'No jobs found',
+                                'Updating results...',
                                 style: TextStyle(
-                                  fontSize: scaleProvider.xlargeFontSize,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.grey,
+                                  fontSize: scaleProvider.largeFontSize,
+                                  color: Colors.grey[600],
                                 ),
-                              ),
-                              const SizedBox(height: 8),
-                              const Text(
-                                'Add a job to get started',
-                                style: TextStyle(color: Colors.grey),
                               ),
                             ],
                           ),
                         )
-                      : Container(
-                          margin: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.grey[300]!),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Stack(
-                            children: [
-                              // Main scrollable table
-                              Scrollbar(
-                                controller: _horizontalScrollController,
-                                thumbVisibility: true,
-                                trackVisibility: true,
-                                thickness: 12,
-                                radius: const Radius.circular(6),
-                                child: SingleChildScrollView(
-                                  controller: _horizontalScrollController,
-                                  scrollDirection: Axis.horizontal,
-                                  child: ConstrainedBox(
-                                    constraints: BoxConstraints(
-                                      minWidth: JobListColumnConfig
-                                          .calculateTotalWidth(
-                                              prefsProvider.visibleColumns),
+                      : jobListItems.isEmpty
+                          ? Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.list_alt,
+                                      size: scaleProvider.xlargeIconSize,
+                                      color: Colors.grey),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    'No jobs found',
+                                    style: TextStyle(
+                                      fontSize: scaleProvider.xlargeFontSize,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.grey,
                                     ),
-                                    child: SingleChildScrollView(
-                                      controller: _mainVerticalScrollController,
-                                      scrollDirection: Axis.vertical,
-                                      child: DataTable(
-                                        columnSpacing: 0,
-                                        horizontalMargin: 8,
-                                        headingRowColor:
-                                            WidgetStateProperty.all(
-                                          Colors.grey[100],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  const Text(
+                                    'Add a job to get started',
+                                    style: TextStyle(color: Colors.grey),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : Container(
+                              margin: const EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.grey[300]!),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Stack(
+                                children: [
+                                  // Main scrollable table with virtualized rows
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                        top: 57), // Below frozen header
+                                    child: Scrollbar(
+                                      controller: _horizontalScrollController,
+                                      thumbVisibility: true,
+                                      trackVisibility: true,
+                                      thickness: 12,
+                                      radius: const Radius.circular(6),
+                                      child: SingleChildScrollView(
+                                        controller: _horizontalScrollController,
+                                        scrollDirection: Axis.horizontal,
+                                        child: SizedBox(
+                                          width: JobListColumnConfig
+                                              .calculateTotalWidth(
+                                                  prefsProvider.visibleColumns),
+                                          child: _buildVirtualizedRows(
+                                            jobListItems: jobListItems,
+                                            jobListProvider: jobListProvider,
+                                            scaleProvider: scaleProvider,
+                                            prefsProvider: prefsProvider,
+                                            statusProvider: context
+                                                .read<JobListStatusProvider>(),
+                                          ),
                                         ),
-                                        columns: JobListDataColumns(
-                                                prefsProvider: prefsProvider)
-                                            .buildColumns(),
-                                        rows: jobListItems.map((item) {
-                                          return DataRow(
-                                            color: WidgetStateProperty.all(
-                                                (Provider.of<JobListStatusProvider>(
-                                                                context,
-                                                                listen: true)
-                                                            .getStatusById(item
-                                                                .jobStatusId)
-                                                            ?.color ??
-                                                        Colors.grey)
-                                                    .withAlpha(240)),
-                                            cells: JobListDataCellsBuilder(
-                                              item: item,
-                                              jobListProvider: jobListProvider,
-                                              scaleProvider: scaleProvider,
-                                              prefsProvider: prefsProvider,
-                                              onUpdateField: _updateJobField,
-                                              onShowUpdateHistory:
-                                                  _showUpdateHistory,
-                                              onShowEditDialog:
-                                                  _showEditJobDialog,
-                                              onShowCopyDialog:
-                                                  _showCopyJobDialog,
-                                              onShowDeleteConfirmation:
-                                                  _showDeleteConfirmation,
-                                              getVehicleTypeStringFromQuantity:
-                                                  _getVehicleTypeStringFromQuantity,
-                                              getVehicleTrailerComboFromQuantity:
-                                                  _getVehicleTrailerComboFromQuantity,
-                                            ).buildCells(context),
-                                          );
-                                        }).toList(),
-                                      ), // Close DataTable
-                                    ), // Close inner SingleChildScrollView (vertical)
-                                  ), // Close ConstrainedBox
-                                ), // Close outer SingleChildScrollView (horizontal)
-                              ), // Close Scrollbar
-
-                              // Frozen header row overlay
-                              Positioned(
-                                top: 0,
-                                left: 0,
-                                right: 0,
-                                height: 57,
-                                child: Container(
-                                  color: Colors.white,
-                                  child: ConstrainedBox(
-                                    constraints: BoxConstraints(
-                                      minWidth:
-                                          JobListFrozenHeaders.calculateWidth(
-                                              prefsProvider),
-                                    ),
-                                    child: SingleChildScrollView(
-                                      controller: _frozenHeaderScrollController,
-                                      scrollDirection: Axis.horizontal,
-                                      child: Row(
-                                        children: JobListFrozenHeaders(
-                                          prefsProvider: prefsProvider,
-                                          jobListProvider: jobListProvider,
-                                        ).buildHeaders(context),
                                       ),
                                     ),
                                   ),
-                                ),
-                              ),
 
-                              // Frozen Client column overlay
-                              Positioned(
-                                top: 57, // Below the header
-                                bottom: 0,
-                                left: 0,
-                                width: 330,
-                                child: Consumer<JobListProvider>(
-                                  builder: (context, jobProvider, child) {
-                                    return Consumer<JobListStatusProvider>(
-                                      builder:
-                                          (context, statusProvider, child) {
-                                        return ListView.builder(
+                                  // Frozen header row overlay
+                                  Positioned(
+                                    top: 0,
+                                    left: 0,
+                                    right: 0,
+                                    height: 57,
+                                    child: Container(
+                                      color: Colors.white,
+                                      child: ConstrainedBox(
+                                        constraints: BoxConstraints(
+                                          minWidth: JobListFrozenHeaders
+                                              .calculateWidth(prefsProvider),
+                                        ),
+                                        child: SingleChildScrollView(
                                           controller:
-                                              _frozenVerticalScrollController,
-                                          itemCount:
-                                              jobProvider.jobListItems.length,
-                                          itemBuilder: (context, index) {
-                                            final item =
-                                                jobProvider.jobListItems[index];
-                                            final statusColor = statusProvider
-                                                    .getStatusById(
-                                                        item.jobStatusId)
-                                                    ?.color ??
-                                                Colors.grey;
+                                              _frozenHeaderScrollController,
+                                          scrollDirection: Axis.horizontal,
+                                          child: Row(
+                                            children: JobListFrozenHeaders(
+                                              prefsProvider: prefsProvider,
+                                              jobListProvider: jobListProvider,
+                                            ).buildHeaders(context),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
 
-                                            return Container(
-                                              height:
-                                                  48, // Match DataTable default row height
-                                              decoration: BoxDecoration(
-                                                color: statusColor,
-                                                border: Border(
-                                                  bottom: BorderSide(
-                                                    color: Colors.grey[300]!,
-                                                    width: 1,
-                                                  ),
-                                                ),
-                                              ),
-                                              child: Row(
-                                                children: [
-                                                  Container(
-                                                    padding: const EdgeInsets
-                                                        .symmetric(vertical: 4),
-                                                    alignment:
-                                                        Alignment.centerLeft,
-                                                    child: EditableDateCell(
-                                                      value: item.date,
-                                                      width: 80,
-                                                      jobType: item.jobType,
-                                                      jobData: {
-                                                        'id': item.id,
-                                                        'quantity':
-                                                            item.quantity,
-                                                        'vehicleType':
-                                                            _getVehicleTypeStringFromQuantity(
-                                                                item.quantity),
-                                                      },
-                                                      onSave: (date) =>
-                                                          _updateJobField(item,
-                                                              'date', date),
+                                  // Frozen Client column overlay
+                                  Positioned(
+                                    top: 57, // Below the header
+                                    bottom: 0,
+                                    left: 0,
+                                    width: 330,
+                                    child: Consumer<JobListProvider>(
+                                      builder: (context, jobProvider, child) {
+                                        return Consumer<JobListStatusProvider>(
+                                          builder:
+                                              (context, statusProvider, child) {
+                                            return ListView.builder(
+                                              controller:
+                                                  _frozenVerticalScrollController,
+                                              itemCount: jobProvider
+                                                  .jobListItems.length,
+                                              itemExtent: 48,
+                                              addAutomaticKeepAlives: false,
+                                              itemBuilder: (context, index) {
+                                                final item = jobProvider
+                                                    .jobListItems[index];
+                                                final statusColor =
+                                                    statusProvider
+                                                            .getStatusById(item
+                                                                .jobStatusId)
+                                                            ?.color ??
+                                                        Colors.grey;
+
+                                                return Container(
+                                                  height:
+                                                      48, // Match DataTable default row height
+                                                  decoration: BoxDecoration(
+                                                    color: statusColor,
+                                                    border: Border(
+                                                      bottom: BorderSide(
+                                                        color:
+                                                            Colors.grey[300]!,
+                                                        width: 1,
+                                                      ),
                                                     ),
                                                   ),
-                                                  Container(
-                                                    padding: const EdgeInsets
-                                                        .symmetric(vertical: 4),
-                                                    alignment:
-                                                        Alignment.centerLeft,
-                                                    child: EditableTableCell(
-                                                      value: item.client,
-                                                      onSave: (value) =>
-                                                          _updateJobField(item,
-                                                              'client', value),
-                                                      width: 250,
-                                                      maxLines: 2,
-                                                      validator: (value) =>
-                                                          value?.isEmpty == true
-                                                              ? 'Client required'
-                                                              : null,
-                                                    ),
+                                                  child: Row(
+                                                    children: [
+                                                      Container(
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .symmetric(
+                                                                vertical: 4),
+                                                        alignment: Alignment
+                                                            .centerLeft,
+                                                        child: EditableDateCell(
+                                                          value: item.date,
+                                                          width: 80,
+                                                          jobTypeId: item.jobTypeId,
+                                                          jobData: {
+                                                            'id': item.id,
+                                                            'quantity':
+                                                                item.quantity,
+                                                            'vehicleType':
+                                                                _getVehicleTypeStringFromQuantity(
+                                                                    item.quantity),
+                                                          },
+                                                          onSave: (date) =>
+                                                              _updateJobField(
+                                                                  item,
+                                                                  'date',
+                                                                  date),
+                                                        ),
+                                                      ),
+                                                      Container(
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .symmetric(
+                                                                vertical: 4),
+                                                        alignment: Alignment
+                                                            .centerLeft,
+                                                        child:
+                                                            EditableTableCell(
+                                                          value: item.client,
+                                                          onSave: (value) =>
+                                                              _updateJobField(
+                                                                  item,
+                                                                  'client',
+                                                                  value),
+                                                          width: 250,
+                                                          maxLines: 2,
+                                                          validator: (value) =>
+                                                              value?.isEmpty ==
+                                                                      true
+                                                                  ? 'Client required'
+                                                                  : null,
+                                                        ),
+                                                      ),
+                                                    ],
                                                   ),
-                                                ],
-                                              ),
+                                                );
+                                              },
                                             );
                                           },
                                         );
                                       },
-                                    );
-                                  },
-                                ),
-                              ),
-                            ],
-                          ), // Close Stack
-                        ), // Close Container
+                                    ),
+                                  ),
+                                ],
+                              ), // Close Stack
+                            ), // Close Container
                 ),
               ], // Close Column children
             ), // Close Column widget
@@ -1730,6 +1711,99 @@ class _JobListGridState extends State<JobListGrid> {
     );
   }
 
+  // Build virtualized rows using ListView.builder instead of DataTable
+  // Only visible rows are built, dramatically reducing widget count
+  Widget _buildVirtualizedRows({
+    required List<JobListItem> jobListItems,
+    required JobListProvider jobListProvider,
+    required ScaleProvider scaleProvider,
+    required JobListPreferencesProvider prefsProvider,
+    required JobListStatusProvider statusProvider,
+  }) {
+    const double rowHeight = 48;
+
+    // Build visible column keys in header order so widths match exactly
+    final visibleColumns = <String>[];
+    for (final col in JobListFrozenHeaders.columnOrder) {
+      if (prefsProvider.isColumnVisible(col)) {
+        visibleColumns.add(col);
+      }
+    }
+    if (prefsProvider.isColumnVisible('refresh')) {
+      visibleColumns.add('refresh');
+    }
+    if (prefsProvider.isColumnVisible('actions')) {
+      visibleColumns.add('actions');
+    }
+
+    // No header-only columns remain — refresh now has a data cell
+    const headerOnlyColumns = <String>{};
+
+    return ListView.builder(
+      controller: _mainVerticalScrollController,
+      itemCount: jobListItems.length,
+      itemExtent: rowHeight, // Fixed height enables efficient scrolling
+      addAutomaticKeepAlives: false, // Don't keep scrolled-past rows alive
+      itemBuilder: (context, index) {
+        final item = jobListItems[index];
+        final statusColor =
+            (statusProvider.getStatusById(item.jobStatusId)?.color ??
+                    Colors.grey)
+                .withAlpha(240);
+
+        // Build cells using existing builder
+        final cellWidgets = JobListDataCellsBuilder(
+          item: item,
+          jobListProvider: jobListProvider,
+          scaleProvider: scaleProvider,
+          prefsProvider: prefsProvider,
+          onUpdateField: _updateJobField,
+          onShowUpdateHistory: _showUpdateHistory,
+          onShowEditDialog: _showEditJobDialog,
+          onShowCopyDialog: _showCopyJobDialog,
+          onShowDeleteConfirmation: _showDeleteConfirmation,
+          getVehicleTypeStringFromQuantity: _getVehicleTypeStringFromQuantity,
+          getVehicleTrailerComboFromQuantity:
+              _getVehicleTrailerComboFromQuantity,
+        ).buildCells(context);
+
+        // Map cells to columns, enforcing exact header widths and
+        // inserting empty placeholders for header-only columns (refresh)
+        int cellIndex = 0;
+        final rowChildren = <Widget>[];
+        for (final col in visibleColumns) {
+          final width = JobListColumnConfig.getWidth(col);
+          if (headerOnlyColumns.contains(col)) {
+            // Header-only column — add empty placeholder to maintain alignment
+            rowChildren.add(SizedBox(width: width));
+          } else if (cellIndex < cellWidgets.length) {
+            rowChildren.add(SizedBox(
+              width: width,
+              child: cellWidgets[cellIndex].child,
+            ));
+            cellIndex++;
+          }
+        }
+
+        return RepaintBoundary(
+          child: Container(
+            height: rowHeight,
+            decoration: BoxDecoration(
+              color: statusColor,
+              border: Border(
+                bottom: BorderSide(
+                  color: Colors.grey[300]!,
+                  width: 1,
+                ),
+              ),
+            ),
+            child: Row(children: rowChildren),
+          ),
+        );
+      },
+    );
+  }
+
   // Helper method to update individual job fields
   void _updateJobField(JobListItem item, String field, dynamic value) {
     try {
@@ -1746,7 +1820,7 @@ class _JobListGridState extends State<JobListGrid> {
           updatedItem = item.copyWith(client: value as String);
           break;
         case 'jobType':
-          updatedItem = item.copyWith(jobType: value as JobType);
+          updatedItem = item.copyWith(jobTypeId: value as String);
           break;
         case 'area':
           updatedItem = item.copyWith(area: value as String);
@@ -1754,8 +1828,8 @@ class _JobListGridState extends State<JobListGrid> {
         case 'quantity':
           final newQuantity = value as int;
           // Validate quantity for vehicle combo job types
-          if ((item.jobType == JobType.junkCollection ||
-                  item.jobType == JobType.furnitureMove) &&
+          if ((item.jobTypeId == 'junkCollection' ||
+                  item.jobTypeId == 'furnitureMove') &&
               (newQuantity < 1 || newQuantity > 9)) {
             // Invalid quantity for vehicle combo, don't update
             ScaffoldMessenger.of(context).showSnackBar(
@@ -1932,12 +2006,12 @@ class _JobListGridState extends State<JobListGrid> {
     // Create a new job with all fields copied but empty ID (so dialog treats it as new)
     final copiedJob = JobListItem(
       id: '', // Empty ID so dialog treats it as a new job
-      invoice: item.invoice,
+      invoice: '',
       amount: item.amount,
       client: item.client,
       jobStatusId: item.jobStatusId,
-      invoiceStatusId: item.invoiceStatusId,
-      jobType: item.jobType,
+      invoiceStatusId: 'INV_NOT CREATED',
+      jobTypeId: item.jobTypeId,
       area: item.area,
       quantity: item.quantity,
       manDays: item.manDays,
@@ -2232,7 +2306,7 @@ class _JobListGridState extends State<JobListGrid> {
                                   const SizedBox(height: 6),
                                   Text(
                                     update.getChangeDescription(
-                                        jobType: item.jobType),
+                                        jobTypeId: item.jobTypeId),
                                     style: const TextStyle(
                                         fontSize: 13,
                                         fontWeight: FontWeight.bold),
@@ -2287,16 +2361,16 @@ class _JobListGridState extends State<JobListGrid> {
   }
 
   // Helper method to get vehicle/trailer combination label from quantity
-  String? _getVehicleTrailerComboFromQuantity(int quantity, JobType jobType) {
+  String? _getVehicleTrailerComboFromQuantity(int quantity, String jobTypeId) {
     // Only convert to vehicle combo for applicable job types
-    if (jobType != JobType.junkCollection &&
-        jobType != JobType.furnitureMove &&
-        jobType != JobType.trailerTowing) {
+    if (jobTypeId != 'junkCollection' &&
+        jobTypeId != 'furnitureMove' &&
+        jobTypeId != 'trailerTowing') {
       return quantity
           .toString(); // Just return quantity as string for other types
     }
 
-    final combinations = jobType == JobType.trailerTowing
+    final combinations = jobTypeId == 'trailerTowing'
         ? [
             'Hyundai - No Trailer',
             'Mahindra - No Trailer',

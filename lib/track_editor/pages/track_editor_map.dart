@@ -8,6 +8,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:provider/provider.dart';
 import '../providers/te_tabs_provider.dart';
 import '../providers/te_map_layer_provider.dart';
+import '../providers/te_mode_provider.dart';
 import '../utils/te_track_stats.dart';
 
 class TEMap extends StatefulWidget {
@@ -49,8 +50,9 @@ class _TEMapState extends State<TEMap> {
   // Live camera position – updated on every onCameraMove for smooth reprojection.
   CameraPosition _currentCamera = _defaultPosition;
 
-  // Track last-seen tab so we fit bounds only when the tab actually changes.
+  // Track last-seen tab index AND mode so we fit bounds when either changes.
   int _lastTab = -1;
+  TEMode? _lastMode;
 
   @override
   void initState() {
@@ -79,10 +81,32 @@ class _TEMapState extends State<TEMap> {
     super.didChangeDependencies();
     final tabsProvider = context.read<TETabsProvider>();
     final tab = tabsProvider.currentTab;
-    if (tab != _lastTab) {
+    final mode = tabsProvider.activeMode;
+    if (tab != _lastTab || mode != _lastMode) {
+      // Clear stale overlay / editing state from previous tab.
+      _clearOverlayState();
       _lastTab = tab;
+      _lastMode = mode;
       _fitTabBounds(tabsProvider);
     }
+  }
+
+  /// Clear all overlay and editing state so stale info doesn't bleed across tabs.
+  void _clearOverlayState() {
+    _infoAnchor = null;
+    _infoName = null;
+    _infoStats = null;
+    _wptAnchor = null;
+    _wptName = null;
+    _wptCoords = null;
+    _polyAnchor = null;
+    _polyName = null;
+    _polyColor = null;
+    _polyIndex = null;
+    _editingPolyIndex = null;
+    _editingPoints = null;
+    _editingPolyColor = null;
+    _editingPolyName = null;
   }
 
   Future<void> _fitTabBounds(TETabsProvider tabsProvider) async {

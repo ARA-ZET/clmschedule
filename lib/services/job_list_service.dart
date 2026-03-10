@@ -17,17 +17,18 @@ class JobListService {
   // Get all job list items for current month
   // Optional jobTypes parameter to filter by specific job types at Firebase level
   Stream<List<JobListItem>> getJobListItems(
-      [DateTime? date, List<JobType>? jobTypes]) {
+      [DateTime? date, List<String>? jobTypes]) {
     final targetDate = date ?? DateTime.now();
     if (kDebugMode) {
-      print('JobListService: Getting job list items for date: $targetDate');
+      debugPrint(
+          'JobListService: Getting job list items for date: $targetDate');
       if (jobTypes != null && jobTypes.isNotEmpty) {
-        print(
-            'JobListService: Filtering by job types: ${jobTypes.map((t) => t.name).join(", ")}');
+        debugPrint(
+            'JobListService: Filtering by job types: ${jobTypes.join(", ")}');
       }
     }
     if (kDebugMode) {
-      print(
+      debugPrint(
           'JobListService: Monthly doc ID: ${_monthlyService.getMonthlyDocumentId(targetDate)}');
     }
 
@@ -39,12 +40,11 @@ class JobListService {
 
     // Add jobType filter if specified (Firebase-level filtering)
     if (jobTypes != null && jobTypes.isNotEmpty) {
-      // Convert JobType enum to string values for Firebase query
-      // Use .name (enum name) not .displayName since Firebase stores enum.name
-      final jobTypeStrings = jobTypes.map((type) => type.name).toList();
+      // Use the string values directly for Firebase query
+      final jobTypeStrings = jobTypes;
       query = query.where('jobType', whereIn: jobTypeStrings);
       if (kDebugMode) {
-        print(
+        debugPrint(
             'JobListService: Applying whereIn filter with values: $jobTypeStrings');
       }
       // Note: Combining whereIn with orderBy requires a composite index in Firebase
@@ -57,13 +57,10 @@ class JobListService {
 
     return query.snapshots().map((snapshot) {
       if (kDebugMode) {
-        print(
+        debugPrint(
             'JobListService: Firestore snapshot received with ${snapshot.docs.length} documents');
       }
       return snapshot.docs.map((doc) {
-        if (kDebugMode) {
-          print('JobListService: Processing doc ID: ${doc.id}');
-        }
         return JobListItem.fromMap(doc.id, doc.data() as Map<String, dynamic>);
       }).toList();
     });
@@ -217,7 +214,7 @@ class JobListService {
     }
 
     if (kDebugMode) {
-      print(
+      debugPrint(
           'JobListService: Moving job ${jobListItem.id} from $oldMonthId to $newMonthId');
     }
 
@@ -225,21 +222,20 @@ class JobListService {
     await _monthlyService.ensureJobListMonthlyDocExists(oldDate);
     await _monthlyService.ensureJobListMonthlyDocExists(newDate);
 
-    // Add to new month collection
-    await _getJobListItemsCollection(newDate)
-        .doc(jobListItem.id)
-        .set(jobListItem.toMap());
-
-    // Remove from old month collection (check if it exists first)
-    final oldDoc =
-        await _getJobListItemsCollection(oldDate).doc(jobListItem.id).get();
-
-    if (oldDoc.exists) {
-      await _getJobListItemsCollection(oldDate).doc(jobListItem.id).delete();
-    }
+    // Atomic move using WriteBatch — add to new month and delete from old in one operation
+    final firestore = _getJobListItemsCollection(newDate).firestore;
+    final batch = firestore.batch();
+    batch.set(
+      _getJobListItemsCollection(newDate).doc(jobListItem.id),
+      jobListItem.toMap(),
+    );
+    batch.delete(
+      _getJobListItemsCollection(oldDate).doc(jobListItem.id),
+    );
+    await batch.commit();
 
     if (kDebugMode) {
-      print(
+      debugPrint(
           'JobListService: Successfully moved job ${jobListItem.id} to $newMonthId');
     }
   }

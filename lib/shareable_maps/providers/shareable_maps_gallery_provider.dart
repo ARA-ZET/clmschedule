@@ -73,7 +73,13 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
   bool _isLoading = false;
   String? _error;
   String _filterTab = 'all'; // 'all', 'recent'
-  StreamSubscription? _subscription;
+  String _searchQuery = '';
+
+  // Lazy month loading
+  List<String> _availableMonths = []; // all months from Firestore, newest first
+  final Set<String> _loadedMonths = {};
+  final Set<String> _loadingMonths = {};
+  StreamSubscription? _currentMonthSubscription;
 
   ShareableMapsGalleryProvider({ShareableMapsFirestoreService? service})
       : _service = service ?? ShareableMapsFirestoreService();
@@ -84,38 +90,98 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
   String get filterTab => _filterTab;
+  String get searchQuery => _searchQuery;
+
+  /// Months in Firestore that haven't been loaded yet (newest first).
+  List<String> get unloadedMonths =>
+      _availableMonths.where((mk) => !_loadedMonths.contains(mk)).toList();
+
+  /// Whether a specific month is currently being fetched.
+  bool isMonthLoading(String monthKey) => _loadingMonths.contains(monthKey);
 
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
 
-  /// Start listening for realtime updates across all months.
-  void startListening() {
+  /// Discover available months and stream the current month.
+  void startListening() async {
+    _currentMonthSubscription?.cancel();
     _isLoading = true;
     _error = null;
+    _allMaps = [];
+    _monthGroups = [];
+    _loadedMonths.clear();
+    _loadingMonths.clear();
     notifyListeners();
 
-    _subscription?.cancel();
-    _subscription = _service.streamAllMaps().listen(
-      (mapsWithMonth) {
-        _allMaps = mapsWithMonth
-            .map((m) => MapGalleryItem.fromMapWithMonth(m))
-            .toList();
-        _buildMonthGroups();
-        _isLoading = false;
-        _error = null;
-        notifyListeners();
-      },
-      onError: (e) {
-        debugPrint('[ShareableMapsGallery] Stream error: $e');
-        _error = e.toString();
-        _isLoading = false;
-        notifyListeners();
-      },
-    );
+    try {
+      // 1. Discover which months exist in Firestore
+      //    Filter to valid MM-YYYY keys only (skip auto-generated doc IDs)
+      final allMonths = await _service.getAvailableMonths();
+      _availableMonths = allMonths
+          .where((mk) => RegExp(r'^\d{2}-\d{4}$').hasMatch(mk))
+          .toList();
+
+      // 2. Stream the current month for real-time updates
+      final currentMK =
+          ShareableMapsFirestoreService.monthKeyFor(DateTime.now());
+      _loadedMonths.add(currentMK);
+
+      _currentMonthSubscription = _service.streamMapsByMonth(currentMK).listen(
+        (maps) {
+          _allMaps.removeWhere((m) => m.monthKey == currentMK);
+          for (final map in maps) {
+            _allMaps.add(MapGalleryItem.fromMapWithMonth(
+              MapWithMonth(map: map, monthKey: currentMK),
+            ));
+          }
+          _buildMonthGroups();
+          _isLoading = false;
+          _error = null;
+          notifyListeners();
+        },
+        onError: (e) {
+          debugPrint('[ShareableMapsGallery] Stream error: $e');
+          _error = e.toString();
+          _isLoading = false;
+          notifyListeners();
+        },
+      );
+    } catch (e) {
+      debugPrint('[ShareableMapsGallery] Init error: $e');
+      _error = e.toString();
+      _isLoading = false;
+      notifyListeners();
+    }
   }
 
-  /// Fetch once (non-realtime).
+  /// Load a previous month's maps on demand (one-time fetch).
+  Future<void> loadMonth(String monthKey) async {
+    if (_loadedMonths.contains(monthKey) || _loadingMonths.contains(monthKey)) {
+      return;
+    }
+
+    _loadingMonths.add(monthKey);
+    notifyListeners();
+
+    try {
+      final maps = await _service.getMapsByMonth(monthKey);
+      _loadedMonths.add(monthKey);
+      for (final map in maps) {
+        _allMaps.add(MapGalleryItem.fromMapWithMonth(
+          MapWithMonth(map: map, monthKey: monthKey),
+        ));
+      }
+      _buildMonthGroups();
+    } catch (e) {
+      debugPrint('[ShareableMapsGallery] Load month $monthKey error: $e');
+    } finally {
+      _loadingMonths.remove(monthKey);
+      notifyListeners();
+    }
+  }
+
+  /// Fetch all maps across all months at once (non-realtime).
   Future<void> loadMaps() async {
     _isLoading = true;
     _error = null;
@@ -126,6 +192,9 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
       _allMaps =
           mapsWithMonth.map((m) => MapGalleryItem.fromMapWithMonth(m)).toList();
       _buildMonthGroups();
+      for (final m in _allMaps) {
+        _loadedMonths.add(m.monthKey);
+      }
     } catch (e) {
       _error = e.toString();
       debugPrint('[ShareableMapsGallery] Load error: $e');
@@ -150,8 +219,11 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
       );
 
       await _service.deleteMap(monthKey, docId);
-      // If we're not streaming, manually remove from local list.
-      if (_subscription == null) {
+      // The current month is streamed and will auto-update.
+      // For older months (one-time fetch), manually remove from local list.
+      final currentMK =
+          ShareableMapsFirestoreService.monthKeyFor(DateTime.now());
+      if (monthKey != currentMK) {
         _allMaps.removeWhere((m) => m.docId == docId && m.monthKey == monthKey);
         _buildMonthGroups();
         notifyListeners();
@@ -171,15 +243,54 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setSearchQuery(String query) {
+    _searchQuery = query.trim();
+    notifyListeners();
+  }
+
+  /// Apply search filter to a list of maps.
+  List<MapGalleryItem> _applySearch(List<MapGalleryItem> maps) {
+    if (_searchQuery.isEmpty) return maps;
+    final q = _searchQuery.toLowerCase();
+    return maps.where((m) {
+      return m.name.toLowerCase().contains(q) ||
+          m.description.toLowerCase().contains(q) ||
+          m.monthKey.contains(q);
+    }).toList();
+  }
+
   List<MapGalleryItem> get filteredMaps {
+    List<MapGalleryItem> result;
     switch (_filterTab) {
       case 'recent':
-        // Maps updated in the last 7 days
         final cutoff = DateTime.now().subtract(const Duration(days: 7));
-        return _allMaps.where((m) => m.updatedAt.isAfter(cutoff)).toList();
+        result = _allMaps.where((m) => m.updatedAt.isAfter(cutoff)).toList();
+        break;
       default:
-        return _allMaps;
+        result = _allMaps;
     }
+    return _applySearch(result);
+  }
+
+  /// Month groups with search applied.
+  List<MonthGroup> get filteredMonthGroups {
+    if (_searchQuery.isEmpty) return _monthGroups;
+    final q = _searchQuery.toLowerCase();
+    return _monthGroups
+        .map((group) {
+          final filtered = group.maps.where((m) {
+            return m.name.toLowerCase().contains(q) ||
+                m.description.toLowerCase().contains(q) ||
+                m.monthKey.contains(q);
+          }).toList();
+          return MonthGroup(
+            monthKey: group.monthKey,
+            label: group.label,
+            maps: filtered,
+          );
+        })
+        .where((g) => g.maps.isNotEmpty)
+        .toList();
   }
 
   // ---------------------------------------------------------------------------
@@ -195,7 +306,7 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
     _monthGroups = grouped.entries.map((entry) {
       return MonthGroup(
         monthKey: entry.key,
-        label: _formatMonthLabel(entry.key),
+        label: formatMonthLabel(entry.key),
         maps: entry.value,
       );
     }).toList()
@@ -204,7 +315,7 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
   }
 
   /// Converts '03-2026' → 'March 2026'.
-  String _formatMonthLabel(String monthKey) {
+  static String formatMonthLabel(String monthKey) {
     final parts = monthKey.split('-');
     if (parts.length != 2) return monthKey;
     final month = int.tryParse(parts[0]) ?? 1;
@@ -236,7 +347,7 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    _subscription?.cancel();
+    _currentMonthSubscription?.cancel();
     super.dispose();
   }
 }

@@ -21,6 +21,8 @@ class ShareableMapsGallery extends StatefulWidget {
 }
 
 class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
+  final TextEditingController _searchController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
@@ -28,6 +30,12 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ShareableMapsGalleryProvider>().startListening();
     });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   @override
@@ -42,12 +50,18 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
           if (gallery.error != null && gallery.allMaps.isEmpty) {
             return _ErrorView(error: gallery.error!);
           }
-          if (gallery.allMaps.isEmpty) {
+          // Show empty state only when no maps loaded AND no unloaded months
+          if (gallery.allMaps.isEmpty && gallery.unloadedMonths.isEmpty) {
             return const _EmptyGallery();
           }
           return _GalleryBody(
-            monthGroups: gallery.monthGroups,
+            monthGroups: gallery.filteredMonthGroups,
             filterTab: gallery.filterTab,
+            unloadedMonths: gallery.unloadedMonths,
+            loadingMonths: gallery.unloadedMonths
+                .where((mk) => gallery.isMonthLoading(mk))
+                .toSet(),
+            onLoadMonth: gallery.loadMonth,
           );
         },
       ),
@@ -69,6 +83,47 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
           Icon(Icons.map, color: Colors.green.shade700),
           const SizedBox(width: 8),
           const Text('My Maps'),
+          const SizedBox(width: 16),
+          // Search field
+          Expanded(
+            child: SizedBox(
+              height: 38,
+              child: TextField(
+                controller: _searchController,
+                style: const TextStyle(fontSize: 14),
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: 'Search maps...',
+                  prefixIcon: const Icon(Icons.search, size: 20),
+                  suffixIcon: _searchController.text.isNotEmpty
+                      ? IconButton(
+                          icon: const Icon(Icons.clear, size: 18),
+                          onPressed: () {
+                            _searchController.clear();
+                            context
+                                .read<ShareableMapsGalleryProvider>()
+                                .setSearchQuery('');
+                          },
+                        )
+                      : null,
+                  filled: true,
+                  fillColor: Colors.white,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide.none,
+                  ),
+                  contentPadding:
+                      const EdgeInsets.symmetric(vertical: 0, horizontal: 12),
+                ),
+                onChanged: (value) {
+                  context
+                      .read<ShareableMapsGalleryProvider>()
+                      .setSearchQuery(value);
+                  setState(() {}); // Refresh suffix icon visibility
+                },
+              ),
+            ),
+          ),
         ],
       ),
       bottom: PreferredSize(
@@ -259,10 +314,16 @@ class _FilterTabs extends StatelessWidget {
 class _GalleryBody extends StatelessWidget {
   final List<MonthGroup> monthGroups;
   final String filterTab;
+  final List<String> unloadedMonths;
+  final Set<String> loadingMonths;
+  final Future<void> Function(String monthKey) onLoadMonth;
 
   const _GalleryBody({
     required this.monthGroups,
     required this.filterTab,
+    required this.unloadedMonths,
+    required this.loadingMonths,
+    required this.onLoadMonth,
   });
 
   @override
@@ -282,13 +343,25 @@ class _GalleryBody extends StatelessWidget {
       );
     }
 
-    // Grouped by month.
+    // Show the next unloadable month (first in the list).
+    final nextMonth = unloadedMonths.isNotEmpty ? unloadedMonths.first : null;
+    final totalItems = monthGroups.length + (nextMonth != null ? 1 : 0);
+
+    // Grouped by month + optional load-more button at the bottom.
     return ListView.builder(
       padding: const EdgeInsets.all(16),
-      itemCount: monthGroups.length,
+      itemCount: totalItems,
       itemBuilder: (context, index) {
-        final group = monthGroups[index];
-        return _MonthSection(group: group);
+        if (index < monthGroups.length) {
+          return _MonthSection(group: monthGroups[index]);
+        }
+        // Load-more button for the next unloaded month.
+        return _LoadMonthTile(
+          monthKey: nextMonth!,
+          label: ShareableMapsGalleryProvider.formatMonthLabel(nextMonth),
+          isLoading: loadingMonths.contains(nextMonth),
+          onLoad: () => onLoadMonth(nextMonth),
+        );
       },
     );
   }
@@ -322,6 +395,59 @@ class _MonthSection extends StatelessWidget {
         const SizedBox(height: 8),
         const Divider(),
       ],
+    );
+  }
+}
+
+// =============================================================================
+// Load Month Tile (progressive disclosure for older months)
+// =============================================================================
+
+class _LoadMonthTile extends StatelessWidget {
+  final String monthKey;
+  final String label;
+  final bool isLoading;
+  final VoidCallback onLoad;
+
+  const _LoadMonthTile({
+    required this.monthKey,
+    required this.label,
+    required this.isLoading,
+    required this.onLoad,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: isLoading
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    'Loading $label…',
+                    style: TextStyle(color: Colors.grey.shade600),
+                  ),
+                ],
+              )
+            : OutlinedButton.icon(
+                onPressed: onLoad,
+                icon: const Icon(Icons.expand_more),
+                label: Text('Load $label'),
+                style: OutlinedButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                ),
+              ),
+      ),
     );
   }
 }
@@ -442,6 +568,7 @@ class _MapTile extends StatelessWidget {
                           ),
                         ),
                         const Spacer(),
+                        _CopyLinkButton(item: item),
                         _TilePopupMenu(item: item),
                       ],
                     ),
@@ -640,6 +767,61 @@ class _GradientPlaceholder extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// =============================================================================
+// Copy Link Button (quick copy shareable URL)
+// =============================================================================
+
+class _CopyLinkButton extends StatelessWidget {
+  final MapGalleryItem item;
+
+  const _CopyLinkButton({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: Icon(Icons.link, size: 18, color: Colors.grey.shade600),
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(),
+      tooltip: 'Copy shareable link',
+      onPressed: () => _copyLink(context),
+    );
+  }
+
+  Future<void> _copyLink(BuildContext context) async {
+    try {
+      final linkService = MapLinkService();
+      final code = await linkService.createShareLink(
+        monthKey: item.monthKey,
+        mapId: item.docId,
+        mapName: item.name,
+      );
+      final url = MapLinkService.buildShareUrl(code);
+
+      await Clipboard.setData(ClipboardData(text: url));
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check, color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Link copied: $url')),
+              ],
+            ),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to copy link: $e')),
+        );
+      }
+    }
   }
 }
 

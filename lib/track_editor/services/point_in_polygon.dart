@@ -1,7 +1,9 @@
 // track_editor/services/point_in_polygon.dart
+import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:gpx/gpx.dart';
 import '../models/styled_polygon.dart';
+import '../models/te_gpx_file_entry.dart';
 
 /// Check if point is inside polygon using ray-casting algorithm.
 bool isPointInPolygon(LatLng point, List<LatLng> polygon) {
@@ -71,4 +73,48 @@ List<TETargetPolygon> groupWaypointsByPolygon(
     results.add(TETargetPolygon(name: polygon.name, waypoints: contained));
   }
   return results;
+}
+
+/// Top-level function for [compute] – groups waypoints by polygon off the
+/// main isolate to avoid jank on large datasets.
+List<TETargetPolygon> _groupWaypointsByPolygonIsolate(
+    _GroupWaypointsMessage msg) {
+  return groupWaypointsByPolygon(msg.polygons, msg.waypoints);
+}
+
+/// Runs [groupWaypointsByPolygon] on a background isolate via [compute].
+Future<List<TETargetPolygon>> groupWaypointsByPolygonAsync(
+  List<TEStyledPolygon> polygons,
+  List<Wpt> waypoints,
+) {
+  return compute(
+    _groupWaypointsByPolygonIsolate,
+    _GroupWaypointsMessage(polygons: polygons, waypoints: waypoints),
+  );
+}
+
+class _GroupWaypointsMessage {
+  final List<TEStyledPolygon> polygons;
+  final List<Wpt> waypoints;
+  const _GroupWaypointsMessage(
+      {required this.polygons, required this.waypoints});
+}
+
+/// Top-level function for [compute] – parses a GPX file off the main isolate.
+TEGpxFileEntry _parseGpxIsolate(_ParseGpxMessage msg) {
+  return TEGpxFileEntry.parse(msg.filename, msg.bytes);
+}
+
+/// Runs GPX file parsing on a background isolate via [compute].
+Future<TEGpxFileEntry> parseGpxFileAsync(String filename, Uint8List bytes) {
+  return compute(
+    _parseGpxIsolate,
+    _ParseGpxMessage(filename: filename, bytes: bytes),
+  );
+}
+
+class _ParseGpxMessage {
+  final String filename;
+  final Uint8List bytes;
+  const _ParseGpxMessage({required this.filename, required this.bytes});
 }

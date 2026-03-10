@@ -18,6 +18,7 @@ class ScheduleJobCell extends StatelessWidget {
   final List<Job> jobs;
   final double cellWidth;
   final double rowHeight;
+  final bool isFullscreen;
 
   const ScheduleJobCell({
     super.key,
@@ -26,6 +27,7 @@ class ScheduleJobCell extends StatelessWidget {
     required this.jobs,
     required this.cellWidth,
     required this.rowHeight,
+    required this.isFullscreen,
   });
 
   @override
@@ -302,15 +304,16 @@ class ScheduleJobCell extends StatelessWidget {
                       height: rowHeight - 8,
                       child: Opacity(
                         opacity: 0.7,
-                        child: JobCard(job: jobs.first),
+                        child: JobCard(
+                            job: jobs.first, isFullscreen: isFullscreen),
                       ),
                     ),
                   ),
                   childWhenDragging: Opacity(
                     opacity: 0.2,
-                    child: JobCard(job: jobs.first),
+                    child: JobCard(job: jobs.first, isFullscreen: isFullscreen),
                   ),
-                  child: JobCard(job: jobs.first),
+                  child: JobCard(job: jobs.first, isFullscreen: isFullscreen),
                 ),
         );
       },

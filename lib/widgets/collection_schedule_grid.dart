@@ -236,7 +236,8 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
 
   @override
   Widget build(BuildContext context) {
-    final bool isFullview = context.watch<TogglerProvider>().isFullview;
+    final bool isFullview =
+        context.watch<TogglerProvider>().isFullviewCollection;
     return Consumer2<CollectionScheduleProvider, ScaleProvider>(
       builder: (context, collectionProvider, scaleProvider, child) {
         // Check if month changed and reset scroll state
@@ -269,7 +270,8 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
               onCurrentMonth: collectionProvider.goToCurrentMonth,
               onMonthSelected: collectionProvider.goToMonth,
               availableMonths: collectionProvider.getAvailableMonths(),
-              onRefresh: collectionProvider.refresh, // Add refresh callback
+              onRefresh: collectionProvider.refresh,
+              mode: Mode.collection, // Add mode parameter
             ),
 
             // Grid
@@ -472,12 +474,7 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                                           // Get visual styling for this job considering consecutive jobs and overlaps
                                           final jobStyling = hasJob
                                               ? _getJobVisualStyling(
-                                                  vehicleJobs.first,
-                                                  vehicleType,
-                                                  date,
-                                                  timeSlot,
-                                                  effectiveColor,
-                                                  collectionProvider)
+                                                  vehicleJobs, effectiveColor)
                                               : null;
 
                                           return Expanded(
@@ -510,7 +507,8 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
                                                       context,
                                                       vehicleJobs.first,
                                                       jobStyling?.textColor ??
-                                                          effectiveColor)
+                                                          effectiveColor,
+                                                      isFullview)
                                                   : _buildAddButton(
                                                       context,
                                                       vehicleType,
@@ -542,19 +540,10 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
 
   // Get visual styling for a job considering consecutive jobs and overlaps
   _JobVisualStyling _getJobVisualStyling(
-    CollectionJob job,
-    VehicleType vehicleType,
-    DateTime date,
-    String timeSlot,
+    List<CollectionJob> vehicleJobs,
     Color baseColor,
-    CollectionScheduleProvider collectionProvider,
   ) {
-    // Simplified styling to improve performance
-    // Check for overlapping jobs (multiple jobs at the same time slot)
-    final overlappingJobs = collectionProvider.getJobsForVehicleAndTimeSlot(
-        vehicleType, date, timeSlot);
-
-    final hasOverlap = overlappingJobs.length > 1;
+    final hasOverlap = vehicleJobs.length > 1;
 
     // Determine colors and styling based on overlap
     Color fillColor;
@@ -594,8 +583,7 @@ Color _getVehicleColor(VehicleType vehicleType) {
 }
 
 Widget _buildCollectionJobCard(
-    BuildContext context, CollectionJob job, Color color) {
-  final bool isFullview = context.watch<TogglerProvider>().isFullview;
+    BuildContext context, CollectionJob job, Color color, bool isFullview) {
   return Tooltip(
     message: _buildJobTooltip(job),
     child: Padding(
@@ -892,7 +880,7 @@ class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
       amount: 0.0, // Default amount - can be edited later
       client: 'COLLECTION: ${_locationController.text.trim()}',
       jobStatusId: 'scheduled', // Default status
-      jobType: JobType.junkCollection, // Collection job type
+      jobTypeId: 'junkCollection', // Collection job type
       area: _locationController.text.trim(),
       quantity: _getQuantityFromVehicleTrailer(
           widget.vehicleType, _selectedTrailerType),

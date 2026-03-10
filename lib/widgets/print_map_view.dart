@@ -4,6 +4,7 @@ import 'dart:math' show min, max;
 import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import '../models/custom_polygon.dart';
 import '../models/job.dart';
 import 'package:intl/intl.dart';
 
@@ -62,10 +63,19 @@ class _PrintMapViewState extends State<PrintMapView> {
   // Global key for capturing the map widget
   final GlobalKey _mapKey = GlobalKey();
 
+  // Vertex editing state
+  bool _isEditingVertices = false;
+  int? _editingPolygonIndex; // which workmap polygon is being edited
+  List<LatLng>? _editingPoints; // mutable copy of the polygon's points
+  Set<Marker> _vertexMarkers = {};
+  BitmapDescriptor? _vertexMarkerIcon;
+  BitmapDescriptor? _midpointMarkerIcon;
+
   @override
   void initState() {
     super.initState();
     _initializeMap();
+    _createMarkerIcons();
   }
 
   Future<void> _initializeMap() async {
@@ -108,18 +118,24 @@ class _PrintMapViewState extends State<PrintMapView> {
         // Determine stroke width: individual override > global setting
         int strokeWidth = override?.strokeWidth ?? _globalBorderWidth;
 
+        // Use editing points if this polygon is being edited
+        final points = (_editingPolygonIndex == i && _editingPoints != null)
+            ? _editingPoints!
+            : workMap.points;
+
         _polygons.add(
           Polygon(
             polygonId: PolygonId(polygonId),
-            points: workMap.points,
-            fillColor:
-                workMap.color.withOpacity(0), // Slight fill to make tappable
+            points: points,
+            fillColor: workMap.color
+                .withValues(alpha: 0), // Slight fill to make tappable
             strokeColor: strokeColor,
             strokeWidth: strokeWidth,
+            consumeTapEvents: _isEditingVertices,
             onTap: () {
-              print(
-                  'Polygon tapped: $polygonId (${workMap.name})'); // Debug print
-              _showPolygonOverrideDialog(polygonId, workMap.name);
+              if (_isEditingVertices) {
+                _selectPolygonForEditing(i);
+              }
             },
           ),
         );
@@ -181,6 +197,179 @@ class _PrintMapViewState extends State<PrintMapView> {
         }
       }
     }
+  }
+
+  // ── Vertex editing helpers ────────────────────────────────────────
+
+  Future<void> _createMarkerIcons() async {
+    try {
+      _vertexMarkerIcon = await _createCircleIcon(
+        size: 16.0,
+        fillColor: Colors.white,
+        borderColor: Colors.red,
+        borderWidth: 1.5,
+      );
+    } catch (_) {
+      _vertexMarkerIcon =
+          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+    }
+    try {
+      _midpointMarkerIcon = await _createCircleIcon(
+        size: 12.0,
+        fillColor: Colors.orange,
+        borderColor: Colors.white,
+        borderWidth: 1.0,
+      );
+    } catch (_) {
+      _midpointMarkerIcon =
+          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<BitmapDescriptor> _createCircleIcon({
+    required double size,
+    required Color fillColor,
+    required Color borderColor,
+    required double borderWidth,
+  }) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final double radius = size / 2;
+    canvas.drawCircle(
+      Offset(radius, radius),
+      radius - borderWidth,
+      Paint()
+        ..color = fillColor
+        ..style = PaintingStyle.fill,
+    );
+    canvas.drawCircle(
+      Offset(radius, radius),
+      radius - borderWidth,
+      Paint()
+        ..color = borderColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = borderWidth,
+    );
+    final picture = recorder.endRecording();
+    final img = await picture.toImage(size.toInt(), size.toInt());
+    final pngBytes = await img.toByteData(format: ui.ImageByteFormat.png);
+    if (pngBytes == null) throw Exception('icon toByteData returned null');
+    return BitmapDescriptor.bytes(pngBytes.buffer.asUint8List());
+  }
+
+  void _selectPolygonForEditing(int polygonIndex) {
+    if (_editingPolygonIndex == polygonIndex) return; // already selected
+    final workMap = widget.job.workMaps[polygonIndex];
+    setState(() {
+      _editingPolygonIndex = polygonIndex;
+      _editingPoints = List<LatLng>.from(workMap.points);
+      _rebuildVertexMarkers();
+    });
+  }
+
+  void _rebuildVertexMarkers() {
+    final markers = <Marker>{};
+    final points = _editingPoints;
+    if (points == null || points.isEmpty) {
+      _vertexMarkers = markers;
+      return;
+    }
+
+    final vertexIcon = _vertexMarkerIcon ??
+        BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+    final midpointIcon = _midpointMarkerIcon ??
+        BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
+
+    // Vertex markers (draggable)
+    for (int i = 0; i < points.length; i++) {
+      markers.add(Marker(
+        markerId: MarkerId('vertex_$i'),
+        icon: vertexIcon,
+        position: points[i],
+        draggable: true,
+        onDrag: (pos) {
+          _editingPoints![i] = pos;
+          setState(() {
+            _rebuildVertexMarkers();
+            _updateMapView();
+          });
+        },
+        onDragEnd: (pos) {
+          _editingPoints![i] = pos;
+          setState(() {
+            _rebuildVertexMarkers();
+            _updateMapView();
+          });
+        },
+      ));
+    }
+
+    // Midpoint markers (dragging inserts a new vertex)
+    if (points.length >= 2) {
+      for (int i = 0; i < points.length; i++) {
+        final j = (i + 1) % points.length;
+        final mid = LatLng(
+          (points[i].latitude + points[j].latitude) / 2,
+          (points[i].longitude + points[j].longitude) / 2,
+        );
+        markers.add(Marker(
+          markerId: MarkerId('midpoint_$i'),
+          icon: midpointIcon,
+          position: mid,
+          draggable: true,
+          anchor: const Offset(0.5, 0.5),
+          onDragEnd: (pos) {
+            _editingPoints!.insert(i + 1, pos);
+            setState(() {
+              _rebuildVertexMarkers();
+              _updateMapView();
+            });
+          },
+        ));
+      }
+    }
+
+    _vertexMarkers = markers;
+  }
+
+  void _saveVertexEditing() {
+    if (_editingPolygonIndex == null || _editingPoints == null) return;
+    final idx = _editingPolygonIndex!;
+    final old = widget.job.workMaps[idx];
+    widget.job.workMaps[idx] = CustomPolygon(
+      name: old.name,
+      description: old.description,
+      points: List<LatLng>.from(_editingPoints!),
+      color: old.color,
+      fillOpacity: old.fillOpacity,
+      strokeWidth: old.strokeWidth,
+    );
+    setState(() {
+      _editingPolygonIndex = null;
+      _editingPoints = null;
+      _vertexMarkers = {};
+      _updateMapView();
+    });
+  }
+
+  void _cancelVertexEditing() {
+    setState(() {
+      _editingPolygonIndex = null;
+      _editingPoints = null;
+      _vertexMarkers = {};
+      _updateMapView();
+    });
+  }
+
+  void _removeLastVertex() {
+    if (_editingPoints == null || _editingPoints!.length <= 3) return;
+    // Find closest vertex to remove — for simplicity, remove the last one
+    _editingPoints!.removeLast();
+    setState(() {
+      _rebuildVertexMarkers();
+      _updateMapView();
+    });
   }
 
   Future<void> _printMap() async {
@@ -388,22 +577,15 @@ class _PrintMapViewState extends State<PrintMapView> {
                       Text(
                           '• Palette icon: Toggle between black and original colors'),
                       SizedBox(height: 12),
-                      Text('Individual Customization:',
+                      Text('Edit Points:',
                           style: TextStyle(fontWeight: FontWeight.bold)),
                       SizedBox(height: 4),
-                      Text(
-                          '1. Click/tap on any colored polygon area on the map'),
-                      Text(
-                          '2. A dialog will appear with customization options'),
-                      Text('3. Choose border width (3-8 pixels)'),
-                      Text('4. Border color is automatically set to black'),
-                      Text('5. Click "Apply" to save changes'),
-                      SizedBox(height: 12),
-                      Text(
-                          'Priority: Individual overrides > Global settings > Original style'),
+                      Text('1. Tap the edit (pencil) icon to enter edit mode'),
+                      Text('2. Tap a polygon to select it for editing'),
+                      Text('3. Drag white vertex markers to move points'),
+                      Text('4. Drag orange midpoint markers to add new points'),
+                      Text('5. Use the toolbar to remove, save, or cancel'),
                       SizedBox(height: 8),
-                      Text(
-                          '• Use "Reset" in dialog to restore original styling'),
                       Text('• Use refresh button in toolbar to reset all'),
                     ],
                   ),
@@ -415,6 +597,25 @@ class _PrintMapViewState extends State<PrintMapView> {
                   ],
                 ),
               );
+            },
+          ),
+
+          // Edit points toggle
+          IconButton(
+            icon: Icon(
+              _isEditingVertices ? Icons.edit : Icons.edit_outlined,
+              color: _isEditingVertices ? const Color(0xFF1967D2) : null,
+            ),
+            tooltip:
+                _isEditingVertices ? 'Exit edit mode' : 'Edit polygon points',
+            onPressed: () {
+              setState(() {
+                _isEditingVertices = !_isEditingVertices;
+                if (!_isEditingVertices) {
+                  // Exiting edit mode — cancel any active editing
+                  _cancelVertexEditing();
+                }
+              });
             },
           ),
 
@@ -455,6 +656,7 @@ class _PrintMapViewState extends State<PrintMapView> {
                       initialCameraPosition:
                           CameraPosition(target: _center, zoom: 12),
                       polygons: _polygons,
+                      markers: _vertexMarkers,
                       mapType: MapType.normal,
                       cloudMapId: "89c628d2bb3002712797ce42",
                       zoomControlsEnabled: false,
@@ -489,6 +691,86 @@ class _PrintMapViewState extends State<PrintMapView> {
                         left: _workAreasBoxPosition.dx,
                         top: _workAreasBoxPosition.dy,
                         child: _buildWorkAreasBox(),
+                      ),
+                    // Vertex editing toolbar
+                    if (_isEditingVertices && _editingPolygonIndex != null)
+                      Positioned(
+                        bottom: 16,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: Material(
+                            elevation: 4,
+                            borderRadius: BorderRadius.circular(24),
+                            color: Colors.white,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 4),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    'Editing: ${widget.job.workMaps[_editingPolygonIndex!].name}',
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  IconButton(
+                                    icon: const Icon(
+                                        Icons.remove_circle_outline,
+                                        size: 20,
+                                        color: Colors.red),
+                                    tooltip: 'Remove last vertex',
+                                    onPressed: _editingPoints != null &&
+                                            _editingPoints!.length > 3
+                                        ? _removeLastVertex
+                                        : null,
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.close,
+                                        size: 20, color: Color(0xFF5F6368)),
+                                    tooltip: 'Cancel',
+                                    onPressed: _cancelVertexEditing,
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.check,
+                                        size: 20, color: Color(0xFF1967D2)),
+                                    tooltip: 'Save changes',
+                                    onPressed: _saveVertexEditing,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    // Edit mode hint (when no polygon selected yet)
+                    if (_isEditingVertices && _editingPolygonIndex == null)
+                      Positioned(
+                        bottom: 16,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: Material(
+                            elevation: 4,
+                            borderRadius: BorderRadius.circular(24),
+                            color: Colors.white,
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 10),
+                              child: Text(
+                                'Tap a polygon to edit its points',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                  color: Color(0xFF5F6368),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                   ],
                 ),
@@ -955,132 +1237,6 @@ class _PrintMapViewState extends State<PrintMapView> {
           ),
         ],
       ),
-    );
-  }
-
-  // Show dialog to override polygon border properties
-  void _showPolygonOverrideDialog(String polygonId, String polygonName) {
-    final currentOverride = _polygonOverrides[polygonId];
-    int selectedWidth = currentOverride?.strokeWidth ?? 3;
-
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (BuildContext dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Text('Customize Polygon Border'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Polygon: $polygonName',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Border Color: Black (fixed)',
-                    style: TextStyle(fontSize: 16),
-                  ),
-                  const SizedBox(height: 8),
-                  Container(
-                    width: 40,
-                    height: 20,
-                    decoration: BoxDecoration(
-                      color: Colors.black,
-                      border: Border.all(color: Colors.grey),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Border Width: $selectedWidth',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                  const SizedBox(height: 8),
-                  Slider(
-                    value: selectedWidth.toDouble(),
-                    min: 3,
-                    max: 8,
-                    divisions: 5,
-                    label: selectedWidth.toString(),
-                    onChanged: (double value) {
-                      setDialogState(() {
-                        selectedWidth = value.round();
-                      });
-                    },
-                  ),
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('3', style: TextStyle(fontSize: 12)),
-                      Text('8', style: TextStyle(fontSize: 12)),
-                    ],
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    // Close dialog first, then update state
-                    Navigator.of(dialogContext).pop();
-                    // Use Future.microtask to ensure dialog is closed before state update
-                    Future.microtask(() {
-                      if (mounted) {
-                        setState(() {
-                          _polygonOverrides.remove(polygonId);
-                          _updateMapView();
-                        });
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content:
-                                Text('$polygonName border reset to original'),
-                            duration: const Duration(seconds: 2),
-                          ),
-                        );
-                      }
-                    });
-                  },
-                  child: const Text('Reset'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    Navigator.of(dialogContext).pop();
-                  },
-                  child: const Text('Cancel'),
-                ),
-                ElevatedButton(
-                  onPressed: () {
-                    // Close dialog first, then update state
-                    Navigator.of(dialogContext).pop();
-                    // Use Future.microtask to ensure dialog is closed before state update
-                    Future.microtask(() {
-                      if (mounted) {
-                        setState(() {
-                          _polygonOverrides[polygonId] = PolygonOverride(
-                            strokeColor: Colors.black,
-                            strokeWidth: selectedWidth,
-                          );
-                          _updateMapView();
-                        });
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                                '$polygonName border customized (width: $selectedWidth)'),
-                            duration: const Duration(seconds: 2),
-                          ),
-                        );
-                      }
-                    });
-                  },
-                  child: const Text('Apply'),
-                ),
-              ],
-            );
-          },
-        );
-      },
     );
   }
 

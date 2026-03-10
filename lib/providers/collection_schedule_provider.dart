@@ -15,14 +15,29 @@ class CollectionScheduleProvider extends ChangeNotifier {
   bool _isInitialized = false;
   bool _isLoading = false;
 
+  // Cached monthly view
+  List<CollectionJob>? _cachedMonthJobs;
+  int? _cachedMonthKey; // year*100+month
+
+  // Fingerprint of last job list data to skip redundant rebuilds
+  int _lastJobListFingerprint = 0;
+
   // Cache for time slot occupation checks to avoid expensive filtering during UI renders
   // Key: "vehicleType_yyyy-MM-dd_timeSlot", Value: List of jobs occupying that slot
   final Map<String, List<CollectionJob>> _timeSlotCache = {};
 
   // Getters
   List<CollectionJob> get collectionJobs => _collectionJobs;
-  List<CollectionJob> get currentMonthCollectionJobs =>
-      _getJobsForMonth(_currentMonth);
+  List<CollectionJob> get currentMonthCollectionJobs {
+    final key = _currentMonth.year * 100 + _currentMonth.month;
+    if (_cachedMonthJobs != null && _cachedMonthKey == key) {
+      return _cachedMonthJobs!;
+    }
+    _cachedMonthJobs = _getJobsForMonth(_currentMonth);
+    _cachedMonthKey = key;
+    return _cachedMonthJobs!;
+  }
+
   List<WorkArea> get workAreas => _workAreas;
   DateTime get currentMonth => _currentMonth;
   String get currentMonthDisplay =>
@@ -40,14 +55,37 @@ class CollectionScheduleProvider extends ChangeNotifier {
     _jobListProvider.addListener(_onJobListChanged);
   }
 
-  /// Called when JobListProvider data changes. Rebuilds collection jobs
-  /// and time slot cache if we're already initialized.
+  /// Called when JobListProvider data changes. Only rebuilds if
+  /// collection-relevant items actually changed (checks fingerprint).
   void _onJobListChanged() {
     if (!_isInitialized) return;
 
+    // Compute fingerprint of collection-relevant items to skip no-op rebuilds
+    final items = _jobListProvider.allJobListItems;
+    int fp = items.length;
+    for (final item in items) {
+      if (item.jobTypeId == 'junkCollection' ||
+          item.jobTypeId == 'furnitureMove' ||
+          item.jobTypeId == 'trailerTowing') {
+        fp = fp * 31 + item.id.hashCode ^
+            item.date.millisecondsSinceEpoch ^
+            item.quantity ^
+            item.quantityDistributed ^
+            item.jobStatusId.hashCode;
+      }
+    }
+    if (fp == _lastJobListFingerprint) return; // Nothing relevant changed
+    _lastJobListFingerprint = fp;
+
     _buildCollectionJobs();
     _rebuildTimeSlotCache();
+    _invalidateMonthCache();
     notifyListeners();
+  }
+
+  void _invalidateMonthCache() {
+    _cachedMonthJobs = null;
+    _cachedMonthKey = null;
   }
 
   // Manual initialization - call this when the tab is opened
@@ -66,78 +104,55 @@ class CollectionScheduleProvider extends ChangeNotifier {
     }
   }
 
-  // Load data for a specific month - now does one-time load instead of streaming
+  // Load data for a specific month
   Future<void> _loadDataForMonth(DateTime month) async {
-    debugPrint(
-        'CollectionScheduleProvider: Loading data for month: ${_firestoreService.getMonthlyDocumentId(month)}');
-
-    // Filter and convert job list items to collection jobs (one-time operation)
+    // Filter and convert job list items to collection jobs
     _buildCollectionJobs();
 
     // Load work areas (one-time fetch)
     await _loadWorkAreas();
 
-    // Pre-compute time slot cache asynchronously (non-blocking)
-    await _rebuildTimeSlotCache();
+    // Pre-compute time slot cache
+    _rebuildTimeSlotCache();
+    _invalidateMonthCache();
 
     notifyListeners();
   }
 
-  // Build collection jobs from job list provider (one-time operation)
+  // Build collection jobs from job list provider
   void _buildCollectionJobs() {
     final jobListItems = _jobListProvider.allJobListItems;
     _collectionJobs = jobListItems
         .where((job) =>
-            job.jobType == JobType.junkCollection ||
-            job.jobType == JobType.furnitureMove ||
-            job.jobType == JobType.trailerTowing)
+            job.jobTypeId == 'junkCollection' ||
+            job.jobTypeId == 'furnitureMove' ||
+            job.jobTypeId == 'trailerTowing')
         .map((job) => _jobListItemToCollectionJob(job))
         .toList();
-
-    debugPrint(
-        'CollectionScheduleProvider: Built ${_collectionJobs.length} collection jobs from job list');
   }
 
-  // Pre-compute which jobs occupy which time slots - async to not block UI
-  Future<void> _rebuildTimeSlotCache() async {
+  // Pre-compute which jobs occupy which time slots — synchronous, fast
+  void _rebuildTimeSlotCache() {
     _timeSlotCache.clear();
 
-    // Process in batches to avoid blocking the UI thread
-    const batchSize = 10;
-    for (var i = 0; i < _collectionJobs.length; i += batchSize) {
-      final end = (i + batchSize < _collectionJobs.length)
-          ? i + batchSize
-          : _collectionJobs.length;
-      final batch = _collectionJobs.sublist(i, end);
+    for (final job in _collectionJobs) {
+      final availableTimeSlots = CollectionJob.availableTimeSlots;
+      final jobStartIndex = availableTimeSlots.indexOf(job.timeSlot);
 
-      for (final job in batch) {
-        final availableTimeSlots = CollectionJob.availableTimeSlots;
-        final jobStartIndex = availableTimeSlots.indexOf(job.timeSlot);
+      if (jobStartIndex == -1) continue;
 
-        if (jobStartIndex == -1) continue;
+      for (int j = 0; j < job.timeSlots; j++) {
+        final slotIndex = jobStartIndex + j;
+        if (slotIndex >= availableTimeSlots.length) break;
 
-        // For each time slot this job occupies
-        for (int j = 0; j < job.timeSlots; j++) {
-          final slotIndex = jobStartIndex + j;
-          if (slotIndex >= availableTimeSlots.length) break;
+        final timeSlot = availableTimeSlots[slotIndex];
+        final dateStr =
+            '${job.date.year}-${job.date.month.toString().padLeft(2, '0')}-${job.date.day.toString().padLeft(2, '0')}';
+        final cacheKey = '${job.vehicleType.name}_${dateStr}_$timeSlot';
 
-          final timeSlot = availableTimeSlots[slotIndex];
-          final dateStr =
-              '${job.date.year}-${job.date.month.toString().padLeft(2, '0')}-${job.date.day.toString().padLeft(2, '0')}';
-          final cacheKey = '${job.vehicleType.name}_${dateStr}_$timeSlot';
-
-          _timeSlotCache.putIfAbsent(cacheKey, () => []).add(job);
-        }
-      }
-
-      // Yield to the UI thread after each batch
-      if (i + batchSize < _collectionJobs.length) {
-        await Future.delayed(Duration.zero);
+        _timeSlotCache.putIfAbsent(cacheKey, () => []).add(job);
       }
     }
-
-    debugPrint(
-        'CollectionScheduleProvider: Pre-computed time slot cache with ${_timeSlotCache.length} entries');
   }
 
   // Load work areas (one-time fetch)
@@ -145,8 +160,6 @@ class CollectionScheduleProvider extends ChangeNotifier {
     try {
       // Get the first emission from the stream for one-time fetch
       _workAreas = await _firestoreService.streamWorkAreas().first;
-      debugPrint(
-          'CollectionScheduleProvider: Loaded ${_workAreas.length} work areas');
     } catch (e) {
       debugPrint('CollectionScheduleProvider: Error loading work areas: $e');
     }
@@ -200,7 +213,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
       timeSlots: timeSlots,
       assignedStaff: [], // Can be populated later
       staffCount: jobListItem.manDays.ceil(),
-      jobType: jobListItem.jobType.displayName,
+      jobType: jobListItem.jobTypeId,
       statusId: jobListItem.jobStatusId,
       clients: [jobListItem.client],
       notes: jobListItem.specialInstructions,
@@ -294,8 +307,8 @@ class CollectionScheduleProvider extends ChangeNotifier {
   Future<void> setCurrentMonth(DateTime month) async {
     if (_currentMonth != month) {
       _currentMonth = month;
+      _invalidateMonthCache();
       await _loadDataForMonth(_currentMonth);
-      // notifyListeners() already called inside _loadDataForMonth
     }
   }
 

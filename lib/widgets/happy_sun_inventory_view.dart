@@ -198,7 +198,7 @@ class _HappySunInventoryViewState extends State<HappySunInventoryView> {
                             icon:
                                 Icon(Icons.more_vert, size: isMobile ? 20 : 24),
                             tooltip: 'Actions',
-                            onSelected: (value) {
+                            onSelected: (value) async {
                               switch (value) {
                                 case 'scan':
                                   showDialog(
@@ -229,6 +229,42 @@ class _HappySunInventoryViewState extends State<HappySunInventoryView> {
                                         tools: inventoryProvider.tools,
                                       ),
                                     );
+                                  }
+                                  break;
+                                case 'resetInUse':
+                                  final confirmed = await showDialog<bool>(
+                                    context: context,
+                                    builder: (context) => AlertDialog(
+                                      title: const Text('Reset All In Use'),
+                                      content: const Text(
+                                        'This will mark all tools currently in use as available. Are you sure?',
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.pop(context, false),
+                                          child: const Text('Cancel'),
+                                        ),
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.pop(context, true),
+                                          child: const Text('Reset All'),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                  if (confirmed == true && context.mounted) {
+                                    final count =
+                                        await inventoryProvider.resetAllInUse();
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                              '$count tool(s) reset to available'),
+                                        ),
+                                      );
+                                    }
                                   }
                                   break;
                               }
@@ -288,6 +324,21 @@ class _HappySunInventoryViewState extends State<HappySunInventoryView> {
                                         size: isMobile ? 18 : 20),
                                     SizedBox(width: 8),
                                     Text('QR Stickers',
+                                        style: TextStyle(
+                                            fontSize: isMobile ? 12 : 14)),
+                                  ],
+                                ),
+                              ),
+                              const PopupMenuDivider(),
+                              PopupMenuItem(
+                                value: 'resetInUse',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.restart_alt,
+                                        color: Colors.red,
+                                        size: isMobile ? 18 : 20),
+                                    SizedBox(width: 8),
+                                    Text('Reset All In Use',
                                         style: TextStyle(
                                             fontSize: isMobile ? 12 : 14)),
                                   ],

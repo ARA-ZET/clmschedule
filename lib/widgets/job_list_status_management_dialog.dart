@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/job_list_status_provider.dart';
+import '../providers/job_type_provider.dart';
 import '../models/custom_job_list_status.dart';
 
 class JobListStatusManagementDialog extends StatefulWidget {
@@ -17,6 +18,7 @@ class _JobListStatusManagementDialogState
   Color _selectedColor = Colors.blue;
   bool _isAdding = false;
   String? _editingId;
+  List<String> _hiddenForJobTypes = [];
 
   @override
   void dispose() {
@@ -30,6 +32,7 @@ class _JobListStatusManagementDialogState
       _editingId = null;
       _labelController.clear();
       _selectedColor = Colors.blue;
+      _hiddenForJobTypes = [];
     });
   }
 
@@ -39,6 +42,7 @@ class _JobListStatusManagementDialogState
       _editingId = status.id;
       _labelController.text = status.label;
       _selectedColor = status.color;
+      _hiddenForJobTypes = List.from(status.hiddenForJobTypes);
     });
   }
 
@@ -47,6 +51,7 @@ class _JobListStatusManagementDialogState
       _isAdding = false;
       _editingId = null;
       _labelController.clear();
+      _hiddenForJobTypes = [];
     });
   }
 
@@ -62,12 +67,17 @@ class _JobListStatusManagementDialogState
 
     try {
       if (_isAdding) {
-        await provider.addStatus(_labelController.text.trim(), _selectedColor);
+        await provider.addStatus(
+          _labelController.text.trim(),
+          _selectedColor,
+          hiddenForJobTypes: _hiddenForJobTypes,
+        );
       } else if (_editingId != null) {
         await provider.updateStatus(
           _editingId!,
           _labelController.text.trim(),
           _selectedColor,
+          hiddenForJobTypes: _hiddenForJobTypes,
         );
       }
 
@@ -115,6 +125,102 @@ class _JobListStatusManagementDialogState
     }
   }
 
+  Widget _buildEditCard({required bool isAdding}) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              isAdding ? 'Add New Status' : 'Edit Status',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _labelController,
+              decoration: const InputDecoration(
+                labelText: 'Status Label',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                const Text('Color: '),
+                GestureDetector(
+                  onTap: _showColorPicker,
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: _selectedColor,
+                      border: Border.all(color: Colors.grey),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: _showColorPicker,
+                  child: const Text('Change Color'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Hide for Job Types:',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: Provider.of<JobTypeProvider>(context, listen: false)
+                  .jobTypes
+                  .map((jt) {
+                final isHidden = _hiddenForJobTypes.contains(jt.id);
+                return FilterChip(
+                  label: Text(
+                    jt.label,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  selected: isHidden,
+                  selectedColor: Colors.red.shade100,
+                  checkmarkColor: Colors.red.shade700,
+                  onSelected: (selected) {
+                    setState(() {
+                      if (selected) {
+                        _hiddenForJobTypes.add(jt.id);
+                      } else {
+                        _hiddenForJobTypes.remove(jt.id);
+                      }
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: _cancelEdit,
+                  child: const Text('Cancel'),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: _saveStatus,
+                  child: Text(isAdding ? 'Add' : 'Update'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showColorPicker() {
     // Define 6 shades for each color family (lightest to darkest)
     final colorFamilies = {
@@ -157,6 +263,22 @@ class _JobListStatusManagementDialogState
         const Color(0xFFE65100), // Orange 900
         const Color(0xFFBF360C), // Deep Orange 800
         const Color.fromARGB(255, 80, 43, 36), // Brown 900 (darkest)
+      ],
+      'Yellow': [
+        const Color(0xFFFFFDE7), // Yellow 50
+        const Color(0xFFFFF176), // Yellow 300
+        const Color(0xFFFFEE58), // Yellow 400
+        const Color(0xFFFFC107), // Yellow 500r
+        const Color(0xFFFFA000), // Yellow 700
+        const Color.fromARGB(255, 151, 101, 0), // Yellow 900 (darkest)
+      ],
+      'Purple': [
+        const Color(0xFFF3E5F5), // Purple 50
+        const Color(0xFFCE93D8), // Purple 300
+        const Color(0xFFBA68C8), // Purple 400
+        const Color(0xFF7B1FA2), // Purple 700
+        const Color(0xFF6A1B9A), // Purple 800
+        const Color.fromARGB(255, 88, 0, 88), // Purple 900 (darkest)
       ],
     };
 
@@ -267,73 +389,8 @@ class _JobListStatusManagementDialogState
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        if (_isAdding || _editingId != null) ...[
-                          Card(
-                            child: Padding(
-                              padding: const EdgeInsets.all(16),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    _isAdding
-                                        ? 'Add New Status'
-                                        : 'Edit Status',
-                                    style:
-                                        Theme.of(context).textTheme.titleMedium,
-                                  ),
-                                  const SizedBox(height: 16),
-                                  TextField(
-                                    controller: _labelController,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Status Label',
-                                      border: OutlineInputBorder(),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 16),
-                                  Row(
-                                    children: [
-                                      const Text('Color: '),
-                                      GestureDetector(
-                                        onTap: _showColorPicker,
-                                        child: Container(
-                                          width: 40,
-                                          height: 40,
-                                          decoration: BoxDecoration(
-                                            color: _selectedColor,
-                                            border:
-                                                Border.all(color: Colors.grey),
-                                            borderRadius:
-                                                BorderRadius.circular(20),
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      TextButton(
-                                        onPressed: _showColorPicker,
-                                        child: const Text('Change Color'),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 16),
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.end,
-                                    children: [
-                                      TextButton(
-                                        onPressed: _cancelEdit,
-                                        child: const Text('Cancel'),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      ElevatedButton(
-                                        onPressed: _saveStatus,
-                                        child:
-                                            Text(_isAdding ? 'Add' : 'Update'),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
+                        if (_isAdding) ...[
+                          _buildEditCard(isAdding: true),
                           const SizedBox(height: 16),
                         ],
                         if (provider.isLoading)
@@ -345,6 +402,9 @@ class _JobListStatusManagementDialogState
                             itemCount: provider.statuses.length,
                             itemBuilder: (context, index) {
                               final status = provider.statuses[index];
+                              if (_editingId == status.id) {
+                                return _buildEditCard(isAdding: false);
+                              }
                               return Card(
                                 child: ListTile(
                                   leading: Container(

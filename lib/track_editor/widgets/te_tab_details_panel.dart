@@ -6,6 +6,7 @@
 //   ─ Waypoints section: count + scrollable name list, with a visibility toggle
 //     that also hides/shows the markers on the map.
 import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:gpx/gpx.dart';
 import 'package:provider/provider.dart';
 import '../../models/work_area.dart';
@@ -30,13 +31,15 @@ class TETabDetailsPanel extends StatelessWidget {
     final hasWaypoints = tab.waypoints.isNotEmpty;
 
     if (!hasTracks && !hasWaypoints && tab.polygons.isEmpty) {
-      return _PolygonsSection(polygons: const [], tabIndex: tabIdx);
+      return _PolygonsSection(
+          polygons: const [], tabIndex: tabIdx, waypoints: tab.waypoints);
     }
 
     return Column(
       spacing: 12,
       children: [
-        _PolygonsSection(polygons: tab.polygons, tabIndex: tabIdx),
+        _PolygonsSection(
+            polygons: tab.polygons, tabIndex: tabIdx, waypoints: tab.waypoints),
         if (hasTracks) _TracksSection(tracks: tab.tracks),
         if (hasWaypoints)
           _WaypointsSection(
@@ -61,7 +64,11 @@ class TETabDetailsPanel extends StatelessWidget {
 class _PolygonsSection extends StatefulWidget {
   final List<TEStyledPolygon> polygons;
   final int tabIndex;
-  const _PolygonsSection({required this.polygons, required this.tabIndex});
+  final List<Wpt> waypoints;
+  const _PolygonsSection(
+      {required this.polygons,
+      required this.tabIndex,
+      required this.waypoints});
 
   @override
   State<_PolygonsSection> createState() => _PolygonsSectionState();
@@ -254,11 +261,22 @@ class _PolygonsSectionState extends State<_PolygonsSection> {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        Text(
-                          '${poly.points.length} pts',
-                          style: TextStyle(
-                              fontSize: 10, color: Colors.grey.shade500),
-                        ),
+                        Builder(builder: (_) {
+                          final wptCount = widget.waypoints.where((wpt) {
+                            if (wpt.lat == null || wpt.lon == null) {
+                              return false;
+                            }
+                            return isPointInPolygon(
+                              LatLng(wpt.lat!, wpt.lon!),
+                              poly.points,
+                            );
+                          }).length;
+                          return Text(
+                            '$wptCount wpts',
+                            style: TextStyle(
+                                fontSize: 10, color: Colors.grey.shade500),
+                          );
+                        }),
                       ],
                     ),
                   );
@@ -273,6 +291,43 @@ class _PolygonsSectionState extends State<_PolygonsSection> {
                 style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
               ),
             ),
+          // ── Outside count ───────────────────────────────────────────────
+          if (widget.polygons.isNotEmpty && widget.waypoints.isNotEmpty)
+            Builder(builder: (_) {
+              final insideCount = widget.waypoints.where((wpt) {
+                if (wpt.lat == null || wpt.lon == null) return false;
+                final ll = LatLng(wpt.lat!, wpt.lon!);
+                return widget.polygons
+                    .any((p) => isPointInPolygon(ll, p.points));
+              }).length;
+              final outsideCount = widget.waypoints.length - insideCount;
+              if (outsideCount <= 0) return const SizedBox.shrink();
+              return Padding(
+                padding: const EdgeInsets.fromLTRB(10, 4, 10, 0),
+                child: Container(
+                  width: double.infinity,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.orange.shade200),
+                  ),
+                  child: Row(
+                    spacing: 6,
+                    children: [
+                      Icon(Icons.info_outline,
+                          size: 13, color: Colors.orange.shade700),
+                      Text(
+                        '$outsideCount waypoint${outsideCount == 1 ? '' : 's'} outside all polygons',
+                        style: TextStyle(
+                            fontSize: 11, color: Colors.orange.shade800),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }),
           // ── Search button ────────────────────────────────────────────────
           Padding(
             padding: const EdgeInsets.fromLTRB(10, 4, 10, 8),

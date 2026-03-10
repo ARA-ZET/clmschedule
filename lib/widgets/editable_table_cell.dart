@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:provider/provider.dart';
-import '../models/job_list_item.dart';
 import '../models/collection_job.dart';
 import '../providers/scale_provider.dart';
 import '../providers/collection_schedule_provider.dart';
@@ -186,7 +185,7 @@ class EditableDateCell extends StatelessWidget {
   final DateTime value;
   final Function(DateTime) onSave;
   final double? width;
-  final JobType? jobType;
+  final String? jobTypeId;
   final Map<String, dynamic>? jobData;
 
   const EditableDateCell({
@@ -194,16 +193,16 @@ class EditableDateCell extends StatelessWidget {
     required this.value,
     required this.onSave,
     this.width,
-    this.jobType,
+    this.jobTypeId,
     this.jobData,
   });
 
   bool _needsTimeDisplay() {
-    return jobType == JobType.junkCollection ||
-        jobType == JobType.furnitureMove ||
-        jobType == JobType.trailerTowing ||
-        jobType == JobType.windowCleaning ||
-        jobType == JobType.solarPanelCleaning;
+    return jobTypeId == 'junkCollection' ||
+        jobTypeId == 'furnitureMove' ||
+        jobTypeId == 'trailerTowing' ||
+        jobTypeId == 'windowCleaning' ||
+        jobTypeId == 'solarPanelCleaning';
   }
 
   List<TimeOfDay> _getAvailableTimeSlots() {
@@ -254,9 +253,9 @@ class EditableDateCell extends StatelessWidget {
                         // Get occupied time slots for conflict info
                         final occupiedSlots = <String>[];
                         if (jobData != null &&
-                            (jobType == JobType.junkCollection ||
-                                jobType == JobType.furnitureMove ||
-                                jobType == JobType.trailerTowing)) {
+                            (jobTypeId == 'junkCollection' ||
+                                jobTypeId == 'furnitureMove' ||
+                                jobTypeId == 'trailerTowing')) {
                           VehicleType? vehicleType;
 
                           if (jobData!.containsKey('vehicleType')) {
@@ -284,9 +283,9 @@ class EditableDateCell extends StatelessWidget {
                             children: [
                               Text('Select Time'),
                               if (jobData != null &&
-                                  (jobType == JobType.junkCollection ||
-                                      jobType == JobType.furnitureMove ||
-                                      jobType == JobType.trailerTowing)) ...[
+                                  (jobTypeId == 'junkCollection' ||
+                                      jobTypeId == 'furnitureMove' ||
+                                      jobTypeId == 'trailerTowing')) ...[
                                 const SizedBox(height: 4),
                                 Text(
                                   '${jobData!['vehicleType']?.toString().toUpperCase() ?? 'VEHICLE'} - ${DateFormat('dd MMM yyyy').format(date)}',
@@ -321,9 +320,9 @@ class EditableDateCell extends StatelessWidget {
                                 String conflictDetails = '';
                                 Color conflictColor = Colors.red;
 
-                                if (jobType == JobType.junkCollection ||
-                                    jobType == JobType.furnitureMove ||
-                                    jobType == JobType.trailerTowing) {
+                                if (jobTypeId == 'junkCollection' ||
+                                    jobTypeId == 'furnitureMove' ||
+                                    jobTypeId == 'trailerTowing') {
                                   // Try to get vehicle type from the job data
                                   if (jobData != null) {
                                     VehicleType? vehicleType;
@@ -835,14 +834,14 @@ class _LinkCellState extends State<LinkCell> {
 
 class EditableVehicleComboCell extends StatefulWidget {
   final int quantity;
-  final JobType jobType;
+  final String jobTypeId;
   final Function(int) onSave;
   final double? width;
 
   const EditableVehicleComboCell({
     super.key,
     required this.quantity,
-    required this.jobType,
+    required this.jobTypeId,
     required this.onSave,
     this.width,
   });
@@ -861,7 +860,7 @@ class _EditableVehicleComboCellState extends State<EditableVehicleComboCell> {
     super.initState();
     _selectedCombo = _getVehicleTrailerComboFromQuantity(widget.quantity);
     // If no valid combo found, default to first option
-    if (_selectedCombo == null && _needsVehicleCombo(widget.jobType)) {
+    if (_selectedCombo == null && _needsVehicleCombo(widget.jobTypeId)) {
       _selectedCombo = _getVehicleTrailerCombinations().first;
     }
   }
@@ -869,7 +868,7 @@ class _EditableVehicleComboCellState extends State<EditableVehicleComboCell> {
   // Helper methods for vehicle/trailer combinations
   List<String> _getVehicleTrailerCombinations() {
     // For trailer towing, only show no-trailer combinations
-    if (widget.jobType == JobType.trailerTowing) {
+    if (widget.jobTypeId == 'trailerTowing') {
       return [
         'Hyundai - No Trailer',
         'Mahindra - No Trailer',
@@ -905,10 +904,10 @@ class _EditableVehicleComboCellState extends State<EditableVehicleComboCell> {
     return index >= 0 ? index + 1 : 1;
   }
 
-  bool _needsVehicleCombo(JobType jobType) {
-    return jobType == JobType.junkCollection ||
-        jobType == JobType.furnitureMove ||
-        jobType == JobType.trailerTowing;
+  bool _needsVehicleCombo(String jobTypeId) {
+    return jobTypeId == 'junkCollection' ||
+        jobTypeId == 'furnitureMove' ||
+        jobTypeId == 'trailerTowing';
   }
 
   void _saveChanges() {
@@ -925,7 +924,7 @@ class _EditableVehicleComboCellState extends State<EditableVehicleComboCell> {
   Widget build(BuildContext context) {
     return Consumer<ScaleProvider>(
       builder: (context, scaleProvider, child) {
-        if (!_needsVehicleCombo(widget.jobType)) {
+        if (!_needsVehicleCombo(widget.jobTypeId)) {
           // For non-vehicle combo job types, show simple quantity
           return SizedBox(
             width: widget.width,

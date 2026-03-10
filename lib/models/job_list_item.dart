@@ -68,23 +68,6 @@ enum JobListStatus {
   }
 }
 
-enum JobType {
-  flyersPrintingOnly('Flyers - Printing only'),
-  junkCollection('Junk Collection'),
-  flyersAndPosters('Flyers and Posters'),
-  furnitureMove('Furniture Move'),
-  flyerDistribution('Flyer Distribution'),
-  flyerPrintingAndDistribution('Flyer Printing and Distribution'),
-  windowCleaning('Window Cleaning'),
-  solarPanelCleaning('Solar Panel Cleaning'),
-  calendersDistribution('Calenders Distribution'),
-  trailerTowing('Trailer Towing'),
-  postering('Postering');
-
-  const JobType(this.displayName);
-  final String displayName;
-}
-
 class JobListItem {
   final String id;
   final String invoice;
@@ -92,7 +75,7 @@ class JobListItem {
   final String client;
   final String jobStatusId; // Changed from JobListStatus enum to String
   final String invoiceStatusId; // Invoice status (separate from job status)
-  final JobType jobType;
+  final String jobTypeId; // Changed from JobType enum to String
   final String area;
   final int quantity;
   final double manDays;
@@ -118,7 +101,7 @@ class JobListItem {
     required this.client,
     required this.jobStatusId,
     this.invoiceStatusId = 'pending', // Default to pending invoice status
-    required this.jobType,
+    required this.jobTypeId,
     required this.area,
     required this.quantity,
     required this.manDays,
@@ -200,10 +183,7 @@ class JobListItem {
       client: data['client'] as String? ?? '',
       jobStatusId: jobStatusId,
       invoiceStatusId: invoiceStatusId,
-      jobType: JobType.values.firstWhere(
-        (e) => e.name == data['jobType'],
-        orElse: () => JobType.flyersPrintingOnly,
-      ),
+      jobTypeId: data['jobType'] as String? ?? 'flyersPrintingOnly',
       area: data['area'] as String? ?? '',
       quantity: data['quantity'] as int? ?? 0,
       manDays: (data['manDays'] as num?)?.toDouble() ?? 0.0,
@@ -238,7 +218,7 @@ class JobListItem {
       'client': client,
       'jobStatusId': jobStatusId, // Changed from jobStatus.name to jobStatusId
       'invoiceStatusId': invoiceStatusId,
-      'jobType': jobType.name,
+      'jobType': jobTypeId,
       'area': area,
       'quantity': quantity,
       'manDays': manDays,
@@ -267,7 +247,7 @@ class JobListItem {
     String?
         jobStatusId, // Changed from JobListStatus? jobStatus to String? jobStatusId
     String? invoiceStatusId,
-    JobType? jobType,
+    String? jobTypeId,
     String? area,
     int? quantity,
     double? manDays,
@@ -291,7 +271,7 @@ class JobListItem {
       client: client ?? this.client,
       jobStatusId: jobStatusId ?? this.jobStatusId,
       invoiceStatusId: invoiceStatusId ?? this.invoiceStatusId,
-      jobType: jobType ?? this.jobType,
+      jobTypeId: jobTypeId ?? this.jobTypeId,
       area: area ?? this.area,
       quantity: quantity ?? this.quantity,
       manDays: manDays ?? this.manDays,
@@ -319,7 +299,7 @@ class JobListItem {
     String? client,
     String? jobStatusId,
     String? invoiceStatusId,
-    JobType? jobType,
+    String? jobTypeId,
     String? area,
     int? quantity,
     double? manDays,
@@ -337,7 +317,7 @@ class JobListItem {
     // Helper functions to resolve display labels
     String? Function(String statusId)? resolveJobStatusLabel,
     String? Function(String statusId)? resolveInvoiceStatusLabel,
-    String? Function(int quantity, JobType jobType)? resolveQuantityLabel,
+    String? Function(int quantity, String jobTypeId)? resolveQuantityLabel,
   }) {
     final List<JobListItemUpdate> newUpdates = List.from(updates);
 
@@ -401,12 +381,12 @@ class JobListItem {
       ));
     }
 
-    if (jobType != null && jobType != this.jobType) {
+    if (jobTypeId != null && jobTypeId != this.jobTypeId) {
       newUpdates.add(JobListItemUpdate(
         userId: userId,
         fieldName: 'jobType',
-        oldValue: this.jobType,
-        newValue: jobType,
+        oldValue: this.jobTypeId,
+        newValue: jobTypeId,
         timestamp: DateTime.now(),
         userDisplayName: userDisplayName,
       ));
@@ -432,9 +412,9 @@ class JobListItem {
         timestamp: DateTime.now(),
         userDisplayName: userDisplayName,
         oldValueDisplay:
-            resolveQuantityLabel?.call(this.quantity, jobType ?? this.jobType),
+            resolveQuantityLabel?.call(this.quantity, jobTypeId ?? this.jobTypeId),
         newValueDisplay:
-            resolveQuantityLabel?.call(quantity, jobType ?? this.jobType),
+            resolveQuantityLabel?.call(quantity, jobTypeId ?? this.jobTypeId),
       ));
     }
 
@@ -558,7 +538,7 @@ class JobListItem {
       client: client,
       jobStatusId: jobStatusId,
       invoiceStatusId: invoiceStatusId,
-      jobType: jobType,
+      jobTypeId: jobTypeId,
       area: area,
       quantity: quantity,
       manDays: manDays,
@@ -600,11 +580,11 @@ class JobListItem {
 
   // Helper method to check if job type needs time display
   bool _needsTimeDisplay() {
-    return jobType == JobType.junkCollection ||
-        jobType == JobType.furnitureMove ||
-        jobType == JobType.trailerTowing ||
-        jobType == JobType.windowCleaning ||
-        jobType == JobType.solarPanelCleaning;
+    return jobTypeId == 'junkCollection' ||
+        jobTypeId == 'furnitureMove' ||
+        jobTypeId == 'trailerTowing' ||
+        jobTypeId == 'windowCleaning' ||
+        jobTypeId == 'solarPanelCleaning';
   }
 
   // Backwards compatibility getter - converts jobStatusId back to JobListStatus enum

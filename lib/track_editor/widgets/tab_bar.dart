@@ -2,7 +2,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/tab_item.dart';
-import '../providers/te_mode_provider.dart';
 import '../providers/te_tabs_provider.dart';
 
 class TETopTabBar extends StatelessWidget {
@@ -13,11 +12,7 @@ class TETopTabBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final mode = context.watch<TEModeProvider>().mode;
     final tabsProvider = context.watch<TETabsProvider>();
-    final tabsRead = context.read<TETabsProvider>();
-    // Sync active mode so tabs always reflect the current mode.
-    tabsRead.setActiveMode(mode);
     final tabs = tabsProvider.tabs;
     final selectedIndex = tabsProvider.currentTab;
 
@@ -44,7 +39,8 @@ class TETopTabBar extends StatelessWidget {
                 return SizedBox(
                   width: tabWidth,
                   child: TextButton(
-                    onPressed: () => tabsRead.selectTab(index),
+                    onPressed: () =>
+                        context.read<TETabsProvider>().selectTab(index),
                     style: TextButton.styleFrom(
                       backgroundColor:
                           isSelected ? Colors.blueGrey : Colors.white,
@@ -74,7 +70,8 @@ class TETopTabBar extends StatelessWidget {
                         ),
                         GestureDetector(
                           behavior: HitTestBehavior.opaque,
-                          onTap: () => tabsRead.removeTab(tab),
+                          onTap: () =>
+                              context.read<TETabsProvider>().removeTab(tab),
                           child: Padding(
                             padding: const EdgeInsets.only(left: 2),
                             child: Icon(
@@ -102,7 +99,7 @@ class TETopTabBar extends StatelessWidget {
                         waypoints: [],
                         targetPolygons: [],
                       );
-                      tabsRead
+                      context.read<TETabsProvider>()
                         ..addTab(newTab)
                         ..selectTab(index);
                     },

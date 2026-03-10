@@ -23,10 +23,10 @@ import 'providers/inventory_provider.dart';
 import 'providers/happy_sun_project_provider.dart';
 import 'providers/app_version_provider.dart';
 import 'providers/tool_settings_provider.dart';
+import 'providers/job_type_provider.dart';
 import 'shareable_maps/providers/shareable_map_provider.dart';
 import 'shareable_maps/providers/shareable_maps_gallery_provider.dart';
 import 'shareable_maps/widgets/shareable_maps_gallery.dart';
-import 'models/job_list_item.dart';
 import 'models/happy_sun_project.dart';
 import 'models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
 import 'widgets/schedule_grid.dart';
@@ -38,6 +38,7 @@ import 'widgets/scale_settings_dialog.dart';
 import 'widgets/job_status_management_dialog.dart';
 import 'widgets/job_list_status_management_dialog.dart';
 import 'widgets/invoice_status_management_dialog.dart';
+import 'widgets/job_type_management_dialog.dart';
 import 'widgets/auth_gate.dart';
 import 'widgets/chat_dialog.dart';
 import 'widgets/chat_admin_panel.dart';
@@ -60,8 +61,10 @@ import 'track_editor/providers/te_tabs_provider.dart';
 import 'track_editor/providers/te_tracks_provider.dart';
 import 'track_editor/providers/te_waypoints_provider.dart';
 import 'track_editor/providers/te_mode_provider.dart';
+import 'erf_property/providers/erf_property_provider.dart';
+import 'erf_property/pages/erf_property_screen.dart';
 import 'services/version_service.dart';
-import 'utils/seed_data.dart';
+
 import 'services/work_area_service.dart';
 import 'services/job_list_service.dart';
 import 'services/job_list_preferences_service.dart';
@@ -172,6 +175,9 @@ void main() async {
     ChangeNotifierProvider(
       create: (context) => InvoiceStatusProvider(),
     ),
+    ChangeNotifierProvider(
+      create: (context) => JobTypeProvider(),
+    ),
     ChangeNotifierProxyProvider<AuthProvider, JobListPreferencesProvider>(
       create: (context) => JobListPreferencesProvider(
         context.read<JobListPreferencesService>(),
@@ -242,6 +248,11 @@ void main() async {
     ChangeNotifierProvider(
       create: (context) => ShareableMapsGalleryProvider(),
     ),
+    // ERF Property provider for CLM flavor
+    if (FlavorConfig.instance.isCLM)
+      ChangeNotifierProvider(
+        create: (context) => ErfPropertyProvider(),
+      ),
   ], child: const MyApp()));
 }
 
@@ -292,7 +303,7 @@ class _MyAppState extends State<MyApp> {
           debugPrint('🔵 Happy Sun Sync onAdded callback');
           debugPrint('   Job List Item ID: ${jobListItem.id}');
           debugPrint('   Client: ${jobListItem.client}');
-          debugPrint('   Job Type: ${jobListItem.jobType.displayName}');
+          debugPrint('   Job Type: ${jobListItem.jobTypeId}');
           debugPrint('   Date: ${jobListItem.date}');
           debugPrint('   Has Tools: ${jobListItem.toolsNeeded != null}');
 
@@ -379,7 +390,7 @@ class _MyAppState extends State<MyApp> {
           }
 
           // Determine job type
-          final jobType = jobListItem.jobType == JobType.windowCleaning
+          final jobType = jobListItem.jobTypeId == 'windowCleaning'
               ? 'windowCleaning'
               : 'solarPanelCleaning';
 
@@ -419,8 +430,8 @@ class _MyAppState extends State<MyApp> {
                   oldItem.area != newItem.area ||
                   oldItem.jobStatusId != newItem.jobStatusId ||
                   oldItem.toolsNeeded != newItem.toolsNeeded) &&
-              (newItem.jobType == JobType.windowCleaning ||
-                  newItem.jobType == JobType.solarPanelCleaning)) {
+              (newItem.jobTypeId == 'windowCleaning' ||
+                  newItem.jobTypeId == 'solarPanelCleaning')) {
             final existingProject =
                 happySunProjectProvider.getProjectById(newItem.id);
             if (existingProject != null) {
@@ -480,8 +491,8 @@ class _MyAppState extends State<MyApp> {
       onDeleted: (jobListItem) async {
         try {
           // Delete corresponding HappySunProject when window/solar cleaning job is deleted
-          if (jobListItem.jobType == JobType.windowCleaning ||
-              jobListItem.jobType == JobType.solarPanelCleaning) {
+          if (jobListItem.jobTypeId == 'windowCleaning' ||
+              jobListItem.jobTypeId == 'solarPanelCleaning') {
             await happySunProjectProvider.deleteProject(jobListItem.id);
             debugPrint('   Happy Sun project deleted: ${jobListItem.id}');
           }
@@ -997,48 +1008,17 @@ class _DashboardScreenState extends State<DashboardScreen>
                       },
                       tooltip: 'Manage Distributors',
                     ),
-                  // Hide debug/seed buttons on mobile
-                  if (!isSmallScreen) ...[
-                    IconButton(
-                      icon: const Icon(Icons.data_array),
-                      onPressed: () async {},
-                      tooltip: 'Add sample schedule data',
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.list_alt),
-                      onPressed: () async {},
-                      tooltip: 'Add sample job list data',
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.map),
-                      onPressed: () async {
-                        final workAreaService = context.read<WorkAreaService>();
-                        try {
-                          final workAreas = await workAreaService.createFromKml(
-                            'craig.kml',
-                          );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  'Imported ${workAreas.length} work areas from KML file',
-                                ),
-                              ),
-                            );
-                          }
-                        } catch (e) {
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                  content:
-                                      Text('Error importing KML data: $e')),
-                            );
-                          }
-                        }
-                      },
-                      tooltip: 'Import KML data',
-                    ),
-                  ],
+                  IconButton(
+                    icon: const Icon(Icons.location_city),
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const ErfPropertyScreen(),
+                        ),
+                      );
+                    },
+                    tooltip: 'ERF Property Viewer',
+                  ),
                   // Settings menu - always visible
                   PopupMenuButton<String>(
                     icon: const Icon(Icons.settings),
@@ -1072,6 +1052,12 @@ class _DashboardScreenState extends State<DashboardScreen>
                           context: context,
                           builder: (context) =>
                               const InvoiceStatusManagementDialog(),
+                        );
+                      } else if (value == 'job_types') {
+                        showDialog(
+                          context: context,
+                          builder: (context) =>
+                              const JobTypeManagementDialog(),
                         );
                       } else if (value == 'signout') {
                         final confirmed = await showDialog<bool>(
@@ -1141,6 +1127,14 @@ class _DashboardScreenState extends State<DashboardScreen>
                         child: ListTile(
                           leading: Icon(Icons.receipt),
                           title: Text('Invoice Statuses'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem<String>(
+                        value: 'job_types',
+                        child: ListTile(
+                          leading: Icon(Icons.category),
+                          title: Text('Job Types'),
                           contentPadding: EdgeInsets.zero,
                         ),
                       ),
@@ -1481,57 +1475,7 @@ class ScheduleScreen extends StatelessWidget {
             TextButton(onPressed: () {}, child: const Text("Job List"))
           ],
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.data_array),
-            onPressed: () async {
-              try {
-                await seedData();
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Sample data added successfully!'),
-                    ),
-                  );
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error adding sample data: $e')),
-                  );
-                }
-              }
-            },
-            tooltip: 'Add sample data',
-          ),
-          IconButton(
-            icon: const Icon(Icons.map),
-            onPressed: () async {
-              final workAreaService = context.read<WorkAreaService>();
-              try {
-                final workAreas = await workAreaService.createFromKml(
-                  'craig.kml',
-                );
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        'Imported ${workAreas.length} work areas from KML file',
-                      ),
-                    ),
-                  );
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error importing KML data: $e')),
-                  );
-                }
-              }
-            },
-            tooltip: 'Import KML data',
-          ),
-        ],
+
       ),
       body: const ScheduleGrid(),
     );

@@ -56,28 +56,28 @@ void testJobTypeLogic() {
   
   // Test which job types should trigger quantityDistributed update
   final collectionJobTypes = [
-    JobType.junkCollection,
-    JobType.furnitureMove,
+    'junkCollection',
+    'furnitureMove',
   ];
   
   final nonCollectionJobTypes = [
-    JobType.flyerDistribution,
-    JobType.windowCleaning,
-    JobType.solarPanelCleaning,
+    'flyerDistribution',
+    'windowCleaning',
+    'solarPanelCleaning',
   ];
   
-  for (final jobType in collectionJobTypes) {
-    final shouldUpdate = (jobType == JobType.junkCollection || jobType == JobType.furnitureMove);
+  for (final jobTypeId in collectionJobTypes) {
+    final shouldUpdate = (jobTypeId == 'junkCollection' || jobTypeId == 'furnitureMove');
     if (kDebugMode) {
-      print('${jobType.displayName}: Should update quantityDistributed = $shouldUpdate');
+      print('$jobTypeId: Should update quantityDistributed = $shouldUpdate');
     }
     assert(shouldUpdate, 'Collection job type should update quantityDistributed');
   }
   
-  for (final jobType in nonCollectionJobTypes) {
-    final shouldUpdate = (jobType == JobType.junkCollection || jobType == JobType.furnitureMove);
+  for (final jobTypeId in nonCollectionJobTypes) {
+    final shouldUpdate = (jobTypeId == 'junkCollection' || jobTypeId == 'furnitureMove');
     if (kDebugMode) {
-      print('${jobType.displayName}: Should update quantityDistributed = $shouldUpdate');
+      print('$jobTypeId: Should update quantityDistributed = $shouldUpdate');
     }
     assert(!shouldUpdate, 'Non-collection job type should NOT update quantityDistributed');
   }

@@ -24,9 +24,15 @@ class _TrackEditorPageState extends State<TrackEditorPage> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Use Provider.of with listen:true so this re-fires whenever mode changes.
+    // Sync tabs provider mode after the current frame to avoid
+    // notifyListeners during build.
     final mode = Provider.of<TEModeProvider>(context).mode;
-    context.read<TETabsProvider>().setActiveMode(mode);
+    final tabsProvider = context.read<TETabsProvider>();
+    if (tabsProvider.activeMode != mode) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) tabsProvider.setActiveMode(mode);
+      });
+    }
   }
 
   @override

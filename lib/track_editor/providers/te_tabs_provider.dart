@@ -31,6 +31,7 @@ class TETabsProvider with ChangeNotifier {
   TEMode _activeMode = TEMode.import;
 
   // ── Active-mode helpers ───────────────────────────────────────────────────
+  TEMode get activeMode => _activeMode;
   List<TETabItem> get tabs => _tabsByMode[_activeMode]!;
   int get currentTab => _currentByMode[_activeMode]!;
 
@@ -43,6 +44,14 @@ class TETabsProvider with ChangeNotifier {
   // ── Mutations (all operate on the active mode's list) ────────────────────
   void addTab(TETabItem tab) {
     tabs.add(tab);
+    notifyListeners();
+  }
+
+  /// Add multiple tabs at once with a single notification.
+  void addTabsBatch(List<TETabItem> newTabs) {
+    if (newTabs.isEmpty) return;
+    tabs.addAll(newTabs);
+    _currentByMode[_activeMode] = tabs.length - 1;
     notifyListeners();
   }
 

@@ -37,13 +37,17 @@ class JobListProvider extends ChangeNotifier {
   Timer? _debounceTimer;
   final Map<String, JobListItem> _pendingUpdates = {};
   final Map<String, DateTime> _updateTimestamps = {};
-  static const Duration _debounceDelay = Duration(seconds: 5);
+  static const Duration _debounceDelay = Duration(milliseconds: 500);
 
   // Search debouncing
   Timer? _searchDebounceTimer;
   String _pendingSearchQuery = '';
   final ValueNotifier<bool> _isSearchingNotifier = ValueNotifier<bool>(false);
   static const Duration _searchDebounceDelay = Duration(seconds: 2);
+
+  // Filter/search UI feedback — when true the grid shows a spinner
+  // instead of the table so the heavy rebuild doesn't block the spinner.
+  bool _isApplyingFilter = false;
 
   // Lazy loading state
   bool _hasInitialLoad = false;
@@ -89,6 +93,7 @@ class JobListProvider extends ChangeNotifier {
   List<JobListItem> get allJobListItems => _getMergedJobListItems();
   bool get isLoading => _isLoading;
   bool get isInitialized => _isInitialized;
+  bool get isApplyingFilter => _isApplyingFilter;
   String? get error => _error;
   String get searchQuery => _searchQuery;
   Set<String> get statusFilters => _statusFilters;
@@ -105,12 +110,49 @@ class JobListProvider extends ChangeNotifier {
   bool get isRefreshingLastChecked => _isRefreshingLastChecked;
   ValueNotifier<bool> get isSearchingNotifier => _isSearchingNotifier;
 
-  // Get merged data (database + pending local changes)
+  // Get merged data (database + pending local changes), cached
+  List<JobListItem>? _cachedMergedItems;
+  bool _mergedItemsDirty = true;
+
   List<JobListItem> _getMergedJobListItems() {
-    return _jobListItems.map((item) {
-      // Return pending update if exists, otherwise original item
-      return _pendingUpdates[item.id] ?? item;
-    }).toList();
+    if (!_mergedItemsDirty && _cachedMergedItems != null) {
+      return _cachedMergedItems!;
+    }
+    _cachedMergedItems = _pendingUpdates.isEmpty
+        ? _jobListItems
+        : _jobListItems.map((item) {
+            return _pendingUpdates[item.id] ?? item;
+          }).toList();
+    _mergedItemsDirty = false;
+    return _cachedMergedItems!;
+  }
+
+  void _invalidateItemCaches() {
+    _mergedItemsDirty = true;
+    _cachedMergedItems = null;
+    _cachedFilteredItems = null;
+    _lastFilterHash = '';
+  }
+
+  /// Two-phase notify that keeps the UI responsive:
+  /// Phase 1: Set _isApplyingFilter = true → notifyListeners().
+  ///   The grid skips building the heavy table and shows a spinner instead
+  ///   (cheap frame, spinner animates freely).
+  /// Phase 2: After a short delay (so spinner paints a few frames),
+  ///   set _isApplyingFilter = false → notifyListeners().
+  ///   The grid rebuilds with the new filtered data. The user was seeing
+  ///   a spinner, so the one heavy frame is not perceived as a freeze.
+  void _notifyWithLoadingFeedback() {
+    _isApplyingFilter = true;
+    _isSearchingNotifier.value = true;
+    notifyListeners(); // Phase 1 — lightweight, shows spinner
+
+    // Give the spinner 2-3 frames to paint and animate before heavy rebuild
+    Future.delayed(const Duration(milliseconds: 50), () {
+      _isApplyingFilter = false;
+      _isSearchingNotifier.value = false;
+      notifyListeners(); // Phase 2 — grid rebuilds with new data
+    });
   }
 
   // Cached filtered results
@@ -119,72 +161,77 @@ class JobListProvider extends ChangeNotifier {
 
   // Get filtered job list items with caching
   List<JobListItem> _filteredJobListItems() {
-    // Create hash of current filter state
+    // Create hash of current filter state (includes sort for full cache coverage)
     final currentHash =
-        '${_searchQuery}_${_statusFilters.join(',')}_${_invoiceStatusFilters.join(',')}_${_dateFilter}_${_startDate?.millisecondsSinceEpoch}_${_endDate?.millisecondsSinceEpoch}';
+        '${_searchQuery}_${_statusFilters.join(',')}_${_invoiceStatusFilters.join(',')}_${_dateFilter}_${_startDate?.millisecondsSinceEpoch}_${_endDate?.millisecondsSinceEpoch}_${_sortField}_$_sortAscending';
 
     // Return cached results if filters haven't changed
     if (_cachedFilteredItems != null && _lastFilterHash == currentHash) {
       return _cachedFilteredItems!;
     }
 
-    var filtered = _getMergedJobListItems();
+    final source = _getMergedJobListItems();
 
-    // Happy Sun flavor: Only show window cleaning and solar panel jobs
-    if (FlavorConfig.instance.isHappySun) {
-      filtered = filtered.where((item) {
-        return item.jobType == JobType.windowCleaning ||
-            item.jobType == JobType.solarPanelCleaning;
-      }).toList();
-    }
+    // Pre-compute filter predicates outside the loop
+    final bool isHappySun = FlavorConfig.instance.isHappySun;
+    final bool hasSearch = _searchQuery.isNotEmpty;
+    final String? queryLower = hasSearch ? _searchQuery.toLowerCase() : null;
+    final bool hasStatusFilter = _statusFilters.isNotEmpty;
+    final bool hasInvoiceFilter = _invoiceStatusFilters.isNotEmpty;
+    final bool hasDateFilter = _dateFilter != 'all' && _startDate != null;
+    final bool isSingleDate = _dateFilter == 'single';
+    final bool isRangeDate = _dateFilter == 'range' && _endDate != null;
+    final DateTime? rangeStart =
+        hasDateFilter ? _startDate!.subtract(const Duration(days: 1)) : null;
+    final DateTime? rangeEnd = hasDateFilter && isRangeDate
+        ? _endDate!.add(const Duration(days: 1))
+        : null;
 
-    // Apply search filter
-    if (_searchQuery.isNotEmpty) {
-      final query = _searchQuery.toLowerCase();
-      filtered = filtered.where((item) {
-        return item.client.toLowerCase().contains(query) ||
-            item.invoice.toLowerCase().contains(query) ||
-            item.area.toLowerCase().contains(query);
-      }).toList();
-    }
+    // Single-pass filter — no intermediate list allocations
+    final filtered = source.where((item) {
+      // Happy Sun flavor filter
+      if (isHappySun &&
+          item.jobTypeId != 'windowCleaning' &&
+          item.jobTypeId != 'solarPanelCleaning') {
+        return false;
+      }
 
-    // Apply status filter
-    if (_statusFilters.isNotEmpty) {
-      final statusSet =
-          _statusFilters.toSet(); // Convert to Set for faster lookup
-      filtered = filtered
-          .where((item) => statusSet.contains(item.jobStatusId))
-          .toList();
-    }
+      // Search filter
+      if (hasSearch &&
+          !item.client.toLowerCase().contains(queryLower!) &&
+          !item.invoice.toLowerCase().contains(queryLower) &&
+          !item.area.toLowerCase().contains(queryLower)) {
+        return false;
+      }
 
-    // Apply invoice status filter
-    if (_invoiceStatusFilters.isNotEmpty) {
-      final invoiceStatusSet =
-          _invoiceStatusFilters.toSet(); // Convert to Set for faster lookup
-      filtered = filtered
-          .where((item) => invoiceStatusSet.contains(item.invoiceStatusId))
-          .toList();
-    }
+      // Status filter
+      if (hasStatusFilter && !_statusFilters.contains(item.jobStatusId)) {
+        return false;
+      }
 
-    // Apply date filter
-    if (_dateFilter != 'all' && _startDate != null) {
-      filtered = filtered.where((item) {
-        if (_dateFilter == 'single') {
-          // Single day filter - check if item date matches the selected date
-          return _isSameDay(item.date, _startDate!);
-        } else if (_dateFilter == 'range' && _endDate != null) {
-          // Date range filter - check if item date is within range
-          return item.date
-                  .isAfter(_startDate!.subtract(const Duration(days: 1))) &&
-              item.date.isBefore(_endDate!.add(const Duration(days: 1)));
+      // Invoice status filter
+      if (hasInvoiceFilter &&
+          !_invoiceStatusFilters.contains(item.invoiceStatusId)) {
+        return false;
+      }
+
+      // Date filter
+      if (hasDateFilter) {
+        if (isSingleDate && !_isSameDay(item.date, _startDate!)) {
+          return false;
+        } else if (isRangeDate &&
+            (!item.date.isAfter(rangeStart!) ||
+                !item.date.isBefore(rangeEnd!))) {
+          return false;
         }
-        return true;
-      }).toList();
-    }
+      }
+
+      return true;
+    }).toList();
 
     // Apply sorting
     filtered.sort((a, b) {
-      int comparison = 0;
+      int comparison;
 
       switch (_sortField) {
         case 'date':
@@ -264,9 +311,9 @@ class JobListProvider extends ChangeNotifier {
         'JobListProvider: Setting up listener for month: ${_jobListService.getMonthlyDocumentId(_currentMonth)}');
 
     // For Happy Sun flavor, only listen to window cleaning and solar panel jobs
-    List<JobType>? jobTypesFilter;
+    List<String>? jobTypesFilter;
     if (FlavorConfig.instance.isHappySun) {
-      jobTypesFilter = [JobType.windowCleaning, JobType.solarPanelCleaning];
+      jobTypesFilter = ['windowCleaning', 'solarPanelCleaning'];
       debugPrint(
           'JobListProvider: Happy Sun flavor - filtering to window cleaning & solar panel jobs only');
     }
@@ -290,8 +337,8 @@ class JobListProvider extends ChangeNotifier {
           for (final job in jobListItems) {
             if (!previousKnownIds.contains(job.id) &&
                 !_locallyAddedJobIds.contains(job.id) &&
-                (job.jobType == JobType.windowCleaning ||
-                    job.jobType == JobType.solarPanelCleaning)) {
+                (job.jobTypeId == 'windowCleaning' ||
+                    job.jobTypeId == 'solarPanelCleaning')) {
               // New Happy Sun job detected - trigger sync asynchronously
               debugPrint(
                   '🆕 JobListProvider: New Happy Sun job detected: ${job.id}');
@@ -306,9 +353,8 @@ class JobListProvider extends ChangeNotifier {
         _jobListItems = jobListItems;
         _isLoading = false;
         _error = null;
-        // Invalidate cache when new data arrives
-        _cachedFilteredItems = null;
-        _lastFilterHash = '';
+        // Invalidate all caches when new data arrives
+        _invalidateItemCaches();
         notifyListeners();
       },
       onError: (error) {
@@ -439,6 +485,9 @@ class JobListProvider extends ChangeNotifier {
     _pendingUpdates[jobListItem.id] = jobListItem;
     _updateTimestamps[jobListItem.id] = DateTime.now();
 
+    // Invalidate caches since merged data changed
+    _invalidateItemCaches();
+
     // Immediately update UI
     notifyListeners();
 
@@ -459,14 +508,14 @@ class JobListProvider extends ChangeNotifier {
         item1.client == item2.client &&
         item1.jobStatusId == item2.jobStatusId &&
         item1.invoiceStatusId == item2.invoiceStatusId &&
-        item1.jobType == item2.jobType &&
+        item1.jobTypeId == item2.jobTypeId &&
         item1.area == item2.area &&
         item1.quantity == item2.quantity &&
         item1.manDays == item2.manDays &&
-        _areDatesEqual(item1.date, item2.date, item1.jobType) &&
+        _areDatesEqual(item1.date, item2.date, item1.jobTypeId) &&
         item1.collectionAddress == item2.collectionAddress &&
         _areDatesEqual(
-            item1.collectionDate, item2.collectionDate, item1.jobType) &&
+            item1.collectionDate, item2.collectionDate, item1.jobTypeId) &&
         item1.specialInstructions == item2.specialInstructions &&
         item1.quantityDistributed == item2.quantityDistributed &&
         item1.invoiceDetails == item2.invoiceDetails &&
@@ -505,9 +554,9 @@ class JobListProvider extends ChangeNotifier {
   }
 
   // Helper method to compare dates based on job type requirements
-  bool _areDatesEqual(DateTime date1, DateTime date2, JobType jobType) {
+  bool _areDatesEqual(DateTime date1, DateTime date2, String jobTypeId) {
     // For job types that need time slots, compare full date-time but ignore milliseconds
-    if (_needsTimeDisplay(jobType)) {
+    if (_needsTimeDisplay(jobTypeId)) {
       return date1.year == date2.year &&
           date1.month == date2.month &&
           date1.day == date2.day &&
@@ -519,12 +568,12 @@ class JobListProvider extends ChangeNotifier {
   }
 
   // Helper method to check if job type needs time display
-  bool _needsTimeDisplay(JobType jobType) {
-    return jobType == JobType.junkCollection ||
-        jobType == JobType.furnitureMove ||
-        jobType == JobType.trailerTowing ||
-        jobType == JobType.windowCleaning ||
-        jobType == JobType.solarPanelCleaning;
+  bool _needsTimeDisplay(String jobTypeId) {
+    return jobTypeId == 'junkCollection' ||
+        jobTypeId == 'furnitureMove' ||
+        jobTypeId == 'trailerTowing' ||
+        jobTypeId == 'windowCleaning' ||
+        jobTypeId == 'solarPanelCleaning';
   }
 
   // Process all pending updates as batch to database
@@ -653,7 +702,7 @@ class JobListProvider extends ChangeNotifier {
         client: jobListItem.client,
         jobStatusId: jobListItem.jobStatusId,
         invoiceStatusId: jobListItem.invoiceStatusId,
-        jobType: jobListItem.jobType,
+        jobTypeId: jobListItem.jobTypeId,
         area: jobListItem.area,
         quantity: jobListItem.quantity,
         manDays: jobListItem.manDays,
@@ -673,8 +722,8 @@ class JobListProvider extends ChangeNotifier {
 
       // Trigger Happy Sun sync if job is window/solar cleaning
       if (_onJobListItemAdded != null &&
-          (savedJob.jobType == JobType.windowCleaning ||
-              savedJob.jobType == JobType.solarPanelCleaning)) {
+          (savedJob.jobTypeId == 'windowCleaning' ||
+              savedJob.jobTypeId == 'solarPanelCleaning')) {
         debugPrint(
             '🔄 JobListProvider: Triggering Happy Sun sync for ${savedJob.id}');
         await _onJobListItemAdded!(savedJob);
@@ -760,7 +809,7 @@ class JobListProvider extends ChangeNotifier {
     JobListItem updatedItem, {
     String? Function(String statusId)? resolveJobStatusLabel,
     String? Function(String statusId)? resolveInvoiceStatusLabel,
-    String? Function(int quantity, JobType jobType)? resolveQuantityLabel,
+    String? Function(int quantity, String jobTypeId)? resolveQuantityLabel,
   }) async {
     final currentUser = _authProvider.user;
     final currentAppUser = _authProvider.appUser;
@@ -788,8 +837,8 @@ class JobListProvider extends ChangeNotifier {
           updatedItem.invoiceStatusId != originalItem.invoiceStatusId
               ? updatedItem.invoiceStatusId
               : null,
-      jobType: updatedItem.jobType != originalItem.jobType
-          ? updatedItem.jobType
+      jobTypeId: updatedItem.jobTypeId != originalItem.jobTypeId
+          ? updatedItem.jobTypeId
           : null,
       area: updatedItem.area != originalItem.area ? updatedItem.area : null,
       quantity: updatedItem.quantity != originalItem.quantity
@@ -799,7 +848,7 @@ class JobListProvider extends ChangeNotifier {
           ? updatedItem.manDays
           : null,
       date: !_areDatesEqual(
-              updatedItem.date, originalItem.date, updatedItem.jobType)
+              updatedItem.date, originalItem.date, updatedItem.jobTypeId)
           ? updatedItem.date
           : null,
       collectionAddress:
@@ -807,7 +856,7 @@ class JobListProvider extends ChangeNotifier {
               ? updatedItem.collectionAddress
               : null,
       collectionDate: !_areDatesEqual(updatedItem.collectionDate,
-              originalItem.collectionDate, updatedItem.jobType)
+              originalItem.collectionDate, updatedItem.jobTypeId)
           ? updatedItem.collectionDate
           : null,
       specialInstructions:
@@ -847,8 +896,8 @@ class JobListProvider extends ChangeNotifier {
     // Trigger Happy Sun tools update if manDays changed for window/solar cleaning
     if (_onJobListItemUpdated != null &&
         updatedItem.manDays != originalItem.manDays &&
-        (updatedItem.jobType == JobType.windowCleaning ||
-            updatedItem.jobType == JobType.solarPanelCleaning)) {
+        (updatedItem.jobTypeId == 'windowCleaning' ||
+            updatedItem.jobTypeId == 'solarPanelCleaning')) {
       _onJobListItemUpdated!(originalItem, updatedItem);
     }
   }
@@ -913,7 +962,7 @@ class JobListProvider extends ChangeNotifier {
     if (query.isEmpty) {
       _searchQuery = query;
       _isSearchingNotifier.value = false;
-      _cachedFilteredItems = null;
+      _invalidateItemCaches();
       notifyListeners();
       return;
     }
@@ -930,9 +979,8 @@ class JobListProvider extends ChangeNotifier {
   // Apply the pending search query
   void _applySearchQuery() {
     _searchQuery = _pendingSearchQuery;
-    _isSearchingNotifier.value = false;
-    _cachedFilteredItems = null;
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Force apply search immediately (for manual triggers)
@@ -946,22 +994,22 @@ class JobListProvider extends ChangeNotifier {
   // Set status filter
   void setStatusFilter(String? statusId) {
     _statusFilters = statusId != null ? {statusId} : {};
-    _cachedFilteredItems = null; // Clear cache
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Add status to filter
   void addStatusFilter(String statusId) {
     _statusFilters.add(statusId);
-    _cachedFilteredItems = null; // Clear cache
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Remove status from filter
   void removeStatusFilter(String statusId) {
     _statusFilters.remove(statusId);
-    _cachedFilteredItems = null; // Clear cache
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Toggle status filter
@@ -971,8 +1019,8 @@ class JobListProvider extends ChangeNotifier {
     } else {
       _statusFilters.add(statusId);
     }
-    _cachedFilteredItems = null; // Clear cache
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Toggle invoice status filter
@@ -982,8 +1030,8 @@ class JobListProvider extends ChangeNotifier {
     } else {
       _invoiceStatusFilters.add(statusId);
     }
-    _cachedFilteredItems = null; // Clear cache
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Clear filters
@@ -994,7 +1042,8 @@ class JobListProvider extends ChangeNotifier {
     _dateFilter = 'all';
     _startDate = null;
     _endDate = null;
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Helper method to check if two dates are the same day
@@ -1013,16 +1062,16 @@ class JobListProvider extends ChangeNotifier {
     _dateFilter = filterType;
     _startDate = startDate;
     _endDate = endDate;
-    _cachedFilteredItems = null; // Clear cache
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   void clearDateFilter() {
     _dateFilter = 'all';
     _startDate = null;
     _endDate = null;
-    _cachedFilteredItems = null; // Clear cache
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Simple date filter methods for new UI
@@ -1030,16 +1079,16 @@ class JobListProvider extends ChangeNotifier {
     _startDate = date;
     _endDate = null;
     _dateFilter = 'single';
-    _cachedFilteredItems = null;
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   void setSimpleDateRangeFilter(DateTime startDate, DateTime endDate) {
     _startDate = startDate;
     _endDate = endDate;
     _dateFilter = 'range';
-    _cachedFilteredItems = null;
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Sorting methods
@@ -1052,13 +1101,15 @@ class JobListProvider extends ChangeNotifier {
       _sortField = field;
       _sortAscending = true;
     }
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   void setSorting(String field, bool ascending) {
     _sortField = field;
     _sortAscending = ascending;
-    notifyListeners();
+    _invalidateItemCaches();
+    _notifyWithLoadingFeedback();
   }
 
   // Get job list item by ID (includes pending updates)

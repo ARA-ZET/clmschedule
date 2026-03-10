@@ -13,6 +13,7 @@ enum Flavor {
   happysun,
   maps,
   trackEditor,
+  erfProperty,
 }
 
 class FlavorConfig {
@@ -63,6 +64,13 @@ class FlavorConfig {
           enableHappySun: false,
           enableCollectionSchedule: false,
         );
+      case 'erfProperty':
+        return FlavorConfig._(
+          flavor: Flavor.erfProperty,
+          appName: 'ERF Property Viewer',
+          enableHappySun: false,
+          enableCollectionSchedule: false,
+        );
       case 'clm':
       default:
         return FlavorConfig._(
@@ -78,6 +86,7 @@ class FlavorConfig {
   bool get isHappySun => flavor == Flavor.happysun;
   bool get isMaps => flavor == Flavor.maps;
   bool get isTrackEditor => flavor == Flavor.trackEditor;
+  bool get isErfProperty => flavor == Flavor.erfProperty;
 
   @override
   String toString() => 'FlavorConfig(flavor: $flavor, appName: $appName)';

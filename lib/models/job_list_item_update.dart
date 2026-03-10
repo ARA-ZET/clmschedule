@@ -1,5 +1,4 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'job_list_item.dart';
 
 class JobListItemUpdate {
   final String userId;
@@ -56,8 +55,6 @@ class JobListItemUpdate {
   dynamic _serializeValue(dynamic value) {
     if (value is DateTime) {
       return Timestamp.fromDate(value);
-    } else if (value is JobType) {
-      return value.name;
     } else {
       return value;
     }
@@ -67,21 +64,15 @@ class JobListItemUpdate {
   static dynamic deserializeValue(dynamic value, String fieldName) {
     if (value is Timestamp) {
       return value.toDate();
-    } else if (fieldName == 'jobType' && value is String) {
-      try {
-        return JobType.values.firstWhere((e) => e.name == value);
-      } catch (e) {
-        return JobType.flyersPrintingOnly; // Default fallback
-      }
     } else {
       return value;
     }
   }
 
   // Get formatted display text for the change
-  String getChangeDescription({JobType? jobType}) {
-    final oldValueText = _getValueDisplayText(oldValue, jobType: jobType);
-    final newValueText = _getValueDisplayText(newValue, jobType: jobType);
+  String getChangeDescription({String? jobTypeId}) {
+    final oldValueText = _getValueDisplayText(oldValue, jobTypeId: jobTypeId);
+    final newValueText = _getValueDisplayText(newValue, jobTypeId: jobTypeId);
 
     switch (fieldName) {
       case 'jobStatusId':
@@ -103,7 +94,7 @@ class JobListItemUpdate {
     return getChangeDescription();
   }
 
-  String _getValueDisplayText(dynamic value, {JobType? jobType}) {
+  String _getValueDisplayText(dynamic value, {String? jobTypeId}) {
     if (value == null || value == '') return 'empty';
 
     // Use stored display labels if available (for status IDs and quantity)
@@ -118,14 +109,12 @@ class JobListItemUpdate {
       // For date fields, check if we should show time based on job type
       if (fieldName == 'date' || fieldName == 'collectionDate') {
         final shouldShowTime =
-            _shouldShowTime(jobType) && (value.hour != 0 || value.minute != 0);
+            _shouldShowTime(jobTypeId) && (value.hour != 0 || value.minute != 0);
         if (shouldShowTime) {
           return _formatDateTimeReadable(value);
         }
       }
       return _formatDateOnly(value);
-    } else if (value is JobType) {
-      return value.displayName;
     } else if (value is double) {
       return value.toStringAsFixed(2);
     } else {
@@ -199,13 +188,13 @@ class JobListItemUpdate {
   }
 
   // Helper method to determine if time should be shown for this job type
-  bool _shouldShowTime(JobType? jobType) {
-    if (jobType == null) return false;
-    return jobType == JobType.junkCollection ||
-        jobType == JobType.furnitureMove ||
-        jobType == JobType.trailerTowing ||
-        jobType == JobType.windowCleaning ||
-        jobType == JobType.solarPanelCleaning;
+  bool _shouldShowTime(String? jobTypeId) {
+    if (jobTypeId == null) return false;
+    return jobTypeId == 'junkCollection' ||
+        jobTypeId == 'furnitureMove' ||
+        jobTypeId == 'trailerTowing' ||
+        jobTypeId == 'windowCleaning' ||
+        jobTypeId == 'solarPanelCleaning';
   }
 
   String _getFieldDisplayName(String fieldName) {

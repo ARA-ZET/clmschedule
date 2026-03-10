@@ -1,4 +1,3 @@
-import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/job.dart';
@@ -15,8 +14,9 @@ import '../shareable_maps/widgets/shareable_map_editor.dart';
 
 class JobCard extends StatelessWidget {
   final Job job;
+  final bool isFullscreen;
 
-  const JobCard({super.key, required this.job});
+  const JobCard({super.key, required this.job, required this.isFullscreen});
 
   Color _getStatusColor(BuildContext context) {
     final statusProvider = context.watch<JobStatusProvider>();
@@ -71,10 +71,8 @@ class JobCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // No Consumer needed — the parent grid Selector already rebuilds cells
-    // when jobs/scale change, passing fresh data via constructor.
-    // Only watch providers that change independently of the grid rebuild cycle.
-    final isFullscreen = context.watch<TogglerProvider>().isFullview;
+    // isFullscreen is passed from the parent grid (single TogglerProvider subscription
+    // at the grid level), avoiding per-card Provider subscriptions.
     final statusColor = _getStatusColor(context);
 
     return Card(

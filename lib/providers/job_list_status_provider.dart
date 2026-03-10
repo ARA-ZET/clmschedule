@@ -46,7 +46,8 @@ class JobListStatusProvider extends ChangeNotifier {
   }
 
   // Add a new status
-  Future<void> addStatus(String label, Color color) async {
+  Future<void> addStatus(String label, Color color,
+      {List<String> hiddenForJobTypes = const []}) async {
     try {
       _error = null;
 
@@ -54,6 +55,7 @@ class JobListStatusProvider extends ChangeNotifier {
         'label': label,
         'color': color.toARGB32(),
         'isDefault': false,
+        'hiddenForJobTypes': hiddenForJobTypes,
       });
 
       final newStatus = CustomJobListStatus(
@@ -61,6 +63,7 @@ class JobListStatusProvider extends ChangeNotifier {
         label: label,
         color: color,
         isDefault: false,
+        hiddenForJobTypes: hiddenForJobTypes,
       );
 
       _statuses.add(newStatus);
@@ -76,20 +79,30 @@ class JobListStatusProvider extends ChangeNotifier {
   }
 
   // Update an existing status
-  Future<void> updateStatus(String id, String label, Color color) async {
+  Future<void> updateStatus(String id, String label, Color color,
+      {List<String>? hiddenForJobTypes}) async {
     try {
       _error = null;
 
-      await _firestore.collection('customJobListStatuses').doc(id).update({
+      final updateData = <String, dynamic>{
         'label': label,
         'color': color.toARGB32(),
-      });
+      };
+      if (hiddenForJobTypes != null) {
+        updateData['hiddenForJobTypes'] = hiddenForJobTypes;
+      }
+
+      await _firestore
+          .collection('customJobListStatuses')
+          .doc(id)
+          .update(updateData);
 
       final index = _statuses.indexWhere((status) => status.id == id);
       if (index != -1) {
         _statuses[index] = _statuses[index].copyWith(
           label: label,
           color: color,
+          hiddenForJobTypes: hiddenForJobTypes,
         );
         _statuses.sort((a, b) => a.label.compareTo(b.label));
         notifyListeners();
@@ -145,6 +158,13 @@ class JobListStatusProvider extends ChangeNotifier {
       }
     }
     return null;
+  }
+
+  // Get statuses filtered for a specific job type
+  List<CustomJobListStatus> getStatusesForJobType(String jobTypeId) {
+    return _statuses
+        .where((status) => !status.hiddenForJobTypes.contains(jobTypeId))
+        .toList();
   }
 
   // Clear error message
