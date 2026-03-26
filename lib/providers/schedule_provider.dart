@@ -39,6 +39,42 @@ class ScheduleProvider extends ChangeNotifier {
     _jobsVersion++;
   }
 
+  // --- Optimistic local state helpers ---
+
+  bool _isSameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  /// Replace a job in the local lists by id, then notify listeners instantly.
+  void _optimisticUpdateJob(Job newJob) {
+    for (int i = 0; i < _currentMonthJobs.length; i++) {
+      if (_currentMonthJobs[i].id == newJob.id) {
+        _currentMonthJobs = List.of(_currentMonthJobs)..[i] = newJob;
+        _invalidateCaches();
+        notifyListeners();
+        return;
+      }
+    }
+    for (int i = 0; i < _nextMonthJobs.length; i++) {
+      if (_nextMonthJobs[i].id == newJob.id) {
+        _nextMonthJobs = List.of(_nextMonthJobs)..[i] = newJob;
+        _invalidateCaches();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  /// Remove a job from local lists by id, then notify listeners instantly.
+  void _optimisticRemoveJob(String jobId) {
+    final beforeCurrent = _currentMonthJobs.length;
+    _currentMonthJobs = _currentMonthJobs.where((j) => j.id != jobId).toList();
+    if (_currentMonthJobs.length == beforeCurrent) {
+      _nextMonthJobs = _nextMonthJobs.where((j) => j.id != jobId).toList();
+    }
+    _invalidateCaches();
+    notifyListeners();
+  }
+
   // Streams subscriptions
   StreamSubscription<List<Distributor>>? _distributorsSubscription;
   StreamSubscription<List<Job>>? _currentMonthJobsSubscription;
@@ -52,6 +88,21 @@ class ScheduleProvider extends ChangeNotifier {
   List<WorkArea> get workAreas => _workAreas;
   Schedule get schedule =>
       _cachedSchedule ??= Schedule(distributors: _distributors, jobs: jobs);
+
+  /// Distributors filtered for grid display:
+  /// - Always show active distributors
+  /// - Hide non-active distributors unless they have jobs in the current month
+  List<Distributor> get gridDistributors {
+    final currentJobs = jobs;
+    final distributorIdsWithJobs = <String>{};
+    for (final job in currentJobs) {
+      distributorIdsWithJobs.add(job.distributorId);
+    }
+    return _distributors.where((d) {
+      if (d.status == DistributorStatus.active) return true;
+      return distributorIdsWithJobs.contains(d.id);
+    }).toList();
+  }
 
   /// Build (or return cached) lookup map for O(1) cell queries.
   Map<String, List<Job>> get _lookupMap {
@@ -411,143 +462,87 @@ class ScheduleProvider extends ChangeNotifier {
 
   Future<void> updateJobWithUndo(
       Job originalJob, Job modifiedJob, DateTime targetDate) async {
-    // Bypass command pattern - update job directly
-    debugPrint('=== UPDATE JOB WITH UNDO DEBUG ===');
-    debugPrint('OriginalJob:');
-    debugPrint('  ID: ${originalJob.id}');
-    debugPrint('  Clients: ${originalJob.clients}');
-    debugPrint('  WorkingAreas: ${originalJob.workingAreas}');
-    debugPrint('  WorkMaps: ${originalJob.workMaps.length}');
-    debugPrint('  Date: ${originalJob.date}');
-    debugPrint('ModifiedJob:');
-    debugPrint('  ID: ${modifiedJob.id}');
-    debugPrint('  Clients: ${modifiedJob.clients}');
-    debugPrint('  WorkingAreas: ${modifiedJob.workingAreas}');
-    debugPrint('  WorkMaps: ${modifiedJob.workMaps.length}');
-    debugPrint('  Date: ${modifiedJob.date}');
-    debugPrint('==================================');
+    // Optimistic UI update — show change instantly before Firestore write
+    _optimisticUpdateJob(modifiedJob);
 
     // Check if we're moving the job to a different date
-    if (originalJob.date.year != modifiedJob.date.year ||
-        originalJob.date.month != modifiedJob.date.month ||
-        originalJob.date.day != modifiedJob.date.day) {
-      // Move between dates
-      debugPrint('Moving job between dates');
+    if (!_isSameDay(originalJob.date, modifiedJob.date)) {
       await moveJobBetweenDates(originalJob, modifiedJob);
     } else {
-      // Regular update
-      debugPrint('Regular update (same date)');
       await updateJob(modifiedJob);
     }
   }
 
   Future<void> moveJobBetweenDatesWithUndo(Job originalJob, Job movedJob,
       DateTime originalDate, DateTime newDate) async {
-    // Bypass command pattern - move job directly
+    _optimisticUpdateJob(movedJob);
     await moveJobBetweenDates(originalJob, movedJob);
   }
 
   Future<void> deleteJobWithUndo(Job job, DateTime targetDate) async {
-    // Bypass command pattern - delete job directly
     await deleteJob(job.id, targetDate);
   }
 
   Future<void> updateJobStatusWithUndo(String jobId, String newStatusId,
       String originalStatusId, DateTime targetDate) async {
-    // Bypass command pattern - update status directly
     final job = jobs.firstWhere((j) => j.id == jobId);
-
-    // Debug logging
-    debugPrint('=== UPDATE JOB STATUS DEBUG ===');
-    debugPrint('Original job:');
-    debugPrint('  ID: ${job.id}');
-    debugPrint('  StatusId: ${job.statusId}');
-    debugPrint('  Clients: ${job.clients}');
-    debugPrint('  WorkingAreas: ${job.workingAreas}');
-    debugPrint('  WorkMaps count: ${job.workMaps.length}');
-
     final updatedJob = job.copyWith(statusId: newStatusId);
-
-    debugPrint('Updated job after copyWith:');
-    debugPrint('  ID: ${updatedJob.id}');
-    debugPrint('  StatusId: ${updatedJob.statusId}');
-    debugPrint('  Clients: ${updatedJob.clients}');
-    debugPrint('  WorkingAreas: ${updatedJob.workingAreas}');
-    debugPrint('  WorkMaps count: ${updatedJob.workMaps.length}');
-    debugPrint('===============================');
-
+    _optimisticUpdateJob(updatedJob);
     await updateJob(updatedJob);
   }
 
   Future<void> swapJobsWithUndo(
       Job draggedJob, Job targetJob, DateTime targetDate) async {
-    // Bypass command pattern - swap jobs directly
-    debugPrint('=== SWAP JOBS PROVIDER DEBUG ===');
-    debugPrint('DraggedJob before swap:');
-    debugPrint('  ID: ${draggedJob.id}');
-    debugPrint('  Clients: ${draggedJob.clients}');
-    debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
-    debugPrint('  DistributorId: ${draggedJob.distributorId}');
-    debugPrint('TargetJob before swap:');
-    debugPrint('  ID: ${targetJob.id}');
-    debugPrint('  Clients: ${targetJob.clients}');
-    debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
-    debugPrint('  DistributorId: ${targetJob.distributorId}');
+    // Each job takes the other's position (distributorId + date)
+    final newDraggedJob = draggedJob.copyWith(
+      distributorId: targetJob.distributorId,
+      date: targetJob.date,
+    );
+    final newTargetJob = targetJob.copyWith(
+      distributorId: draggedJob.distributorId,
+      date: draggedJob.date,
+    );
 
-    // Swap distributor IDs
-    final swappedDraggedJob =
-        draggedJob.copyWith(distributorId: targetJob.distributorId);
-    final swappedTargetJob =
-        targetJob.copyWith(distributorId: draggedJob.distributorId);
+    // Optimistic UI update — show change instantly
+    _optimisticUpdateJob(newDraggedJob);
+    _optimisticUpdateJob(newTargetJob);
 
-    debugPrint('After copyWith:');
-    debugPrint('SwappedDraggedJob:');
-    debugPrint('  Clients: ${swappedDraggedJob.clients}');
-    debugPrint('  WorkMaps: ${swappedDraggedJob.workMaps.length}');
-    debugPrint('  DistributorId: ${swappedDraggedJob.distributorId}');
-    debugPrint('SwappedTargetJob:');
-    debugPrint('  Clients: ${swappedTargetJob.clients}');
-    debugPrint('  WorkMaps: ${swappedTargetJob.workMaps.length}');
-    debugPrint('  DistributorId: ${swappedTargetJob.distributorId}');
-    debugPrint('===============================');
-
-    await updateJob(swappedDraggedJob);
-    await updateJob(swappedTargetJob);
+    // Persist atomically to Firestore
+    if (_isSameDay(draggedJob.date, targetJob.date)) {
+      await _firestoreService.swapJobsOnSameDate(
+          newDraggedJob, newTargetJob, draggedJob.date);
+    } else {
+      await _firestoreService.swapJobsBetweenDates(
+        draggedJob,
+        newDraggedJob,
+        targetJob,
+        newTargetJob,
+        draggedJob.date,
+        targetJob.date,
+      );
+    }
   }
 
   Future<void> combineJobsWithUndo(Job draggedJob, Job targetJob,
       Job combinedJob, DateTime targetDate) async {
-    // Bypass command pattern - combine jobs directly
-    debugPrint('=== COMBINE JOBS PROVIDER DEBUG ===');
-    debugPrint('DraggedJob to delete:');
-    debugPrint('  ID: ${draggedJob.id}');
-    debugPrint('  Clients: ${draggedJob.clients}');
-    debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
-    debugPrint('CombinedJob to save:');
-    debugPrint('  ID: ${combinedJob.id}');
-    debugPrint('  Clients: ${combinedJob.clients}');
-    debugPrint('  WorkingAreas: ${combinedJob.workingAreas}');
-    debugPrint('  WorkMaps: ${combinedJob.workMaps.length}');
-    debugPrint('===================================');
+    // Optimistic UI update — show change instantly
+    _optimisticRemoveJob(draggedJob.id);
+    _optimisticUpdateJob(combinedJob);
 
-    await deleteJob(draggedJob.id, targetDate);
-    await updateJob(combinedJob);
+    // Persist atomically to Firestore
+    if (_isSameDay(draggedJob.date, targetJob.date)) {
+      await _firestoreService.combineJobsOnSameDate(
+          draggedJob.id, combinedJob, draggedJob.date);
+    } else {
+      await _firestoreService.combineJobsBetweenDates(
+          draggedJob.id, combinedJob, draggedJob.date, targetJob.date);
+    }
   }
 
   Future<void> copyAndCombineJobsWithUndo(
       Job targetJob, Job combinedJob, DateTime targetDate) async {
-    // Bypass command pattern - copy and combine jobs directly
-    debugPrint('=== COPY & COMBINE PROVIDER DEBUG ===');
-    debugPrint('TargetJob (will keep in place):');
-    debugPrint('  ID: ${targetJob.id}');
-    debugPrint('  Clients: ${targetJob.clients}');
-    debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
-    debugPrint('CombinedJob (to save):');
-    debugPrint('  ID: ${combinedJob.id}');
-    debugPrint('  Clients: ${combinedJob.clients}');
-    debugPrint('  WorkingAreas: ${combinedJob.workingAreas}');
-    debugPrint('  WorkMaps: ${combinedJob.workMaps.length}');
-    debugPrint('=====================================');
+    // Optimistic UI update — show change instantly
+    _optimisticUpdateJob(combinedJob);
 
     await updateJob(combinedJob);
   }

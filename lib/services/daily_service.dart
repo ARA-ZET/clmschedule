@@ -9,6 +9,15 @@ class DailyService {
   final Set<String> _knownJobListDocIds = {};
   final Set<String> _knownCollectionScheduleDocIds = {};
 
+  // Cache for available months lists (avoids full collection reads on every picker open)
+  static const _monthsCacheTtl = Duration(minutes: 10);
+  List<String>? _cachedScheduleMonths;
+  List<String>? _cachedJobListMonths;
+  List<String>? _cachedCollectionScheduleMonths;
+  DateTime? _scheduleMonthsCacheTime;
+  DateTime? _jobListMonthsCacheTime;
+  DateTime? _collectionScheduleMonthsCacheTime;
+
   DailyService(this._firestore);
 
   /// Generate monthly document ID from date
@@ -319,15 +328,23 @@ class DailyService {
       ..sort(); // Sort chronologically
   }
 
-  /// Get all available monthly documents for schedules
+  /// Get all available monthly documents for schedules (cached for 10 min)
   Future<List<String>> getAvailableScheduleMonths() async {
+    final now = DateTime.now();
+    if (_cachedScheduleMonths != null &&
+        _scheduleMonthsCacheTime != null &&
+        now.difference(_scheduleMonthsCacheTime!) < _monthsCacheTtl) {
+      return _cachedScheduleMonths!;
+    }
     final snapshot = await _firestore.collection('schedules').get();
-    return snapshot.docs
+    _cachedScheduleMonths = snapshot.docs
         .where((doc) => doc.id.contains(' ')) // Filter out non-monthly docs
         .map((doc) => doc.id)
         .toList()
       ..sort((a, b) =>
           _parseMonthYear(b).compareTo(_parseMonthYear(a))); // Latest first
+    _scheduleMonthsCacheTime = now;
+    return _cachedScheduleMonths!;
   }
 
   /// Get all available daily documents for job lists in a specific month
@@ -337,15 +354,23 @@ class DailyService {
       ..sort(); // Sort chronologically
   }
 
-  /// Get all available monthly documents for job lists
+  /// Get all available monthly documents for job lists (cached for 10 min)
   Future<List<String>> getAvailableJobListMonths() async {
+    final now = DateTime.now();
+    if (_cachedJobListMonths != null &&
+        _jobListMonthsCacheTime != null &&
+        now.difference(_jobListMonthsCacheTime!) < _monthsCacheTtl) {
+      return _cachedJobListMonths!;
+    }
     final snapshot = await _firestore.collection('jobLists').get();
-    return snapshot.docs
+    _cachedJobListMonths = snapshot.docs
         .where((doc) => doc.id.contains(' ')) // Filter out non-monthly docs
         .map((doc) => doc.id)
         .toList()
       ..sort((a, b) =>
           _parseMonthYear(b).compareTo(_parseMonthYear(a))); // Latest first
+    _jobListMonthsCacheTime = now;
+    return _cachedJobListMonths!;
   }
 
   /// Get all available daily documents for collection schedules in a specific month
@@ -356,15 +381,23 @@ class DailyService {
       ..sort(); // Sort chronologically
   }
 
-  /// Get all available monthly documents for collection schedules
+  /// Get all available monthly documents for collection schedules (cached for 10 min)
   Future<List<String>> getAvailableCollectionScheduleMonths() async {
+    final now = DateTime.now();
+    if (_cachedCollectionScheduleMonths != null &&
+        _collectionScheduleMonthsCacheTime != null &&
+        now.difference(_collectionScheduleMonthsCacheTime!) < _monthsCacheTtl) {
+      return _cachedCollectionScheduleMonths!;
+    }
     final snapshot = await _firestore.collection('collectionSchedules').get();
-    return snapshot.docs
+    _cachedCollectionScheduleMonths = snapshot.docs
         .where((doc) => doc.id.contains(' ')) // Filter out non-monthly docs
         .map((doc) => doc.id)
         .toList()
       ..sort((a, b) =>
           _parseMonthYear(b).compareTo(_parseMonthYear(a))); // Latest first
+    _collectionScheduleMonthsCacheTime = now;
+    return _cachedCollectionScheduleMonths!;
   }
 
   /// Parse month year string back to DateTime for sorting

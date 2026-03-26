@@ -1048,50 +1048,115 @@ class _JobListGridState extends State<JobListGrid> {
   final TextEditingController _searchController = TextEditingController();
   bool _isAddingJob = false;
 
+  // Map update field names to column keys for highlighting changed cells
+  static const Map<String, String> _updateFieldToColumnKey = {
+    'date': 'date',
+    'client': 'client',
+    'jobStatusId': 'jobStatus',
+    'invoiceStatusId': 'invoiceStatus',
+    'jobType': 'jobType',
+    'area': 'area',
+    'quantity': 'quantity',
+    'manDays': 'manDays',
+    'collectionAddress': 'collectionAddress',
+    'specialInstructions': 'specialInstructions',
+    'collectionDate': 'collectionDate',
+    'invoice': 'invoice',
+    'amount': 'amount',
+    'quantityDistributed': 'quantityDistributed',
+    'invoiceDetails': 'invoiceDetails',
+    'reportAddresses': 'reportAddresses',
+    'whoToInvoice': 'whoToInvoice',
+    'reminders': 'reminder',
+  };
+
+  Set<String> _getUpdatedColumnKeys(
+      JobListProvider jobListProvider, JobListItem item) {
+    final updates = jobListProvider.getUpdatesAfterLastCheck(item);
+    return updates
+        .map((u) => _updateFieldToColumnKey[u.fieldName] ?? u.fieldName)
+        .toSet();
+  }
+
+  // Cached per-build map of item id -> updated column keys
+  Map<String, Set<String>>? _updatedColumnsCache;
+  int _updatedColumnsCacheVersion = -1;
+
+  Set<String> _getCachedUpdatedColumnKeys(
+      JobListProvider jobListProvider, JobListItem item) {
+    // Invalidate cache when provider version changes (notifyListeners)
+    final version =
+        jobListProvider.hashCode ^ jobListProvider.lastCheckedTime.hashCode;
+    if (_updatedColumnsCache == null ||
+        _updatedColumnsCacheVersion != version) {
+      _updatedColumnsCache = {};
+      _updatedColumnsCacheVersion = version;
+    }
+    return _updatedColumnsCache!.putIfAbsent(
+      item.id,
+      () => _getUpdatedColumnKeys(jobListProvider, item),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
     // Synchronize horizontal scrolling between main table and frozen header
-    _horizontalScrollController.addListener(() {
-      if (_frozenHeaderScrollController.hasClients &&
-          _horizontalScrollController.offset !=
-              _frozenHeaderScrollController.offset) {
-        _frozenHeaderScrollController
-            .jumpTo(_horizontalScrollController.offset);
-      }
-    });
-
-    _frozenHeaderScrollController.addListener(() {
-      if (_horizontalScrollController.hasClients &&
-          _frozenHeaderScrollController.offset !=
-              _horizontalScrollController.offset) {
-        _horizontalScrollController
-            .jumpTo(_frozenHeaderScrollController.offset);
-      }
-    });
+    _horizontalScrollController.addListener(_syncHorizontalScroll);
+    _frozenHeaderScrollController.addListener(_syncFrozenHeaderScroll);
 
     // Synchronize vertical scrolling between main table and frozen column
-    _mainVerticalScrollController.addListener(() {
-      if (_frozenVerticalScrollController.hasClients &&
-          _mainVerticalScrollController.offset !=
-              _frozenVerticalScrollController.offset) {
-        _frozenVerticalScrollController
-            .jumpTo(_mainVerticalScrollController.offset);
-      }
-    });
+    _mainVerticalScrollController.addListener(_syncMainVerticalScroll);
+    _frozenVerticalScrollController.addListener(_syncFrozenVerticalScroll);
+  }
 
-    _frozenVerticalScrollController.addListener(() {
-      if (_mainVerticalScrollController.hasClients &&
-          _frozenVerticalScrollController.offset !=
-              _mainVerticalScrollController.offset) {
-        _mainVerticalScrollController
-            .jumpTo(_frozenVerticalScrollController.offset);
-      }
-    });
+  bool _isSyncingHorizontal = false;
+  bool _isSyncingVertical = false;
+
+  void _syncHorizontalScroll() {
+    if (_isSyncingHorizontal) return;
+    _isSyncingHorizontal = true;
+    if (_frozenHeaderScrollController.hasClients) {
+      _frozenHeaderScrollController.jumpTo(_horizontalScrollController.offset);
+    }
+    _isSyncingHorizontal = false;
+  }
+
+  void _syncFrozenHeaderScroll() {
+    if (_isSyncingHorizontal) return;
+    _isSyncingHorizontal = true;
+    if (_horizontalScrollController.hasClients) {
+      _horizontalScrollController.jumpTo(_frozenHeaderScrollController.offset);
+    }
+    _isSyncingHorizontal = false;
+  }
+
+  void _syncMainVerticalScroll() {
+    if (_isSyncingVertical) return;
+    _isSyncingVertical = true;
+    if (_frozenVerticalScrollController.hasClients) {
+      _frozenVerticalScrollController
+          .jumpTo(_mainVerticalScrollController.offset);
+    }
+    _isSyncingVertical = false;
+  }
+
+  void _syncFrozenVerticalScroll() {
+    if (_isSyncingVertical) return;
+    _isSyncingVertical = true;
+    if (_mainVerticalScrollController.hasClients) {
+      _mainVerticalScrollController
+          .jumpTo(_frozenVerticalScrollController.offset);
+    }
+    _isSyncingVertical = false;
   }
 
   @override
   void dispose() {
+    _horizontalScrollController.removeListener(_syncHorizontalScroll);
+    _frozenHeaderScrollController.removeListener(_syncFrozenHeaderScroll);
+    _mainVerticalScrollController.removeListener(_syncMainVerticalScroll);
+    _frozenVerticalScrollController.removeListener(_syncFrozenVerticalScroll);
     _horizontalScrollController.dispose();
     _frozenHeaderScrollController.dispose();
     _mainVerticalScrollController.dispose();
@@ -1558,42 +1623,46 @@ class _JobListGridState extends State<JobListGrid> {
                                     bottom: 0,
                                     left: 0,
                                     width: 330,
-                                    child: Consumer<JobListProvider>(
-                                      builder: (context, jobProvider, child) {
-                                        return Consumer<JobListStatusProvider>(
-                                          builder:
-                                              (context, statusProvider, child) {
-                                            return ListView.builder(
-                                              controller:
-                                                  _frozenVerticalScrollController,
-                                              itemCount: jobProvider
-                                                  .jobListItems.length,
-                                              itemExtent: 48,
-                                              addAutomaticKeepAlives: false,
-                                              itemBuilder: (context, index) {
-                                                final item = jobProvider
-                                                    .jobListItems[index];
-                                                final statusColor =
-                                                    statusProvider
-                                                            .getStatusById(item
-                                                                .jobStatusId)
-                                                            ?.color ??
-                                                        Colors.grey;
+                                    child: Builder(
+                                      builder: (context) {
+                                        // Use already-available data from outer Consumer3
+                                        final frozenItems = jobListItems;
+                                        final frozenStatusProvider = context
+                                            .read<JobListStatusProvider>();
+                                        return ListView.builder(
+                                          controller:
+                                              _frozenVerticalScrollController,
+                                          itemCount: frozenItems.length,
+                                          itemExtent: 48,
+                                          addAutomaticKeepAlives: false,
+                                          itemBuilder: (context, index) {
+                                            final item = frozenItems[index];
+                                            final statusColor =
+                                                frozenStatusProvider
+                                                        .getStatusById(
+                                                            item.jobStatusId)
+                                                        ?.color ??
+                                                    Colors.grey;
 
-                                                return Container(
-                                                  height:
-                                                      48, // Match DataTable default row height
-                                                  decoration: BoxDecoration(
-                                                    color: statusColor,
-                                                    border: Border(
-                                                      bottom: BorderSide(
-                                                        color:
-                                                            Colors.grey[300]!,
-                                                        width: 1,
-                                                      ),
-                                                    ),
+                                            return Container(
+                                              height:
+                                                  48, // Match DataTable default row height
+                                              decoration: BoxDecoration(
+                                                color: statusColor,
+                                                border: Border(
+                                                  bottom: BorderSide(
+                                                    color: Colors.grey[300]!,
+                                                    width: 1,
                                                   ),
-                                                  child: Row(
+                                                ),
+                                              ),
+                                              child: Builder(
+                                                builder: (context) {
+                                                  final frozenUpdatedCols =
+                                                      _getCachedUpdatedColumnKeys(
+                                                          jobListProvider,
+                                                          item);
+                                                  return Row(
                                                     children: [
                                                       Container(
                                                         padding:
@@ -1602,6 +1671,20 @@ class _JobListGridState extends State<JobListGrid> {
                                                                 vertical: 4),
                                                         alignment: Alignment
                                                             .centerLeft,
+                                                        decoration:
+                                                            frozenUpdatedCols
+                                                                    .contains(
+                                                                        'date')
+                                                                ? BoxDecoration(
+                                                                    border:
+                                                                        Border
+                                                                            .all(
+                                                                      color: Colors
+                                                                          .orange,
+                                                                      width: 1,
+                                                                    ),
+                                                                  )
+                                                                : null,
                                                         child: EditableDateCell(
                                                           value: item.date,
                                                           width: 80,
@@ -1629,6 +1712,20 @@ class _JobListGridState extends State<JobListGrid> {
                                                                 vertical: 4),
                                                         alignment: Alignment
                                                             .centerLeft,
+                                                        decoration:
+                                                            frozenUpdatedCols
+                                                                    .contains(
+                                                                        'client')
+                                                                ? BoxDecoration(
+                                                                    border:
+                                                                        Border
+                                                                            .all(
+                                                                      color: Colors
+                                                                          .orange,
+                                                                      width: 1,
+                                                                    ),
+                                                                  )
+                                                                : null,
                                                         child:
                                                             EditableTableCell(
                                                           value: item.client,
@@ -1647,9 +1744,9 @@ class _JobListGridState extends State<JobListGrid> {
                                                         ),
                                                       ),
                                                     ],
-                                                  ),
-                                                );
-                                              },
+                                                  );
+                                                },
+                                              ),
                                             );
                                           },
                                         );
@@ -1772,6 +1869,7 @@ class _JobListGridState extends State<JobListGrid> {
 
         // Map cells to columns, enforcing exact header widths and
         // inserting empty placeholders for header-only columns (refresh)
+        final updatedCols = _getCachedUpdatedColumnKeys(jobListProvider, item);
         int cellIndex = 0;
         final rowChildren = <Widget>[];
         for (final col in visibleColumns) {
@@ -1780,8 +1878,17 @@ class _JobListGridState extends State<JobListGrid> {
             // Header-only column — add empty placeholder to maintain alignment
             rowChildren.add(SizedBox(width: width));
           } else if (cellIndex < cellWidgets.length) {
-            rowChildren.add(SizedBox(
+            final hasUpdate = updatedCols.contains(col);
+            rowChildren.add(Container(
               width: width,
+              decoration: hasUpdate
+                  ? BoxDecoration(
+                      border: Border.all(
+                        color: Colors.orange,
+                        width: 1,
+                      ),
+                    )
+                  : null,
               child: cellWidgets[cellIndex].child,
             ));
             cellIndex++;
@@ -2338,14 +2445,17 @@ class _JobListGridState extends State<JobListGrid> {
     final now = DateTime.now();
     final difference = now.difference(dateTime);
 
+    final timeWithMs =
+        '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}:${dateTime.second.toString().padLeft(2, '0')}.${dateTime.millisecond.toString().padLeft(3, '0')}';
+
     if (difference.inDays > 0) {
-      return '${difference.inDays}d ago (${dateTime.day}/${dateTime.month} ${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')})';
+      return '${difference.inDays}d ago (${dateTime.day}/${dateTime.month} $timeWithMs)';
     } else if (difference.inHours > 0) {
-      return '${difference.inHours}h ago (${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')})';
+      return '${difference.inHours}h ago ($timeWithMs)';
     } else if (difference.inMinutes > 0) {
-      return '${difference.inMinutes}m ago';
+      return '${difference.inMinutes}m ago ($timeWithMs)';
     } else {
-      return 'Just now';
+      return 'Just now ($timeWithMs)';
     }
   }
 

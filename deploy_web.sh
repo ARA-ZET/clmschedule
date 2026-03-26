@@ -43,7 +43,7 @@ fi
 
 # Step 3: Update version in Firestore
 echo -e "\n${BLUE}Step 3: Updating version in Firestore...${NC}"
-dart run tools/update_firestore_version.dart "$VERSION"
+node tools/update_firestore_version.js "$VERSION"
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Version updated in Firestore${NC}"

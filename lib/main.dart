@@ -70,6 +70,9 @@ import 'services/job_list_service.dart';
 import 'services/job_list_preferences_service.dart';
 import 'services/user_service.dart';
 import 'services/chat_service.dart';
+import 'services/ai_chat_service.dart';
+import 'providers/ai_chat_provider.dart';
+import 'widgets/ai_chat_dialog.dart';
 import 'services/inventory_service.dart';
 import 'services/connectivity_service.dart';
 import 'services/happy_sun_local_storage.dart';
@@ -161,6 +164,14 @@ void main() async {
     ),
     Provider(
       create: (context) => ChatService(FirebaseFirestore.instance),
+    ),
+    Provider(
+      create: (context) => AiChatService(),
+    ),
+    ChangeNotifierProxyProvider<AiChatService, AiChatProvider>(
+      create: (context) => AiChatProvider(context.read<AiChatService>()),
+      update: (context, aiChatService, previous) =>
+          previous ?? AiChatProvider(aiChatService),
     ),
     // InventoryService for all flavors (Happy Sun needs it)
     Provider(
@@ -584,6 +595,10 @@ class _MyAppState extends State<MyApp> {
 
     // Run all provider initializations in parallel for fast startup
     await Future.wait(initializations);
+
+    // Ensure lastCheckedTime is loaded now that auth is guaranteed ready
+    await context.read<JobListProvider>().ensureLastCheckedTimeLoaded();
+
     // CollectionScheduleProvider loads lazily when tab opens (depends on JobListProvider data)
 
     // Initialize version checking for web only
@@ -839,6 +854,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   int _currentTabIndex = 0;
+  bool _showAiChat = false;
 
   // Dynamic tab count based on flavor
   int get _tabCount {
@@ -1151,75 +1167,119 @@ class _DashboardScreenState extends State<DashboardScreen>
                   ),
                 ],
               ),
-        body: IndexedStack(
-          index: _currentTabIndex,
+        body: Stack(
           children: [
-            // CLM flavor has all tabs: Schedule, Job List, Collection Schedule, Happy Sun
-            if (FlavorConfig.instance.isCLM) ...[
-              const ScheduleTab(),
-              const JobListTab(),
-              const CollectionScheduleTab(),
-              const HappySunTab(),
-            ],
-            // Happy Sun flavor only has Happy Sun tab (Job List filtered in background)
-            // Wrap in SafeArea to avoid system UI overlays (status bar, navigation bar)
-            if (FlavorConfig.instance.isHappySun)
-              const SafeArea(
-                child: HappySunTab(),
+            // Main content fills the entire area
+            IndexedStack(
+              index: _currentTabIndex,
+              children: [
+                // CLM flavor has all tabs: Schedule, Job List, Collection Schedule, Happy Sun
+                if (FlavorConfig.instance.isCLM) ...[
+                  const ScheduleTab(),
+                  const JobListTab(),
+                  const CollectionScheduleTab(),
+                  const HappySunTab(),
+                ],
+                // Happy Sun flavor only has Happy Sun tab (Job List filtered in background)
+                // Wrap in SafeArea to avoid system UI overlays (status bar, navigation bar)
+                if (FlavorConfig.instance.isHappySun)
+                  const SafeArea(
+                    child: HappySunTab(),
+                  ),
+              ],
+            ),
+            // AI Chat panel floats above everything
+            if (_showAiChat)
+              Positioned(
+                top: 8,
+                bottom: 72,
+                right: 8,
+                width: MediaQuery.of(context).size.width * 0.20,
+                child: Material(
+                  elevation: 12,
+                  borderRadius: BorderRadius.circular(16),
+                  clipBehavior: Clip.antiAlias,
+                  child: AiChatPanel(
+                    onClose: () => setState(() => _showAiChat = false),
+                  ),
+                ),
               ),
           ],
         ),
         floatingActionButton: Consumer2<ChatProvider, AuthProvider>(
           builder: (context, chatProvider, authProvider, child) {
-            return Stack(
+            return Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                GestureDetector(
-                  onLongPress: authProvider.isAdmin
-                      ? () {
+                // AI Assistant FAB
+                FloatingActionButton.small(
+                  heroTag: 'ai_chat',
+                  onPressed: () {
+                    setState(() => _showAiChat = !_showAiChat);
+                  },
+                  tooltip: _showAiChat ? 'Close Pelisa' : 'Open Pelisa',
+                  backgroundColor: _showAiChat
+                      ? Colors.deepPurple.shade400
+                      : Colors.deepPurple.shade600,
+                  child: Icon(
+                      _showAiChat ? Icons.close_rounded : Icons.auto_awesome,
+                      color: Colors.white,
+                      size: 20),
+                ),
+                const SizedBox(width: 8),
+                // Team Chat FAB
+                Stack(
+                  children: [
+                    GestureDetector(
+                      onLongPress: authProvider.isAdmin
+                          ? () {
+                              showDialog(
+                                context: context,
+                                builder: (context) => const ChatAdminPanel(),
+                              );
+                            }
+                          : null,
+                      child: FloatingActionButton(
+                        heroTag: 'team_chat',
+                        onPressed: () {
                           showDialog(
                             context: context,
-                            builder: (context) => const ChatAdminPanel(),
+                            builder: (context) => const ChatDialog(),
                           );
-                        }
-                      : null,
-                  child: FloatingActionButton(
-                    onPressed: () {
-                      showDialog(
-                        context: context,
-                        builder: (context) => const ChatDialog(),
-                      );
-                    },
-                    tooltip: authProvider.isAdmin
-                        ? 'Chat (Long press for admin panel)'
-                        : 'Team Chat',
-                    child: const Icon(Icons.chat),
-                  ),
-                ),
-                if (chatProvider.hasUnreadMessages)
-                  Positioned(
-                    right: 0,
-                    top: 0,
-                    child: Container(
-                      padding: const EdgeInsets.all(2),
-                      decoration: BoxDecoration(
-                        color: Colors.red,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      constraints: const BoxConstraints(
-                        minWidth: 20,
-                        minHeight: 20,
-                      ),
-                      child: Text(
-                        '${chatProvider.unreadCount}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        textAlign: TextAlign.center,
+                        },
+                        tooltip: authProvider.isAdmin
+                            ? 'Chat (Long press for admin panel)'
+                            : 'Team Chat',
+                        child: const Icon(Icons.chat),
                       ),
                     ),
-                  ),
+                    if (chatProvider.hasUnreadMessages)
+                      Positioned(
+                        right: 0,
+                        top: 0,
+                        child: Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: BoxDecoration(
+                            color: Colors.red,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          constraints: const BoxConstraints(
+                            minWidth: 20,
+                            minHeight: 20,
+                          ),
+                          child: Text(
+                            '${chatProvider.unreadCount}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ],
             );
           },

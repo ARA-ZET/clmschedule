@@ -385,7 +385,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                         ),
                                         const SizedBox(height: 12),
                                         DropdownButtonFormField<String>(
-                                          value: _selectedJobType,
+                                          initialValue: _selectedJobType,
                                           decoration: const InputDecoration(
                                             labelText: 'Job Type *',
                                             border: OutlineInputBorder(),
@@ -498,7 +498,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                           flex: 2,
                                           child:
                                               DropdownButtonFormField<String>(
-                                            value: _selectedJobType,
+                                            initialValue: _selectedJobType,
                                             decoration: const InputDecoration(
                                               labelText: 'Job Type *',
                                               border: OutlineInputBorder(),

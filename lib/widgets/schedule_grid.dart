@@ -228,7 +228,7 @@ class _ScheduleGridState extends State<ScheduleGrid> {
         final jobs = scheduleProvider.jobs;
 
         return _ScheduleGridData(
-          distributors: scheduleProvider.distributors,
+          distributors: scheduleProvider.gridDistributors,
           currentMonth: scheduleProvider.currentMonth,
           hasJobsInNextMonth: scheduleProvider.hasJobsInNextMonth,
           currentMonthDisplay: scheduleProvider.currentMonthDisplay,

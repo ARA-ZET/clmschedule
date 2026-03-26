@@ -3,6 +3,20 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 class MonthlyService {
   final FirebaseFirestore _firestore;
 
+  // Cache for available months lists (avoids full collection reads on every picker open)
+  static const _monthsCacheTtl = Duration(minutes: 10);
+  List<String>? _cachedScheduleMonths;
+  List<String>? _cachedJobListMonths;
+  List<String>? _cachedCollectionScheduleMonths;
+  DateTime? _scheduleMonthsCacheTime;
+  DateTime? _jobListMonthsCacheTime;
+  DateTime? _collectionScheduleMonthsCacheTime;
+
+  // In-memory caches for ensureMonthlyDocExists (avoids redundant .get() reads)
+  final Set<String> _knownScheduleMonthIds = {};
+  final Set<String> _knownJobListMonthIds = {};
+  final Set<String> _knownCollectionScheduleMonthIds = {};
+
   MonthlyService(this._firestore);
 
   /// Generate monthly document ID from date
@@ -75,14 +89,18 @@ class MonthlyService {
   }
 
   /// Ensure monthly document exists (creates if not present)
+  /// Uses in-memory cache to avoid redundant Firestore reads.
   Future<void> ensureScheduleMonthlyDocExists(DateTime date) async {
+    final monthKey = getMonthlyDocumentId(date);
+    if (_knownScheduleMonthIds.contains(monthKey)) return;
+
     final doc = getScheduleMonthlyDoc(date);
     final docSnapshot = await doc.get();
 
     if (!docSnapshot.exists) {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
-        'month': getMonthlyDocumentId(date),
+        'month': monthKey,
         'jobs': [], // Initialize with empty jobs array
       });
     } else {
@@ -92,30 +110,42 @@ class MonthlyService {
         await doc.update({'jobs': []});
       }
     }
+
+    _knownScheduleMonthIds.add(monthKey);
   }
 
   /// Ensure job list monthly document exists (creates if not present)
+  /// Uses in-memory cache to avoid redundant Firestore reads.
   Future<void> ensureJobListMonthlyDocExists(DateTime date) async {
+    final monthKey = getMonthlyDocumentId(date);
+    if (_knownJobListMonthIds.contains(monthKey)) return;
+
     final doc = getJobListMonthlyDoc(date);
     final docSnapshot = await doc.get();
 
     if (!docSnapshot.exists) {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
-        'month': getMonthlyDocumentId(date),
+        'month': monthKey,
       });
     }
+
+    _knownJobListMonthIds.add(monthKey);
   }
 
   /// Ensure collection schedule monthly document exists (creates if not present)
+  /// Uses in-memory cache to avoid redundant Firestore reads.
   Future<void> ensureCollectionScheduleMonthlyDocExists(DateTime date) async {
+    final monthKey = getMonthlyDocumentId(date);
+    if (_knownCollectionScheduleMonthIds.contains(monthKey)) return;
+
     final doc = getCollectionScheduleMonthlyDoc(date);
     final docSnapshot = await doc.get();
 
     if (!docSnapshot.exists) {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
-        'month': getMonthlyDocumentId(date),
+        'month': monthKey,
         'collectionJobs': [], // Initialize with empty collection jobs array
       });
     } else {
@@ -125,30 +155,56 @@ class MonthlyService {
         await doc.update({'collectionJobs': []});
       }
     }
+
+    _knownCollectionScheduleMonthIds.add(monthKey);
   }
 
-  /// Get all available monthly documents for schedules
+  /// Get all available monthly documents for schedules (cached for 10 min)
   Future<List<String>> getAvailableScheduleMonths() async {
+    final now = DateTime.now();
+    if (_cachedScheduleMonths != null &&
+        _scheduleMonthsCacheTime != null &&
+        now.difference(_scheduleMonthsCacheTime!) < _monthsCacheTtl) {
+      return _cachedScheduleMonths!;
+    }
     final snapshot = await _firestore.collection('schedules').get();
-    return snapshot.docs.map((doc) => doc.id).toList()
+    _cachedScheduleMonths = snapshot.docs.map((doc) => doc.id).toList()
       ..sort((a, b) =>
-          _parseMonthYear(b).compareTo(_parseMonthYear(a))); // Latest first
+          _parseMonthYear(b).compareTo(_parseMonthYear(a)));
+    _scheduleMonthsCacheTime = now;
+    return _cachedScheduleMonths!;
   }
 
-  /// Get all available monthly documents for job lists
+  /// Get all available monthly documents for job lists (cached for 10 min)
   Future<List<String>> getAvailableJobListMonths() async {
+    final now = DateTime.now();
+    if (_cachedJobListMonths != null &&
+        _jobListMonthsCacheTime != null &&
+        now.difference(_jobListMonthsCacheTime!) < _monthsCacheTtl) {
+      return _cachedJobListMonths!;
+    }
     final snapshot = await _firestore.collection('jobLists').get();
-    return snapshot.docs.map((doc) => doc.id).toList()
+    _cachedJobListMonths = snapshot.docs.map((doc) => doc.id).toList()
       ..sort((a, b) =>
-          _parseMonthYear(b).compareTo(_parseMonthYear(a))); // Latest first
+          _parseMonthYear(b).compareTo(_parseMonthYear(a)));
+    _jobListMonthsCacheTime = now;
+    return _cachedJobListMonths!;
   }
 
-  /// Get all available monthly documents for collection schedules
+  /// Get all available monthly documents for collection schedules (cached for 10 min)
   Future<List<String>> getAvailableCollectionScheduleMonths() async {
+    final now = DateTime.now();
+    if (_cachedCollectionScheduleMonths != null &&
+        _collectionScheduleMonthsCacheTime != null &&
+        now.difference(_collectionScheduleMonthsCacheTime!) < _monthsCacheTtl) {
+      return _cachedCollectionScheduleMonths!;
+    }
     final snapshot = await _firestore.collection('collectionSchedules').get();
-    return snapshot.docs.map((doc) => doc.id).toList()
+    _cachedCollectionScheduleMonths = snapshot.docs.map((doc) => doc.id).toList()
       ..sort((a, b) =>
-          _parseMonthYear(b).compareTo(_parseMonthYear(a))); // Latest first
+          _parseMonthYear(b).compareTo(_parseMonthYear(a)));
+    _collectionScheduleMonthsCacheTime = now;
+    return _cachedCollectionScheduleMonths!;
   }
 
   /// Parse month year string back to DateTime for sorting

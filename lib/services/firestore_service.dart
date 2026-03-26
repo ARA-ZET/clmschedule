@@ -429,6 +429,122 @@ class FirestoreService {
     await batch.commit();
   }
 
+  /// Swap two jobs on the same date in a single atomic write.
+  /// Each job gets the other's distributorId.
+  Future<void> swapJobsOnSameDate(
+      Job newJobA, Job newJobB, DateTime date) async {
+    await _dailyService.ensureScheduleDailyDocExists(date);
+
+    final doc = _dailyService.getScheduleDailyDoc(date);
+    final snapshot = await doc.get();
+    if (!snapshot.exists) return;
+
+    final data = snapshot.data() as Map<String, dynamic>? ?? {};
+    final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
+
+    for (int i = 0; i < jobsArray.length; i++) {
+      if (jobsArray[i]['id'] == newJobA.id) {
+        jobsArray[i] = newJobA.toMap();
+      } else if (jobsArray[i]['id'] == newJobB.id) {
+        jobsArray[i] = newJobB.toMap();
+      }
+    }
+
+    await doc.update({'jobs': jobsArray});
+  }
+
+  /// Swap two jobs across different dates using an atomic batch write.
+  /// Job A moves from dateA to dateB, Job B moves from dateB to dateA.
+  Future<void> swapJobsBetweenDates(Job originalJobA, Job newJobA,
+      Job originalJobB, Job newJobB, DateTime dateA, DateTime dateB) async {
+    await _dailyService.ensureScheduleDailyDocExists(dateA);
+    await _dailyService.ensureScheduleDailyDocExists(dateB);
+
+    final docA = _dailyService.getScheduleDailyDoc(dateA);
+    final docB = _dailyService.getScheduleDailyDoc(dateB);
+
+    final snapshotA = await docA.get();
+    final snapshotB = await docB.get();
+
+    final dataA = snapshotA.data() as Map<String, dynamic>? ?? {};
+    final jobsA = List<Map<String, dynamic>>.from(dataA['jobs'] ?? []);
+
+    final dataB = snapshotB.data() as Map<String, dynamic>? ?? {};
+    final jobsB = List<Map<String, dynamic>>.from(dataB['jobs'] ?? []);
+
+    // Remove Job A from dateA, add modified Job B to dateA
+    jobsA.removeWhere((j) => j['id'] == originalJobA.id);
+    jobsA.add(newJobB.toMap());
+
+    // Remove Job B from dateB, add modified Job A to dateB
+    jobsB.removeWhere((j) => j['id'] == originalJobB.id);
+    jobsB.add(newJobA.toMap());
+
+    final batch = _firestore.batch();
+    batch.update(docA, {'jobs': jobsA});
+    batch.update(docB, {'jobs': jobsB});
+    await batch.commit();
+  }
+
+  /// Combine two jobs on the same date in a single atomic write:
+  /// removes the source job and updates the target with combined data.
+  Future<void> combineJobsOnSameDate(
+      String removeJobId, Job combinedJob, DateTime date) async {
+    await _dailyService.ensureScheduleDailyDocExists(date);
+
+    final doc = _dailyService.getScheduleDailyDoc(date);
+    final snapshot = await doc.get();
+    if (!snapshot.exists) return;
+
+    final data = snapshot.data() as Map<String, dynamic>? ?? {};
+    final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
+
+    // Remove the dragged job
+    jobsArray.removeWhere((j) => j['id'] == removeJobId);
+
+    // Update the combined (target) job
+    final idx = jobsArray.indexWhere((j) => j['id'] == combinedJob.id);
+    if (idx != -1) {
+      jobsArray[idx] = combinedJob.toMap();
+    }
+
+    await doc.update({'jobs': jobsArray});
+  }
+
+  /// Combine two jobs across different dates using an atomic batch write:
+  /// removes the source job from sourceDate, updates the target job at targetDate.
+  Future<void> combineJobsBetweenDates(String removeJobId, Job combinedJob,
+      DateTime sourceDate, DateTime targetDate) async {
+    await _dailyService.ensureScheduleDailyDocExists(sourceDate);
+    await _dailyService.ensureScheduleDailyDocExists(targetDate);
+
+    final sourceDoc = _dailyService.getScheduleDailyDoc(sourceDate);
+    final targetDoc = _dailyService.getScheduleDailyDoc(targetDate);
+
+    final sourceSnapshot = await sourceDoc.get();
+    final targetSnapshot = await targetDoc.get();
+
+    // Remove from source
+    final sourceData = sourceSnapshot.data() as Map<String, dynamic>? ?? {};
+    final sourceJobs =
+        List<Map<String, dynamic>>.from(sourceData['jobs'] ?? []);
+    sourceJobs.removeWhere((j) => j['id'] == removeJobId);
+
+    // Update in target
+    final targetData = targetSnapshot.data() as Map<String, dynamic>? ?? {};
+    final targetJobs =
+        List<Map<String, dynamic>>.from(targetData['jobs'] ?? []);
+    final idx = targetJobs.indexWhere((j) => j['id'] == combinedJob.id);
+    if (idx != -1) {
+      targetJobs[idx] = combinedJob.toMap();
+    }
+
+    final batch = _firestore.batch();
+    batch.update(sourceDoc, {'jobs': sourceJobs});
+    batch.update(targetDoc, {'jobs': targetJobs});
+    await batch.commit();
+  }
+
   // Delete a job
   Future<void> deleteJob(String jobId, [DateTime? date]) async {
     final targetDate = date ?? DateTime.now();

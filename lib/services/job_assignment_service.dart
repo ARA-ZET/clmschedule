@@ -15,7 +15,8 @@ class JobAssignmentService {
     return manDays.ceil();
   }
 
-  /// Find distributors that don't have jobs assigned on a specific date
+  /// Find distributors that don't have jobs assigned on a specific date.
+  /// Only considers active distributors for allocation.
   List<Distributor> findAvailableDistributors(DateTime date) {
     final allDistributors = scheduleProvider.distributors;
     final jobsForDate = scheduleProvider.getJobsForDate(date);
@@ -24,10 +25,11 @@ class JobAssignmentService {
     final assignedDistributorIds =
         jobsForDate.map((job) => job.distributorId).toSet();
 
-    // Filter out assigned distributors and sort by index
+    // Filter out assigned distributors and non-active distributors, then sort by index
     final availableDistributors = allDistributors
-        .where(
-            (distributor) => !assignedDistributorIds.contains(distributor.id))
+        .where((distributor) =>
+            distributor.status == DistributorStatus.active &&
+            !assignedDistributorIds.contains(distributor.id))
         .toList();
 
     // Sort by index (lowest index first)

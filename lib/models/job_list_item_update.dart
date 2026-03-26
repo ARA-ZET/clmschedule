@@ -23,11 +23,12 @@ class JobListItemUpdate {
 
   // Create from Firestore
   factory JobListItemUpdate.fromMap(Map<String, dynamic> data) {
+    final fieldName = data['fieldName'] as String? ?? '';
     return JobListItemUpdate(
       userId: data['userId'] as String? ?? '',
-      fieldName: data['fieldName'] as String? ?? '',
-      oldValue: data['oldValue'],
-      newValue: data['newValue'],
+      fieldName: fieldName,
+      oldValue: deserializeValue(data['oldValue'], fieldName),
+      newValue: deserializeValue(data['newValue'], fieldName),
       timestamp: data['timestamp'] != null
           ? (data['timestamp'] as Timestamp).toDate()
           : DateTime.now(),
@@ -105,6 +106,19 @@ class JobListItemUpdate {
       return newValueDisplay!;
     }
 
+    // Handle Timestamp objects that weren't converted during deserialization
+    if (value is Timestamp) {
+      final dateTime = value.toDate();
+      if (fieldName == 'date' || fieldName == 'collectionDate') {
+        final shouldShowTime = _shouldShowTime(jobTypeId) &&
+            (dateTime.hour != 0 || dateTime.minute != 0);
+        if (shouldShowTime) {
+          return _formatDateTimeReadable(dateTime);
+        }
+      }
+      return _formatDateOnly(dateTime);
+    }
+
     if (value is DateTime) {
       // For date fields, check if we should show time based on job type
       if (fieldName == 'date' || fieldName == 'collectionDate') {
@@ -122,7 +136,7 @@ class JobListItemUpdate {
     }
   }
 
-  // Format date and time in readable format: "16 Oct 2025 10:00 AM"
+  // Format date and time in readable format: "16 Oct 2025 10:00:00.000 AM"
   String _formatDateTimeReadable(DateTime dateTime) {
     final months = [
       '',
@@ -158,8 +172,10 @@ class JobListItemUpdate {
     }
 
     final minute = dateTime.minute.toString().padLeft(2, '0');
+    final second = dateTime.second.toString().padLeft(2, '0');
+    final millisecond = dateTime.millisecond.toString().padLeft(3, '0');
 
-    return '$day $month $year $hour12:$minute $period';
+    return '$day $month $year $hour12:$minute:$second.$millisecond $period';
   }
 
   // Format date only: "16 Oct 2025"

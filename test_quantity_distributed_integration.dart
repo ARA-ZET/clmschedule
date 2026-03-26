@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 // Test script to verify quantityDistributed integration
-import 'lib/models/job_list_item.dart';
 
 void main() {
   if (kDebugMode) {

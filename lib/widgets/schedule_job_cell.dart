@@ -46,22 +46,6 @@ class ScheduleJobCell extends StatelessWidget {
           orElse: () => jobDetails.data, // Fallback to original if not found
         );
 
-        // DEBUG: Log dragged job data
-        debugPrint('=== DRAG AND DROP DEBUG ===');
-        debugPrint('Dragged Job (FRESH from provider):');
-        debugPrint('  ID: ${draggedJob.id}');
-        debugPrint('  StatusId: ${draggedJob.statusId}');
-        debugPrint('  Clients: ${draggedJob.clients}');
-        debugPrint('  WorkingAreas: ${draggedJob.workingAreas}');
-        debugPrint('  WorkMaps count: ${draggedJob.workMaps.length}');
-        debugPrint('  DistributorId: ${draggedJob.distributorId}');
-        debugPrint('  Date: ${draggedJob.date}');
-        debugPrint('Target:');
-        debugPrint('  DistributorId: ${distributor.id}');
-        debugPrint('  Distributor Name: ${distributor.name}');
-        debugPrint('  Date: $date');
-        debugPrint('===========================');
-
         // Check if dropping on the same day and distributor (no changes)
         final isSameDayAndDistributor =
             draggedJob.distributorId == distributor.id &&
@@ -70,7 +54,6 @@ class ScheduleJobCell extends StatelessWidget {
                 draggedJob.date.day == date.day;
 
         if (isSameDayAndDistributor) {
-          // Show feedback that no changes will be made
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -92,192 +75,175 @@ class ScheduleJobCell extends StatelessWidget {
               ),
             );
           }
-          return; // Exit early, no changes needed
+          return;
         }
 
-        // If there's already a job in the target cell
-        if (jobs.isNotEmpty) {
-          // Get fresh target job data from provider to avoid stale state
-          final targetJobId = jobs.first.id;
-          final targetJob = scheduleProvider.jobs.firstWhere(
-            (j) => j.id == targetJobId,
-            orElse: () => jobs.first,
-          );
+        try {
+          // If there's already a job in the target cell
+          if (jobs.isNotEmpty) {
+            // Get fresh target job data from provider to avoid stale state
+            final targetJobId = jobs.first.id;
+            final targetJob = scheduleProvider.jobs.firstWhere(
+              (j) => j.id == targetJobId,
+              orElse: () => jobs.first,
+            );
 
-          debugPrint('=== TARGET JOB (FRESH) ===');
-          debugPrint('  ID: ${targetJob.id}');
-          debugPrint('  Clients: ${targetJob.clients}');
-          debugPrint('  WorkingAreas: ${targetJob.workingAreas}');
-          debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
-          debugPrint('==========================');
+            // Show confirmation dialog
+            final action = await showDialog<DropAction>(
+              context: context,
+              builder: (context) => JobDropConfirmationDialog(
+                draggedJob: draggedJob,
+                targetJob: targetJob,
+                distributorName: distributor.name,
+                targetDate: date,
+              ),
+            );
 
-          // Show confirmation dialog
-          final action = await showDialog<DropAction>(
-            context: context,
-            builder: (context) => JobDropConfirmationDialog(
-              draggedJob: draggedJob,
-              targetJob: targetJob,
-              distributorName: distributor.name,
-              targetDate: date,
-            ),
-          );
+            if (action == null) return; // User cancelled
 
-          if (action == null) return; // User cancelled
+            if (action == DropAction.swap) {
+              await scheduleProvider.swapJobsWithUndo(
+                draggedJob,
+                targetJob,
+                date,
+              );
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Row(
+                      children: [
+                        Icon(Icons.swap_horiz, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text('Jobs swapped'),
+                      ],
+                    ),
+                    backgroundColor: Colors.blue.shade700,
+                    duration: const Duration(milliseconds: 1500),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            } else if (action == DropAction.addToExisting) {
+              final combinedClients = <String>{
+                ...targetJob.clients,
+                ...draggedJob.clients,
+              }.toList();
 
-          if (action == DropAction.swap) {
-            // Swap the jobs using undo/redo command
-            debugPrint('=== SWAP JOBS DEBUG ===');
-            debugPrint('DraggedJob:');
-            debugPrint('  Clients: ${draggedJob.clients}');
-            debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
-            debugPrint('TargetJob:');
-            debugPrint('  Clients: ${targetJob.clients}');
-            debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
-            debugPrint('======================');
+              final combinedWorkingAreas = <String>{
+                ...targetJob.workingAreas,
+                ...draggedJob.workingAreas,
+              }.toList();
 
-            await scheduleProvider.swapJobsWithUndo(
+              final combinedWorkMaps = <CustomPolygon>[
+                ...targetJob.workMaps,
+                ...draggedJob.workMaps,
+              ];
+
+              final combinedJob = targetJob.copyWith(
+                clients: combinedClients,
+                workingAreas: combinedWorkingAreas,
+                workMaps: combinedWorkMaps,
+              );
+
+              await scheduleProvider.combineJobsWithUndo(
+                draggedJob,
+                targetJob,
+                combinedJob,
+                date,
+              );
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Row(
+                      children: [
+                        Icon(Icons.merge_type, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text('Jobs combined'),
+                      ],
+                    ),
+                    backgroundColor: Colors.green.shade700,
+                    duration: const Duration(milliseconds: 1500),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            } else if (action == DropAction.copy) {
+              final combinedClients = <String>{
+                ...targetJob.clients,
+                ...draggedJob.clients,
+              }.toList();
+
+              final combinedWorkingAreas = <String>{
+                ...targetJob.workingAreas,
+                ...draggedJob.workingAreas,
+              }.toList();
+
+              final combinedWorkMaps = <CustomPolygon>[
+                ...targetJob.workMaps,
+                ...draggedJob.workMaps,
+              ];
+
+              final combinedJob = targetJob.copyWith(
+                clients: combinedClients,
+                workingAreas: combinedWorkingAreas,
+                workMaps: combinedWorkMaps,
+              );
+
+              await scheduleProvider.copyAndCombineJobsWithUndo(
+                targetJob,
+                combinedJob,
+                date,
+              );
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Row(
+                      children: [
+                        Icon(Icons.copy, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text('Job copied & combined'),
+                      ],
+                    ),
+                    backgroundColor: Colors.purple.shade700,
+                    duration: const Duration(milliseconds: 1500),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            }
+          } else {
+            // If target cell is empty, just move the dragged job
+            final movedJob = draggedJob.copyWith(
+              distributorId: distributor.id,
+              date: date,
+            );
+
+            await scheduleProvider.updateJobWithUndo(
               draggedJob,
-              targetJob,
-              date,
-            );
-          } else if (action == DropAction.addToExisting) {
-            // Combine the jobs - merge clients, working areas, and polygons
-            debugPrint('=== COMBINE JOBS DEBUG ===');
-            debugPrint('Before combine - DraggedJob:');
-            debugPrint('  Clients: ${draggedJob.clients}');
-            debugPrint('  WorkingAreas: ${draggedJob.workingAreas}');
-            debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
-            debugPrint('Before combine - TargetJob:');
-            debugPrint('  Clients: ${targetJob.clients}');
-            debugPrint('  WorkingAreas: ${targetJob.workingAreas}');
-            debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
-
-            final combinedClients = <String>{
-              ...targetJob.clients,
-              ...draggedJob.clients,
-            }.toList(); // Remove duplicates
-
-            final combinedWorkingAreas = <String>{
-              ...targetJob.workingAreas,
-              ...draggedJob.workingAreas,
-            }.toList(); // Remove duplicates
-
-            // Combine work maps from both jobs
-            final combinedWorkMaps = <CustomPolygon>[
-              ...targetJob.workMaps,
-              ...draggedJob.workMaps,
-            ];
-
-            debugPrint('After combine:');
-            debugPrint('  Combined Clients: $combinedClients');
-            debugPrint('  Combined WorkingAreas: $combinedWorkingAreas');
-            debugPrint('  Combined WorkMaps count: ${combinedWorkMaps.length}');
-
-            // Create combined job with target job's status preserved
-            final combinedJob = targetJob.copyWith(
-              clients: combinedClients,
-              workingAreas: combinedWorkingAreas,
-              workMaps: combinedWorkMaps,
-            );
-
-            debugPrint('CombinedJob after copyWith:');
-            debugPrint('  Clients: ${combinedJob.clients}');
-            debugPrint('  WorkingAreas: ${combinedJob.workingAreas}');
-            debugPrint('  WorkMaps: ${combinedJob.workMaps.length}');
-            debugPrint('=========================');
-
-            // Use undo/redo command for combine operation
-            await scheduleProvider.combineJobsWithUndo(
-              draggedJob,
-              targetJob,
-              combinedJob,
-              date,
-            );
-          } else if (action == DropAction.copy) {
-            // Copy & Combine - preserve source job, create combined job at target
-            debugPrint('=== COPY & COMBINE DEBUG ===');
-            debugPrint('Before combine - DraggedJob:');
-            debugPrint('  ID: ${draggedJob.id}');
-            debugPrint('  Clients: ${draggedJob.clients}');
-            debugPrint('  WorkingAreas: ${draggedJob.workingAreas}');
-            debugPrint('  WorkMaps: ${draggedJob.workMaps.length}');
-            debugPrint('Before combine - TargetJob:');
-            debugPrint('  ID: ${targetJob.id}');
-            debugPrint('  Clients: ${targetJob.clients}');
-            debugPrint('  WorkingAreas: ${targetJob.workingAreas}');
-            debugPrint('  WorkMaps: ${targetJob.workMaps.length}');
-
-            final combinedClients = <String>{
-              ...targetJob.clients,
-              ...draggedJob.clients,
-            }.toList(); // Remove duplicates
-
-            final combinedWorkingAreas = <String>{
-              ...targetJob.workingAreas,
-              ...draggedJob.workingAreas,
-            }.toList(); // Remove duplicates
-
-            // Combine work maps from both jobs
-            final combinedWorkMaps = <CustomPolygon>[
-              ...targetJob.workMaps,
-              ...draggedJob.workMaps,
-            ];
-
-            debugPrint('After combining arrays:');
-            debugPrint('  Combined Clients: $combinedClients');
-            debugPrint('  Combined WorkingAreas: $combinedWorkingAreas');
-            debugPrint('  Combined WorkMaps count: ${combinedWorkMaps.length}');
-
-            // Create combined job with target job's status preserved
-            final combinedJob = targetJob.copyWith(
-              clients: combinedClients,
-              workingAreas: combinedWorkingAreas,
-              workMaps: combinedWorkMaps,
-            );
-
-            debugPrint('CombinedJob after copyWith:');
-            debugPrint('  ID: ${combinedJob.id}');
-            debugPrint('  Clients: ${combinedJob.clients}');
-            debugPrint('  WorkingAreas: ${combinedJob.workingAreas}');
-            debugPrint('  WorkMaps: ${combinedJob.workMaps.length}');
-            debugPrint('============================');
-
-            // Use undo/redo command for copy & combine operation
-            await scheduleProvider.copyAndCombineJobsWithUndo(
-              targetJob,
-              combinedJob,
+              movedJob,
               date,
             );
           }
-        } else {
-          // If target cell is empty, just move the dragged job
-          debugPrint('=== SIMPLE MOVE DEBUG ===');
-          debugPrint('Original draggedJob before copyWith:');
-          debugPrint('  ID: ${draggedJob.id}');
-          debugPrint('  Clients: ${draggedJob.clients}');
-          debugPrint('  WorkingAreas: ${draggedJob.workingAreas}');
-          debugPrint('  WorkMaps count: ${draggedJob.workMaps.length}');
-
-          final movedJob = draggedJob.copyWith(
-            distributorId: distributor.id,
-            date: date,
-          );
-
-          debugPrint('After copyWith - movedJob:');
-          debugPrint('  ID: ${movedJob.id}');
-          debugPrint('  Clients: ${movedJob.clients}');
-          debugPrint('  WorkingAreas: ${movedJob.workingAreas}');
-          debugPrint('  WorkMaps count: ${movedJob.workMaps.length}');
-          debugPrint('  DistributorId: ${movedJob.distributorId}');
-          debugPrint('  Date: ${movedJob.date}');
-          debugPrint('========================');
-
-          // Use undo/redo command for simple move operation
-          await scheduleProvider.updateJobWithUndo(
-            draggedJob,
-            movedJob,
-            date,
-          );
+        } catch (e) {
+          debugPrint('Drag-drop operation failed: $e');
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Row(
+                  children: [
+                    const Icon(Icons.error_outline, color: Colors.white),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text('Operation failed: $e'),
+                    ),
+                  ],
+                ),
+                backgroundColor: Colors.red,
+                duration: const Duration(seconds: 3),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          }
         }
       },
       onWillAcceptWithDetails: (job) => true,

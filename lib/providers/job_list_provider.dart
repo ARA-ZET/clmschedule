@@ -54,6 +54,7 @@ class JobListProvider extends ChangeNotifier {
 
   // Last checked time for updates
   DateTime? _lastCheckedTime;
+  bool _lastCheckedTimeLoaded = false;
   bool _isRefreshingLastChecked = false;
 
   // Callback for Happy Sun job syncing
@@ -107,6 +108,7 @@ class JobListProvider extends ChangeNotifier {
   String get currentMonthDisplay =>
       _jobListService.getMonthlyDocumentId(_currentMonth);
   DateTime? get lastCheckedTime => _lastCheckedTime;
+  bool get lastCheckedTimeLoaded => _lastCheckedTimeLoaded;
   bool get isRefreshingLastChecked => _isRefreshingLastChecked;
   ValueNotifier<bool> get isSearchingNotifier => _isSearchingNotifier;
 
@@ -1183,9 +1185,10 @@ class JobListProvider extends ChangeNotifier {
         final data = userDoc.data()!;
         if (data.containsKey('lastCheckedTime')) {
           _lastCheckedTime = (data['lastCheckedTime'] as Timestamp).toDate();
-          notifyListeners();
         }
       }
+      _lastCheckedTimeLoaded = true;
+      notifyListeners();
     } catch (e) {
       debugPrint('JobListProvider: Error loading last checked time: $e');
     }
@@ -1230,6 +1233,7 @@ class JobListProvider extends ChangeNotifier {
     try {
       final now = DateTime.now();
       _lastCheckedTime = now;
+      _lastCheckedTimeLoaded = true;
 
       // Save to database
       await _saveLastCheckedTimeToDatabase(now);
@@ -1243,7 +1247,9 @@ class JobListProvider extends ChangeNotifier {
 
   // Check if a job has updates after the last checked time
   bool hasUpdatesAfterLastCheck(JobListItem item) {
-    if (_lastCheckedTime == null || item.updates.isEmpty) {
+    if (!_lastCheckedTimeLoaded ||
+        _lastCheckedTime == null ||
+        item.updates.isEmpty) {
       return false;
     }
 
@@ -1253,13 +1259,19 @@ class JobListProvider extends ChangeNotifier {
 
   // Get updates that occurred after the last checked time
   List<JobListItemUpdate> getUpdatesAfterLastCheck(JobListItem item) {
-    if (_lastCheckedTime == null) {
-      return item.updates;
+    if (!_lastCheckedTimeLoaded || _lastCheckedTime == null) {
+      return [];
     }
 
     return item.updates
         .where((update) => update.timestamp.isAfter(_lastCheckedTime!))
         .toList();
+  }
+
+  // Ensure lastCheckedTime is loaded (call after auth is guaranteed ready)
+  Future<void> ensureLastCheckedTimeLoaded() async {
+    if (_lastCheckedTimeLoaded) return;
+    await _loadLastCheckedTimeFromDatabase();
   }
 
   @override
