@@ -169,8 +169,7 @@ class MonthlyService {
     }
     final snapshot = await _firestore.collection('schedules').get();
     _cachedScheduleMonths = snapshot.docs.map((doc) => doc.id).toList()
-      ..sort((a, b) =>
-          _parseMonthYear(b).compareTo(_parseMonthYear(a)));
+      ..sort((a, b) => _parseMonthYear(b).compareTo(_parseMonthYear(a)));
     _scheduleMonthsCacheTime = now;
     return _cachedScheduleMonths!;
   }
@@ -185,8 +184,7 @@ class MonthlyService {
     }
     final snapshot = await _firestore.collection('jobLists').get();
     _cachedJobListMonths = snapshot.docs.map((doc) => doc.id).toList()
-      ..sort((a, b) =>
-          _parseMonthYear(b).compareTo(_parseMonthYear(a)));
+      ..sort((a, b) => _parseMonthYear(b).compareTo(_parseMonthYear(a)));
     _jobListMonthsCacheTime = now;
     return _cachedJobListMonths!;
   }
@@ -200,9 +198,10 @@ class MonthlyService {
       return _cachedCollectionScheduleMonths!;
     }
     final snapshot = await _firestore.collection('collectionSchedules').get();
-    _cachedCollectionScheduleMonths = snapshot.docs.map((doc) => doc.id).toList()
-      ..sort((a, b) =>
-          _parseMonthYear(b).compareTo(_parseMonthYear(a)));
+    _cachedCollectionScheduleMonths = snapshot.docs
+        .map((doc) => doc.id)
+        .toList()
+      ..sort((a, b) => _parseMonthYear(b).compareTo(_parseMonthYear(a)));
     _collectionScheduleMonthsCacheTime = now;
     return _cachedCollectionScheduleMonths!;
   }
