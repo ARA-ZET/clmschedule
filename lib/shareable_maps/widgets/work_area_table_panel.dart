@@ -29,7 +29,8 @@ class _WorkAreaTablePanelState
     final entries = <_PolyEntry>[];
     for (final layer in layers) {
       for (int i = 0; i < layer.polygons.length; i++) {
-        entries.add(_PolyEntry(layerId: layer.id, index: i, poly: layer.polygons[i]));
+        entries.add(
+            _PolyEntry(layerId: layer.id, index: i, poly: layer.polygons[i]));
       }
     }
 
@@ -290,8 +291,8 @@ class _PolyRowState extends riverpod.ConsumerState<_PolyRow> {
                   keyboardType: TextInputType.number,
                   decoration: InputDecoration(
                     isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 4, vertical: 4),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
                     border: OutlineInputBorder(
                       borderSide: BorderSide(color: Colors.grey.shade300),
                       borderRadius: BorderRadius.circular(4),

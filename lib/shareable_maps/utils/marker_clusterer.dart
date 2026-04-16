@@ -132,7 +132,10 @@ class MarkerClusterer {
       ...List.generate(8, (i) => i + 2),
       ...List.generate(9, (i) => (i + 1) * 10),
       ...List.generate(9, (i) => (i + 1) * 100),
-      1000, 2000, 3000, 5000,
+      1000,
+      2000,
+      3000,
+      5000,
     ];
     for (final b in buckets) {
       cache[b] = await _renderClusterIcon(b);

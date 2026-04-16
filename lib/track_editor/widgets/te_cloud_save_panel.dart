@@ -28,8 +28,7 @@ class TECloudSavePanel extends riverpod.ConsumerStatefulWidget {
       _TECloudSavePanelState();
 }
 
-class _TECloudSavePanelState
-    extends riverpod.ConsumerState<TECloudSavePanel> {
+class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
   bool _loading = false;
   List<_ClientEntry> _clients = [];
   String? _error;
@@ -175,8 +174,8 @@ class _TECloudSavePanelState
     final clientName = segments.length >= 4 ? segments[3] : segments.last;
 
     // Check if already in the list.
-    if (_clients.any((c) =>
-        c.clientName == clientName && c.folderPath == picked)) {
+    if (_clients
+        .any((c) => c.clientName == clientName && c.folderPath == picked)) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -267,7 +266,8 @@ class _TECloudSavePanelState
         return;
       }
 
-      final jobs = await schedule.fetchJobsForDistributorAndDate(match.id, date);
+      final jobs =
+          await schedule.fetchJobsForDistributorAndDate(match.id, date);
       if (jobs.isEmpty) {
         setState(() {
           _loading = false;
@@ -287,8 +287,7 @@ class _TECloudSavePanelState
           // Resolve next round number for folder suggestion.
           final nextRound = await gpxStorage.nextRoundNumber(date, client);
           final round = nextRound > 1 ? nextRound - 1 : 1;
-          final folderPath =
-              gpxStorage.roundFolderPath(date, client, round);
+          final folderPath = gpxStorage.roundFolderPath(date, client, round);
 
           // Collect polygons from ALL jobs referencing this client.
           final polys = <TEStyledPolygon>[];
@@ -302,7 +301,8 @@ class _TECloudSavePanelState
                   style: TEKmlStyle(
                     strokeColor: wm.color,
                     strokeWidth: wm.strokeWidth.toDouble(),
-                    fillColor: wm.color.withAlpha((wm.fillOpacity * 255).round()),
+                    fillColor:
+                        wm.color.withAlpha((wm.fillOpacity * 255).round()),
                     fill: true,
                     outline: true,
                   ),
@@ -433,8 +433,7 @@ class _ClientTileState extends State<_ClientTile> {
           skipped++;
         } else {
           final trackContent = await fm.toGpxTracksString(widget.tracks);
-          await gpxStorage.uploadGpxFile(
-              _folderPath, trackFile, trackContent);
+          await gpxStorage.uploadGpxFile(_folderPath, trackFile, trackContent);
           uploaded++;
         }
       }
@@ -444,8 +443,7 @@ class _ClientTileState extends State<_ClientTile> {
           skipped++;
         } else {
           final wptContent = await fm.toGpxWaypointsString(widget.waypoints);
-          await gpxStorage.uploadGpxFile(
-              _folderPath, wptFile, wptContent);
+          await gpxStorage.uploadGpxFile(_folderPath, wptFile, wptContent);
           uploaded++;
         }
       }
@@ -457,9 +455,8 @@ class _ClientTileState extends State<_ClientTile> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(msg),
-            backgroundColor: skipped > 0 && uploaded == 0
-                ? Colors.orange
-                : Colors.green,
+            backgroundColor:
+                skipped > 0 && uploaded == 0 ? Colors.orange : Colors.green,
           ),
         );
       }
@@ -480,12 +477,10 @@ class _ClientTileState extends State<_ClientTile> {
     if (_selectedPolyIndices.isEmpty) return;
     setState(() => _trimming = true);
     try {
-      final selectedPolys = _selectedPolyIndices
-          .map((i) => widget.entry.polygons[i])
-          .toList();
+      final selectedPolys =
+          _selectedPolyIndices.map((i) => widget.entry.polygons[i]).toList();
 
-      final trimmedTracks =
-          trimTracksToPolygons(widget.tracks, selectedPolys);
+      final trimmedTracks = trimTracksToPolygons(widget.tracks, selectedPolys);
       final trimmedWpts =
           filterWaypointsByPolygons(widget.waypoints, selectedPolys);
 
@@ -519,8 +514,7 @@ class _ClientTileState extends State<_ClientTile> {
           skipped++;
         } else {
           final trackContent = await fm.toGpxTracksString(trimmedTracks);
-          await gpxStorage.uploadGpxFile(
-              _folderPath, trackFile, trackContent);
+          await gpxStorage.uploadGpxFile(_folderPath, trackFile, trackContent);
           uploaded++;
         }
       }
@@ -530,8 +524,7 @@ class _ClientTileState extends State<_ClientTile> {
           skipped++;
         } else {
           final wptContent = await fm.toGpxWaypointsString(trimmedWpts);
-          await gpxStorage.uploadGpxFile(
-              _folderPath, wptFile, wptContent);
+          await gpxStorage.uploadGpxFile(_folderPath, wptFile, wptContent);
           uploaded++;
         }
       }
@@ -591,8 +584,7 @@ class _ClientTileState extends State<_ClientTile> {
           // ── Client header ─────────────────────────────────────────────
           InkWell(
             onTap: () => setState(() => _expanded = !_expanded),
-            borderRadius:
-                const BorderRadius.vertical(top: Radius.circular(8)),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               child: Row(
@@ -681,8 +673,8 @@ class _ClientTileState extends State<_ClientTile> {
                     const SizedBox(height: 6),
                     Text(
                       'Select polygons to trim tracks & waypoints:',
-                      style: TextStyle(
-                          fontSize: 11, color: Colors.grey.shade600),
+                      style:
+                          TextStyle(fontSize: 11, color: Colors.grey.shade600),
                     ),
                     const SizedBox(height: 6),
                     // Polygon checkboxes
@@ -931,10 +923,9 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
                               color: i == _provider.breadcrumbs.length - 1
                                   ? Colors.blueGrey.shade800
                                   : Colors.blue.shade700,
-                              fontWeight:
-                                  i == _provider.breadcrumbs.length - 1
-                                      ? FontWeight.w600
-                                      : FontWeight.normal,
+                              fontWeight: i == _provider.breadcrumbs.length - 1
+                                  ? FontWeight.w600
+                                  : FontWeight.normal,
                             ),
                           ),
                         ),
@@ -968,8 +959,7 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
                                       color: Colors.grey.shade500)),
                             )
                           : ListView.separated(
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 4),
+                              padding: const EdgeInsets.symmetric(vertical: 4),
                               itemCount: _provider.folders.length,
                               separatorBuilder: (_, __) =>
                                   const Divider(height: 1),
@@ -978,16 +968,12 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
                                 return ListTile(
                                   dense: true,
                                   leading: Icon(Icons.folder,
-                                      color: Colors.amber.shade700,
-                                      size: 22),
+                                      color: Colors.amber.shade700, size: 22),
                                   title: Text(folder.name,
-                                      style:
-                                          const TextStyle(fontSize: 13)),
-                                  trailing: const Icon(
-                                      Icons.chevron_right,
-                                      size: 18),
-                                  onTap: () =>
-                                      _provider.openFolder(folder),
+                                      style: const TextStyle(fontSize: 13)),
+                                  trailing:
+                                      const Icon(Icons.chevron_right, size: 18),
+                                  onTap: () => _provider.openFolder(folder),
                                 );
                               },
                             ),
@@ -1003,8 +989,8 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
                   Expanded(
                     child: Text(
                       _provider.currentPath,
-                      style: TextStyle(
-                          fontSize: 10, color: Colors.grey.shade600),
+                      style:
+                          TextStyle(fontSize: 10, color: Colors.grey.shade600),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
