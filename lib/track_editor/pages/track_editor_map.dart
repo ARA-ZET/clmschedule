@@ -10,7 +10,9 @@ import '../providers/te_tabs_provider.dart';
 import '../providers/te_map_layer_provider.dart';
 import '../providers/te_mode_provider.dart';
 import '../providers/te_tools_provider.dart';
+import '../models/styled_polygon.dart';
 import '../utils/te_track_stats.dart';
+import '../../providers/schedule_provider.dart';
 
 class TEMap extends riverpod.ConsumerStatefulWidget {
   const TEMap({super.key});
@@ -62,12 +64,18 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
   Offset? _selectEnd;
   BitmapDescriptor? _multiSelectWptIcon;
 
+  // ── Drawing state ─────────────────────────────────────────────────────────
+  final List<LatLng> _drawingPoints = [];
+  BitmapDescriptor? _drawingVertexIcon;
+  BitmapDescriptor? _drawingFirstVertexIcon;
+
   // Live camera position – updated on every onCameraMove for smooth reprojection.
   CameraPosition _currentCamera = _defaultPosition;
 
   // Track last-seen tab index AND mode so we fit bounds when either changes.
   int _lastTab = -1;
   TEMode? _lastMode;
+  TEDrawingMode? _lastDrawingMode;
 
   @override
   void initState() {
@@ -76,6 +84,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     _loadSelectedWptIcon();
     _loadVertexIcon();
     _loadMultiSelectWptIcon();
+    _loadDrawingVertexIcons();
     HardwareKeyboard.instance.addHandler(_handleKeyEvent);
   }
 
@@ -147,6 +156,422 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     }
   }
 
+  Future<void> _loadDrawingVertexIcons() async {
+    // Blue vertex for drawing points
+    const double size = 22.0;
+    const double radius = 8.0;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final center = Offset(size / 2, size / 2);
+    canvas.drawCircle(center, radius + 2, Paint()..color = Colors.white);
+    canvas.drawCircle(center, radius, Paint()..color = Colors.blue);
+    canvas.drawCircle(center, 3, Paint()..color = Colors.white);
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(size.toInt(), size.toInt());
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (mounted && data != null) {
+      setState(() {
+        _drawingVertexIcon = BitmapDescriptor.bytes(data.buffer.asUint8List());
+      });
+    }
+
+    // Green vertex for the first/closing point
+    final recorder2 = ui.PictureRecorder();
+    final canvas2 = Canvas(recorder2);
+    canvas2.drawCircle(center, radius + 2, Paint()..color = Colors.white);
+    canvas2.drawCircle(center, radius, Paint()..color = Colors.green);
+    canvas2.drawCircle(center, 3, Paint()..color = Colors.white);
+    final picture2 = recorder2.endRecording();
+    final image2 = await picture2.toImage(size.toInt(), size.toInt());
+    final data2 = await image2.toByteData(format: ui.ImageByteFormat.png);
+    if (mounted && data2 != null) {
+      setState(() {
+        _drawingFirstVertexIcon =
+            BitmapDescriptor.bytes(data2.buffer.asUint8List());
+      });
+    }
+  }
+
+  // ── Drawing mode handlers ─────────────────────────────────────────────────
+
+  void _handleDrawingTap(LatLng latLng, int currentTab) {
+    final toolsProvider = ref.read(teToolsRiverpod);
+    if (toolsProvider.drawingMode == TEDrawingMode.polygon) {
+      // If we have ≥3 points and tap near the first point, close the polygon
+      if (_drawingPoints.length >= 3) {
+        final first = _drawingPoints.first;
+        final dist = _haversineDistance(
+          latLng.latitude, latLng.longitude,
+          first.latitude, first.longitude,
+        );
+        // Close if within ~100m of the first point
+        if (dist < 0.1) {
+          _showPolygonNameClientDialog(context, currentTab);
+          return;
+        }
+      }
+      setState(() => _drawingPoints.add(latLng));
+    } else if (toolsProvider.drawingMode == TEDrawingMode.point) {
+      _showPointNameDialog(context, latLng, currentTab);
+    }
+  }
+
+  void _cancelDrawing() {
+    setState(() => _drawingPoints.clear());
+    ref.read(teToolsRiverpod).cancelDrawing();
+  }
+
+  void _undoLastDrawingPoint() {
+    if (_drawingPoints.isNotEmpty) {
+      setState(() => _drawingPoints.removeLast());
+    }
+  }
+
+  Set<Marker> _buildDrawingMarkers() {
+    if (_drawingPoints.isEmpty) return {};
+    final markers = <Marker>{};
+    for (int i = 0; i < _drawingPoints.length; i++) {
+      final isFirst = i == 0;
+      final canClose = isFirst && _drawingPoints.length >= 3;
+      markers.add(Marker(
+        markerId: MarkerId('draw_vtx_$i'),
+        position: _drawingPoints[i],
+        anchor: const Offset(0.5, 0.5),
+        icon: canClose
+            ? (_drawingFirstVertexIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen))
+            : (_drawingVertexIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue)),
+        zIndex: 20,
+        onTap: canClose
+            ? () => _showPolygonNameClientDialog(context, ref.read(teTabsRiverpod).currentTab)
+            : null,
+      ));
+    }
+    return markers;
+  }
+
+  Set<Polygon> _buildDrawingPreviewPolygon() {
+    if (_drawingPoints.length < 2) return {};
+    return {
+      Polygon(
+        polygonId: const PolygonId('drawing_preview'),
+        points: _drawingPoints,
+        strokeColor: Colors.blue,
+        strokeWidth: 2,
+        fillColor: Colors.blue.withAlpha(30),
+      ),
+    };
+  }
+
+  Set<Polyline> _buildDrawingPreviewPolyline() {
+    if (_drawingPoints.length < 2) return {};
+    return {
+      Polyline(
+        polylineId: const PolylineId('drawing_preview_line'),
+        points: _drawingPoints,
+        color: Colors.blue,
+        width: 2,
+        patterns: [PatternItem.dash(10), PatternItem.gap(6)],
+      ),
+    };
+  }
+
+  Future<void> _showPolygonNameClientDialog(
+      BuildContext context, int currentTab) async {
+    final nameCtrl = TextEditingController();
+    final clientCtrl = TextEditingController();
+
+    // Find overlapping work area maps
+    final scheduleProvider = ref.read(scheduleRiverpod);
+    final workAreas = scheduleProvider.workAreas;
+    final overlapping = <String>[];
+    for (final wa in workAreas) {
+      if (wa.polygonPoints.isEmpty) continue;
+      // Check if any drawing point falls inside this work area
+      for (final dp in _drawingPoints) {
+        if (_pointInPolygon(dp, wa.polygonPoints)) {
+          overlapping.add(wa.name);
+          break;
+        }
+      }
+    }
+
+    // Also check overlap with existing polygons in the current tab
+    final tabData = ref.read(teTabsRiverpod).tabs[currentTab];
+    final overlappingPolygons = <String>[];
+    for (final poly in tabData.polygons) {
+      for (final dp in _drawingPoints) {
+        if (_pointInPolygon(dp, poly.points)) {
+          overlappingPolygons.add(poly.name);
+          break;
+        }
+      }
+    }
+
+    // Get distributor client names from existing jobs
+    final clientSuggestions = <String>{};
+    for (final job in scheduleProvider.jobs) {
+      for (final c in job.clients) {
+        if (c.isNotEmpty) clientSuggestions.add(c);
+      }
+    }
+    final sortedClients = clientSuggestions.toList()..sort();
+
+    if (!context.mounted) return;
+
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('New Polygon', style: TextStyle(fontSize: 16)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Polygon Name',
+                    hintText: 'e.g. Block A, Zone 3',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Autocomplete<String>(
+                  optionsBuilder: (textEditingValue) {
+                    if (textEditingValue.text.isEmpty) return sortedClients;
+                    final q = textEditingValue.text.toLowerCase();
+                    return sortedClients
+                        .where((c) => c.toLowerCase().contains(q));
+                  },
+                  fieldViewBuilder:
+                      (ctx, controller, focusNode, onSubmitted) {
+                    // Sync the autocomplete controller with our controller
+                    clientCtrl.addListener(() {
+                      if (controller.text != clientCtrl.text) {
+                        controller.text = clientCtrl.text;
+                      }
+                    });
+                    controller.addListener(() {
+                      if (clientCtrl.text != controller.text) {
+                        clientCtrl.text = controller.text;
+                      }
+                    });
+                    return TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      decoration: const InputDecoration(
+                        labelText: 'Client Name',
+                        hintText: 'Type or select from list',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    );
+                  },
+                  onSelected: (val) => clientCtrl.text = val,
+                ),
+                if (overlapping.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.teal.shade50,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.teal.shade200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(Icons.layers,
+                                size: 14, color: Colors.teal.shade700),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Overlapping Work Areas',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.teal.shade700,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        ...overlapping.map((name) => Padding(
+                              padding: const EdgeInsets.only(left: 20, top: 2),
+                              child: Text('• $name',
+                                  style: const TextStyle(fontSize: 11)),
+                            )),
+                      ],
+                    ),
+                  ),
+                ],
+                if (overlappingPolygons.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.deepPurple.shade50,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.deepPurple.shade200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(Icons.stacked_line_chart,
+                                size: 14, color: Colors.deepPurple.shade700),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Overlapping Existing Polygons',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.deepPurple.shade700,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        ...overlappingPolygons.map((name) => Padding(
+                              padding: const EdgeInsets.only(left: 20, top: 2),
+                              child: Text('• $name',
+                                  style: const TextStyle(fontSize: 11)),
+                            )),
+                      ],
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Text(
+                  '${_drawingPoints.length} vertices drawn',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final name = nameCtrl.text.trim();
+                if (name.isEmpty) return;
+                Navigator.of(ctx).pop({
+                  'name': name,
+                  'client': clientCtrl.text.trim(),
+                });
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    nameCtrl.dispose();
+    clientCtrl.dispose();
+
+    if (result != null && _drawingPoints.isNotEmpty) {
+      final polygon = TEStyledPolygon(
+        id: 'drawn_${DateTime.now().millisecondsSinceEpoch}',
+        name: result['name']!,
+        clientName: result['client'] ?? '',
+        points: List<LatLng>.from(_drawingPoints),
+        style: TEKmlStyle(
+          strokeColor: Colors.blue.shade700,
+          strokeWidth: 2.0,
+          fillColor: Colors.blue.shade300,
+          fill: true,
+          outline: true,
+        ),
+      );
+      ref.read(teTabsRiverpod).addPolygonsToCurrentTab([polygon]);
+    }
+    // Always clear drawing state (like shareable maps completeDrawing /
+    // cancelDrawing) — dialog Cancel exits draw mode too.
+    setState(() => _drawingPoints.clear());
+    ref.read(teToolsRiverpod).cancelDrawing();
+  }
+
+  Future<void> _showPointNameDialog(
+      BuildContext context, LatLng position, int currentTab) async {
+    final nameCtrl = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New Point', style: TextStyle(fontSize: 16)),
+        content: TextField(
+          controller: nameCtrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Point Name',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(nameCtrl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    nameCtrl.dispose();
+    if (result != null && result.isNotEmpty) {
+      // Add as a single-point polygon (point marker)
+      final point = TEStyledPolygon(
+        id: 'point_${DateTime.now().millisecondsSinceEpoch}',
+        name: result,
+        points: [position],
+        style: TEKmlStyle(
+          strokeColor: Colors.red.shade700,
+          strokeWidth: 2.0,
+          fillColor: Colors.red.shade300,
+          fill: true,
+          outline: true,
+        ),
+      );
+      ref.read(teTabsRiverpod).addPolygonsToCurrentTab([point]);
+      // Stay in point mode — user can keep placing points
+    } else {
+      // User cancelled — exit drawing mode (like shareable maps)
+      ref.read(teToolsRiverpod).cancelDrawing();
+    }
+  }
+
+  /// Ray-casting point-in-polygon test.
+  static bool _pointInPolygon(LatLng point, List<LatLng> polygon) {
+    int intersectCount = 0;
+    for (int j = 0; j < polygon.length - 1; j++) {
+      final p1 = polygon[j];
+      final p2 = polygon[j + 1];
+      if ((p1.latitude > point.latitude) != (p2.latitude > point.latitude)) {
+        final lon = (p2.longitude - p1.longitude) *
+                (point.latitude - p1.latitude) /
+                (p2.latitude - p1.latitude) +
+            p1.longitude;
+        if (point.longitude < lon) intersectCount++;
+      }
+    }
+    return (intersectCount % 2 == 1);
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -170,6 +595,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     _editingPolyName = null;
     _selectStart = null;
     _selectEnd = null;
+    _drawingPoints.clear();
   }
 
   Future<void> _fitTabBounds(TETabsProvider tabsProvider) async {
@@ -568,6 +994,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     final currentTab = ref.watch(teTabsRiverpod).currentTab;
     final tabData = ref.watch(teTabsRiverpod).tabs[currentTab];
     final scissorsMode = ref.watch(teToolsRiverpod).scissorsMode;
+    final drawingMode = ref.watch(teToolsRiverpod).drawingMode;
+    final isDrawing = drawingMode != TEDrawingMode.none;
 
     // Detect tab or mode switch and fit map bounds to the new tab's content.
     final activeMode = ref.watch(teTabsRiverpod).activeMode;
@@ -578,6 +1006,17 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _fitTabBounds(ref.read(teTabsRiverpod));
       });
+    }
+
+    // Clear drawing points when the drawing tool changes (e.g. user clicked
+    // a different tool in the toolbar while points were in progress).
+    if (drawingMode != _lastDrawingMode) {
+      _lastDrawingMode = drawingMode;
+      if (_drawingPoints.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) setState(() => _drawingPoints.clear());
+        });
+      }
     }
     final showWaypoints =
         ref.watch(teMapLayerRiverpod).waypointsVisible(currentTab);
@@ -621,8 +1060,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                   : (sp.style.fill
                       ? sp.style.fillColor.withAlpha(100)
                       : Colors.transparent),
-              consumeTapEvents: true,
-              onTap: isEditing
+              consumeTapEvents: !isDrawing,
+              onTap: (isEditing || isDrawing)
                   ? null
                   : () => _openPolyInfoWindow(
                         centroid,
@@ -713,8 +1152,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                 ? Colors.red
                 : Colors.blue,
         width: isSelected ? 7 : 5,
-        consumeTapEvents: !scissorsMode,
-        onTap: scissorsMode
+        consumeTapEvents: !scissorsMode && !isDrawing,
+        onTap: scissorsMode || isDrawing
             ? null
             : () {
                 if (midPt != null) {
@@ -738,7 +1177,9 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
               MouseRegion(
                   cursor: scissorsMode
                       ? SystemMouseCursors.none
-                      : MouseCursor.defer,
+                      : isDrawing
+                          ? SystemMouseCursors.precise
+                          : MouseCursor.defer,
                   onHover: scissorsMode
                       ? (event) =>
                           setState(() => _mousePosition = event.localPosition)
@@ -764,7 +1205,9 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                       }
                     },
                     onTap: (latLng) {
-                      if (scissorsMode) {
+                      if (isDrawing) {
+                        _handleDrawingTap(latLng, currentTab);
+                      } else if (scissorsMode) {
                         _handleScissorsTap(latLng, currentTab);
                       } else {
                         _closeInfoWindow();
@@ -773,9 +1216,9 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                       }
                     },
                     onCameraMove: (pos) => setState(() => _currentCamera = pos),
-                    polygons: mapPolygons,
-                    markers: {...mapMarkers, ...vertexMarkers},
-                    polylines: polylines,
+                    polygons: {...mapPolygons, ..._buildDrawingPreviewPolygon()},
+                    markers: {...mapMarkers, ...vertexMarkers, ..._buildDrawingMarkers()},
+                    polylines: {...polylines, ..._buildDrawingPreviewPolyline()},
                     cloudMapId: '29325755824913c4',
                   )),
               // ── Shift+drag selection interceptor ─────────────────────────
@@ -981,6 +1424,185 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                               color: Colors.white,
                               fontSize: 13,
                               fontWeight: FontWeight.w500),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              // ── Drawing mode hint banner & controls ────────────────────────
+              if (isDrawing)
+                Positioned(
+                  top: 12,
+                  left: 0,
+                  right: 60,
+                  child: Center(
+                    child: Material(
+                      elevation: 4,
+                      borderRadius: BorderRadius.circular(20),
+                      color: Colors.blue.shade700,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
+                        child: Text(
+                          drawingMode == TEDrawingMode.polygon
+                              ? 'Tap map to draw polygon vertices${_drawingPoints.length >= 3 ? '  •  Tap first point to close' : ''}'
+                              : 'Tap map to place a point',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              // ── Drawing mode floating toolbar ──────────────────────────────
+              if (isDrawing)
+                Positioned(
+                  bottom: 16,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Material(
+                      elevation: 8,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFFDADCE0)),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // Status row
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  drawingMode == TEDrawingMode.polygon
+                                      ? Icons.pentagon_outlined
+                                      : Icons.place_outlined,
+                                  size: 20,
+                                  color: const Color(0xFF1967D2),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  drawingMode == TEDrawingMode.polygon
+                                      ? 'Drawing Polygon'
+                                      : 'Placing Point',
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Color(0xFF202124),
+                                  ),
+                                ),
+                                if (_drawingPoints.isNotEmpty) ...[
+                                  const SizedBox(width: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFE8F0FE),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Text(
+                                      '${_drawingPoints.length} ${_drawingPoints.length == 1 ? 'point' : 'points'}',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Color(0xFF1967D2),
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                            if (drawingMode == TEDrawingMode.polygon) ...[
+                              const SizedBox(height: 12),
+                              // Action buttons
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  OutlinedButton.icon(
+                                    onPressed: _drawingPoints.isNotEmpty
+                                        ? _undoLastDrawingPoint
+                                        : null,
+                                    icon: const Icon(Icons.undo, size: 18),
+                                    label: const Text('Undo'),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: const Color(0xFF5F6368),
+                                      side: const BorderSide(
+                                          color: Color(0xFFDADCE0)),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  OutlinedButton.icon(
+                                    onPressed: _cancelDrawing,
+                                    icon: const Icon(Icons.close, size: 18),
+                                    label: const Text('Cancel'),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: const Color(0xFFD93025),
+                                      side: const BorderSide(
+                                          color: Color(0xFFDADCE0)),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  ElevatedButton.icon(
+                                    onPressed: _drawingPoints.length >= 3
+                                        ? () => _showPolygonNameClientDialog(
+                                            context, currentTab)
+                                        : null,
+                                    icon: const Icon(Icons.check, size: 18),
+                                    label: const Text('Complete'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor:
+                                          const Color(0xFF1967D2),
+                                      foregroundColor: Colors.white,
+                                      disabledBackgroundColor:
+                                          const Color(0xFFE8EAED),
+                                      disabledForegroundColor:
+                                          const Color(0xFF80868B),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (_drawingPoints.length < 3)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 8),
+                                  child: Text(
+                                    'Tap map to add vertices (${3 - _drawingPoints.length} more needed)',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF5F6368),
+                                    ),
+                                  ),
+                                ),
+                            ] else ...[
+                              // Point mode — just show cancel
+                              const SizedBox(height: 8),
+                              Text(
+                                'Tap map to place a point',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF5F6368),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              OutlinedButton.icon(
+                                onPressed: _cancelDrawing,
+                                icon: const Icon(Icons.close, size: 18),
+                                label: const Text('Done'),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: const Color(0xFF5F6368),
+                                  side: const BorderSide(
+                                      color: Color(0xFFDADCE0)),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                       ),
                     ),

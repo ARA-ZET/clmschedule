@@ -229,7 +229,7 @@ class _PolygonsSectionState extends riverpod.ConsumerState<_PolygonsSection> {
           // ── Polygon list ────────────────────────────────────────────────
           if (widget.polygons.isNotEmpty)
             ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 200),
+              constraints: const BoxConstraints(maxHeight: 240),
               child: ListView.separated(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -245,42 +245,63 @@ class _PolygonsSectionState extends riverpod.ConsumerState<_PolygonsSection> {
                       color: Colors.deepPurple.shade50,
                       borderRadius: BorderRadius.circular(6),
                     ),
-                    child: Row(
-                      spacing: 8,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Container(
-                          width: 12,
-                          height: 12,
-                          decoration: BoxDecoration(
-                            color: poly.style.fillColor.withValues(alpha: 0.7),
-                            border: Border.all(
-                                color: poly.style.strokeColor, width: 1.5),
-                            borderRadius: BorderRadius.circular(3),
-                          ),
+                        Row(
+                          spacing: 8,
+                          children: [
+                            Container(
+                              width: 12,
+                              height: 12,
+                              decoration: BoxDecoration(
+                                color:
+                                    poly.style.fillColor.withValues(alpha: 0.7),
+                                border: Border.all(
+                                    color: poly.style.strokeColor, width: 1.5),
+                                borderRadius: BorderRadius.circular(3),
+                              ),
+                            ),
+                            Expanded(
+                              child: Text(
+                                poly.name.isNotEmpty
+                                    ? poly.name
+                                    : 'Area ${i + 1}',
+                                style: const TextStyle(fontSize: 12),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            Builder(builder: (_) {
+                              final wptCount = widget.waypoints.where((wpt) {
+                                if (wpt.lat == null || wpt.lon == null) {
+                                  return false;
+                                }
+                                return isPointInPolygon(
+                                  LatLng(wpt.lat!, wpt.lon!),
+                                  poly.points,
+                                );
+                              }).length;
+                              return Text(
+                                '$wptCount wpts',
+                                style: TextStyle(
+                                    fontSize: 10, color: Colors.grey.shade500),
+                              );
+                            }),
+                          ],
                         ),
-                        Expanded(
-                          child: Text(
-                            poly.name.isNotEmpty ? poly.name : 'Area ${i + 1}',
-                            style: const TextStyle(fontSize: 12),
-                            overflow: TextOverflow.ellipsis,
+                        if (poly.clientName.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 20, top: 2),
+                            child: Text(
+                              poly.clientName,
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Colors.blueGrey.shade600,
+                                fontStyle: FontStyle.italic,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
-                        ),
-                        Builder(builder: (_) {
-                          final wptCount = widget.waypoints.where((wpt) {
-                            if (wpt.lat == null || wpt.lon == null) {
-                              return false;
-                            }
-                            return isPointInPolygon(
-                              LatLng(wpt.lat!, wpt.lon!),
-                              poly.points,
-                            );
-                          }).length;
-                          return Text(
-                            '$wptCount wpts',
-                            style: TextStyle(
-                                fontSize: 10, color: Colors.grey.shade500),
-                          );
-                        }),
                       ],
                     ),
                   );

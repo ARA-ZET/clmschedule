@@ -162,6 +162,7 @@ class TETabsProvider with ChangeNotifier {
     polys[polyIndex] = TEStyledPolygon(
       id: p.id,
       name: newName,
+      clientName: p.clientName,
       points: p.points,
       style: p.style,
     );

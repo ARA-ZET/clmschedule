@@ -22,22 +22,30 @@ class TEKmlStyle {
 class TEStyledPolygon {
   final String id;
   final String name;
+  final String clientName;
   final List<LatLng> points;
   final TEKmlStyle style;
 
   TEStyledPolygon({
     required this.id,
     required this.name,
+    this.clientName = '',
     required this.points,
     required this.style,
   });
 
-  TEStyledPolygon copyWith({List<LatLng>? points}) {
+  TEStyledPolygon copyWith({
+    String? name,
+    String? clientName,
+    List<LatLng>? points,
+    TEKmlStyle? style,
+  }) {
     return TEStyledPolygon(
       id: id,
-      name: name,
+      name: name ?? this.name,
+      clientName: clientName ?? this.clientName,
       points: points ?? this.points,
-      style: style,
+      style: style ?? this.style,
     );
   }
 }

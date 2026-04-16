@@ -20,10 +20,9 @@ class TETopTabBar extends riverpod.ConsumerWidget {
     final tabs = tabsProvider.tabs;
     final selectedIndex = tabsProvider.currentTab;
     final scissorsMode = ref.watch(teToolsRiverpod).scissorsMode;
+    final drawingMode = ref.watch(teToolsRiverpod).drawingMode;
 
-    // Fixed-width right-side toolbar (scissors + future tools).
-    // Each tool button is 36 px wide with 4 px gap between them.
-    const double toolBtnSize = 36.0;
+    // Fixed-width right-side toolbar.
     const double toolGap = 4.0;
 
     return Container(
@@ -184,34 +183,93 @@ class TETopTabBar extends riverpod.ConsumerWidget {
               spacing: toolGap,
               children: [
                 // Scissors tool
-                Tooltip(
-                  message: scissorsMode ? 'Exit split mode' : 'Split track',
-                  child: SizedBox(
-                    width: toolBtnSize,
-                    child: Material(
-                      elevation: scissorsMode ? 4 : 1,
-                      borderRadius: BorderRadius.circular(8),
-                      color: scissorsMode ? Colors.orange : Colors.white,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(8),
-                        onTap: () => ref.read(teToolsRiverpod).toggleScissors(),
-                        child: Center(
-                          child: Icon(
-                            Icons.content_cut,
-                            size: 18,
-                            color: scissorsMode
-                                ? Colors.white
-                                : Colors.blueGrey.shade700,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                _ToolButton(
+                  icon: Icons.content_cut,
+                  tooltip: scissorsMode ? 'Exit split mode' : 'Split track',
+                  isActive: scissorsMode,
+                  activeColor: Colors.orange,
+                  isLocked: drawingMode != TEDrawingMode.none,
+                  onTap: () => ref.read(teToolsRiverpod).toggleScissors(),
+                ),
+                // Draw polygon tool
+                _ToolButton(
+                  icon: Icons.pentagon_outlined,
+                  tooltip: drawingMode == TEDrawingMode.polygon
+                      ? 'Exit polygon drawing'
+                      : 'Draw polygon',
+                  isActive: drawingMode == TEDrawingMode.polygon,
+                  activeColor: Colors.blue,
+                  isLocked: scissorsMode,
+                  onTap: () =>
+                      ref.read(teToolsRiverpod).toggleDrawPolygon(),
+                ),
+                // Draw point tool
+                _ToolButton(
+                  icon: Icons.place_outlined,
+                  tooltip: drawingMode == TEDrawingMode.point
+                      ? 'Exit point placement'
+                      : 'Place point',
+                  isActive: drawingMode == TEDrawingMode.point,
+                  activeColor: Colors.blue,
+                  isLocked: scissorsMode,
+                  onTap: () =>
+                      ref.read(teToolsRiverpod).toggleDrawPoint(),
                 ),
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Reusable tool button for the right-side toolbar.
+class _ToolButton extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final bool isActive;
+  final Color activeColor;
+  final bool isLocked;
+  final VoidCallback onTap;
+
+  const _ToolButton({
+    required this.icon,
+    required this.tooltip,
+    required this.isActive,
+    required this.activeColor,
+    required this.isLocked,
+    required this.onTap,
+  });
+
+  static const double _size = 36.0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: isLocked ? '' : tooltip,
+      child: SizedBox(
+        width: _size,
+        child: Material(
+          elevation: isActive ? 4 : 1,
+          borderRadius: BorderRadius.circular(8),
+          color: isActive ? activeColor : Colors.white,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: isLocked ? null : onTap,
+            child: Center(
+              child: Icon(
+                icon,
+                size: 18,
+                color: isLocked
+                    ? Colors.grey.shade400
+                    : isActive
+                        ? Colors.white
+                        : Colors.blueGrey.shade700,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
