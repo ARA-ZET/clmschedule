@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../../models/custom_polygon.dart';
 import 'map_layer.dart';
 
 /// Represents a complete shareable map with all layers and settings
@@ -13,6 +14,8 @@ class ShareableMap {
   final DateTime createdAt;
   final DateTime updatedAt;
   final String? thumbnailUrl;
+  final String? jobListItemId;
+  final String? storageFolderPath;
 
   const ShareableMap({
     required this.id,
@@ -24,6 +27,8 @@ class ShareableMap {
     required this.createdAt,
     required this.updatedAt,
     this.thumbnailUrl,
+    this.jobListItemId,
+    this.storageFolderPath,
   });
 
   /// Create a new map with generated ID
@@ -44,6 +49,8 @@ class ShareableMap {
       createdAt: now,
       updatedAt: now,
       thumbnailUrl: null,
+      jobListItemId: null,
+      storageFolderPath: null,
     );
   }
 
@@ -52,6 +59,8 @@ class ShareableMap {
     required String name,
     String description = '',
     LatLng? defaultCenter,
+    String? jobListItemId,
+    String? storageFolderPath,
   }) {
     final now = DateTime.now();
     final defaultLayer = MapLayer.create(
@@ -70,6 +79,8 @@ class ShareableMap {
       createdAt: now,
       updatedAt: now,
       thumbnailUrl: null,
+      jobListItemId: jobListItemId,
+      storageFolderPath: storageFolderPath,
     );
   }
 
@@ -97,6 +108,8 @@ class ShareableMap {
           ? DateTime.fromMillisecondsSinceEpoch(data['updatedAt'] as int)
           : DateTime.now(),
       thumbnailUrl: data['thumbnailUrl'] as String?,
+      jobListItemId: data['jobListItemId'] as String?,
+      storageFolderPath: data['storageFolderPath'] as String?,
     );
   }
 
@@ -112,6 +125,8 @@ class ShareableMap {
       'createdAt': createdAt.millisecondsSinceEpoch,
       'updatedAt': updatedAt.millisecondsSinceEpoch,
       if (thumbnailUrl != null) 'thumbnailUrl': thumbnailUrl,
+      if (jobListItemId != null) 'jobListItemId': jobListItemId,
+      if (storageFolderPath != null) 'storageFolderPath': storageFolderPath,
     };
   }
 
@@ -124,6 +139,8 @@ class ShareableMap {
     double? defaultZoom,
     DateTime? updatedAt,
     String? thumbnailUrl,
+    String? jobListItemId,
+    String? storageFolderPath,
   }) {
     return ShareableMap(
       id: id,
@@ -135,6 +152,8 @@ class ShareableMap {
       createdAt: createdAt,
       updatedAt: updatedAt ?? DateTime.now(),
       thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
+      jobListItemId: jobListItemId ?? this.jobListItemId,
+      storageFolderPath: storageFolderPath ?? this.storageFolderPath,
     );
   }
 
@@ -301,11 +320,17 @@ class ShareableMap {
   List<Marker> getAllGoogleMapsMarkers({
     String? selectedElementId,
     Function(String pointId)? onTap,
+    bool draggable = false,
+    Function(String pointId, LatLng newPosition)? onDragEnd,
+    Map<PointCategory, BitmapDescriptor>? pointIcons,
   }) {
     return visibleLayersSorted
         .expand((layer) => layer.getGoogleMapsMarkers(
               selectedElementId: selectedElementId,
               onTap: onTap,
+              draggable: draggable,
+              onDragEnd: onDragEnd,
+              pointIcons: pointIcons,
             ))
         .toList();
   }

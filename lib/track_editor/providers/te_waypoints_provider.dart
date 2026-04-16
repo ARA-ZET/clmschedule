@@ -1,6 +1,11 @@
 // track_editor/providers/te_waypoints_provider.dart
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:gpx/gpx.dart';
+
+final teWaypointsRiverpod =
+    riverpod.ChangeNotifierProvider<TEWaypointsProvider>(
+        (ref) => TEWaypointsProvider());
 
 class TEWaypointsProvider extends ChangeNotifier {
   final List<Wpt> _waypoints = [];

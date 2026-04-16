@@ -1,23 +1,30 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show Uint8List;
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:file_picker/file_picker.dart';
 import '../providers/shareable_map_provider.dart';
+import '../../providers/cloud_file_manager_provider.dart';
+import '../../services/gpx_storage_service.dart';
 import '../../services/kml_parser_service.dart';
 import '../../widgets/mymaps_kml_downloader.dart';
 
 /// Dialog for importing KML/GPX files into shareable maps
-class MapImportDialog extends StatefulWidget {
+class MapImportDialog extends riverpod.ConsumerStatefulWidget {
   const MapImportDialog({super.key});
 
   @override
-  State<MapImportDialog> createState() => _MapImportDialogState();
+  riverpod.ConsumerState<MapImportDialog> createState() =>
+      _MapImportDialogState();
 }
 
-class _MapImportDialogState extends State<MapImportDialog> {
+class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
   bool _isLoading = false;
   String? _errorMessage;
-  int _selectedImportType = 0; // 0 = File, 1 = Google My Maps URL
+  int _selectedImportType = 0; // 0 = File, 1 = Google My Maps, 2 = Cloud
+
+  // Cloud browser state
+  final CloudFileManagerProvider _cloudProvider = CloudFileManagerProvider();
+  bool _cloudInitialized = false;
 
   @override
   Widget build(BuildContext context) {
@@ -42,6 +49,11 @@ class _MapImportDialogState extends State<MapImportDialog> {
                   label: Text('Google My Maps'),
                   icon: Icon(Icons.link),
                 ),
+                ButtonSegment(
+                  value: 2,
+                  label: Text('Cloud Files'),
+                  icon: Icon(Icons.cloud),
+                ),
               ],
               selected: {_selectedImportType},
               onSelectionChanged: (Set<int> selection) {
@@ -56,8 +68,10 @@ class _MapImportDialogState extends State<MapImportDialog> {
             // Import content based on type
             if (_selectedImportType == 0)
               _buildFileImportSection()
+            else if (_selectedImportType == 1)
+              _buildUrlImportSection()
             else
-              _buildUrlImportSection(),
+              _buildCloudImportSection(),
 
             // Error message
             if (_errorMessage != null) ...[
@@ -151,6 +165,238 @@ class _MapImportDialogState extends State<MapImportDialog> {
     );
   }
 
+  Widget _buildCloudImportSection() {
+    // Lazy-init the cloud provider on first show
+    if (!_cloudInitialized) {
+      _cloudInitialized = true;
+      _cloudProvider.addListener(() {
+        if (mounted) setState(() {});
+      });
+      _cloudProvider.loadCurrentFolder();
+    }
+
+    final provider = ref.read(shareableMapRiverpod);
+    final linkedFolder = provider.currentMap?.storageFolderPath;
+    final hasLink = linkedFolder != null && linkedFolder.isNotEmpty;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Linked folder status
+        if (hasLink) ...[
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.green.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.green.shade200),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.link, color: Colors.green, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Linked Folder',
+                          style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.green)),
+                      Text(linkedFolder,
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey[600]),
+                          overflow: TextOverflow.ellipsis),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.link_off,
+                      color: Colors.red, size: 18),
+                  tooltip: 'Unlink folder',
+                  onPressed: () {
+                    provider.unlinkCloudFolder();
+                    setState(() {});
+                  },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+        const Text(
+          'Browse Cloud Storage to link a folder or import files',
+          style: TextStyle(fontSize: 14, color: Colors.grey),
+        ),
+        const SizedBox(height: 8),
+        // Breadcrumbs
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              InkWell(
+                onTap: _cloudProvider.isAtRoot
+                    ? null
+                    : () => _cloudProvider.goToRoot(),
+                child: Icon(Icons.cloud,
+                    size: 18,
+                    color: _cloudProvider.isAtRoot
+                        ? Colors.blue
+                        : Colors.grey[600]),
+              ),
+              for (int i = 0; i < _cloudProvider.breadcrumbs.length; i++) ...[
+                Icon(Icons.chevron_right, size: 16, color: Colors.grey[400]),
+                InkWell(
+                  onTap: i == _cloudProvider.breadcrumbs.length - 1
+                      ? null
+                      : () => _cloudProvider.goToBreadcrumb(i),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    child: Text(
+                      _cloudProvider.breadcrumbs[i].name,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight:
+                            i == _cloudProvider.breadcrumbs.length - 1
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                        color: i == _cloudProvider.breadcrumbs.length - 1
+                            ? Colors.blue
+                            : Colors.grey[700],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const Divider(height: 12),
+        // Link folder button (only when inside a folder, not at root)
+        if (!_cloudProvider.isAtRoot) ...[
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.link, size: 18),
+              label: Text(
+                'Link "${_cloudProvider.breadcrumbs.last.name}" to this map',
+                style: const TextStyle(fontSize: 13),
+              ),
+              onPressed: () {
+                provider.linkCloudFolder(_cloudProvider.currentPath);
+                setState(() {});
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                        'Folder linked: ${_cloudProvider.breadcrumbs.last.name}'),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+        // Contents
+        if (_cloudProvider.isLoading)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: CircularProgressIndicator()),
+          )
+        else if (_cloudProvider.error != null)
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Text(_cloudProvider.error!,
+                style: TextStyle(color: Colors.red[700], fontSize: 13)),
+          )
+        else
+          SizedBox(
+            height: 220,
+            child: _cloudProvider.folders.isEmpty &&
+                    _cloudProvider.files.isEmpty
+                ? Center(
+                    child: Text('Empty folder',
+                        style: TextStyle(color: Colors.grey[500])),
+                  )
+                : ListView(
+                    children: [
+                      for (final folder in _cloudProvider.folders)
+                        ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.folder,
+                              color: Colors.amber, size: 24),
+                          title: Text(folder.name,
+                              style: const TextStyle(fontSize: 13)),
+                          trailing: const Icon(Icons.chevron_right, size: 18),
+                          onTap: () => _cloudProvider.openFolder(folder),
+                        ),
+                      for (final file in _cloudProvider.files)
+                        _buildCloudFileTile(file),
+                    ],
+                  ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildCloudFileTile(StorageFileItem file) {
+    final ext = file.extension;
+    final canImport = ['gpx', 'kml', 'kmz'].contains(ext);
+    final icon = ext == 'gpx'
+        ? Icons.route
+        : ext == 'kml' || ext == 'kmz'
+            ? Icons.map
+            : Icons.insert_drive_file;
+    final color = canImport ? Colors.green : Colors.grey;
+
+    return ListTile(
+      dense: true,
+      leading: Icon(icon, color: color, size: 22),
+      title: Text(file.name, style: const TextStyle(fontSize: 13)),
+      subtitle: Text(ext.toUpperCase(),
+          style: TextStyle(fontSize: 10, color: Colors.grey[500])),
+      trailing: canImport
+          ? TextButton.icon(
+              icon: const Icon(Icons.download, size: 16),
+              label: const Text('Import', style: TextStyle(fontSize: 12)),
+              onPressed: _isLoading ? null : () => _importCloudFile(file),
+            )
+          : null,
+      onTap: canImport && !_isLoading ? () => _importCloudFile(file) : null,
+    );
+  }
+
+  Future<void> _importCloudFile(StorageFileItem file) async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final bytes = await _cloudProvider.downloadFile(file);
+      if (bytes == null) {
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'Failed to download ${file.name}';
+            _isLoading = false;
+          });
+        }
+        return;
+      }
+      await _handleKmlData(bytes, file.name);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Error loading cloud file: $e';
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
   Future<void> _pickAndImportFile() async {
     // Don't show spinner yet — wait until we actually have a file to parse
     try {
@@ -219,7 +465,7 @@ class _MapImportDialogState extends State<MapImportDialog> {
 
       // Commit import
       setState(() => _isLoading = true);
-      final provider = context.read<ShareableMapProvider>();
+      final provider = ref.read(shareableMapRiverpod);
 
       if (provider.currentMap == null) {
         provider.createNewMap(

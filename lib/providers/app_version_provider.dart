@@ -1,7 +1,14 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/app_version.dart';
 import '../services/app_version_service.dart';
+
+/// Riverpod provider for AppVersionProvider
+final appVersionRiverpod =
+    riverpod.ChangeNotifierProvider<AppVersionProvider>((ref) {
+  return AppVersionProvider();
+});
 
 class AppVersionProvider extends ChangeNotifier {
   final AppVersionService _versionService;

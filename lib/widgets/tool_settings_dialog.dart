@@ -1,19 +1,20 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/tool_settings.dart';
 import '../models/inventory_tool.dart';
 import '../providers/tool_settings_provider.dart';
 import '../providers/inventory_provider.dart';
 
-class ToolSettingsDialog extends StatefulWidget {
+class ToolSettingsDialog extends riverpod.ConsumerStatefulWidget {
   const ToolSettingsDialog({super.key});
 
   @override
-  State<ToolSettingsDialog> createState() => _ToolSettingsDialogState();
+  riverpod.ConsumerState<ToolSettingsDialog> createState() =>
+      _ToolSettingsDialogState();
 }
 
-class _ToolSettingsDialogState extends State<ToolSettingsDialog>
-    with SingleTickerProviderStateMixin {
+class _ToolSettingsDialogState extends riverpod
+    .ConsumerState<ToolSettingsDialog> with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   @override
@@ -23,7 +24,7 @@ class _ToolSettingsDialogState extends State<ToolSettingsDialog>
 
     // Load settings when dialog opens
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ToolSettingsProvider>().loadSettings();
+      ref.read(toolSettingsRiverpod).loadSettings();
     });
   }
 
@@ -93,106 +94,118 @@ class _ToolSettingsDialogState extends State<ToolSettingsDialog>
   }
 
   Widget _buildTeamToolsTab() {
-    return Consumer2<ToolSettingsProvider, InventoryProvider>(
-      builder: (context, settingsProvider, inventoryProvider, child) {
-        if (settingsProvider.isLoading) {
-          return const Center(child: CircularProgressIndicator());
-        }
+    return riverpod.Consumer(
+      builder: (context, ref, child) {
+        final settingsProvider = ref.watch(toolSettingsRiverpod);
+        return Builder(
+          builder: (context) {
+            if (settingsProvider.isLoading) {
+              return const Center(child: CircularProgressIndicator());
+            }
 
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const SizedBox(height: 16),
-            const Text(
-              'Tools needed for the entire team (regardless of team size)',
-              style: TextStyle(fontSize: 14, color: Colors.grey),
-            ),
-            const SizedBox(height: 16),
-            // Add tool button
-            ElevatedButton.icon(
-              onPressed: () => _showAddToolDialog(context, ToolType.team),
-              icon: const Icon(Icons.add),
-              label: const Text('Add Team Tool'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.orange,
-                foregroundColor: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 16),
-            // Tools list
-            Expanded(
-              child: settingsProvider.settings.teamTools.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'No team tools configured.\nAdd tools that the entire team needs.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    )
-                  : ListView.builder(
-                      itemCount: settingsProvider.settings.teamTools.length,
-                      itemBuilder: (context, index) {
-                        final tool = settingsProvider.settings.teamTools[index];
-                        return _buildToolListItem(
-                            tool, settingsProvider, ToolType.team);
-                      },
-                    ),
-            ),
-          ],
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: 16),
+                const Text(
+                  'Tools needed for the entire team (regardless of team size)',
+                  style: TextStyle(fontSize: 14, color: Colors.grey),
+                ),
+                const SizedBox(height: 16),
+                // Add tool button
+                ElevatedButton.icon(
+                  onPressed: () => _showAddToolDialog(context, ToolType.team),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add Team Tool'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                // Tools list
+                Expanded(
+                  child: settingsProvider.settings.teamTools.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'No team tools configured.\nAdd tools that the entire team needs.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        )
+                      : ListView.builder(
+                          itemCount: settingsProvider.settings.teamTools.length,
+                          itemBuilder: (context, index) {
+                            final tool =
+                                settingsProvider.settings.teamTools[index];
+                            return _buildToolListItem(
+                                tool, settingsProvider, ToolType.team);
+                          },
+                        ),
+                ),
+              ],
+            );
+          },
         );
       },
     );
   }
 
   Widget _buildIndividualToolsTab() {
-    return Consumer2<ToolSettingsProvider, InventoryProvider>(
-      builder: (context, settingsProvider, inventoryProvider, child) {
-        if (settingsProvider.isLoading) {
-          return const Center(child: CircularProgressIndicator());
-        }
+    return riverpod.Consumer(
+      builder: (context, ref, child) {
+        final settingsProvider = ref.watch(toolSettingsRiverpod);
+        return Builder(
+          builder: (context) {
+            if (settingsProvider.isLoading) {
+              return const Center(child: CircularProgressIndicator());
+            }
 
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const SizedBox(height: 16),
-            const Text(
-              'Tools needed per cleaner (quantities will be multiplied by number of cleaners)',
-              style: TextStyle(fontSize: 14, color: Colors.grey),
-            ),
-            const SizedBox(height: 16),
-            // Add tool button
-            ElevatedButton.icon(
-              onPressed: () => _showAddToolDialog(context, ToolType.individual),
-              icon: const Icon(Icons.add),
-              label: const Text('Add Individual Tool'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.orange,
-                foregroundColor: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 16),
-            // Tools list
-            Expanded(
-              child: settingsProvider.settings.individualTools.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'No individual tools configured.\nAdd tools that each cleaner needs.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    )
-                  : ListView.builder(
-                      itemCount:
-                          settingsProvider.settings.individualTools.length,
-                      itemBuilder: (context, index) {
-                        final tool =
-                            settingsProvider.settings.individualTools[index];
-                        return _buildToolListItem(
-                            tool, settingsProvider, ToolType.individual);
-                      },
-                    ),
-            ),
-          ],
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: 16),
+                const Text(
+                  'Tools needed per cleaner (quantities will be multiplied by number of cleaners)',
+                  style: TextStyle(fontSize: 14, color: Colors.grey),
+                ),
+                const SizedBox(height: 16),
+                // Add tool button
+                ElevatedButton.icon(
+                  onPressed: () =>
+                      _showAddToolDialog(context, ToolType.individual),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add Individual Tool'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                // Tools list
+                Expanded(
+                  child: settingsProvider.settings.individualTools.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'No individual tools configured.\nAdd tools that each cleaner needs.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        )
+                      : ListView.builder(
+                          itemCount:
+                              settingsProvider.settings.individualTools.length,
+                          itemBuilder: (context, index) {
+                            final tool = settingsProvider
+                                .settings.individualTools[index];
+                            return _buildToolListItem(
+                                tool, settingsProvider, ToolType.individual);
+                          },
+                        ),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -284,17 +297,18 @@ class _ToolSettingsDialogState extends State<ToolSettingsDialog>
   }
 }
 
-class _AddToolToSettingsDialog extends StatefulWidget {
+class _AddToolToSettingsDialog extends riverpod.ConsumerStatefulWidget {
   final ToolType toolType;
 
   const _AddToolToSettingsDialog({required this.toolType});
 
   @override
-  State<_AddToolToSettingsDialog> createState() =>
+  riverpod.ConsumerState<_AddToolToSettingsDialog> createState() =>
       _AddToolToSettingsDialogState();
 }
 
-class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
+class _AddToolToSettingsDialogState
+    extends riverpod.ConsumerState<_AddToolToSettingsDialog> {
   final Map<String, bool> _selectedBaseNames = {};
   final Map<String, int> _baseNameQuantities = {};
 
@@ -307,169 +321,180 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
       content: SizedBox(
         width: 600,
         height: 500,
-        child: Consumer2<InventoryProvider, ToolSettingsProvider>(
-          builder: (context, inventoryProvider, settingsProvider, child) {
-            // Get already added base names to filter them out
-            final existingBaseNames = widget.toolType == ToolType.team
-                ? settingsProvider.settings.teamTools
-                    .map((t) => t.baseName)
-                    .toSet()
-                : settingsProvider.settings.individualTools
-                    .map((t) => t.baseName)
-                    .toSet();
+        child: riverpod.Consumer(
+          builder: (context, ref, child) {
+            final settingsProvider = ref.watch(toolSettingsRiverpod);
+            return Builder(
+              builder: (context) {
+                final inventoryProvider = ref.watch(inventoryRiverpod);
+                // Get already added base names to filter them out
+                final existingBaseNames = widget.toolType == ToolType.team
+                    ? settingsProvider.settings.teamTools
+                        .map((t) => t.baseName)
+                        .toSet()
+                    : settingsProvider.settings.individualTools
+                        .map((t) => t.baseName)
+                        .toSet();
 
-            // Group tools by base name and filter by tool type
-            final Map<String, List<InventoryTool>> groupedTools = {};
-            for (final tool in inventoryProvider.tools) {
-              if (tool.toolType == widget.toolType &&
-                  !existingBaseNames.contains(tool.baseName)) {
-                if (!groupedTools.containsKey(tool.baseName)) {
-                  groupedTools[tool.baseName] = [];
+                // Group tools by base name and filter by tool type
+                final Map<String, List<InventoryTool>> groupedTools = {};
+                for (final tool in inventoryProvider.tools) {
+                  if (tool.toolType == widget.toolType &&
+                      !existingBaseNames.contains(tool.baseName)) {
+                    if (!groupedTools.containsKey(tool.baseName)) {
+                      groupedTools[tool.baseName] = [];
+                    }
+                    groupedTools[tool.baseName]!.add(tool);
+                  }
                 }
-                groupedTools[tool.baseName]!.add(tool);
-              }
-            }
 
-            if (groupedTools.isEmpty) {
-              return Center(
-                child: Text(
-                  widget.toolType == ToolType.team
-                      ? 'No team tools available.\nMark tools as "Team Tool" when adding them to inventory.'
-                      : 'No individual tools available.\nMark tools as "Individual Tool" when adding them to inventory.',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.grey),
-                ),
-              );
-            }
-
-            final baseNames = groupedTools.keys.toList()..sort();
-
-            return Column(
-              children: [
-                // Header with select all
-                Row(
-                  children: [
-                    Checkbox(
-                      value: _selectedBaseNames.values
-                              .every((selected) => selected) &&
-                          _selectedBaseNames.length == baseNames.length,
-                      onChanged: (value) {
-                        setState(() {
-                          if (value == true) {
-                            for (var baseName in baseNames) {
-                              _selectedBaseNames[baseName] = true;
-                              _baseNameQuantities[baseName] ??= 1;
-                            }
-                          } else {
-                            _selectedBaseNames.clear();
-                          }
-                        });
-                      },
-                    ),
-                    const Text(
-                      'Select All',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const Spacer(),
-                    Text(
-                      '${_selectedBaseNames.values.where((v) => v).length} selected',
+                if (groupedTools.isEmpty) {
+                  return Center(
+                    child: Text(
+                      widget.toolType == ToolType.team
+                          ? 'No team tools available.\nMark tools as "Team Tool" when adding them to inventory.'
+                          : 'No individual tools available.\nMark tools as "Individual Tool" when adding them to inventory.',
+                      textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.grey),
                     ),
-                  ],
-                ),
-                const Divider(),
-                // Base names list
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: baseNames.length,
-                    itemBuilder: (context, index) {
-                      final baseName = baseNames[index];
-                      final tools = groupedTools[baseName]!;
-                      final isSelected = _selectedBaseNames[baseName] ?? false;
-                      final quantity = _baseNameQuantities[baseName] ?? 1;
+                  );
+                }
 
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        child: ListTile(
-                          leading: Checkbox(
-                            value: isSelected,
-                            onChanged: (value) {
-                              setState(() {
-                                _selectedBaseNames[baseName] = value ?? false;
-                                if (value == true) {
+                final baseNames = groupedTools.keys.toList()..sort();
+
+                return Column(
+                  children: [
+                    // Header with select all
+                    Row(
+                      children: [
+                        Checkbox(
+                          value: _selectedBaseNames.values
+                                  .every((selected) => selected) &&
+                              _selectedBaseNames.length == baseNames.length,
+                          onChanged: (value) {
+                            setState(() {
+                              if (value == true) {
+                                for (var baseName in baseNames) {
+                                  _selectedBaseNames[baseName] = true;
                                   _baseNameQuantities[baseName] ??= 1;
                                 }
-                              });
-                            },
-                          ),
-                          title: Text(
-                            baseName,
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(tools.first.category),
-                              Text(
-                                '${tools.length} available in inventory',
-                                style: const TextStyle(
-                                    fontSize: 11, color: Colors.grey),
-                              ),
-                            ],
-                          ),
-                          trailing: isSelected
-                              ? Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Text('Qty:'),
-                                    const SizedBox(width: 8),
-                                    IconButton(
-                                      onPressed: quantity > 1
-                                          ? () {
-                                              setState(() {
-                                                _baseNameQuantities[baseName] =
-                                                    quantity - 1;
-                                              });
-                                            }
-                                          : null,
-                                      icon: const Icon(
-                                          Icons.remove_circle_outline),
-                                      iconSize: 20,
-                                    ),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 12, vertical: 4),
-                                      decoration: BoxDecoration(
-                                        color: Colors.grey.shade200,
-                                        borderRadius: BorderRadius.circular(4),
-                                      ),
-                                      child: Text(
-                                        '$quantity',
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ),
-                                    IconButton(
-                                      onPressed: () {
-                                        setState(() {
-                                          _baseNameQuantities[baseName] =
-                                              quantity + 1;
-                                        });
-                                      },
-                                      icon:
-                                          const Icon(Icons.add_circle_outline),
-                                      iconSize: 20,
-                                    ),
-                                  ],
-                                )
-                              : null,
+                              } else {
+                                _selectedBaseNames.clear();
+                              }
+                            });
+                          },
                         ),
-                      );
-                    },
-                  ),
-                ),
-              ],
+                        const Text(
+                          'Select All',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const Spacer(),
+                        Text(
+                          '${_selectedBaseNames.values.where((v) => v).length} selected',
+                          style: const TextStyle(color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    // Base names list
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: baseNames.length,
+                        itemBuilder: (context, index) {
+                          final baseName = baseNames[index];
+                          final tools = groupedTools[baseName]!;
+                          final isSelected =
+                              _selectedBaseNames[baseName] ?? false;
+                          final quantity = _baseNameQuantities[baseName] ?? 1;
+
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            child: ListTile(
+                              leading: Checkbox(
+                                value: isSelected,
+                                onChanged: (value) {
+                                  setState(() {
+                                    _selectedBaseNames[baseName] =
+                                        value ?? false;
+                                    if (value == true) {
+                                      _baseNameQuantities[baseName] ??= 1;
+                                    }
+                                  });
+                                },
+                              ),
+                              title: Text(
+                                baseName,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold),
+                              ),
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(tools.first.category),
+                                  Text(
+                                    '${tools.length} available in inventory',
+                                    style: const TextStyle(
+                                        fontSize: 11, color: Colors.grey),
+                                  ),
+                                ],
+                              ),
+                              trailing: isSelected
+                                  ? Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Text('Qty:'),
+                                        const SizedBox(width: 8),
+                                        IconButton(
+                                          onPressed: quantity > 1
+                                              ? () {
+                                                  setState(() {
+                                                    _baseNameQuantities[
+                                                            baseName] =
+                                                        quantity - 1;
+                                                  });
+                                                }
+                                              : null,
+                                          icon: const Icon(
+                                              Icons.remove_circle_outline),
+                                          iconSize: 20,
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 12, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.shade200,
+                                            borderRadius:
+                                                BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            '$quantity',
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                        IconButton(
+                                          onPressed: () {
+                                            setState(() {
+                                              _baseNameQuantities[baseName] =
+                                                  quantity + 1;
+                                            });
+                                          },
+                                          icon: const Icon(
+                                              Icons.add_circle_outline),
+                                          iconSize: 20,
+                                        ),
+                                      ],
+                                    )
+                                  : null,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                );
+              },
             );
           },
         ),
@@ -482,8 +507,8 @@ class _AddToolToSettingsDialogState extends State<_AddToolToSettingsDialog> {
         ElevatedButton(
           onPressed: _selectedBaseNames.values.any((selected) => selected)
               ? () async {
-                  final settingsProvider = context.read<ToolSettingsProvider>();
-                  final inventoryProvider = context.read<InventoryProvider>();
+                  final settingsProvider = ref.read(toolSettingsRiverpod);
+                  final inventoryProvider = ref.read(inventoryRiverpod);
 
                   // Get selected base names
                   final selectedBaseNamesList = _selectedBaseNames.entries

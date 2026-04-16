@@ -1,8 +1,9 @@
 import 'package:clmschedule/providers/toggler_provider.dart';
+import 'package:clmschedule/providers/unfinished_work_areas_provider.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
-class MonthNavigationWidget extends StatelessWidget {
+class MonthNavigationWidget extends riverpod.ConsumerWidget {
   final String currentMonthDisplay;
   final VoidCallback onPreviousMonth;
   final VoidCallback onNextMonth;
@@ -74,12 +75,12 @@ class MonthNavigationWidget extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final monthRange = _generateMonthRange(currentMonthDisplay);
     final isFullview = mode == Mode.schedule
-        ? context.watch<TogglerProvider>().isFullviewSchedule
+        ? ref.watch(togglerRiverpod).isFullviewSchedule
         : mode == Mode.collection
-            ? context.watch<TogglerProvider>().isFullviewCollection
+            ? ref.watch(togglerRiverpod).isFullviewCollection
             : false;
 
     return Container(
@@ -194,7 +195,7 @@ class MonthNavigationWidget extends StatelessWidget {
             children: [
               IconButton(
                   onPressed: () {
-                    context.read<TogglerProvider>().toggleFullview(mode);
+                    ref.read(togglerRiverpod).toggleFullview(mode);
                   },
                   tooltip:
                       isFullview ? "Exit Fullscreen" : "Change to fullscreen",
@@ -207,6 +208,19 @@ class MonthNavigationWidget extends StatelessWidget {
                           Icons.fullscreen,
                           size: 32,
                         )),
+              // Unfinished Work Areas panel toggle (schedule only)
+              if (mode == Mode.schedule) ...[
+                const SizedBox(width: 4),
+                IconButton(
+                  onPressed: () {
+                    ref.read(unfinishedWorkAreasRiverpod).togglePanel();
+                  },
+                  tooltip: 'Unfinished Work Areas',
+                  icon: ref.watch(unfinishedWorkAreasRiverpod).isPanelVisible
+                      ? const Icon(Icons.view_sidebar, size: 28)
+                      : const Icon(Icons.view_sidebar_outlined, size: 28),
+                ),
+              ],
               const SizedBox(width: 8),
               FutureBuilder<List<String>>(
                 future: availableMonths,

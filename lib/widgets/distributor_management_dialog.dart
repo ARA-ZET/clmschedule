@@ -1,19 +1,19 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/distributor.dart';
 import '../providers/schedule_provider.dart';
 import 'edit_distributor_dialog.dart';
 
-class DistributorManagementDialog extends StatefulWidget {
+class DistributorManagementDialog extends riverpod.ConsumerStatefulWidget {
   const DistributorManagementDialog({super.key});
 
   @override
-  State<DistributorManagementDialog> createState() =>
+  riverpod.ConsumerState<DistributorManagementDialog> createState() =>
       _DistributorManagementDialogState();
 }
 
 class _DistributorManagementDialogState
-    extends State<DistributorManagementDialog> {
+    extends riverpod.ConsumerState<DistributorManagementDialog> {
   // Track changes locally before committing to database
   List<Distributor> _localDistributors = [];
   final Set<String> _deletedDistributorIds = {};
@@ -28,7 +28,7 @@ class _DistributorManagementDialogState
   }
 
   void _initializeLocalDistributors() {
-    final provider = Provider.of<ScheduleProvider>(context, listen: false);
+    final provider = ref.read(scheduleRiverpod);
     _localDistributors =
         provider.distributors.map((d) => d.copyWith()).toList();
     // Ensure proper sorting by index
@@ -45,293 +45,281 @@ class _DistributorManagementDialogState
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ScheduleProvider>(
-      builder: (context, provider, child) {
-        // Update local distributors if they haven't been modified locally
-        if (!_hasChanges) {
-          _localDistributors =
-              provider.distributors.map((d) => d.copyWith()).toList();
-          _localDistributors.sort((a, b) => a.index.compareTo(b.index));
-        }
+    final provider = ref.watch(scheduleRiverpod);
+    // Update local distributors if they haven't been modified locally
+    if (!_hasChanges) {
+      _localDistributors =
+          provider.distributors.map((d) => d.copyWith()).toList();
+      _localDistributors.sort((a, b) => a.index.compareTo(b.index));
+    }
 
-        return Dialog(
-          child: Container(
-            width: 500,
-            height: 600,
-            padding: const EdgeInsets.all(16),
-            child: Column(
+    return Dialog(
+      child: Container(
+        width: 500,
+        height: 600,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            // Header
+            Row(
               children: [
-                // Header
-                Row(
-                  children: [
-                    const Icon(Icons.people, size: 24),
-                    const SizedBox(width: 8),
-                    const Text(
-                      'Distributor Management',
+                const Icon(Icons.people, size: 24),
+                const SizedBox(width: 8),
+                const Text(
+                  'Distributor Management',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const Spacer(),
+                if (_hasChanges)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      'Unsaved changes',
                       style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                        color: Colors.orange[800],
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
-                    const Spacer(),
-                    if (_hasChanges)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          'Unsaved changes',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.orange[800],
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                    const SizedBox(width: 8),
-                    IconButton(
-                      icon: const Icon(Icons.close),
-                      onPressed: () => _handleClose(),
-                    ),
-                  ],
+                  ),
+                const SizedBox(width: 8),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => _handleClose(),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  '${_localDistributors.length} distributors',
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Colors.grey[600],
-                      ),
-                ),
-                const Divider(),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${_localDistributors.length} distributors',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Colors.grey[600],
+                  ),
+            ),
+            const Divider(),
 
-                // Content
-                Expanded(
-                  child: _localDistributors.isEmpty
-                      ? const Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
+            // Content
+            Expanded(
+              child: _localDistributors.isEmpty
+                  ? const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.people_outline,
+                            size: 64,
+                            color: Colors.grey,
+                          ),
+                          SizedBox(height: 16),
+                          Text(
+                            'No distributors found',
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: _localDistributors.length,
+                      separatorBuilder: (context, index) =>
+                          const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final distributor = _localDistributors[index];
+                        return Card(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          child: ExpansionTile(
+                            leading: Stack(
+                              children: [
+                                CircleAvatar(
+                                  backgroundColor: Theme.of(context)
+                                      .colorScheme
+                                      .primary
+                                      .withOpacity(0.1),
+                                  child: Text(
+                                    distributor.index.toString(),
+                                    style: TextStyle(
+                                      color:
+                                          Theme.of(context).colorScheme.primary,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  right: -2,
+                                  top: -2,
+                                  child: Container(
+                                    width: 12,
+                                    height: 12,
+                                    decoration: BoxDecoration(
+                                      color:
+                                          _getStatusColor(distributor.status),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: Colors.white,
+                                        width: 1,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            title: Row(
+                              children: [
+                                Expanded(child: Text(distributor.name)),
+                                Icon(
+                                  _getStatusIcon(distributor.status),
+                                  size: 16,
+                                  color: _getStatusColor(distributor.status),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  distributor.status.displayName,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: _getStatusColor(distributor.status),
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Position: ${distributor.index}'),
+                                if (distributor.phone1 != null)
+                                  Text(
+                                    'Phone: ${distributor.phone1}',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                              ],
+                            ),
                             children: [
-                              Icon(
-                                Icons.people_outline,
-                                size: 64,
-                                color: Colors.grey,
-                              ),
-                              SizedBox(height: 16),
-                              Text(
-                                'No distributors found',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  color: Colors.grey,
+                              Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Icon(Icons.phone, size: 16),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          'Phone 1: ${distributor.phone1 ?? 'Not set'}',
+                                          style: const TextStyle(fontSize: 14),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Row(
+                                      children: [
+                                        const Icon(Icons.phone_android,
+                                            size: 16),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          'Phone 2: ${distributor.phone2 ?? 'Not set'}',
+                                          style: const TextStyle(fontSize: 14),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.end,
+                                      children: [
+                                        if (distributor.index > 0)
+                                          IconButton(
+                                            icon: const Icon(
+                                                Icons.keyboard_arrow_up),
+                                            tooltip: 'Move Up',
+                                            onPressed: () =>
+                                                _swapDistributorPositions(
+                                                    distributor, true),
+                                          ),
+                                        if (distributor.index <
+                                            _localDistributors.length - 1)
+                                          IconButton(
+                                            icon: const Icon(
+                                                Icons.keyboard_arrow_down),
+                                            tooltip: 'Move Down',
+                                            onPressed: () =>
+                                                _swapDistributorPositions(
+                                                    distributor, false),
+                                          ),
+                                        IconButton(
+                                          icon: const Icon(Icons.edit),
+                                          tooltip: 'Edit Distributor',
+                                          onPressed: () =>
+                                              _editDistributorLocal(
+                                                  distributor),
+                                        ),
+                                        IconButton(
+                                          icon: const Icon(Icons.delete),
+                                          tooltip: 'Delete Distributor',
+                                          onPressed: () =>
+                                              _deleteDistributorLocal(
+                                                  distributor),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
                           ),
-                        )
-                      : ListView.separated(
-                          itemCount: _localDistributors.length,
-                          separatorBuilder: (context, index) =>
-                              const Divider(height: 1),
-                          itemBuilder: (context, index) {
-                            final distributor = _localDistributors[index];
-                            return Card(
-                              margin: const EdgeInsets.only(bottom: 8),
-                              child: ExpansionTile(
-                                leading: Stack(
-                                  children: [
-                                    CircleAvatar(
-                                      backgroundColor: Theme.of(context)
-                                          .colorScheme
-                                          .primary
-                                          .withOpacity(0.1),
-                                      child: Text(
-                                        distributor.index.toString(),
-                                        style: TextStyle(
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .primary,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ),
-                                    Positioned(
-                                      right: -2,
-                                      top: -2,
-                                      child: Container(
-                                        width: 12,
-                                        height: 12,
-                                        decoration: BoxDecoration(
-                                          color: _getStatusColor(
-                                              distributor.status),
-                                          shape: BoxShape.circle,
-                                          border: Border.all(
-                                            color: Colors.white,
-                                            width: 1,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                title: Row(
-                                  children: [
-                                    Expanded(child: Text(distributor.name)),
-                                    Icon(
-                                      _getStatusIcon(distributor.status),
-                                      size: 16,
-                                      color:
-                                          _getStatusColor(distributor.status),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      distributor.status.displayName,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color:
-                                            _getStatusColor(distributor.status),
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                subtitle: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text('Position: ${distributor.index}'),
-                                    if (distributor.phone1 != null)
-                                      Text(
-                                        'Phone: ${distributor.phone1}',
-                                        style: const TextStyle(fontSize: 12),
-                                      ),
-                                  ],
-                                ),
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.all(16),
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            const Icon(Icons.phone, size: 16),
-                                            const SizedBox(width: 8),
-                                            Text(
-                                              'Phone 1: ${distributor.phone1 ?? 'Not set'}',
-                                              style:
-                                                  const TextStyle(fontSize: 14),
-                                            ),
-                                          ],
-                                        ),
-                                        const SizedBox(height: 8),
-                                        Row(
-                                          children: [
-                                            const Icon(Icons.phone_android,
-                                                size: 16),
-                                            const SizedBox(width: 8),
-                                            Text(
-                                              'Phone 2: ${distributor.phone2 ?? 'Not set'}',
-                                              style:
-                                                  const TextStyle(fontSize: 14),
-                                            ),
-                                          ],
-                                        ),
-                                        const SizedBox(height: 16),
-                                        Row(
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.end,
-                                          children: [
-                                            if (distributor.index > 0)
-                                              IconButton(
-                                                icon: const Icon(
-                                                    Icons.keyboard_arrow_up),
-                                                tooltip: 'Move Up',
-                                                onPressed: () =>
-                                                    _swapDistributorPositions(
-                                                        distributor, true),
-                                              ),
-                                            if (distributor.index <
-                                                _localDistributors.length - 1)
-                                              IconButton(
-                                                icon: const Icon(
-                                                    Icons.keyboard_arrow_down),
-                                                tooltip: 'Move Down',
-                                                onPressed: () =>
-                                                    _swapDistributorPositions(
-                                                        distributor, false),
-                                              ),
-                                            IconButton(
-                                              icon: const Icon(Icons.edit),
-                                              tooltip: 'Edit Distributor',
-                                              onPressed: () =>
-                                                  _editDistributorLocal(
-                                                      distributor),
-                                            ),
-                                            IconButton(
-                                              icon: const Icon(Icons.delete),
-                                              tooltip: 'Delete Distributor',
-                                              onPressed: () =>
-                                                  _deleteDistributorLocal(
-                                                      distributor),
-                                            ),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                ),
-
-                // Footer with save/cancel actions
-                const Divider(),
-                Row(
-                  children: [
-                    Text(
-                      _hasChanges
-                          ? 'You have unsaved changes'
-                          : 'No changes to save',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: _hasChanges
-                                ? Colors.orange[700]
-                                : Colors.grey[600],
-                          ),
+                        );
+                      },
                     ),
-                    const Spacer(),
-                    if (_hasChanges) ...[
-                      TextButton(
-                        onPressed: _isLoading ? null : _discardChanges,
-                        child: const Text('Discard'),
+            ),
+
+            // Footer with save/cancel actions
+            const Divider(),
+            Row(
+              children: [
+                Text(
+                  _hasChanges
+                      ? 'You have unsaved changes'
+                      : 'No changes to save',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color:
+                            _hasChanges ? Colors.orange[700] : Colors.grey[600],
                       ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: _isLoading ? null : _saveChanges,
-                        child: _isLoading
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Text('Save Changes'),
-                      ),
-                    ] else
-                      TextButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: const Text('Close'),
-                      ),
-                  ],
                 ),
+                const Spacer(),
+                if (_hasChanges) ...[
+                  TextButton(
+                    onPressed: _isLoading ? null : _discardChanges,
+                    child: const Text('Discard'),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: _isLoading ? null : _saveChanges,
+                    child: _isLoading
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Save Changes'),
+                  ),
+                ] else
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Close'),
+                  ),
               ],
             ),
-          ),
-        );
-      },
+          ],
+        ),
+      ),
     );
   }
 
@@ -501,7 +489,7 @@ class _DistributorManagementDialogState
 
   void _discardChanges() {
     setState(() {
-      final provider = Provider.of<ScheduleProvider>(context, listen: false);
+      final provider = ref.read(scheduleRiverpod);
       _localDistributors =
           provider.distributors.map((d) => d.copyWith()).toList();
       _localDistributors.sort((a, b) => a.index.compareTo(b.index));
@@ -516,7 +504,7 @@ class _DistributorManagementDialogState
     });
 
     try {
-      final provider = Provider.of<ScheduleProvider>(context, listen: false);
+      final provider = ref.read(scheduleRiverpod);
 
       // Delete distributors first
       for (String deletedId in _deletedDistributorIds) {

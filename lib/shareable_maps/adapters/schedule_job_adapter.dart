@@ -4,6 +4,8 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/job.dart';
 import '../models/map_layer.dart';
+import '../models/map_point.dart';
+import '../models/map_polyline.dart';
 import '../models/shareable_map.dart';
 import 'map_data_adapter.dart';
 
@@ -69,7 +71,7 @@ class ScheduleJobAdapter extends MapDataAdapter {
   MapEditorCapabilities get capabilities => const MapEditorCapabilities(
         canDrawPolygons: true,
         canDrawPolylines: true,
-        canDrawPoints: false,
+        canDrawPoints: true,
         canImportKml: true,
         canImportGpx: false,
         canExport: true,
@@ -84,14 +86,31 @@ class ScheduleJobAdapter extends MapDataAdapter {
   Future<ShareableMap> load() async {
     final now = DateTime.now();
 
-    // Convert existing workMaps to polygons on a single layer
+    // Debug: log all workMaps being loaded
+    debugPrint(
+        '[ScheduleJobAdapter.load] Job ${_job.id} has ${_job.workMaps.length} workMaps:');
+    for (final wm in _job.workMaps) {
+      debugPrint('  "${wm.name}" type=${wm.type} isPolygon=${wm.isPolygon} '
+          'isPolyline=${wm.isPolyline} isPoint=${wm.isPoint} isMarker=${wm.isMarker} '
+          'points=${wm.points.length} pointCategory=${wm.pointCategory.id}');
+    }
+
+    // Split workMaps by element type
+    final polygonWorkMaps = _job.workMaps.where((p) => p.isPolygon).toList();
+    final polylineWorkMaps = _job.workMaps.where((p) => p.isPolyline).toList();
+    final pointWorkMaps = _job.workMaps.where((p) => p.isPoint).toList();
+    debugPrint(
+        '[ScheduleJobAdapter.load] Split: ${polygonWorkMaps.length} polygons, '
+        '${polylineWorkMaps.length} polylines, ${pointWorkMaps.length} points');
+
+    // Convert existing workMaps to a single layer
     final layer = MapLayer(
       id: 'job_maps_layer',
       name: 'Job Maps',
       description: 'Work maps for ${_job.clientsDisplay}',
       order: 0,
       defaultColor: Colors.blue,
-      polygons: _job.workMaps
+      polygons: polygonWorkMaps
           .map((p) => CustomPolygon(
                 name: p.name,
                 description: p.description,
@@ -99,6 +118,27 @@ class ScheduleJobAdapter extends MapDataAdapter {
                 color: p.color,
                 fillOpacity: p.fillOpacity,
                 strokeWidth: p.strokeWidth,
+                type: p.type,
+              ))
+          .toList(),
+      polylines: polylineWorkMaps
+          .map((p) => MapPolyline.create(
+                name: p.name,
+                description: p.description,
+                points: List<LatLng>.from(p.points),
+                color: p.color,
+                strokeWidth: p.strokeWidth.toDouble(),
+                isDashed: p.isDashed,
+              ))
+          .toList(),
+      points: pointWorkMaps
+          .map((p) => MapPoint.create(
+                name: p.name,
+                description: p.description,
+                position:
+                    p.points.isNotEmpty ? p.points.first : const LatLng(0, 0),
+                color: p.color,
+                pointCategory: p.pointCategory,
               ))
           .toList(),
       createdAt: now,
@@ -139,13 +179,52 @@ class ScheduleJobAdapter extends MapDataAdapter {
     // Collect all polygons from all layers
     final polygons = map.layers.expand((l) => l.polygons).toList();
 
-    // Derive working area names from polygon names
-    final workingAreaNames = polygons
+    // Collect all polylines and convert to CustomPolygon with polyline type
+    final polylineElements = map.layers
+        .expand((l) => l.polylines)
+        .map((p) => CustomPolygon(
+              name: p.name,
+              description: p.description,
+              points: List<LatLng>.from(p.points),
+              color: p.color,
+              strokeWidth: p.strokeWidth.toInt(),
+              isDashed: p.isDashed,
+              type: MapElementType.polyline,
+            ))
+        .toList();
+
+    // Collect all points/markers and convert to CustomPolygon with point type
+    final pointElements = map.layers
+        .expand((l) => l.points)
+        .map((p) => CustomPolygon(
+              name: p.name,
+              description: p.description,
+              points: [p.position],
+              color: p.color,
+              type: MapElementType.point,
+              pointCategory: p.pointCategory,
+            ))
+        .toList();
+
+    // Combine all element types for storage in Job.workMaps
+    final allWorkMaps = [...polygons, ...polylineElements, ...pointElements];
+
+    // Debug: log what we're saving
+    debugPrint(
+        '[ScheduleJobAdapter.save] Saving ${allWorkMaps.length} workMaps: '
+        '${polygons.length} polygons, ${polylineElements.length} polylines, ${pointElements.length} points');
+    for (final wm in allWorkMaps) {
+      debugPrint('  "${wm.name}" type=${wm.type} points=${wm.points.length} '
+          'pointCategory=${wm.pointCategory.id}');
+    }
+
+    // Derive working area names from all element names
+    final workingAreaNames = allWorkMaps
         .map((p) => p.name)
         .where((name) => name.isNotEmpty)
         .toSet()
         .toList();
 
-    await _onSave(polygons, workingAreaNames);
+    await _onSave(allWorkMaps, workingAreaNames);
   }
 }

@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_job_type.dart';
+
+final jobTypeRiverpod = riverpod.ChangeNotifierProvider<JobTypeProvider>(
+    (ref) => JobTypeProvider());
 
 class JobTypeProvider extends ChangeNotifier {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;

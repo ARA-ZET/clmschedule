@@ -1,7 +1,13 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_polygon.dart';
+
+/// Riverpod provider for MapViewProvider
+final mapViewRiverpod = riverpod.ChangeNotifierProvider<MapViewProvider>((ref) {
+  return MapViewProvider();
+});
 
 class MapViewProvider extends ChangeNotifier {
   // Popup state
@@ -17,6 +23,9 @@ class MapViewProvider extends ChangeNotifier {
   // Polygon creation state
   bool _isCreatingNewPolygon = false;
   final List<LatLng> _newPolygonPoints = [];
+
+  // Marker creation state
+  bool _isPlacingMarker = false;
 
   // Polygon list
   List<CustomPolygon> _customPolygons = [];
@@ -37,6 +46,7 @@ class MapViewProvider extends ChangeNotifier {
   bool get hasUnsavedChanges => _hasUnsavedChanges;
   bool get isCreatingNewPolygon => _isCreatingNewPolygon;
   List<LatLng> get newPolygonPoints => _newPolygonPoints;
+  bool get isPlacingMarker => _isPlacingMarker;
   List<CustomPolygon> get customPolygons => _customPolygons;
   LatLng get center => _center;
   bool get hasInitiallyPositioned => _hasInitiallyPositioned;
@@ -173,6 +183,44 @@ class MapViewProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // Marker placement
+  void startPlacingMarker() {
+    _isPlacingMarker = true;
+    _isCreatingNewPolygon = false;
+    _isEditing = false;
+    _newPolygonPoints.clear();
+    if (kDebugMode) {
+      print('MapViewProvider: Started placing marker');
+    }
+    notifyListeners();
+  }
+
+  void placeMarker(LatLng position) {
+    final newMarker = CustomPolygon(
+      name: 'Point ${_customPolygons.where((p) => p.isMarker).length + 1}',
+      description: '',
+      points: [position],
+      color: Colors.red,
+      type: MapElementType.point,
+    );
+    _customPolygons.add(newMarker);
+    _isPlacingMarker = false;
+    _hasUnsavedChanges = true;
+    if (kDebugMode) {
+      print(
+          'MapViewProvider: Placed marker at ${position.latitude}, ${position.longitude}');
+    }
+    notifyListeners();
+  }
+
+  void cancelPlacingMarker() {
+    _isPlacingMarker = false;
+    if (kDebugMode) {
+      print('MapViewProvider: Cancelled placing marker');
+    }
+    notifyListeners();
+  }
+
   // Polygon property updates
   void updatePolygonProperty(int polygonIndex, {String? name, Color? color}) {
     if (polygonIndex >= _customPolygons.length) return;
@@ -272,6 +320,7 @@ class MapViewProvider extends ChangeNotifier {
     _hasUnsavedChanges = false;
     _isCreatingNewPolygon = false;
     _newPolygonPoints.clear();
+    _isPlacingMarker = false;
     _customPolygons.clear();
     _center = const LatLng(-33.925, 18.425);
     _hasInitiallyPositioned = false;

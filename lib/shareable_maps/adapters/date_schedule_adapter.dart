@@ -5,6 +5,8 @@ import '../../models/custom_polygon.dart';
 import '../../models/distributor.dart';
 import '../../models/job.dart';
 import '../models/map_layer.dart';
+import '../models/map_point.dart';
+import '../models/map_polyline.dart';
 import '../models/shareable_map.dart';
 import 'map_data_adapter.dart';
 
@@ -53,8 +55,10 @@ class DateScheduleAdapter extends MapDataAdapter {
   Future<ShareableMap> load() async {
     final now = DateTime.now();
 
-    // Collect all polygons from all jobs on this date
+    // Collect all polygons and markers from all jobs on this date
     final allPolygons = <CustomPolygon>[];
+    final allPolylines = <MapPolyline>[];
+    final allPoints = <MapPoint>[];
     for (final job in _jobs) {
       // Resolve distributor name for display
       final distName = _distributors
@@ -70,14 +74,35 @@ class DateScheduleAdapter extends MapDataAdapter {
           if (p.description.isNotEmpty) p.description,
         ];
         final desc = parts.join(' — ');
-        allPolygons.add(CustomPolygon(
-          name: p.name,
-          description: desc,
-          points: List<LatLng>.from(p.points),
-          color: p.color,
-          fillOpacity: p.fillOpacity,
-          strokeWidth: p.strokeWidth,
-        ));
+
+        if (p.isPoint && p.points.isNotEmpty) {
+          allPoints.add(MapPoint.create(
+            name: p.name,
+            description: desc,
+            position: p.points.first,
+            color: p.color,
+            pointCategory: p.pointCategory,
+          ));
+        } else if (p.isPolyline) {
+          allPolylines.add(MapPolyline.create(
+            name: p.name,
+            description: desc,
+            points: List<LatLng>.from(p.points),
+            color: p.color,
+            strokeWidth: p.strokeWidth.toDouble(),
+            isDashed: p.isDashed,
+          ));
+        } else {
+          allPolygons.add(CustomPolygon(
+            name: p.name,
+            description: desc,
+            points: List<LatLng>.from(p.points),
+            color: p.color,
+            fillOpacity: p.fillOpacity,
+            strokeWidth: p.strokeWidth,
+            type: p.type,
+          ));
+        }
       }
     }
 
@@ -88,13 +113,17 @@ class DateScheduleAdapter extends MapDataAdapter {
       order: 0,
       defaultColor: Colors.blue,
       polygons: allPolygons,
+      polylines: allPolylines,
+      points: allPoints,
       createdAt: now,
       updatedAt: now,
     );
 
-    // Center on polygon bounds or fall back to Cape Town
+    // Center on element bounds or fall back to Cape Town
     LatLng center = const LatLng(-33.925, 18.425);
-    if (allPolygons.isNotEmpty) {
+    if (allPolygons.isNotEmpty ||
+        allPolylines.isNotEmpty ||
+        allPoints.isNotEmpty) {
       double latSum = 0, lngSum = 0;
       int count = 0;
       for (final polygon in allPolygons) {
@@ -104,15 +133,30 @@ class DateScheduleAdapter extends MapDataAdapter {
           count++;
         }
       }
+      for (final polyline in allPolylines) {
+        for (final pt in polyline.points) {
+          latSum += pt.latitude;
+          lngSum += pt.longitude;
+          count++;
+        }
+      }
+      for (final pt in allPoints) {
+        latSum += pt.position.latitude;
+        lngSum += pt.position.longitude;
+        count++;
+      }
       if (count > 0) {
         center = LatLng(latSum / count, lngSum / count);
       }
     }
 
+    final totalElements =
+        allPolygons.length + allPolylines.length + allPoints.length;
+
     return ShareableMap(
       id: 'date_${_date.toIso8601String().split('T').first}',
       name: displayName,
-      description: '${allPolygons.length} area(s) from ${_jobs.length} job(s)',
+      description: '$totalElements element(s) from ${_jobs.length} job(s)',
       layers: [layer],
       defaultCenter: center,
       defaultZoom: 11.0,

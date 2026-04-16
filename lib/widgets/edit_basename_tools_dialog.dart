@@ -1,9 +1,9 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import '../models/inventory_tool.dart';
 import '../providers/inventory_provider.dart';
 
-class EditBaseNameToolsDialog extends StatefulWidget {
+class EditBaseNameToolsDialog extends riverpod.ConsumerStatefulWidget {
   final String baseName;
   final List<InventoryTool> tools;
 
@@ -14,11 +14,11 @@ class EditBaseNameToolsDialog extends StatefulWidget {
   });
 
   @override
-  State<EditBaseNameToolsDialog> createState() =>
+  riverpod.ConsumerState<EditBaseNameToolsDialog> createState() =>
       _EditBaseNameToolsDialogState();
 }
 
-class _EditBaseNameToolsDialogState extends State<EditBaseNameToolsDialog> {
+class _EditBaseNameToolsDialogState extends riverpod.ConsumerState<EditBaseNameToolsDialog> {
   late TextEditingController _baseNameController;
   late String _selectedCategory;
   late ToolType _selectedToolType;
@@ -54,7 +54,7 @@ class _EditBaseNameToolsDialogState extends State<EditBaseNameToolsDialog> {
     setState(() => _isSaving = true);
 
     try {
-      final inventoryProvider = context.read<InventoryProvider>();
+      final inventoryProvider = ref.read(inventoryRiverpod);
       final newBaseName = _baseNameController.text.trim();
       final currentQuantity = widget.tools.length;
       final quantityDiff = _quantity - currentQuantity;

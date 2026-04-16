@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/inventory_tool.dart';
 import '../providers/inventory_provider.dart';
 import 'qr_code_display_dialog.dart';
@@ -296,8 +296,8 @@ class ToolDetailsDialog extends StatelessWidget {
 
                       if (confirmed == true && context.mounted) {
                         try {
-                          await context
-                              .read<InventoryProvider>()
+                          await riverpod.ProviderScope.containerOf(context)
+                              .read(inventoryRiverpod)
                               .deleteTool(tool.id);
                           if (context.mounted) {
                             Navigator.of(context).pop();

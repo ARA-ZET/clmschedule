@@ -1,5 +1,5 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'dart:io';
 import '../providers/inventory_provider.dart';
 import '../models/inventory_tool.dart';
@@ -10,20 +10,21 @@ import 'tool_settings_dialog.dart';
 import 'edit_basename_tools_dialog.dart';
 import 'qr_code_print_preview_dialog.dart';
 
-class HappySunInventoryView extends StatefulWidget {
+class HappySunInventoryView extends riverpod.ConsumerStatefulWidget {
   const HappySunInventoryView({super.key});
 
   @override
-  State<HappySunInventoryView> createState() => _HappySunInventoryViewState();
+  riverpod.ConsumerState<HappySunInventoryView> createState() => _HappySunInventoryViewState();
 }
 
-class _HappySunInventoryViewState extends State<HappySunInventoryView> {
+class _HappySunInventoryViewState extends riverpod.ConsumerState<HappySunInventoryView> {
   bool _hasInitialized = false;
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<InventoryProvider>(
-      builder: (context, inventoryProvider, child) {
+    return Builder(
+      builder: (context) {
+        final inventoryProvider = ref.watch(inventoryRiverpod);
         // Initialize on first build
         if (!_hasInitialized) {
           _hasInitialized = true;

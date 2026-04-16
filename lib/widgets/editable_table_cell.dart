@@ -2,12 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/collection_job.dart';
 import '../providers/scale_provider.dart';
 import '../providers/collection_schedule_provider.dart';
 
-class EditableTableCell extends StatefulWidget {
+class EditableTableCell extends riverpod.ConsumerStatefulWidget {
   final String value;
   final Function(String) onSave;
   final String? Function(String?)? validator;
@@ -32,10 +32,12 @@ class EditableTableCell extends StatefulWidget {
   });
 
   @override
-  State<EditableTableCell> createState() => _EditableTableCellState();
+  riverpod.ConsumerState<EditableTableCell> createState() =>
+      _EditableTableCellState();
 }
 
-class _EditableTableCellState extends State<EditableTableCell> {
+class _EditableTableCellState
+    extends riverpod.ConsumerState<EditableTableCell> {
   bool _isEditing = false;
   late TextEditingController _controller;
   late FocusNode _focusNode;
@@ -104,8 +106,9 @@ class _EditableTableCellState extends State<EditableTableCell> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ScaleProvider>(
-      builder: (context, scaleProvider, child) {
+    return riverpod.Consumer(
+      builder: (context, ref, child) {
+        final scaleProvider = ref.watch(scaleRiverpod);
         if (_isEditing) {
           return SizedBox(
             width: widget.width,
@@ -228,8 +231,9 @@ class EditableDateCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ScaleProvider>(
-      builder: (context, scaleProvider, child) {
+    return riverpod.Consumer(
+      builder: (context, ref, child) {
+        final scaleProvider = ref.watch(scaleRiverpod);
         return SizedBox(
           width: width,
           child: InkWell(
@@ -248,8 +252,10 @@ class EditableDateCell extends StatelessWidget {
                   final timeSlots = _getAvailableTimeSlots();
                   final selectedTime = await showDialog<TimeOfDay>(
                     context: context,
-                    builder: (context) => Consumer<CollectionScheduleProvider>(
-                      builder: (context, collectionProvider, child) {
+                    builder: (context) => Builder(
+                      builder: (context) {
+                        final collectionProvider =
+                            ref.watch(collectionScheduleRiverpod);
                         // Get occupied time slots for conflict info
                         final occupiedSlots = <String>[];
                         if (jobData != null &&
@@ -590,7 +596,7 @@ class EditableDateCell extends StatelessWidget {
   }
 }
 
-class LinkCell extends StatefulWidget {
+class LinkCell extends riverpod.ConsumerStatefulWidget {
   final String value;
   final Function(String) onSave;
   final String? Function(String?)? validator;
@@ -607,10 +613,10 @@ class LinkCell extends StatefulWidget {
   });
 
   @override
-  State<LinkCell> createState() => _LinkCellState();
+  riverpod.ConsumerState<LinkCell> createState() => _LinkCellState();
 }
 
-class _LinkCellState extends State<LinkCell> {
+class _LinkCellState extends riverpod.ConsumerState<LinkCell> {
   bool _isEditing = false;
   bool _isHovering = false;
   late TextEditingController _controller;
@@ -722,8 +728,9 @@ class _LinkCellState extends State<LinkCell> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ScaleProvider>(
-      builder: (context, scaleProvider, child) {
+    return riverpod.Consumer(
+      builder: (context, ref, child) {
+        final scaleProvider = ref.watch(scaleRiverpod);
         if (_isEditing) {
           return SizedBox(
             width: widget.width,
@@ -832,7 +839,7 @@ class _LinkCellState extends State<LinkCell> {
   }
 }
 
-class EditableVehicleComboCell extends StatefulWidget {
+class EditableVehicleComboCell extends riverpod.ConsumerStatefulWidget {
   final int quantity;
   final String jobTypeId;
   final Function(int) onSave;
@@ -847,11 +854,12 @@ class EditableVehicleComboCell extends StatefulWidget {
   });
 
   @override
-  State<EditableVehicleComboCell> createState() =>
+  riverpod.ConsumerState<EditableVehicleComboCell> createState() =>
       _EditableVehicleComboCellState();
 }
 
-class _EditableVehicleComboCellState extends State<EditableVehicleComboCell> {
+class _EditableVehicleComboCellState
+    extends riverpod.ConsumerState<EditableVehicleComboCell> {
   bool _isEditing = false;
   String? _selectedCombo;
 
@@ -922,8 +930,9 @@ class _EditableVehicleComboCellState extends State<EditableVehicleComboCell> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ScaleProvider>(
-      builder: (context, scaleProvider, child) {
+    return riverpod.Consumer(
+      builder: (context, ref, child) {
+        final scaleProvider = ref.watch(scaleRiverpod);
         if (!_needsVehicleCombo(widget.jobTypeId)) {
           // For non-vehicle combo job types, show simple quantity
           return SizedBox(

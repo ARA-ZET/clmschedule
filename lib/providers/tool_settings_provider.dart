@@ -1,8 +1,15 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/tool_settings.dart';
 import '../models/happy_sun_shared.dart';
 import '../models/inventory_tool.dart';
 import '../services/tool_settings_service.dart';
+
+/// Riverpod provider for ToolSettingsProvider
+final toolSettingsRiverpod =
+    riverpod.ChangeNotifierProvider<ToolSettingsProvider>((ref) {
+  return ToolSettingsProvider();
+});
 
 class ToolSettingsProvider with ChangeNotifier {
   final ToolSettingsService _service = ToolSettingsService();

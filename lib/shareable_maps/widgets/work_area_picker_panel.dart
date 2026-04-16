@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../../models/work_area.dart';
 import '../../providers/schedule_provider.dart';
 import '../providers/shareable_map_provider.dart';
@@ -7,23 +7,25 @@ import '../providers/shareable_map_provider.dart';
 /// A floating panel that lists all work areas from Firestore and lets
 /// the user toggle them on/off.  Selected work areas are added as
 /// polygons to a dedicated "Work Areas" layer on the map.
-class WorkAreaPickerPanel extends StatefulWidget {
+class WorkAreaPickerPanel extends riverpod.ConsumerStatefulWidget {
   /// Called when the user taps the close button.
   final VoidCallback onClose;
 
   const WorkAreaPickerPanel({super.key, required this.onClose});
 
   @override
-  State<WorkAreaPickerPanel> createState() => _WorkAreaPickerPanelState();
+  riverpod.ConsumerState<WorkAreaPickerPanel> createState() =>
+      _WorkAreaPickerPanelState();
 }
 
-class _WorkAreaPickerPanelState extends State<WorkAreaPickerPanel> {
+class _WorkAreaPickerPanelState
+    extends riverpod.ConsumerState<WorkAreaPickerPanel> {
   String _searchQuery = '';
 
   @override
   Widget build(BuildContext context) {
-    final scheduleProvider = context.watch<ScheduleProvider>();
-    final mapProvider = context.watch<ShareableMapProvider>();
+    final scheduleProvider = ref.watch(scheduleRiverpod);
+    final mapProvider = ref.watch(shareableMapRiverpod);
     final workAreas = scheduleProvider.workAreas;
 
     // Filter by search query
@@ -190,13 +192,13 @@ class _WorkAreaPickerPanelState extends State<WorkAreaPickerPanel> {
 
 // ── Individual work area tile ─────────────────────────────────────────
 
-class _WorkAreaTile extends StatelessWidget {
+class _WorkAreaTile extends riverpod.ConsumerWidget {
   final WorkArea workArea;
   const _WorkAreaTile({required this.workArea});
 
   @override
-  Widget build(BuildContext context) {
-    final mapProvider = context.watch<ShareableMapProvider>();
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final mapProvider = ref.watch(shareableMapRiverpod);
     final isImported = mapProvider.isWorkAreaImported(workArea.name);
 
     return InkWell(

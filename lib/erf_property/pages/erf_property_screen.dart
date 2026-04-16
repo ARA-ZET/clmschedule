@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../../shareable_maps/providers/shareable_map_provider.dart';
 import '../../shareable_maps/widgets/shareable_map_editor.dart';
 import '../adapters/erf_property_adapter.dart';
@@ -11,14 +11,16 @@ import '../providers/erf_property_provider.dart';
 /// Shows a list of loaded properties with controls to fetch suburb data.
 /// The "View on Map" button opens the ShareableMapEditor with the
 /// [ErfPropertyAdapter].
-class ErfPropertyScreen extends StatefulWidget {
+class ErfPropertyScreen extends riverpod.ConsumerStatefulWidget {
   const ErfPropertyScreen({super.key});
 
   @override
-  State<ErfPropertyScreen> createState() => _ErfPropertyScreenState();
+  riverpod.ConsumerState<ErfPropertyScreen> createState() =>
+      _ErfPropertyScreenState();
 }
 
-class _ErfPropertyScreenState extends State<ErfPropertyScreen> {
+class _ErfPropertyScreenState
+    extends riverpod.ConsumerState<ErfPropertyScreen> {
   final _addressController = TextEditingController();
   ErfProperty? _searchResult;
   bool _isSearching = false;
@@ -60,9 +62,10 @@ class _ErfPropertyScreenState extends State<ErfPropertyScreen> {
   };
 
   @override
+  @override
   void initState() {
     super.initState();
-    final provider = context.read<ErfPropertyProvider>();
+    final provider = ref.read(erfPropertyRiverpod);
     if (!_initialized) {
       provider.initialize();
       _initialized = true;
@@ -85,7 +88,7 @@ class _ErfPropertyScreenState extends State<ErfPropertyScreen> {
       _searchError = null;
     });
 
-    final provider = context.read<ErfPropertyProvider>();
+    final provider = ref.read(erfPropertyRiverpod);
     final result = await provider.findPropertyByAddress(address);
 
     setState(() {
@@ -98,7 +101,7 @@ class _ErfPropertyScreenState extends State<ErfPropertyScreen> {
   }
 
   Future<void> _loadSuburb(String name, Map<String, double> bounds) async {
-    final provider = context.read<ErfPropertyProvider>();
+    final provider = ref.read(erfPropertyRiverpod);
     final count = await provider.fetchAndSaveArea(
       minLat: bounds['minLat']!,
       minLng: bounds['minLng']!,
@@ -117,8 +120,8 @@ class _ErfPropertyScreenState extends State<ErfPropertyScreen> {
     List<ErfProperty>? properties,
     String? suburb,
   }) async {
-    final mapProvider = context.read<ShareableMapProvider>();
-    final erfProvider = context.read<ErfPropertyProvider>();
+    final mapProvider = ref.read(shareableMapRiverpod);
+    final erfProvider = ref.read(erfPropertyRiverpod);
 
     final adapter = ErfPropertyAdapter(
       preloadedProperties: properties ?? erfProvider.properties,
@@ -161,165 +164,164 @@ class _ErfPropertyScreenState extends State<ErfPropertyScreen> {
           ),
         ],
       ),
-      body: Consumer<ErfPropertyProvider>(
-        builder: (context, provider, _) {
-          return Column(
+      body: _buildBody(context),
+    );
+  }
+
+  Widget _buildBody(BuildContext context) {
+    final provider = ref.watch(erfPropertyRiverpod);
+    return Column(
+      children: [
+        // Search bar
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
             children: [
-              // Search bar
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _addressController,
-                        decoration: const InputDecoration(
-                          hintText:
-                              'Search address (e.g. 10 Main Road, Kensington)',
-                          border: OutlineInputBorder(),
-                          contentPadding:
-                              EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        ),
-                        onSubmitted: (_) => _searchAddress(),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    IconButton.filled(
-                      onPressed: _isSearching ? null : _searchAddress,
-                      icon: _isSearching
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.search),
-                    ),
-                  ],
+              Expanded(
+                child: TextField(
+                  controller: _addressController,
+                  decoration: const InputDecoration(
+                    hintText: 'Search address (e.g. 10 Main Road, Kensington)',
+                    border: OutlineInputBorder(),
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  onSubmitted: (_) => _searchAddress(),
                 ),
               ),
-
-              // Search result card
-              if (_searchResult != null)
-                Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 12),
-                  color: Colors.teal.shade50,
-                  child: ListTile(
-                    leading: const Icon(Icons.location_on, color: Colors.teal),
-                    title: Text(_searchResult!.displayLabel),
-                    subtitle: Text(
-                      'ERF ${_searchResult!.erfNumber} · ${_searchResult!.minRegion}\n'
-                      '${_searchResult!.area.toStringAsFixed(1)} m² · LPI: ${_searchResult!.lpiCode}',
-                    ),
-                    isThreeLine: true,
-                    trailing: IconButton(
-                      icon: const Icon(Icons.map, color: Colors.teal),
-                      tooltip: 'View on map',
-                      onPressed: () => _openMap(properties: [_searchResult!]),
-                    ),
-                  ),
-                ),
-
-              if (_searchError != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Text(_searchError!,
-                      style: const TextStyle(color: Colors.red)),
-                ),
-
-              const Divider(height: 24),
-
-              // Loading indicator
-              if (provider.isLoading)
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      const CircularProgressIndicator(),
-                      const SizedBox(height: 8),
-                      Text(
-                          'Fetching ERF data... ${provider.totalFetched} properties'),
-                    ],
-                  ),
-                ),
-
-              if (provider.error != null)
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Text('Error: ${provider.error}',
-                      style: const TextStyle(color: Colors.red)),
-                ),
-
-              // View on Map button
-              if (provider.properties.isNotEmpty && !provider.isLoading)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Row(
-                    children: [
-                      Text(
-                        '${provider.properties.length} properties',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const Spacer(),
-                      FilledButton.icon(
-                        onPressed: () => _openMap(),
-                        icon: const Icon(Icons.map),
-                        label: const Text('View on Map'),
-                      ),
-                    ],
-                  ),
-                ),
-
-              const SizedBox(height: 4),
-
-              // Properties list
-              Expanded(
-                child: provider.properties.isEmpty && !provider.isLoading
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.location_city,
-                                size: 64, color: Colors.grey.shade400),
-                            const SizedBox(height: 16),
-                            const Text(
-                              'No properties loaded yet',
-                              style: TextStyle(
-                                  fontSize: 18, fontWeight: FontWeight.w500),
-                            ),
-                            const SizedBox(height: 8),
-                            const Text(
-                              'Use the download button to load ERF data\nfor a suburb, or search an address above.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: Colors.grey),
-                            ),
-                          ],
-                        ),
+              const SizedBox(width: 8),
+              IconButton.filled(
+                onPressed: _isSearching ? null : _searchAddress,
+                icon: _isSearching
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : ListView.builder(
-                        itemCount: provider.properties.length,
-                        itemBuilder: (context, index) {
-                          final property = provider.properties[index];
-                          return ListTile(
-                            dense: true,
-                            title: Text(property.displayLabel),
-                            subtitle: Text(
-                              '${property.minRegion} · ${property.area.toStringAsFixed(1)} m²'
-                              '${property.suburb != null ? ' · ${property.suburb}' : ''}',
-                            ),
-                            trailing: Text(
-                              'ERF ${property.erfNumber}',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w500,
-                                  color: Colors.teal),
-                            ),
-                          );
-                        },
-                      ),
+                    : const Icon(Icons.search),
               ),
             ],
-          );
-        },
-      ),
+          ),
+        ),
+
+        // Search result card
+        if (_searchResult != null)
+          Card(
+            margin: const EdgeInsets.symmetric(horizontal: 12),
+            color: Colors.teal.shade50,
+            child: ListTile(
+              leading: const Icon(Icons.location_on, color: Colors.teal),
+              title: Text(_searchResult!.displayLabel),
+              subtitle: Text(
+                'ERF ${_searchResult!.erfNumber} · ${_searchResult!.minRegion}\n'
+                '${_searchResult!.area.toStringAsFixed(1)} m² · LPI: ${_searchResult!.lpiCode}',
+              ),
+              isThreeLine: true,
+              trailing: IconButton(
+                icon: const Icon(Icons.map, color: Colors.teal),
+                tooltip: 'View on map',
+                onPressed: () => _openMap(properties: [_searchResult!]),
+              ),
+            ),
+          ),
+
+        if (_searchError != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child:
+                Text(_searchError!, style: const TextStyle(color: Colors.red)),
+          ),
+
+        const Divider(height: 24),
+
+        // Loading indicator
+        if (provider.isLoading)
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 8),
+                Text(
+                    'Fetching ERF data... ${provider.totalFetched} properties'),
+              ],
+            ),
+          ),
+
+        if (provider.error != null)
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text('Error: ${provider.error}',
+                style: const TextStyle(color: Colors.red)),
+          ),
+
+        // View on Map button
+        if (provider.properties.isNotEmpty && !provider.isLoading)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                Text(
+                  '${provider.properties.length} properties',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const Spacer(),
+                FilledButton.icon(
+                  onPressed: () => _openMap(),
+                  icon: const Icon(Icons.map),
+                  label: const Text('View on Map'),
+                ),
+              ],
+            ),
+          ),
+
+        const SizedBox(height: 4),
+
+        // Properties list
+        Expanded(
+          child: provider.properties.isEmpty && !provider.isLoading
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.location_city,
+                          size: 64, color: Colors.grey.shade400),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'No properties loaded yet',
+                        style: TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.w500),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Use the download button to load ERF data\nfor a suburb, or search an address above.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: provider.properties.length,
+                  itemBuilder: (context, index) {
+                    final property = provider.properties[index];
+                    return ListTile(
+                      dense: true,
+                      title: Text(property.displayLabel),
+                      subtitle: Text(
+                        '${property.minRegion} · ${property.area.toStringAsFixed(1)} m²'
+                        '${property.suburb != null ? ' · ${property.suburb}' : ''}',
+                      ),
+                      trailing: Text(
+                        'ERF ${property.erfNumber}',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w500, color: Colors.teal),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 }

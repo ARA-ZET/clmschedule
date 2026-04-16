@@ -1,8 +1,13 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import '../models/inventory_tool.dart';
+
+final inventoryServiceRiverpod = riverpod.Provider<InventoryService>(
+  (ref) => InventoryService(FirebaseFirestore.instance),
+);
 
 class InventoryService {
   final FirebaseFirestore _firestore;

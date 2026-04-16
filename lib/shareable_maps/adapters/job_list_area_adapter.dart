@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:intl/intl.dart';
 
 import '../../models/custom_polygon.dart';
 import '../../models/job_list_item.dart';
 import '../models/map_layer.dart';
 import '../models/shareable_map.dart';
+import '../services/map_link_service.dart';
 import 'map_data_adapter.dart';
 
 /// Callback signature for saving updated polygons and optional area link
@@ -120,8 +123,24 @@ class JobListAreaAdapter extends MapDataAdapter {
     // Collect all polygons from all layers
     final polygons = map.layers.expand((l) => l.polygons).toList();
 
-    // For now, pass null as areaLink. Future: export KML to Cloud Storage
-    // and provide the download URL here.
-    await _onSave(polygons, null);
+    // Generate share link URL if the job has a linked shareable map
+    String? areaLink;
+    if (_item.shareableMapId.isNotEmpty) {
+      try {
+        final monthKey = DateFormat('MM-yyyy').format(_item.date);
+        final linkService =
+            MapLinkService(firestore: FirebaseFirestore.instance);
+        final shareCode = await linkService.createShareLink(
+          monthKey: monthKey,
+          mapId: _item.shareableMapId,
+          mapName: _item.client,
+        );
+        areaLink = MapLinkService.buildShareUrl(shareCode);
+      } catch (e) {
+        debugPrint('⚠️ JobListAreaAdapter: Share link generation failed: $e');
+      }
+    }
+
+    await _onSave(polygons, areaLink);
   }
 }

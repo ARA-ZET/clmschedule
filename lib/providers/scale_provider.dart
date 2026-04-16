@@ -1,4 +1,10 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+
+/// Riverpod provider for ScaleProvider
+final scaleRiverpod = riverpod.ChangeNotifierProvider<ScaleProvider>((ref) {
+  return ScaleProvider();
+});
 
 class ScaleProvider extends ChangeNotifier {
   double _scale = 1.0;

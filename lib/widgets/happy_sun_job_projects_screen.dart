@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:video_player/video_player.dart';
@@ -18,15 +18,16 @@ import 'happy_sun_checkout_screen.dart';
 import 'happy_sun_checklist_screen.dart';
 import 'happy_sun_checkin_screen.dart';
 
-class HappySunJobProjectsScreen extends StatefulWidget {
+class HappySunJobProjectsScreen extends riverpod.ConsumerStatefulWidget {
   const HappySunJobProjectsScreen({super.key});
 
   @override
-  State<HappySunJobProjectsScreen> createState() =>
+  riverpod.ConsumerState<HappySunJobProjectsScreen> createState() =>
       _HappySunJobProjectsScreenState();
 }
 
-class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
+class _HappySunJobProjectsScreenState
+    extends riverpod.ConsumerState<HappySunJobProjectsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   final Map<String, int> _cardTabIndices = {}; // Track tab index per project ID
@@ -57,8 +58,9 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
   Widget build(BuildContext context) {
     final isMobile = MediaQuery.of(context).size.width < 600;
 
-    return Consumer<HappySunProjectProvider>(
-      builder: (context, happySunProvider, child) {
+    return Builder(
+      builder: (context) {
+        final happySunProvider = ref.watch(happySunProjectRiverpod);
         final now = DateTime.now();
         final today = DateTime(now.year, now.month, now.day);
 
@@ -185,7 +187,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                                 );
 
                                 if (confirmed == true && context.mounted) {
-                                  await context.read<AuthProvider>().signOut();
+                                  await ref.read(authRiverpod).signOut();
                                 }
                               },
                             ),
@@ -409,7 +411,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
                   );
 
                   if (confirmed == true && context.mounted) {
-                    await context.read<AuthProvider>().signOut();
+                    await ref.read(authRiverpod).signOut();
                   }
                 },
               ),
@@ -420,8 +422,10 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
   }
 
   Widget _buildJobsList(String statusFilter) {
-    return Consumer2<HappySunProjectProvider, JobListProvider>(
-      builder: (context, happySunProvider, jobListProvider, child) {
+    final happySunProvider = ref.watch(happySunProjectRiverpod);
+    final jobListProvider = ref.watch(jobListRiverpod);
+    return Builder(
+      builder: (context) {
         if (happySunProvider.isLoading) {
           return const Center(child: CircularProgressIndicator());
         }
@@ -1260,11 +1264,12 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     final toolsUsed = project.toolsUsedCategorized;
     if (toolsUsed == null) return;
     final isMobile = MediaQuery.of(context).size.width < 600;
+    final inventoryProvider = ref.read(inventoryRiverpod);
 
     showDialog(
       context: context,
-      builder: (context) => Consumer<InventoryProvider>(
-        builder: (context, inventoryProvider, child) => Dialog(
+      builder: (context) => Builder(
+        builder: (context) => Dialog(
           insetPadding: isMobile
               ? EdgeInsets.zero
               : const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
@@ -1507,11 +1512,12 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
     if (toolsUsed == null) return;
 
     final isMobile = MediaQuery.of(context).size.width < 600;
+    final inventoryProvider = ref.read(inventoryRiverpod);
 
     showDialog(
       context: context,
-      builder: (context) => Consumer<InventoryProvider>(
-        builder: (context, inventoryProvider, child) => Dialog(
+      builder: (context) => Builder(
+        builder: (context) => Dialog(
           insetPadding: isMobile
               ? EdgeInsets.zero
               : const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
@@ -2130,8 +2136,8 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
   }
 
   void _showToolsDialog(BuildContext context, HappySunProject project) async {
-    final inventoryProvider = context.read<InventoryProvider>();
-    final projectProvider = context.read<HappySunProjectProvider>();
+    final inventoryProvider = ref.read(inventoryRiverpod);
+    final projectProvider = ref.read(happySunProjectRiverpod);
 
     // Initialize inventory if needed
     if (inventoryProvider.tools.isEmpty && !inventoryProvider.isLoading) {
@@ -2384,7 +2390,7 @@ class _HappySunJobProjectsScreenState extends State<HappySunJobProjectsScreen>
 }
 
 // Image Viewer Screen - View and add before/after images
-class _ImageViewerScreen extends StatefulWidget {
+class _ImageViewerScreen extends riverpod.ConsumerStatefulWidget {
   final HappySunProject project;
   final String imageType; // 'before' or 'after'
   final String title;
@@ -2398,10 +2404,12 @@ class _ImageViewerScreen extends StatefulWidget {
   });
 
   @override
-  State<_ImageViewerScreen> createState() => _ImageViewerScreenState();
+  riverpod.ConsumerState<_ImageViewerScreen> createState() =>
+      _ImageViewerScreenState();
 }
 
-class _ImageViewerScreenState extends State<_ImageViewerScreen> {
+class _ImageViewerScreenState
+    extends riverpod.ConsumerState<_ImageViewerScreen> {
   late PageController _pageController;
   int _currentPage = 0;
   bool _isUploading = false;
@@ -2508,7 +2516,7 @@ class _ImageViewerScreenState extends State<_ImageViewerScreen> {
         _uploadStatus = 'Preparing upload...';
       });
 
-      final projectProvider = context.read<HappySunProjectProvider>();
+      final projectProvider = ref.read(happySunProjectRiverpod);
       final List<String> uploadedUrls = [];
 
       // Upload images to Firebase Storage
@@ -2656,7 +2664,7 @@ class _ImageViewerScreenState extends State<_ImageViewerScreen> {
     if (confirmed != true) return;
 
     try {
-      final projectProvider = context.read<HappySunProjectProvider>();
+      final projectProvider = ref.read(happySunProjectRiverpod);
       final updatedImages = List<String>.from(_images)..removeAt(index);
 
       final fieldName =

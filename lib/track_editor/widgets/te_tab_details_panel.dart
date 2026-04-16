@@ -8,7 +8,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:gpx/gpx.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:intl/intl.dart';
 import '../../models/work_area.dart';
 import '../models/styled_polygon.dart';
 import '../providers/te_map_layer_provider.dart';
@@ -16,14 +17,15 @@ import '../providers/te_tabs_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
 import '../utils/te_track_stats.dart';
+import '../../services/gpx_storage_service.dart';
 import '../../providers/schedule_provider.dart';
 
-class TETabDetailsPanel extends StatelessWidget {
+class TETabDetailsPanel extends riverpod.ConsumerWidget {
   const TETabDetailsPanel({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final provider = context.watch<TETabsProvider>();
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final provider = ref.watch(teTabsRiverpod);
     final tabIdx = provider.currentTab;
     final tab = provider.tabs[tabIdx];
 
@@ -52,6 +54,7 @@ class TETabDetailsPanel extends StatelessWidget {
             tracks: tab.tracks,
             waypoints: tab.waypoints,
             polygons: tab.polygons,
+            storageFolderPath: tab.storageFolderPath,
           ),
       ],
     );
@@ -61,7 +64,7 @@ class TETabDetailsPanel extends StatelessWidget {
 // ════════════════════════════════════════════════════════════════════════════
 // POLYGONS SECTION  (target / work-map areas)
 // ════════════════════════════════════════════════════════════════════════════
-class _PolygonsSection extends StatefulWidget {
+class _PolygonsSection extends riverpod.ConsumerStatefulWidget {
   final List<TEStyledPolygon> polygons;
   final int tabIndex;
   final List<Wpt> waypoints;
@@ -71,10 +74,11 @@ class _PolygonsSection extends StatefulWidget {
       required this.waypoints});
 
   @override
-  State<_PolygonsSection> createState() => _PolygonsSectionState();
+  riverpod.ConsumerState<_PolygonsSection> createState() =>
+      _PolygonsSectionState();
 }
 
-class _PolygonsSectionState extends State<_PolygonsSection> {
+class _PolygonsSectionState extends riverpod.ConsumerState<_PolygonsSection> {
   bool _searchOpen = false;
   bool _loading = false;
   List<WorkArea> _allWorkAreas = [];
@@ -94,7 +98,7 @@ class _PolygonsSectionState extends State<_PolygonsSection> {
       _selected.clear();
       _searchCtrl.clear();
     });
-    final areas = await context.read<ScheduleProvider>().fetchWorkAreas();
+    final areas = await ref.read(scheduleRiverpod).fetchWorkAreas();
     if (mounted) {
       setState(() {
         _allWorkAreas = areas..sort((a, b) => a.name.compareTo(b.name));
@@ -130,7 +134,7 @@ class _PolygonsSectionState extends State<_PolygonsSection> {
         ),
       );
     }).toList();
-    context.read<TETabsProvider>().addPolygonsToCurrentTab(newPolygons);
+    ref.read(teTabsRiverpod).addPolygonsToCurrentTab(newPolygons);
     setState(() {
       _searchOpen = false;
       _allWorkAreas = [];
@@ -140,7 +144,7 @@ class _PolygonsSectionState extends State<_PolygonsSection> {
 
   @override
   Widget build(BuildContext context) {
-    final layerProvider = context.watch<TEMapLayerProvider>();
+    final layerProvider = ref.watch(teMapLayerRiverpod);
     final visible = layerProvider.polygonsVisible(widget.tabIndex);
     final filtered = _filtered;
 
@@ -175,8 +179,8 @@ class _PolygonsSectionState extends State<_PolygonsSection> {
                       visible ? 'Hide polygons on map' : 'Show polygons on map',
                   child: InkWell(
                     borderRadius: BorderRadius.circular(6),
-                    onTap: () => context
-                        .read<TEMapLayerProvider>()
+                    onTap: () => ref
+                        .read(teMapLayerRiverpod)
                         .togglePolygons(widget.tabIndex),
                     child: Container(
                       padding: const EdgeInsets.symmetric(
@@ -514,14 +518,42 @@ class _PolygonsSectionState extends State<_PolygonsSection> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// SHARED CONFIRM DIALOG
+// ════════════════════════════════════════════════════════════════════════════
+Future<bool> _confirmDelete(
+    BuildContext context, String type, String name) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text('Delete $type?', style: const TextStyle(fontSize: 15)),
+      content: Text('Are you sure you want to delete "$name"?',
+          style: const TextStyle(fontSize: 13)),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          style: FilledButton.styleFrom(backgroundColor: Colors.red),
+          child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
+  return result ?? false;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // TRACKS SECTION
 // ════════════════════════════════════════════════════════════════════════════
-class _TracksSection extends StatelessWidget {
+class _TracksSection extends riverpod.ConsumerWidget {
   final List<Trk> tracks;
   const _TracksSection({required this.tracks});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final tabIdx = ref.watch(teTabsRiverpod).currentTab;
     return Container(
       width: 420,
       decoration: BoxDecoration(
@@ -563,8 +595,22 @@ class _TracksSection extends StatelessWidget {
           ),
           const Divider(height: 1),
           ...tracks.asMap().entries.map(
-                (e) => _TrackCard(index: e.key, track: e.value),
-              ),
+            (e) {
+              final rawName = e.value.name?.trim() ?? '';
+              final trackName =
+                  rawName.isNotEmpty ? rawName : 'Track ${e.key + 1}';
+              return _TrackCard(
+                index: e.key,
+                track: e.value,
+                onDelete: () async {
+                  final confirm =
+                      await _confirmDelete(context, 'track', trackName);
+                  if (!confirm) return;
+                  ref.read(teTabsRiverpod).removeTrack(tabIdx, e.key);
+                },
+              );
+            },
+          ),
           const SizedBox(height: 4),
         ],
       ),
@@ -575,7 +621,8 @@ class _TracksSection extends StatelessWidget {
 class _TrackCard extends StatelessWidget {
   final int index;
   final Trk track;
-  const _TrackCard({required this.index, required this.track});
+  final VoidCallback? onDelete;
+  const _TrackCard({required this.index, required this.track, this.onDelete});
 
   @override
   Widget build(BuildContext context) {
@@ -614,12 +661,20 @@ class _TrackCard extends StatelessWidget {
                       fontSize: 13),
                   overflow: TextOverflow.ellipsis,
                 ),
-                Spacer(),
+                const Spacer(),
                 Text(stats.distanceLabel,
                     style: const TextStyle(
                         color: Colors.white,
                         fontSize: 13,
                         fontWeight: FontWeight.bold)),
+                if (onDelete != null) ...[
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: onDelete,
+                    child: const Icon(Icons.delete_outline,
+                        color: Colors.white70, size: 16),
+                  ),
+                ],
               ],
             ),
           ),
@@ -709,17 +764,18 @@ class _StatCell extends StatelessWidget {
 // ════════════════════════════════════════════════════════════════════════════
 // WAYPOINTS SECTION
 // ════════════════════════════════════════════════════════════════════════════
-class _WaypointsSection extends StatefulWidget {
+class _WaypointsSection extends riverpod.ConsumerStatefulWidget {
   final List<Wpt> waypoints;
   final int tabIndex;
 
   const _WaypointsSection({required this.waypoints, required this.tabIndex});
 
   @override
-  State<_WaypointsSection> createState() => _WaypointsSectionState();
+  riverpod.ConsumerState<_WaypointsSection> createState() =>
+      _WaypointsSectionState();
 }
 
-class _WaypointsSectionState extends State<_WaypointsSection> {
+class _WaypointsSectionState extends riverpod.ConsumerState<_WaypointsSection> {
   final TextEditingController _searchController = TextEditingController();
   String _query = '';
 
@@ -731,15 +787,16 @@ class _WaypointsSectionState extends State<_WaypointsSection> {
 
   void _onQueryChanged(String value) {
     setState(() => _query = value.toLowerCase().trim());
-    context
-        .read<TEMapLayerProvider>()
+    ref
+        .read(teMapLayerRiverpod)
         .setWaypointFilter(widget.tabIndex, value.trim());
   }
 
   @override
   Widget build(BuildContext context) {
-    final layerProvider = context.watch<TEMapLayerProvider>();
+    final layerProvider = ref.watch(teMapLayerRiverpod);
     final visible = layerProvider.waypointsVisible(widget.tabIndex);
+    final selectedWptIdx = layerProvider.selectedWaypoint(widget.tabIndex);
 
     final allWaypoints = widget.waypoints;
     final filtered = _query.isEmpty
@@ -780,8 +837,8 @@ class _WaypointsSectionState extends State<_WaypointsSection> {
                       : 'Show waypoints on map',
                   child: InkWell(
                     borderRadius: BorderRadius.circular(6),
-                    onTap: () => context
-                        .read<TEMapLayerProvider>()
+                    onTap: () => ref
+                        .read(teMapLayerRiverpod)
                         .toggleWaypoints(widget.tabIndex),
                     child: Container(
                       padding: const EdgeInsets.symmetric(
@@ -889,29 +946,64 @@ class _WaypointsSectionState extends State<_WaypointsSection> {
                     separatorBuilder: (_, __) => const SizedBox(height: 2),
                     itemBuilder: (context, i) {
                       final wpt = filtered[i];
+                      final realIdx = widget.waypoints.indexOf(wpt);
                       final name = (wpt.name?.trim().isNotEmpty ?? false)
                           ? wpt.name!
-                          : 'Waypoint ${widget.waypoints.indexOf(wpt) + 1}';
-                      return Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.teal.shade50,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Row(
-                          spacing: 8,
-                          children: [
-                            Icon(Icons.place,
-                                size: 14, color: Colors.teal.shade600),
-                            Expanded(
-                              child: Text(name,
-                                  style: const TextStyle(fontSize: 12),
-                                  overflow: TextOverflow.ellipsis),
+                          : 'Waypoint ${realIdx + 1}';
+                      final isSelected = realIdx == selectedWptIdx;
+                      return GestureDetector(
+                          onTap: () {
+                            ref.read(teMapLayerRiverpod).selectWaypoint(
+                                widget.tabIndex, isSelected ? null : realIdx);
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: isSelected
+                                  ? Colors.orange.shade100
+                                  : Colors.teal.shade50,
+                              borderRadius: BorderRadius.circular(6),
+                              border: isSelected
+                                  ? Border.all(
+                                      color: Colors.orange.shade400, width: 1.5)
+                                  : null,
                             ),
-                          ],
-                        ),
-                      );
+                            child: Row(
+                              spacing: 8,
+                              children: [
+                                Icon(Icons.place,
+                                    size: 14,
+                                    color: isSelected
+                                        ? Colors.orange.shade700
+                                        : Colors.teal.shade600),
+                                Expanded(
+                                  child: Text(name,
+                                      style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: isSelected
+                                              ? FontWeight.bold
+                                              : FontWeight.normal),
+                                      overflow: TextOverflow.ellipsis),
+                                ),
+                                GestureDetector(
+                                  onTap: () async {
+                                    if (realIdx < 0) return;
+                                    final confirm = await _confirmDelete(
+                                        context, 'waypoint', name);
+                                    if (!confirm) return;
+                                    ref.read(teTabsRiverpod).removeWaypoint(
+                                        widget.tabIndex, realIdx);
+                                    ref
+                                        .read(teMapLayerRiverpod)
+                                        .selectWaypoint(widget.tabIndex, null);
+                                  },
+                                  child: Icon(Icons.delete_outline,
+                                      size: 14, color: Colors.red.shade300),
+                                ),
+                              ],
+                            ),
+                          ));
                     },
                   ),
           ),
@@ -930,12 +1022,14 @@ class _SaveTrimSection extends StatefulWidget {
   final List<Trk> tracks;
   final List<Wpt> waypoints;
   final List<TEStyledPolygon> polygons;
+  final String? storageFolderPath;
 
   const _SaveTrimSection({
     required this.tabTitle,
     required this.tracks,
     required this.waypoints,
     required this.polygons,
+    this.storageFolderPath,
   });
 
   @override
@@ -945,24 +1039,48 @@ class _SaveTrimSection extends StatefulWidget {
 class _SaveTrimSectionState extends State<_SaveTrimSection> {
   bool _saveBusy = false;
   bool _trimBusy = false;
+  bool _cloudBusy = false;
 
-  String get _slug => widget.tabTitle.replaceAll(RegExp(r'[^\w]'), '_');
+  /// Client name derived from the tab title (original filename minus extension).
+  String get _clientName {
+    var name = widget.tabTitle;
+    name =
+        name.replaceAll(RegExp(r'\.(gpx|kml|kmz)$', caseSensitive: false), '');
+    return name.trim().isEmpty ? 'Export' : name.trim();
+  }
 
-  Future<void> _onSave(BuildContext context) async {
+  /// Work area names from polygons, joined with 3 spaces.
+  String get _workAreas {
+    final names = widget.polygons
+        .map((p) => p.name.trim())
+        .where((n) => n.isNotEmpty)
+        .toSet()
+        .toList();
+    return names.join('   ');
+  }
+
+  /// Today's date formatted as "09 Mar 2026".
+  String get _dateStr => DateFormat('dd MMM yyyy').format(DateTime.now());
+
+  /// Build filename: Type   DD MMM YYYY   Client   WorkAreas  Count.gpx
+  String _buildFileName(String type, int count) {
+    final parts = <String>[type, _dateStr, _clientName];
+    if (_workAreas.isNotEmpty) parts.add(_workAreas);
+    parts.add(count.toString());
+    return '${parts.join('   ')}.gpx';
+  }
+
+  Future<void> _onSaveTracks(BuildContext context) async {
+    if (widget.tracks.isEmpty) return;
     setState(() => _saveBusy = true);
-    final fm = TEFileManager();
     try {
-      if (widget.tracks.isNotEmpty) {
-        await fm.saveGpxTracksFile('${_slug}_tracks.gpx', widget.tracks);
-      }
-      if (widget.waypoints.isNotEmpty) {
-        await fm.saveGpxWaypointsFile(
-            '${_slug}_waypoints.gpx', widget.waypoints);
-      }
+      final fm = TEFileManager();
+      final fileName = _buildFileName('Track', widget.waypoints.length);
+      await fm.saveGpxTracksFile(fileName, widget.tracks);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('GPX files saved'),
+          SnackBar(
+            content: Text('Saved as $fileName'),
             backgroundColor: Colors.green,
           ),
         );
@@ -971,13 +1089,117 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Save failed: $e'),
-            backgroundColor: Colors.red,
-          ),
+              content: Text('Save failed: $e'), backgroundColor: Colors.red),
         );
       }
     }
     if (mounted) setState(() => _saveBusy = false);
+  }
+
+  Future<void> _onSaveWaypoints(BuildContext context) async {
+    if (widget.waypoints.isEmpty) return;
+    setState(() => _saveBusy = true);
+    try {
+      final fm = TEFileManager();
+      final fileName = _buildFileName('Waypoints', widget.waypoints.length);
+      await fm.saveGpxWaypointsFile(fileName, widget.waypoints);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Saved as $fileName'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Save failed: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+    if (mounted) setState(() => _saveBusy = false);
+  }
+
+  Future<void> _onSaveTracksToCloud(BuildContext context) async {
+    if (widget.tracks.isEmpty) return;
+    setState(() => _cloudBusy = true);
+    try {
+      final fm = TEFileManager();
+      final gpxStorage = GpxStorageService();
+      final fileName = _buildFileName('Track', widget.waypoints.length);
+      final gpxContent = await fm.toGpxTracksString(widget.tracks);
+
+      String folderPath;
+      if (widget.storageFolderPath != null &&
+          widget.storageFolderPath!.isNotEmpty) {
+        folderPath = widget.storageFolderPath!;
+      } else {
+        final now = DateTime.now();
+        final roundNumber = await gpxStorage.nextRoundNumber(now, _clientName);
+        folderPath = gpxStorage.roundFolderPath(now, _clientName, roundNumber);
+      }
+
+      await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Uploaded tracks to cloud: $fileName'),
+            backgroundColor: Colors.blue,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Cloud upload failed: $e'),
+              backgroundColor: Colors.red),
+        );
+      }
+    }
+    if (mounted) setState(() => _cloudBusy = false);
+  }
+
+  Future<void> _onSaveWaypointsToCloud(BuildContext context) async {
+    if (widget.waypoints.isEmpty) return;
+    setState(() => _cloudBusy = true);
+    try {
+      final fm = TEFileManager();
+      final gpxStorage = GpxStorageService();
+      final fileName = _buildFileName('Waypoints', widget.waypoints.length);
+      final gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
+
+      String folderPath;
+      if (widget.storageFolderPath != null &&
+          widget.storageFolderPath!.isNotEmpty) {
+        folderPath = widget.storageFolderPath!;
+      } else {
+        final now = DateTime.now();
+        final roundNumber = await gpxStorage.nextRoundNumber(now, _clientName);
+        folderPath = gpxStorage.roundFolderPath(now, _clientName, roundNumber);
+      }
+
+      await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Uploaded waypoints to cloud: $fileName'),
+            backgroundColor: Colors.blue,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Cloud upload failed: $e'),
+              backgroundColor: Colors.red),
+        );
+      }
+    }
+    if (mounted) setState(() => _cloudBusy = false);
   }
 
   Future<void> _onTrim(BuildContext context) async {
@@ -989,20 +1211,64 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       final trimmedWpts =
           filterWaypointsByPolygons(widget.waypoints, widget.polygons);
 
+      String? trackFileName;
+      String? trackGpxContent;
+      String? wptsFileName;
+      String? wptsGpxContent;
+
       if (trimmedTracks.isNotEmpty) {
-        await fm.saveGpxTracksFile(
-            '${_slug}_trimmed_tracks.gpx', trimmedTracks);
+        final trimTrackPts = trimmedTracks.fold<int>(
+            0,
+            (s, t) =>
+                s + t.trksegs.fold<int>(0, (ss, sg) => ss + sg.trkpts.length));
+        trackFileName = _buildFileName('Track Trimmed', trimTrackPts);
+        trackGpxContent = await fm.toGpxTracksString(trimmedTracks);
+        await fm.saveGpxTracksFile(trackFileName, trimmedTracks);
       }
       if (trimmedWpts.isNotEmpty) {
-        await fm.saveGpxWaypointsFile(
-            '${_slug}_trimmed_waypoints.gpx', trimmedWpts);
+        wptsFileName = _buildFileName('Waypoints Trimmed', trimmedWpts.length);
+        wptsGpxContent = await fm.toGpxWaypointsString(trimmedWpts);
+        await fm.saveGpxWaypointsFile(wptsFileName, trimmedWpts);
+      }
+
+      // ── Upload to Cloud Storage ──────────────────────────────────────
+      int cloudUploaded = 0;
+      try {
+        final gpxStorage = GpxStorageService();
+        String folderPath;
+        if (widget.storageFolderPath != null &&
+            widget.storageFolderPath!.isNotEmpty) {
+          // Use the pre-resolved path from the matched job
+          folderPath = widget.storageFolderPath!;
+        } else {
+          // Fallback: compute a new folder path
+          final now = DateTime.now();
+          final roundNumber =
+              await gpxStorage.nextRoundNumber(now, _clientName);
+          folderPath =
+              gpxStorage.roundFolderPath(now, _clientName, roundNumber);
+        }
+
+        if (trackFileName != null && trackGpxContent != null) {
+          await gpxStorage.uploadGpxFile(
+              folderPath, trackFileName, trackGpxContent);
+          cloudUploaded++;
+        }
+        if (wptsFileName != null && wptsGpxContent != null) {
+          await gpxStorage.uploadGpxFile(
+              folderPath, wptsFileName, wptsGpxContent);
+          cloudUploaded++;
+        }
+      } catch (e) {
+        debugPrint('⚠️ Cloud upload failed: $e');
       }
 
       final trackPts = trimmedTracks.fold<int>(
           0,
           (s, t) =>
               s + t.trksegs.fold<int>(0, (ss, sg) => ss + sg.trkpts.length));
-      final msg = '$trackPts track pts, ${trimmedWpts.length} waypoints kept';
+      final msg = '$trackPts track pts, ${trimmedWpts.length} waypoints kept'
+          '${cloudUploaded > 0 ? ' · $cloudUploaded uploaded' : ''}';
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1027,8 +1293,10 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
 
   @override
   Widget build(BuildContext context) {
+    final hasTracks = widget.tracks.isNotEmpty;
+    final hasWaypoints = widget.waypoints.isNotEmpty;
     final hasPolygons = widget.polygons.isNotEmpty;
-    final busy = _saveBusy || _trimBusy;
+    final busy = _saveBusy || _trimBusy || _cloudBusy;
 
     final trimButton = ElevatedButton.icon(
       onPressed: (busy || !hasPolygons) ? null : () => _onTrim(context),
@@ -1050,34 +1318,125 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       ),
     );
 
+    final spinnerIcon = SizedBox(
+      width: 14,
+      height: 14,
+      child: CircularProgressIndicator(
+          strokeWidth: 2, color: Colors.white.withAlpha(180)),
+    );
+
     return Container(
       width: 420,
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: ElevatedButton.icon(
-              onPressed: busy ? null : () => _onSave(context),
-              icon: _saveBusy
-                  ? const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Icon(Icons.save_alt, size: 16),
-              label: const Text('Save GPX'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blueGrey[700],
-                foregroundColor: Colors.white,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-                textStyle: const TextStyle(fontSize: 12),
+          // ── Save row: separate tracks / waypoints ──────────────────
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: (busy || !hasTracks)
+                      ? null
+                      : () => _onSaveTracks(context),
+                  icon: _saveBusy
+                      ? spinnerIcon
+                      : const Icon(Icons.route, size: 15),
+                  label: const Text('Save Tracks'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        hasTracks ? Colors.blueGrey[700] : Colors.grey[500],
+                    foregroundColor: Colors.white,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                    textStyle: const TextStyle(fontSize: 11),
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: (busy || !hasWaypoints)
+                      ? null
+                      : () => _onSaveWaypoints(context),
+                  icon: _saveBusy
+                      ? spinnerIcon
+                      : const Icon(Icons.place, size: 15),
+                  label: const Text('Save Waypoints'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        hasWaypoints ? Colors.teal[700] : Colors.grey[500],
+                    foregroundColor: Colors.white,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                    textStyle: const TextStyle(fontSize: 11),
+                  ),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
-          Expanded(
+          const SizedBox(height: 6),
+          // ── Save to Cloud row ──────────────────────────────────────
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: (busy || !hasTracks)
+                      ? null
+                      : () => _onSaveTracksToCloud(context),
+                  icon: _cloudBusy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.cloud_upload, size: 15),
+                  label: const Text('Tracks → Cloud'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor:
+                        hasTracks ? Colors.blue[700] : Colors.grey[500],
+                    side: BorderSide(
+                        color:
+                            hasTracks ? Colors.blue[300]! : Colors.grey[300]!),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                    textStyle: const TextStyle(fontSize: 11),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: (busy || !hasWaypoints)
+                      ? null
+                      : () => _onSaveWaypointsToCloud(context),
+                  icon: _cloudBusy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.cloud_upload, size: 15),
+                  label: const Text('Waypoints → Cloud'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor:
+                        hasWaypoints ? Colors.blue[700] : Colors.grey[500],
+                    side: BorderSide(
+                        color: hasWaypoints
+                            ? Colors.blue[300]!
+                            : Colors.grey[300]!),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                    textStyle: const TextStyle(fontSize: 11),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // ── Trim row ───────────────────────────────────────────────
+          SizedBox(
+            width: double.infinity,
             child: hasPolygons
                 ? trimButton
                 : Tooltip(

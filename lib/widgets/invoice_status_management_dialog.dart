@@ -1,18 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/invoice_status_provider.dart';
 import '../models/custom_invoice_status.dart';
 
-class InvoiceStatusManagementDialog extends StatefulWidget {
+class InvoiceStatusManagementDialog extends riverpod.ConsumerStatefulWidget {
   const InvoiceStatusManagementDialog({super.key});
 
   @override
-  State<InvoiceStatusManagementDialog> createState() =>
+  riverpod.ConsumerState<InvoiceStatusManagementDialog> createState() =>
       _InvoiceStatusManagementDialogState();
 }
 
 class _InvoiceStatusManagementDialogState
-    extends State<InvoiceStatusManagementDialog> {
+    extends riverpod.ConsumerState<InvoiceStatusManagementDialog> {
   final TextEditingController _labelController = TextEditingController();
   Color _selectedColor = Colors.blue;
   bool _isAdding = false;
@@ -58,7 +58,7 @@ class _InvoiceStatusManagementDialogState
       return;
     }
 
-    final provider = Provider.of<InvoiceStatusProvider>(context, listen: false);
+    final provider = ref.read(invoiceStatusRiverpod);
 
     try {
       if (_isAdding) {
@@ -101,8 +101,7 @@ class _InvoiceStatusManagementDialogState
     );
 
     if (confirmed == true) {
-      final provider =
-          Provider.of<InvoiceStatusProvider>(context, listen: false);
+      final provider = ref.read(invoiceStatusRiverpod);
       try {
         await provider.deleteStatus(id);
       } catch (e) {
@@ -335,8 +334,9 @@ class _InvoiceStatusManagementDialogState
 
             // Status List
             Expanded(
-              child: Consumer<InvoiceStatusProvider>(
-                builder: (context, provider, child) {
+              child: Builder(
+                builder: (context) {
+                  final provider = ref.watch(invoiceStatusRiverpod);
                   if (provider.isLoading) {
                     return const Center(child: CircularProgressIndicator());
                   }

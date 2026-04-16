@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_job_status.dart';
 import '../providers/job_status_provider.dart';
 
-class JobStatusManagementDialog extends StatefulWidget {
+class JobStatusManagementDialog extends riverpod.ConsumerStatefulWidget {
   const JobStatusManagementDialog({super.key});
 
   @override
-  State<JobStatusManagementDialog> createState() =>
+  riverpod.ConsumerState<JobStatusManagementDialog> createState() =>
       _JobStatusManagementDialogState();
 }
 
-class _JobStatusManagementDialogState extends State<JobStatusManagementDialog> {
+class _JobStatusManagementDialogState
+    extends riverpod.ConsumerState<JobStatusManagementDialog> {
   @override
   Widget build(BuildContext context) {
     return Dialog(
@@ -44,8 +45,9 @@ class _JobStatusManagementDialogState extends State<JobStatusManagementDialog> {
 
             // Status list
             Expanded(
-              child: Consumer<JobStatusProvider>(
-                builder: (context, statusProvider, child) {
+              child: Builder(
+                builder: (context) {
+                  final statusProvider = ref.watch(jobStatusRiverpod);
                   return ListView.builder(
                     padding: const EdgeInsets.all(16),
                     itemCount: statusProvider.statuses.length,
@@ -149,7 +151,7 @@ class _JobStatusManagementDialogState extends State<JobStatusManagementDialog> {
           ),
           TextButton(
             onPressed: () async {
-              await context.read<JobStatusProvider>().deleteStatus(status.id);
+              await ref.read(jobStatusRiverpod).deleteStatus(status.id);
               Navigator.of(context).pop();
             },
             style: TextButton.styleFrom(foregroundColor: Colors.red),
@@ -161,16 +163,17 @@ class _JobStatusManagementDialogState extends State<JobStatusManagementDialog> {
   }
 }
 
-class _StatusFormDialog extends StatefulWidget {
+class _StatusFormDialog extends riverpod.ConsumerStatefulWidget {
   final CustomJobStatus? status; // null for add, non-null for edit
 
   const _StatusFormDialog({this.status});
 
   @override
-  State<_StatusFormDialog> createState() => _StatusFormDialogState();
+  riverpod.ConsumerState<_StatusFormDialog> createState() =>
+      _StatusFormDialogState();
 }
 
-class _StatusFormDialogState extends State<_StatusFormDialog> {
+class _StatusFormDialogState extends riverpod.ConsumerState<_StatusFormDialog> {
   final _labelController = TextEditingController();
   Color _selectedColor = Colors.blue;
   final _formKey = GlobalKey<FormState>();
@@ -331,7 +334,7 @@ class _StatusFormDialogState extends State<_StatusFormDialog> {
       return;
     }
 
-    final statusProvider = context.read<JobStatusProvider>();
+    final statusProvider = ref.read(jobStatusRiverpod);
 
     try {
       if (widget.status == null) {

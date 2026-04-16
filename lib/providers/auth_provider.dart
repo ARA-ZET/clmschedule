@@ -1,7 +1,12 @@
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../services/firebase_auth_service.dart';
 import '../models/user.dart' as app_user;
+
+final authRiverpod = riverpod.ChangeNotifierProvider<AuthProvider>(
+  (ref) => AuthProvider(),
+);
 
 /// Provider for managing Firebase authentication state throughout the app
 /// Uses real Firebase Auth to create users in Firebase Auth console

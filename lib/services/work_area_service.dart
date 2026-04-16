@@ -3,7 +3,12 @@ import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:xml/xml.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/work_area.dart';
+
+final workAreaServiceRiverpod = riverpod.Provider<WorkAreaService>(
+  (ref) => WorkAreaService(FirebaseFirestore.instance),
+);
 
 class WorkAreaService {
   final FirebaseFirestore _firestore;

@@ -1,4 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+
+/// Riverpod provider for TogglerProvider
+final togglerRiverpod = riverpod.ChangeNotifierProvider<TogglerProvider>((ref) {
+  return TogglerProvider();
+});
 
 class TogglerProvider with ChangeNotifier {
   bool _isFullviewSchedule = false;

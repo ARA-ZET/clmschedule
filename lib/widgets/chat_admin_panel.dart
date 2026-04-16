@@ -1,16 +1,17 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/chat_provider.dart';
 import '../providers/auth_provider.dart';
 
-class ChatAdminPanel extends StatefulWidget {
+class ChatAdminPanel extends riverpod.ConsumerStatefulWidget {
   const ChatAdminPanel({super.key});
 
   @override
-  State<ChatAdminPanel> createState() => _ChatAdminPanelState();
+  riverpod.ConsumerState<ChatAdminPanel> createState() =>
+      _ChatAdminPanelState();
 }
 
-class _ChatAdminPanelState extends State<ChatAdminPanel> {
+class _ChatAdminPanelState extends riverpod.ConsumerState<ChatAdminPanel> {
   final TextEditingController _systemMessageController =
       TextEditingController();
   Map<String, dynamic>? _statistics;
@@ -33,7 +34,7 @@ class _ChatAdminPanelState extends State<ChatAdminPanel> {
       _isLoadingStats = true;
     });
 
-    final chatProvider = context.read<ChatProvider>();
+    final chatProvider = ref.read(chatRiverpod);
     final stats = await chatProvider.getChatStatistics();
 
     setState(() {
@@ -46,7 +47,7 @@ class _ChatAdminPanelState extends State<ChatAdminPanel> {
     final content = _systemMessageController.text.trim();
     if (content.isEmpty) return;
 
-    final chatProvider = context.read<ChatProvider>();
+    final chatProvider = ref.read(chatRiverpod);
     chatProvider.sendSystemMessage(content);
     _systemMessageController.clear();
 
@@ -71,7 +72,7 @@ class _ChatAdminPanelState extends State<ChatAdminPanel> {
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              final chatProvider = context.read<ChatProvider>();
+              final chatProvider = ref.read(chatRiverpod);
               chatProvider.cleanupOldMessages();
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Old messages cleanup initiated')),
@@ -87,7 +88,7 @@ class _ChatAdminPanelState extends State<ChatAdminPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final authProvider = context.read<AuthProvider>();
+    final authProvider = ref.read(authRiverpod);
 
     if (!authProvider.isAdmin) {
       return const Center(
@@ -167,8 +168,9 @@ class _ChatAdminPanelState extends State<ChatAdminPanel> {
               maxLines: 3,
             ),
             const SizedBox(height: 12),
-            Consumer<ChatProvider>(
-              builder: (context, chatProvider, child) {
+            Builder(
+              builder: (context) {
+                final chatProvider = ref.watch(chatRiverpod);
                 return ElevatedButton.icon(
                   onPressed: chatProvider.isSending ? null : _sendSystemMessage,
                   icon: chatProvider.isSending
@@ -212,7 +214,7 @@ class _ChatAdminPanelState extends State<ChatAdminPanel> {
 
             const Spacer(),
 
-            if (context.watch<ChatProvider>().error != null)
+            if (ref.watch(chatRiverpod).error != null)
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -225,13 +227,12 @@ class _ChatAdminPanelState extends State<ChatAdminPanel> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        context.watch<ChatProvider>().error!,
+                        ref.watch(chatRiverpod).error!,
                         style: TextStyle(color: Colors.red[700]),
                       ),
                     ),
                     IconButton(
-                      onPressed: () =>
-                          context.read<ChatProvider>().clearError(),
+                      onPressed: () => ref.read(chatRiverpod).clearError(),
                       icon: Icon(Icons.close, color: Colors.red),
                     ),
                   ],

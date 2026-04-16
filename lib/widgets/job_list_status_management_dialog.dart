@@ -1,19 +1,19 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/job_list_status_provider.dart';
 import '../providers/job_type_provider.dart';
 import '../models/custom_job_list_status.dart';
 
-class JobListStatusManagementDialog extends StatefulWidget {
+class JobListStatusManagementDialog extends riverpod.ConsumerStatefulWidget {
   const JobListStatusManagementDialog({super.key});
 
   @override
-  State<JobListStatusManagementDialog> createState() =>
+  riverpod.ConsumerState<JobListStatusManagementDialog> createState() =>
       _JobListStatusManagementDialogState();
 }
 
 class _JobListStatusManagementDialogState
-    extends State<JobListStatusManagementDialog> {
+    extends riverpod.ConsumerState<JobListStatusManagementDialog> {
   final TextEditingController _labelController = TextEditingController();
   Color _selectedColor = Colors.blue;
   bool _isAdding = false;
@@ -63,7 +63,7 @@ class _JobListStatusManagementDialogState
       return;
     }
 
-    final provider = Provider.of<JobListStatusProvider>(context, listen: false);
+    final provider = ref.read(jobListStatusRiverpod);
 
     try {
       if (_isAdding) {
@@ -111,8 +111,7 @@ class _JobListStatusManagementDialogState
     );
 
     if (confirmed == true) {
-      final provider =
-          Provider.of<JobListStatusProvider>(context, listen: false);
+      final provider = ref.read(jobListStatusRiverpod);
       try {
         await provider.deleteStatus(id);
       } catch (e) {
@@ -176,9 +175,7 @@ class _JobListStatusManagementDialogState
             Wrap(
               spacing: 4,
               runSpacing: 4,
-              children: Provider.of<JobTypeProvider>(context, listen: false)
-                  .jobTypes
-                  .map((jt) {
+              children: ref.read(jobTypeRiverpod).jobTypes.map((jt) {
                 final isHidden = _hiddenForJobTypes.contains(jt.id);
                 return FilterChip(
                   label: Text(
@@ -360,8 +357,9 @@ class _JobListStatusManagementDialogState
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<JobListStatusProvider>(
-      builder: (context, provider, child) {
+    return Builder(
+      builder: (context) {
+        final provider = ref.watch(jobListStatusRiverpod);
         return AlertDialog(
           title: const Text('Manage Job List Statuses'),
           content: SizedBox(

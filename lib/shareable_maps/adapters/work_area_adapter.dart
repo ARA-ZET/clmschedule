@@ -118,11 +118,16 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
         final pointsChanged =
             !_pointsEqual(existing.polygonPoints, polygon.points);
         final descChanged = existing.description != polygon.description;
+        final nameChanged = existing.name != polygon.name;
+        final estimateChanged =
+            existing.letterBoxEstimate != polygon.letterBoxEstimate;
 
-        if (pointsChanged || descChanged) {
+        if (pointsChanged || descChanged || nameChanged || estimateChanged) {
           final updated = existing.copyWith(
+            name: polygon.name,
             description: polygon.description,
             polygonPoints: polygon.points,
+            letterBoxEstimate: polygon.letterBoxEstimate,
           );
           await _firestoreService.updateWorkArea(updated);
         }
@@ -133,6 +138,7 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
           name: polygon.name,
           description: polygon.description,
           polygonPoints: polygon.points,
+          letterBoxEstimate: polygon.letterBoxEstimate,
           kmlFileName: '',
           createdAt: DateTime.now(),
           updatedAt: DateTime.now(),
@@ -161,6 +167,7 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
       description: wa.description,
       points: List<LatLng>.from(wa.polygonPoints),
       color: Colors.red,
+      letterBoxEstimate: wa.letterBoxEstimate,
     );
   }
 

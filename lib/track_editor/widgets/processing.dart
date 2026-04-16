@@ -1,20 +1,20 @@
 // track_editor/widgets/processing.dart
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/styled_polygon.dart';
 import '../models/tab_item.dart';
 import '../providers/te_tabs_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
 
-class TEProcessing extends StatefulWidget {
+class TEProcessing extends riverpod.ConsumerStatefulWidget {
   const TEProcessing({super.key});
 
   @override
-  State<TEProcessing> createState() => _TEProcessingState();
+  riverpod.ConsumerState<TEProcessing> createState() => _TEProcessingState();
 }
 
-class _TEProcessingState extends State<TEProcessing> {
+class _TEProcessingState extends riverpod.ConsumerState<TEProcessing> {
   bool _processing = false;
 
   Future<void> _runTrimWaypoints(TETabItem tabData) async {
@@ -24,7 +24,7 @@ class _TEProcessingState extends State<TEProcessing> {
       final targetPolygons = await groupWaypointsByPolygonAsync(
           tabData.polygons, tabData.waypoints);
       if (mounted) {
-        context.read<TETabsProvider>().addData(TETabItem(
+        ref.read(teTabsRiverpod).addData(TETabItem(
               title: tabData.title,
               polygons: [],
               tracks: [],
@@ -39,8 +39,8 @@ class _TEProcessingState extends State<TEProcessing> {
 
   @override
   Widget build(BuildContext context) {
-    final currentTab = context.watch<TETabsProvider>().currentTab;
-    final tabData = context.watch<TETabsProvider>().tabs[currentTab];
+    final currentTab = ref.watch(teTabsRiverpod).currentTab;
+    final tabData = ref.watch(teTabsRiverpod).tabs[currentTab];
     final List<TETargetPolygon> polygons = tabData.targetPolygons;
 
     // Count waypoints inside any polygon vs outside all polygons.

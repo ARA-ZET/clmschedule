@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:url_launcher/url_launcher.dart';
 import '../providers/ai_chat_provider.dart';
 import '../providers/auth_provider.dart';
@@ -9,16 +9,16 @@ import '../providers/job_list_provider.dart';
 import '../services/ai_chat_service.dart';
 
 /// Side panel widget for AI chat — sits alongside the main content.
-class AiChatPanel extends StatefulWidget {
+class AiChatPanel extends riverpod.ConsumerStatefulWidget {
   final VoidCallback onClose;
 
   const AiChatPanel({super.key, required this.onClose});
 
   @override
-  State<AiChatPanel> createState() => _AiChatPanelState();
+  riverpod.ConsumerState<AiChatPanel> createState() => _AiChatPanelState();
 }
 
-class _AiChatPanelState extends State<AiChatPanel>
+class _AiChatPanelState extends riverpod.ConsumerState<AiChatPanel>
     with SingleTickerProviderStateMixin {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -33,8 +33,8 @@ class _AiChatPanelState extends State<AiChatPanel>
       duration: const Duration(milliseconds: 1200),
     )..repeat();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final authProvider = context.read<AuthProvider>();
-      final aiChatProvider = context.read<AiChatProvider>();
+      final authProvider = ref.read(authRiverpod);
+      final aiChatProvider = ref.read(aiChatRiverpod);
       final userName = authProvider.appUser?.name ?? 'User';
       aiChatProvider.initialize(userName);
       _syncDataContext();
@@ -44,8 +44,8 @@ class _AiChatPanelState extends State<AiChatPanel>
 
   /// Sync the current month from JobListProvider into AiChatProvider
   void _syncDataContext() {
-    final aiChatProvider = context.read<AiChatProvider>();
-    final jobListProvider = context.read<JobListProvider>();
+    final aiChatProvider = ref.read(aiChatRiverpod);
+    final jobListProvider = ref.read(jobListRiverpod);
     final monthId = jobListProvider.currentMonthDisplay;
     aiChatProvider.updateDataContext(monthId: monthId);
   }
@@ -78,7 +78,7 @@ class _AiChatPanelState extends State<AiChatPanel>
     if (text.isEmpty) return;
 
     _messageController.clear();
-    final provider = context.read<AiChatProvider>();
+    final provider = ref.read(aiChatRiverpod);
     await provider.sendMessage(text);
     _scrollToBottom();
   }
@@ -143,8 +143,9 @@ class _AiChatPanelState extends State<AiChatPanel>
                     letterSpacing: 0.3,
                   ),
                 ),
-                Consumer<AiChatProvider>(
-                  builder: (context, provider, _) {
+                riverpod.Consumer(
+                  builder: (context, ref, _) {
+                    final provider = ref.watch(aiChatRiverpod);
                     final monthLabel = provider.currentMonthId;
                     final statusText = provider.isLoading
                         ? 'Thinking...'
@@ -164,8 +165,8 @@ class _AiChatPanelState extends State<AiChatPanel>
               ],
             ),
           ),
-          Consumer<AiChatProvider>(
-            builder: (context, provider, _) {
+          riverpod.Consumer(
+            builder: (context, ref, _) {
               return _HeaderIconButton(
                 icon: Icons.psychology_rounded,
                 onPressed: () => _showKnowledgeManager(context),
@@ -174,8 +175,9 @@ class _AiChatPanelState extends State<AiChatPanel>
             },
           ),
           const SizedBox(width: 4),
-          Consumer<AiChatProvider>(
-            builder: (context, provider, _) {
+          riverpod.Consumer(
+            builder: (context, ref, _) {
+              final provider = ref.watch(aiChatRiverpod);
               return _HeaderIconButton(
                 icon: Icons.sync_rounded,
                 onPressed: () {
@@ -196,8 +198,9 @@ class _AiChatPanelState extends State<AiChatPanel>
             },
           ),
           const SizedBox(width: 4),
-          Consumer<AiChatProvider>(
-            builder: (context, provider, _) {
+          riverpod.Consumer(
+            builder: (context, ref, _) {
+              final provider = ref.watch(aiChatRiverpod);
               return _HeaderIconButton(
                 icon: Icons.refresh_rounded,
                 onPressed: provider.clearConversation,
@@ -217,8 +220,9 @@ class _AiChatPanelState extends State<AiChatPanel>
   }
 
   Widget _buildMessageList() {
-    return Consumer<AiChatProvider>(
-      builder: (context, provider, _) {
+    return riverpod.Consumer(
+      builder: (context, ref, _) {
+        final provider = ref.watch(aiChatRiverpod);
         final messages = provider.messages;
 
         if (messages.isEmpty) {
@@ -660,8 +664,9 @@ class _AiChatPanelState extends State<AiChatPanel>
           if ((jobData['specialInstructions'] as String?)?.isNotEmpty == true)
             _buildJobDetailRow('Instructions', jobData['specialInstructions']),
           const SizedBox(height: 8),
-          Consumer<AiChatProvider>(
-            builder: (context, provider, _) {
+          riverpod.Consumer(
+            builder: (context, ref, _) {
+              final provider = ref.watch(aiChatRiverpod);
               final isLoading = provider.isLoading;
               return Row(
                 mainAxisSize: MainAxisSize.min,
@@ -767,8 +772,9 @@ class _AiChatPanelState extends State<AiChatPanel>
             );
           }),
           const SizedBox(height: 4),
-          Consumer<AiChatProvider>(
-            builder: (context, provider, _) {
+          riverpod.Consumer(
+            builder: (context, ref, _) {
+              final provider = ref.watch(aiChatRiverpod);
               final isLoading = provider.isLoading;
               return Row(
                 mainAxisSize: MainAxisSize.min,
@@ -850,6 +856,7 @@ class _AiChatPanelState extends State<AiChatPanel>
                 '';
             final date =
                 job['dateDisplay'] as String? ?? job['date'] as String? ?? '';
+            final workMaps = job['workMaps'] as List? ?? [];
             return Padding(
               padding: const EdgeInsets.only(bottom: 6),
               child: Container(
@@ -880,14 +887,26 @@ class _AiChatPanelState extends State<AiChatPanel>
                         color: Colors.grey.shade600,
                       ),
                     ),
+                    if (workMaps.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        '🗺️ ${workMaps.length} work area map${workMaps.length == 1 ? '' : 's'} included',
+                        style: TextStyle(
+                          fontSize: 9,
+                          color: Colors.blue.shade600,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
             );
           }),
           const SizedBox(height: 4),
-          Consumer<AiChatProvider>(
-            builder: (context, provider, _) {
+          riverpod.Consumer(
+            builder: (context, ref, _) {
+              final provider = ref.watch(aiChatRiverpod);
               final isLoading = provider.isLoading;
               return Row(
                 mainAxisSize: MainAxisSize.min,
@@ -974,8 +993,9 @@ class _AiChatPanelState extends State<AiChatPanel>
             return _buildChangeRow(label, oldDisplay, newDisplay);
           }),
           const SizedBox(height: 8),
-          Consumer<AiChatProvider>(
-            builder: (context, provider, _) {
+          riverpod.Consumer(
+            builder: (context, ref, _) {
+              final provider = ref.watch(aiChatRiverpod);
               final isLoading = provider.isLoading;
               return Row(
                 mainAxisSize: MainAxisSize.min,
@@ -1118,8 +1138,9 @@ class _AiChatPanelState extends State<AiChatPanel>
   }
 
   Widget _buildInputArea() {
-    return Consumer<AiChatProvider>(
-      builder: (context, provider, _) {
+    return riverpod.Consumer(
+      builder: (context, ref, _) {
+        final provider = ref.watch(aiChatRiverpod);
         return Container(
           padding: const EdgeInsets.fromLTRB(10, 6, 6, 10),
           decoration: BoxDecoration(
@@ -1227,7 +1248,7 @@ class _AiChatPanelState extends State<AiChatPanel>
 
   /// Show the knowledge management dialog
   void _showKnowledgeManager(BuildContext context) {
-    final provider = context.read<AiChatProvider>();
+    final provider = ref.read(aiChatRiverpod);
     showDialog(
       context: context,
       builder: (ctx) => _KnowledgeManagerDialog(provider: provider),
@@ -1319,7 +1340,7 @@ class _AiChatPanelState extends State<AiChatPanel>
             FilledButton.icon(
               onPressed: () async {
                 if (controller.text.trim().isEmpty) return;
-                final provider = context.read<AiChatProvider>();
+                final provider = ref.read(aiChatRiverpod);
                 await provider.addKnowledge(
                   content: controller.text.trim(),
                   category: category,

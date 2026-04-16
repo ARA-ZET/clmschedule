@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/happy_sun_project.dart';
 import '../models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
 import '../services/happy_sun_project_service.dart';
@@ -7,6 +8,11 @@ import '../services/happy_sun_local_storage.dart';
 import '../services/happy_sun_sync_service.dart';
 import '../services/connectivity_service.dart';
 import '../config/flavor_config.dart';
+
+final happySunProjectRiverpod =
+    riverpod.ChangeNotifierProvider<HappySunProjectProvider>(
+  (ref) => HappySunProjectProvider(),
+);
 
 class HappySunProjectProvider extends ChangeNotifier {
   final HappySunProjectService _projectService = HappySunProjectService();

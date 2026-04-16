@@ -1,19 +1,19 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:image_picker/image_picker.dart';
 import 'dart:typed_data';
 import '../models/chat_message.dart';
 import '../providers/chat_provider.dart';
 import '../providers/auth_provider.dart';
 
-class ChatDialog extends StatefulWidget {
+class ChatDialog extends riverpod.ConsumerStatefulWidget {
   const ChatDialog({super.key});
 
   @override
-  State<ChatDialog> createState() => _ChatDialogState();
+  riverpod.ConsumerState<ChatDialog> createState() => _ChatDialogState();
 }
 
-class _ChatDialogState extends State<ChatDialog> {
+class _ChatDialogState extends riverpod.ConsumerState<ChatDialog> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final FocusNode _messageFocusNode = FocusNode();
@@ -164,7 +164,7 @@ class _ChatDialogState extends State<ChatDialog> {
   }
 
   void _markAllMessagesAsRead() {
-    final chatProvider = context.read<ChatProvider>();
+    final chatProvider = ref.read(chatRiverpod);
     chatProvider.markAllMessagesAsRead();
   }
 
@@ -172,7 +172,7 @@ class _ChatDialogState extends State<ChatDialog> {
     final content = _messageController.text.trim();
     if (content.isEmpty) return;
 
-    final chatProvider = context.read<ChatProvider>();
+    final chatProvider = ref.read(chatRiverpod);
     chatProvider.sendMessage(content, replyToMessageId: _replyToMessageId);
 
     _messageController.clear();
@@ -209,7 +209,7 @@ class _ChatDialogState extends State<ChatDialog> {
         final Uint8List imageData = await image.readAsBytes();
         final String fileName = image.name;
 
-        final chatProvider = context.read<ChatProvider>();
+        final chatProvider = ref.read(chatRiverpod);
         await chatProvider.sendImageMessage(
           imageData,
           fileName,
@@ -260,7 +260,7 @@ class _ChatDialogState extends State<ChatDialog> {
   Future<void> _searchUsers(String query) async {
     try {
       print('ChatDialog: Searching for users with query: "$query"');
-      final chatProvider = context.read<ChatProvider>();
+      final chatProvider = ref.read(chatRiverpod);
       final users = await chatProvider.searchUsers(query);
       print('ChatDialog: Got ${users.length} users from search');
 
@@ -353,8 +353,9 @@ class _ChatDialogState extends State<ChatDialog> {
                         ),
                   ),
                   const Spacer(),
-                  Consumer<ChatProvider>(
-                    builder: (context, chatProvider, child) {
+                  Builder(
+                    builder: (context) {
+                      final chatProvider = ref.watch(chatRiverpod);
                       final onlineCount = chatProvider.onlineUsers.length;
                       return Row(
                         children: [
@@ -389,8 +390,9 @@ class _ChatDialogState extends State<ChatDialog> {
 
             // Messages List
             Expanded(
-              child: Consumer<ChatProvider>(
-                builder: (context, chatProvider, child) {
+              child: Builder(
+                builder: (context) {
+                  final chatProvider = ref.watch(chatRiverpod);
                   if (chatProvider.isLoading) {
                     return const Center(
                       child: CircularProgressIndicator(),
@@ -607,8 +609,9 @@ class _ChatDialogState extends State<ChatDialog> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  Consumer<ChatProvider>(
-                    builder: (context, chatProvider, child) {
+                  Builder(
+                    builder: (context) {
+                      final chatProvider = ref.watch(chatRiverpod);
                       return FloatingActionButton(
                         onPressed: chatProvider.isSending ? null : _sendMessage,
                         mini: true,
@@ -633,7 +636,7 @@ class _ChatDialogState extends State<ChatDialog> {
   }
 }
 
-class MessageBubble extends StatelessWidget {
+class MessageBubble extends riverpod.ConsumerWidget {
   final ChatMessage message;
   final VoidCallback? onReply;
   final VoidCallback? onDelete;
@@ -646,8 +649,8 @@ class MessageBubble extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final authProvider = context.read<AuthProvider>();
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final authProvider = ref.read(authRiverpod);
     final currentUser = authProvider.user;
     final isOwnMessage = currentUser?.uid == message.senderId;
     final isSystem = message.isSystem;
@@ -1006,7 +1009,8 @@ class MessageBubble extends StatelessWidget {
   }
 
   void _showMessageOptions(BuildContext context) {
-    final authProvider = context.read<AuthProvider>();
+    final authProvider =
+        riverpod.ProviderScope.containerOf(context).read(authRiverpod);
     final currentUser = authProvider.user;
     final isOwnMessage = currentUser?.uid == message.senderId;
 
@@ -1076,7 +1080,8 @@ class MessageBubble extends StatelessWidget {
 
   Widget _buildReplyPreview(
       BuildContext context, String replyToMessageId, bool isOwnMessage) {
-    final chatProvider = context.read<ChatProvider>();
+    final chatProvider =
+        riverpod.ProviderScope.containerOf(context).read(chatRiverpod);
     final originalMessage = chatProvider.messages.firstWhere(
       (msg) => msg.id == replyToMessageId,
       orElse: () => ChatMessage(

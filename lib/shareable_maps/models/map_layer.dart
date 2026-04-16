@@ -151,7 +151,7 @@ class MapLayer {
   /// Check if layer has content
   bool get isNotEmpty => elementCount > 0;
 
-  /// Get all polygons as Google Maps Polygon objects
+  /// Get all polygons as Google Maps Polygon objects (skips marker-type entries)
   List<Polygon> getGoogleMapsPolygons({
     String? selectedElementId,
     String? editingElementId,
@@ -159,19 +159,28 @@ class MapLayer {
   }) {
     if (!isVisible) return [];
 
-    return polygons.asMap().entries.map((entry) {
-      final index = entry.key;
-      final polygon = entry.value;
+    final result = <Polygon>[];
+    for (int index = 0; index < polygons.length; index++) {
+      final polygon = polygons[index];
+
+      // Skip marker-type CustomPolygons — they are converted to markers
+      if (polygon.isMarker) continue;
+
       final polygonId = '${id}_polygon_$index';
+
+      // Skip the polygon being vertex-edited (replaced by editing overlay)
+      if (polygonId == editingElementId) continue;
+
       final isSelected = polygonId == selectedElementId;
 
-      return polygon.toGoogleMapsPolygon(
+      result.add(polygon.toGoogleMapsPolygon(
         polygonId: polygonId,
         isSelected: isSelected,
         isEditing: polygonId == editingElementId,
         onTap: onTap != null ? () => onTap(polygonId) : null,
-      );
-    }).toList();
+      ));
+    }
+    return result;
   }
 
   /// Get all polylines as Google Maps Polyline objects
@@ -182,7 +191,9 @@ class MapLayer {
   }) {
     if (!isVisible) return [];
 
-    return polylines.map((polyline) {
+    return polylines
+        .where((polyline) => polyline.id != editingElementId)
+        .map((polyline) {
       return polyline.toGoogleMapsPolyline(
         isSelected: polyline.id == selectedElementId,
         isEditing: polyline.id == editingElementId,
@@ -192,18 +203,58 @@ class MapLayer {
   }
 
   /// Get all points as Google Maps Marker objects
+  /// Includes both MapPoint entries and marker-type CustomPolygon entries.
+  /// If [pointIcons] is provided, uses custom bitmap icons per category.
+  /// If [visibleBounds] is provided, only points within those bounds are
+  /// returned (viewport culling for large point sets).
   List<Marker> getGoogleMapsMarkers({
     String? selectedElementId,
     Function(String pointId)? onTap,
+    bool draggable = false,
+    Function(String pointId, LatLng newPosition)? onDragEnd,
+    Map<PointCategory, BitmapDescriptor>? pointIcons,
+    LatLngBounds? visibleBounds,
   }) {
     if (!isVisible) return [];
 
-    return points.map((point) {
-      return point.toGoogleMapsMarker(
+    final result = <Marker>[];
+
+    // Regular MapPoint markers — cull by visible bounds when provided
+    final visiblePoints = visibleBounds != null
+        ? points.where((p) => visibleBounds.contains(p.position))
+        : points;
+
+    for (final point in visiblePoints) {
+      result.add(point.toGoogleMapsMarker(
         isSelected: point.id == selectedElementId,
         onTap: onTap != null ? () => onTap(point.id) : null,
+        draggable: draggable,
+        onDragEnd: draggable && onDragEnd != null
+            ? (pos) => onDragEnd(point.id, pos)
+            : null,
+        customIcon: pointIcons?[point.pointCategory],
+      ));
+    }
+
+    // Marker-type CustomPolygon entries
+    for (int i = 0; i < polygons.length; i++) {
+      final cp = polygons[i];
+      if (!cp.isMarker || cp.points.isEmpty) continue;
+      final markerId = '${id}_polygon_marker_$i';
+      final marker = cp.toGoogleMapsMarker(
+        markerId: markerId,
+        isSelected: markerId == selectedElementId,
+        onTap: onTap != null ? () => onTap(markerId) : null,
+        draggable: draggable,
+        onDragEnd: draggable && onDragEnd != null
+            ? (pos) => onDragEnd(markerId, pos)
+            : null,
+        customIcon: pointIcons?[cp.pointCategory],
       );
-    }).toList();
+      if (marker != null) result.add(marker);
+    }
+
+    return result;
   }
 
   /// Get bounding box that encompasses all elements in the layer

@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_job_list_status.dart';
+
+final jobListStatusRiverpod =
+    riverpod.ChangeNotifierProvider<JobListStatusProvider>(
+        (ref) => JobListStatusProvider());
 
 class JobListStatusProvider extends ChangeNotifier {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;

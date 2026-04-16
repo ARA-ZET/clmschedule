@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/job_type_provider.dart';
 import '../models/custom_job_type.dart';
 
-class JobTypeManagementDialog extends StatefulWidget {
+class JobTypeManagementDialog extends riverpod.ConsumerStatefulWidget {
   const JobTypeManagementDialog({super.key});
 
   @override
-  State<JobTypeManagementDialog> createState() =>
+  riverpod.ConsumerState<JobTypeManagementDialog> createState() =>
       _JobTypeManagementDialogState();
 }
 
-class _JobTypeManagementDialogState extends State<JobTypeManagementDialog> {
+class _JobTypeManagementDialogState
+    extends riverpod.ConsumerState<JobTypeManagementDialog> {
   final TextEditingController _labelController = TextEditingController();
   bool _isAdding = false;
   String? _editingId;
@@ -54,7 +55,7 @@ class _JobTypeManagementDialogState extends State<JobTypeManagementDialog> {
       return;
     }
 
-    final provider = Provider.of<JobTypeProvider>(context, listen: false);
+    final provider = ref.read(jobTypeRiverpod);
 
     try {
       if (_isAdding) {
@@ -92,7 +93,7 @@ class _JobTypeManagementDialogState extends State<JobTypeManagementDialog> {
     );
 
     if (confirmed == true) {
-      final provider = Provider.of<JobTypeProvider>(context, listen: false);
+      final provider = ref.read(jobTypeRiverpod);
       try {
         await provider.deleteJobType(id);
       } catch (e) {
@@ -107,8 +108,9 @@ class _JobTypeManagementDialogState extends State<JobTypeManagementDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<JobTypeProvider>(
-      builder: (context, provider, child) {
+    return Builder(
+      builder: (context) {
+        final provider = ref.watch(jobTypeRiverpod);
         return AlertDialog(
           title: Row(
             children: [

@@ -1,19 +1,19 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import '../models/inventory_tool.dart';
 import '../providers/inventory_provider.dart';
 
-class ManageAccessoriesDialog extends StatefulWidget {
+class ManageAccessoriesDialog extends riverpod.ConsumerStatefulWidget {
   final InventoryTool tool;
 
   const ManageAccessoriesDialog({super.key, required this.tool});
 
   @override
-  State<ManageAccessoriesDialog> createState() =>
+  riverpod.ConsumerState<ManageAccessoriesDialog> createState() =>
       _ManageAccessoriesDialogState();
 }
 
-class _ManageAccessoriesDialogState extends State<ManageAccessoriesDialog> {
+class _ManageAccessoriesDialogState extends riverpod.ConsumerState<ManageAccessoriesDialog> {
   // Map of base name to quantity needed
   final Map<String, int> _selectedAccessories = {};
   bool _isLoading = false;
@@ -40,7 +40,7 @@ class _ManageAccessoriesDialogState extends State<ManageAccessoriesDialog> {
     setState(() => _isLoading = true);
 
     try {
-      final inventoryProvider = context.read<InventoryProvider>();
+      final inventoryProvider = ref.read(inventoryRiverpod);
 
       // Convert base name quantities to AccessoryRequirement objects
       final List<AccessoryRequirement> requiredAccessories = [];
@@ -185,8 +185,9 @@ class _ManageAccessoriesDialogState extends State<ManageAccessoriesDialog> {
 
             // Tools list
             Expanded(
-              child: Consumer<InventoryProvider>(
-                builder: (context, inventoryProvider, child) {
+              child: Builder(
+                builder: (context) {
+                  final inventoryProvider = ref.watch(inventoryRiverpod);
                   // Filter to show only accessories type tools
                   var availableTools = inventoryProvider.tools
                       .where((t) =>

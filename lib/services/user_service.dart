@@ -1,6 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/user.dart';
+
+final userServiceRiverpod = riverpod.Provider<UserService>(
+  (ref) => UserService(FirebaseFirestore.instance),
+);
 
 /// Service for managing user data in Firestore
 /// Handles CRUD operations for user accounts and role management

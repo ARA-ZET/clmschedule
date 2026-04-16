@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import '../models/custom_polygon.dart';
 import '../models/job.dart';
+import '../shareable_maps/utils/point_marker_icons.dart';
 import 'package:intl/intl.dart';
 
 // Class to store polygon override settings
@@ -36,6 +37,8 @@ class PrintMapView extends StatefulWidget {
 class _PrintMapViewState extends State<PrintMapView> {
   GoogleMapController? _controller;
   final Set<Polygon> _polygons = {};
+  final Set<Polyline> _polylines = {};
+  final Set<Marker> _customPointMarkers = {};
   LatLng _center = const LatLng(-33.925, 18.425); // Cape Town city center
   bool _isLoading = true;
   bool _isDraggingInfoBox = false; // Track when dragging info box
@@ -70,6 +73,7 @@ class _PrintMapViewState extends State<PrintMapView> {
   Set<Marker> _vertexMarkers = {};
   BitmapDescriptor? _vertexMarkerIcon;
   BitmapDescriptor? _midpointMarkerIcon;
+  Map<PointCategory, BitmapDescriptor>? _pointIcons;
 
   @override
   void initState() {
@@ -95,11 +99,42 @@ class _PrintMapViewState extends State<PrintMapView> {
 
   void _updateMapView() {
     _polygons.clear();
+    _polylines.clear();
+    _customPointMarkers.clear();
 
     // Show all work maps with their respective colors
     if (widget.job.workMaps.isNotEmpty) {
       for (int i = 0; i < widget.job.workMaps.length; i++) {
         final workMap = widget.job.workMaps[i];
+
+        // Handle point/marker-type elements
+        if (workMap.isPoint && workMap.points.isNotEmpty) {
+          final marker = workMap.toGoogleMapsMarker(
+            markerId: 'workmap_marker_$i',
+            customIcon: _pointIcons?[workMap.pointCategory],
+          );
+          if (marker != null) {
+            _customPointMarkers.add(marker);
+          }
+          continue;
+        }
+
+        // Handle polyline-type elements
+        if (workMap.isPolyline && workMap.points.length >= 2) {
+          _polylines.add(
+            Polyline(
+              polylineId: PolylineId('workmap_polyline_$i'),
+              points: workMap.points,
+              color: workMap.color,
+              width: workMap.strokeWidth,
+              patterns: workMap.isDashed
+                  ? [PatternItem.dash(20), PatternItem.gap(10)]
+                  : [],
+            ),
+          );
+          continue;
+        }
+
         final polygonId = 'workmap_$i';
 
         // Check if there's an override for this polygon
@@ -223,6 +258,12 @@ class _PrintMapViewState extends State<PrintMapView> {
     } catch (_) {
       _midpointMarkerIcon =
           BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
+    }
+    try {
+      await PointMarkerIcons.preload();
+      _pointIcons = PointMarkerIcons.allCached;
+    } catch (_) {
+      _pointIcons = null;
     }
     if (mounted) setState(() {});
   }
@@ -656,7 +697,8 @@ class _PrintMapViewState extends State<PrintMapView> {
                       initialCameraPosition:
                           CameraPosition(target: _center, zoom: 12),
                       polygons: _polygons,
-                      markers: _vertexMarkers,
+                      polylines: _polylines,
+                      markers: {..._vertexMarkers, ..._customPointMarkers},
                       mapType: MapType.normal,
                       cloudMapId: "89c628d2bb3002712797ce42",
                       zoomControlsEnabled: false,

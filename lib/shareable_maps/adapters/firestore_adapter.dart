@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import '../models/shareable_map.dart';
 import '../services/shareable_maps_firestore_service.dart';
 import 'map_data_adapter.dart';
@@ -80,17 +81,35 @@ class FirestoreMapAdapter extends MapDataAdapter {
 
   @override
   Future<ShareableMap> load() async {
+    final sw = Stopwatch()..start();
+    debugPrint('[adapter.load] START (docId=$_docId, monthKey=$monthKey)');
+
+    ShareableMap map;
     if (_docId != null) {
-      final map = await _service.getMap(monthKey, _docId!);
-      if (map != null) return map;
-      // Document was deleted – fall through to seed or blank map.
+      final loaded = await _service.getMap(monthKey, _docId!);
+      debugPrint(
+          '[adapter.load] Firestore getMap done in ${sw.elapsedMilliseconds}ms');
+      map = loaded ??
+          _seed ??
+          ShareableMap.createWithDefaultLayer(
+            name: 'Untitled Map',
+            description: '',
+          );
+    } else {
+      map = _seed ??
+          ShareableMap.createWithDefaultLayer(
+            name: 'Untitled Map',
+            description: '',
+          );
     }
-    // New map – return the seed or a default blank map.
-    return _seed ??
-        ShareableMap.createWithDefaultLayer(
-          name: 'Untitled Map',
-          description: '',
-        );
+
+    // GPX layers from Cloud Storage are loaded by the provider's cloud
+    // overlay system (deferred until the map controller is ready), so we
+    // no longer block here.
+
+    debugPrint(
+        '[adapter.load] TOTAL: ${sw.elapsedMilliseconds}ms (layers=${map.layers.length})');
+    return map;
   }
 
   @override

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/job_list_item.dart';
 import '../models/job_list_item_update.dart';
 import '../models/collection_job.dart';
@@ -18,16 +18,17 @@ import '../services/job_assignment_service.dart';
 import 'job_assignment_preview_dialog.dart';
 import 'happy_sun_tools_dialog.dart';
 
-class AddEditJobDialog extends StatefulWidget {
+class AddEditJobDialog extends riverpod.ConsumerStatefulWidget {
   final JobListItem? jobToEdit;
 
   const AddEditJobDialog({super.key, this.jobToEdit});
 
   @override
-  State<AddEditJobDialog> createState() => _AddEditJobDialogState();
+  riverpod.ConsumerState<AddEditJobDialog> createState() =>
+      _AddEditJobDialogState();
 }
 
-class _AddEditJobDialogState extends State<AddEditJobDialog> {
+class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   final _formKey = GlobalKey<FormState>();
   final _scrollController = ScrollController();
 
@@ -334,9 +335,10 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                           ),
                                         ),
                                         const SizedBox(height: 12),
-                                        Consumer<JobListStatusProvider>(
-                                          builder:
-                                              (context, statusProvider, child) {
+                                        Builder(
+                                          builder: (context) {
+                                            final statusProvider = ref
+                                                .watch(jobListStatusRiverpod);
                                             var statuses = statusProvider
                                                 .getStatusesForJobType(
                                                     _selectedJobType);
@@ -390,9 +392,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                             labelText: 'Job Type *',
                                             border: OutlineInputBorder(),
                                           ),
-                                          items: Provider.of<JobTypeProvider>(
-                                                  context,
-                                                  listen: false)
+                                          items: ref
+                                              .read(jobTypeRiverpod)
                                               .jobTypes
                                               .map((type) {
                                             return DropdownMenuItem<String>(
@@ -440,10 +441,10 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                         const SizedBox(width: 12),
                                         Flexible(
                                           flex: 2,
-                                          child:
-                                              Consumer<JobListStatusProvider>(
-                                            builder: (context, statusProvider,
-                                                child) {
+                                          child: Builder(
+                                            builder: (context) {
+                                              final statusProvider = ref
+                                                  .watch(jobListStatusRiverpod);
                                               var statuses = statusProvider
                                                   .getStatusesForJobType(
                                                       _selectedJobType);
@@ -503,9 +504,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                               labelText: 'Job Type *',
                                               border: OutlineInputBorder(),
                                             ),
-                                            items: Provider.of<JobTypeProvider>(
-                                                    context,
-                                                    listen: false)
+                                            items: ref
+                                                .read(jobTypeRiverpod)
                                                 .jobTypes
                                                 .map((type) {
                                               return DropdownMenuItem<String>(
@@ -644,9 +644,10 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                   const SizedBox(width: 16),
                                   Expanded(
                                     flex: 2,
-                                    child: Consumer<CollectionScheduleProvider>(
-                                      builder:
-                                          (context, collectionProvider, child) {
+                                    child: Builder(
+                                      builder: (context) {
+                                        final collectionProvider = ref
+                                            .watch(collectionScheduleRiverpod);
                                         // Check if current selection has conflicts
                                         bool hasConflicts = false;
                                         String conflictMessage = '';
@@ -722,11 +723,11 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
                                                             TimeOfDay>(
                                                       context: context,
                                                       builder: (context) =>
-                                                          Consumer<
-                                                              CollectionScheduleProvider>(
-                                                        builder: (context,
-                                                            collectionProvider,
-                                                            child) {
+                                                          Builder(
+                                                        builder: (context) {
+                                                          final collectionProvider =
+                                                              ref.watch(
+                                                                  collectionScheduleRiverpod);
                                                           // Get vehicle type and count occupied slots for header info
                                                           VehicleType?
                                                               vehicleType;
@@ -1415,7 +1416,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
 
     // Log creation if this is a new job
     if (isNew) {
-      final authProvider = mounted ? context.read<AuthProvider>() : null;
+      final authProvider = mounted ? ref.read(authRiverpod) : null;
       final userId = authProvider?.user?.uid ?? 'system';
       final userName = authProvider?.appUser?.name ??
           authProvider?.user?.displayName ??
@@ -1543,7 +1544,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
             '   🔥 Calling JobListProvider.addJobListItem (direct DB write)');
         debugPrint(
             '   This will trigger Happy Sun sync if window/solar cleaning!');
-        await context.read<JobListProvider>().addJobListItem(jobListItem);
+        await ref.read(jobListRiverpod).addJobListItem(jobListItem);
         debugPrint('   ✅ JobListProvider.addJobListItem completed');
 
         // Return job with a special flag to indicate skip allocation
@@ -1591,7 +1592,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   Future<void> _showJobAssignmentPreview(JobListItem jobListItem) async {
     try {
       // Get the schedule provider
-      final scheduleProvider = context.read<ScheduleProvider>();
+      final scheduleProvider = ref.read(scheduleRiverpod);
 
       // Create the assignment service
       final assignmentService = JobAssignmentService(scheduleProvider);
@@ -1654,7 +1655,7 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
   Future<void> _createScheduleJobs(JobAssignmentService assignmentService,
       List<JobAssignment> assignments) async {
     try {
-      final scheduleProvider = context.read<ScheduleProvider>();
+      final scheduleProvider = ref.read(scheduleRiverpod);
 
       // Convert assignments to Job objects
       final jobs = assignmentService.createJobsFromAssignments(assignments);
@@ -1828,8 +1829,8 @@ class _AddEditJobDialogState extends State<AddEditJobDialog> {
       return;
     }
 
-    final inventoryProvider = context.read<InventoryProvider>();
-    final toolSettingsProvider = context.read<ToolSettingsProvider>();
+    final inventoryProvider = ref.read(inventoryRiverpod);
+    final toolSettingsProvider = ref.read(toolSettingsRiverpod);
 
     // Initialize inventory if needed
     if (inventoryProvider.tools.isEmpty && !inventoryProvider.isLoading) {

@@ -1,8 +1,13 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/inventory_tool.dart';
 import '../services/inventory_service.dart';
 import '../services/inventory_sync_service.dart';
+
+final inventoryRiverpod = riverpod.ChangeNotifierProvider<InventoryProvider>(
+  (ref) => InventoryProvider(ref.read(inventoryServiceRiverpod)),
+);
 
 class InventoryProvider extends ChangeNotifier {
   final InventoryService _inventoryService;

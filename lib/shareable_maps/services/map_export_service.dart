@@ -81,10 +81,14 @@ class MapExportService {
       }
       builder.element('visibility', nest: layer.isVisible ? '1' : '0');
 
-      // Add polygons
+      // Add polygons (skip marker-type entries)
       for (int i = 0; i < layer.polygons.length; i++) {
-        _addPolygon(
-            builder, layer.polygons[i], '${layer.id}_polygon_$i', layer.id);
+        final polygon = layer.polygons[i];
+        if (polygon.isMarker) {
+          _addMarkerPoint(builder, polygon, layer.id);
+          continue;
+        }
+        _addPolygon(builder, polygon, '${layer.id}_polygon_$i', layer.id);
       }
 
       // Add polylines
@@ -151,6 +155,28 @@ class MapExportService {
             builder.text('${point.longitude},${point.latitude},0\n');
           }
         });
+      });
+    });
+  }
+
+  /// Add a marker-type CustomPolygon as a Point placemark
+  static void _addMarkerPoint(
+    XmlBuilder builder,
+    CustomPolygon marker,
+    String layerId,
+  ) {
+    if (marker.points.isEmpty) return;
+    final pos = marker.markerPosition!;
+    builder.element('Placemark', nest: () {
+      builder.element('name', nest: marker.name);
+      if (marker.description.isNotEmpty) {
+        builder.element('description', nest: marker.description);
+      }
+      builder.element('styleUrl', nest: '#style_$layerId');
+
+      builder.element('Point', nest: () {
+        builder.element('coordinates',
+            nest: '${pos.longitude},${pos.latitude},0');
       });
     });
   }

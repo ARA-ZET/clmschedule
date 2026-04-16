@@ -1,5 +1,9 @@
 // track_editor/providers/te_files_provider.dart
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+
+final teFilesRiverpod = riverpod.ChangeNotifierProvider<TEFilesProvider>(
+    (ref) => TEFilesProvider());
 
 class TEFilesProvider extends ChangeNotifier {
   List<String> _selectedFileNames = [];

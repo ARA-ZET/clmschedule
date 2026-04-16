@@ -1,18 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../models/job.dart';
 import '../models/custom_polygon.dart';
 import '../models/distributor.dart';
 import '../providers/schedule_provider.dart';
+import '../providers/unfinished_work_areas_provider.dart';
 import '../providers/scale_provider.dart';
 import 'job_card.dart';
 import 'job_drop_confirmation_dialog.dart';
 
 /// Isolated widget for a single schedule grid cell
 /// Only rebuilds when its specific cell data changes
-class ScheduleJobCell extends StatelessWidget {
+class ScheduleJobCell extends riverpod.ConsumerWidget {
   final Distributor distributor;
   final DateTime date;
   final List<Job> jobs;
@@ -30,9 +31,90 @@ class ScheduleJobCell extends StatelessWidget {
     required this.isFullscreen,
   });
 
+  /// Handles a drop from the unfinished work areas panel into this cell.
+  Future<void> _handleUnfinishedDrop(
+    BuildContext context,
+    riverpod.WidgetRef ref,
+    Job unfinishedItem,
+    ScheduleProvider scheduleProvider,
+  ) async {
+    try {
+      final unfinishedProvider = ref.read(unfinishedWorkAreasRiverpod);
+
+      if (jobs.isNotEmpty) {
+        // Cell already has a job — combine the unfinished item into it
+        final targetJob = scheduleProvider.jobs.firstWhere(
+          (j) => j.id == jobs.first.id,
+          orElse: () => jobs.first,
+        );
+
+        final combinedClients = <String>{
+          ...targetJob.clients,
+          ...unfinishedItem.clients,
+        }.toList();
+
+        final combinedWorkingAreas = <String>{
+          ...targetJob.workingAreas,
+          ...unfinishedItem.workingAreas,
+        }.toList();
+
+        final combinedJob = targetJob.copyWith(
+          clients: combinedClients,
+          workingAreas: combinedWorkingAreas,
+        );
+
+        await scheduleProvider.updateJobWithUndo(targetJob, combinedJob, date);
+      } else {
+        // Empty cell — create a new job assigned to this distributor/date
+        final newJob = Job(
+          id: '', // Will be set by Firestore
+          clients: unfinishedItem.clients,
+          workingAreas: unfinishedItem.workingAreas,
+          workMaps: unfinishedItem.workMaps,
+          distributorId: distributor.id,
+          date: date,
+          statusId: unfinishedItem.statusId,
+        );
+        await scheduleProvider.addJobWithUndo(newJob, date);
+      }
+
+      // Remove from unfinished pool
+      await unfinishedProvider.removeItem(unfinishedItem.id);
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.white),
+                SizedBox(width: 8),
+                Expanded(child: Text('Assigned to schedule')),
+              ],
+            ),
+            backgroundColor: Colors.green.shade700,
+            duration: const Duration(milliseconds: 1500),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Unfinished drop failed: $e');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to assign: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
-    final scaleProvider = context.read<ScaleProvider>();
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final scaleProvider = ref.read(scaleRiverpod);
 
     return DragTarget<Job>(
       onAcceptWithDetails: (jobDetails) async {
@@ -40,7 +122,21 @@ class ScheduleJobCell extends StatelessWidget {
         final draggedJobId = jobDetails.data.id;
 
         // Get fresh job data from provider to avoid stale state
-        final scheduleProvider = context.read<ScheduleProvider>();
+        final scheduleProvider = ref.read(scheduleRiverpod);
+
+        // Check if this is an unfinished work area item (no distributorId)
+        final isFromUnfinishedPanel = jobDetails.data.distributorId.isEmpty;
+
+        if (isFromUnfinishedPanel) {
+          await _handleUnfinishedDrop(
+            context,
+            ref,
+            jobDetails.data,
+            scheduleProvider,
+          );
+          return;
+        }
+
         final draggedJob = scheduleProvider.jobs.firstWhere(
           (j) => j.id == draggedJobId,
           orElse: () => jobDetails.data, // Fallback to original if not found
@@ -325,8 +421,8 @@ class _AddJobButtonState extends State<_AddJobButton> {
       );
 
       if (mounted) {
-        await context
-            .read<ScheduleProvider>()
+        await riverpod.ProviderScope.containerOf(context)
+            .read(scheduleRiverpod)
             .addJobWithUndo(newJob, newJob.date);
       }
     } catch (e) {

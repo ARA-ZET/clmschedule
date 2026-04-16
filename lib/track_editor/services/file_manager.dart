@@ -43,6 +43,11 @@ class TEFileManager {
     return _fixNamespace(GpxWriter().asString(gpx, pretty: true));
   }
 
+  Future<String> toGpxTracksString(List<Trk> tracks) =>
+      _toGpxTracksString(tracks);
+
+  Future<String> toGpxWaypointsString(List<Wpt> points) => _toGpxString(points);
+
   Future<void> saveGpxWaypointsFile(String fileName, List<Wpt> points) async {
     final xmlString = await _toGpxString(points);
     await downloadStringAsFile(xmlString, fileName);

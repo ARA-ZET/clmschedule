@@ -1,61 +1,103 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
+import '../../config/flavor_config.dart';
 import '../../models/custom_polygon.dart';
+import '../../models/work_area.dart';
+import '../../providers/schedule_provider.dart';
 import '../providers/shareable_map_provider.dart';
 import '../providers/map_gesture_provider.dart';
 import '../services/map_link_service.dart';
 import '../adapters/firestore_adapter.dart';
+import '../adapters/work_area_adapter.dart';
+import '../utils/point_marker_icons.dart';
+import '../utils/marker_clusterer.dart';
 import 'map_layers_sidebar.dart';
 import 'map_drawing_toolbar.dart';
 import 'map_import_dialog.dart';
 import 'work_area_picker_panel.dart';
+import 'work_area_table_panel.dart';
 
 /// Main map editor widget for the universal map editor.
 /// Displays Google Maps with drawing tools and layer management.
 /// UI elements are conditionally shown based on the active adapter's
 /// [MapEditorCapabilities].
-class ShareableMapEditor extends StatelessWidget {
+class ShareableMapEditor extends riverpod.ConsumerWidget {
   const ShareableMapEditor({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final provider = ref.watch(shareableMapRiverpod);
     return Scaffold(
       appBar: const MapEditorAppBar(),
-      body: ChangeNotifierProvider(
-        create: (_) => MapGestureProvider(),
-        child: Consumer<ShareableMapProvider>(
-          builder: (context, provider, child) {
-            if (provider.isLoading) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            if (provider.currentMap == null) {
-              return const MapEditorEmptyState();
-            }
-            final caps = provider.capabilities;
-            return Stack(
-              children: [
-                const MapViewWidget(),
-                if (caps.canManageLayers) const MapSidebarWidget(),
-                if (caps.canDraw && !caps.readOnly)
-                  const MapDrawingToolbarWidget(),
-                if (!caps.readOnly) const MapDrawingControlsWidget(),
-                // Work area picker panel (positioned top-right under app bar)
-                if (provider.isWorkAreaPickerVisible)
-                  Positioned(
-                    top: 8,
-                    right: 8,
-                    child: WorkAreaPickerPanel(
-                      onClose: () => provider.hideWorkAreaPicker(),
+      body: Builder(
+        builder: (context) {
+          if (provider.isLoading) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (provider.currentMap == null) {
+            return const MapEditorEmptyState();
+          }
+          final caps = provider.capabilities;
+          final isWorkAreaEditor =
+              provider.adapter is WorkAreaCollectionAdapter;
+          return Stack(
+            children: [
+              const MapViewWidget(),
+              if (caps.canManageLayers) const MapSidebarWidget(),
+              if (isWorkAreaEditor) const _WorkAreaTableSidebar(),
+              if (caps.canDraw && !caps.readOnly)
+                const MapDrawingToolbarWidget(),
+              if (!caps.readOnly) const MapDrawingControlsWidget(),
+              // Cloud tracks loading indicator
+              if (provider.isLoadingCloudTracks)
+                Positioned(
+                  top: 8,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.92),
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.15),
+                              blurRadius: 8),
+                        ],
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2)),
+                          SizedBox(width: 8),
+                          Text('Loading cloud tracks…',
+                              style: TextStyle(fontSize: 13)),
+                        ],
+                      ),
                     ),
                   ),
-              ],
-            );
-          },
-        ),
+                ),
+              // Work area picker panel (positioned top-right under app bar)
+              if (provider.isWorkAreaPickerVisible)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: WorkAreaPickerPanel(
+                    onClose: () => provider.hideWorkAreaPicker(),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -66,17 +108,19 @@ class ShareableMapEditor extends StatelessWidget {
 // ============================================================================
 
 /// App bar for the map editor — capability-driven, with polygon search
-class MapEditorAppBar extends StatefulWidget implements PreferredSizeWidget {
+class MapEditorAppBar extends riverpod.ConsumerStatefulWidget
+    implements PreferredSizeWidget {
   const MapEditorAppBar({super.key});
 
   @override
   Size get preferredSize => const Size.fromHeight(kToolbarHeight);
 
   @override
-  State<MapEditorAppBar> createState() => _MapEditorAppBarState();
+  riverpod.ConsumerState<MapEditorAppBar> createState() =>
+      _MapEditorAppBarState();
 }
 
-class _MapEditorAppBarState extends State<MapEditorAppBar> {
+class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
   // Reference to the Autocomplete's internal controller so we can clear it
   TextEditingController? _autocompleteController;
   FocusNode? _autocompleteFocusNode;
@@ -117,6 +161,7 @@ class _MapEditorAppBarState extends State<MapEditorAppBar> {
       subtitle: subtitle,
       type: 'polygon',
       anchor: centroid,
+      letterBoxEstimate: polygon.letterBoxEstimate,
     ));
   }
 
@@ -176,287 +221,258 @@ class _MapEditorAppBarState extends State<MapEditorAppBar> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ShareableMapProvider>(
-      builder: (context, provider, child) {
-        final caps = provider.capabilities;
-        final allPolygons = provider.getSearchablePolygons();
+    final provider = ref.watch(shareableMapRiverpod);
+    final caps = provider.capabilities;
+    final allPolygons = provider.getSearchablePolygons();
 
-        return AppBar(
-          backgroundColor: Colors.white,
-          elevation: 0,
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back, color: Color(0xFF5F6368)),
-            onPressed: () async {
-              // Save & capture thumbnail only when changes were made
-              if (provider.hasUnsavedChanges &&
-                  provider.hasAdapter &&
-                  provider.adapter is FirestoreMapAdapter) {
-                await provider.saveToAdapter(captureThumbnail: true);
-              }
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
-          titleSpacing: 0,
-          title: Row(
-            children: [
-              // Search field
-              Flexible(
-                child: Autocomplete<
-                    ({CustomPolygon polygon, String layerId, int index})>(
-                  optionsBuilder: (TextEditingValue textEditingValue) {
-                    if (textEditingValue.text.isEmpty) return allPolygons;
-                    final query = textEditingValue.text.toLowerCase();
-                    return allPolygons.where((entry) {
-                      final name = entry.polygon.name.toLowerCase();
-                      final desc = entry.polygon.description.toLowerCase();
-                      return name.contains(query) || desc.contains(query);
-                    });
-                  },
-                  displayStringForOption: (option) =>
-                      option.polygon.name.isNotEmpty
-                          ? option.polygon.name
-                          : 'Unnamed Polygon',
-                  fieldViewBuilder: (context, textEditingController, focusNode,
-                      onFieldSubmitted) {
-                    _autocompleteController = textEditingController;
-                    _autocompleteFocusNode = focusNode;
-                    return TextField(
-                      controller: textEditingController,
-                      focusNode: focusNode,
-                      style: const TextStyle(
-                          color: Color(0xFF202124), fontSize: 14),
-                      decoration: InputDecoration(
-                        hintText: 'Search work areas...',
-                        hintStyle: const TextStyle(
-                            color: Color(0xFF9AA0A6), fontSize: 14),
-                        prefixIcon: const Icon(Icons.search,
-                            size: 20, color: Color(0xFF9AA0A6)),
-                        suffixIcon: textEditingController.text.isNotEmpty
-                            ? IconButton(
-                                icon: const Icon(Icons.close,
-                                    size: 18, color: Color(0xFF5F6368)),
-                                onPressed: () {
-                                  textEditingController.clear();
-                                  // Trigger rebuild so suffix icon hides
-                                  // ignore: invalid_use_of_protected_member
-                                  (context as Element).markNeedsBuild();
-                                },
-                              )
-                            : null,
-                        filled: true,
-                        fillColor: const Color(0xFFF1F3F4),
-                        contentPadding: const EdgeInsets.symmetric(
-                            vertical: 8, horizontal: 12),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: const BorderSide(
-                              color: Color(0xFF1967D2), width: 1.5),
-                        ),
-                      ),
-                      onChanged: (_) {
-                        // Force rebuild for suffix icon visibility
-                        // ignore: invalid_use_of_protected_member
-                        (context as Element).markNeedsBuild();
-                      },
-                      onSubmitted: (_) => onFieldSubmitted(),
-                    );
-                  },
-                  optionsViewBuilder: (context, onSelected, options) {
-                    return Align(
-                      alignment: Alignment.topLeft,
-                      child: Material(
-                        elevation: 4,
-                        borderRadius: BorderRadius.circular(8),
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(
-                            maxHeight: 300,
-                            maxWidth: 400,
-                          ),
-                          child: ListView.builder(
-                            padding: EdgeInsets.zero,
-                            shrinkWrap: true,
-                            itemCount: options.length,
-                            itemBuilder: (context, i) {
-                              final entry = options.elementAt(i);
-                              final poly = entry.polygon;
-                              final name = poly.name.isNotEmpty
-                                  ? poly.name
-                                  : 'Unnamed Polygon';
-                              final areaKm2 = _polygonAreaKm2(poly.points);
+    final isMapsStandalone = FlavorConfig.instance.isMaps;
 
-                              return ListTile(
-                                dense: true,
-                                leading: Container(
-                                  width: 16,
-                                  height: 16,
-                                  decoration: BoxDecoration(
-                                    color: poly.color
-                                        .withValues(alpha: poly.fillOpacity),
-                                    border: Border.all(
-                                      color: poly.color,
-                                      width: 2,
-                                    ),
-                                    borderRadius: BorderRadius.circular(3),
-                                  ),
-                                ),
-                                title: Text(
-                                  name,
-                                  style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                subtitle: Text(
-                                  _fmtKm2(areaKm2),
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Color(0xFF5F6368),
-                                  ),
-                                ),
-                                onTap: () => onSelected(entry),
-                              );
+    return AppBar(
+      backgroundColor: Colors.white,
+      elevation: 0,
+      leading: isMapsStandalone
+          ? null
+          : IconButton(
+              icon: const Icon(Icons.arrow_back, color: Color(0xFF5F6368)),
+              onPressed: () async {
+                // Unfocus any active text field so pending edits
+                // (e.g. estimate changes) are committed before saving.
+                FocusManager.instance.primaryFocus?.unfocus();
+                await Future.delayed(Duration.zero);
+
+                // Auto-save on exit with thumbnail capture
+                if (provider.hasUnsavedChanges && provider.hasAdapter) {
+                  await provider.saveToAdapter(captureThumbnail: true);
+                }
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+      automaticallyImplyLeading: !isMapsStandalone,
+      titleSpacing: isMapsStandalone ? 16 : 0,
+      title: Row(
+        children: [
+          // Search field
+          Flexible(
+            child: Autocomplete<
+                ({CustomPolygon polygon, String layerId, int index})>(
+              optionsBuilder: (TextEditingValue textEditingValue) {
+                if (textEditingValue.text.isEmpty) return allPolygons;
+                final query = textEditingValue.text.toLowerCase();
+                return allPolygons.where((entry) {
+                  final name = entry.polygon.name.toLowerCase();
+                  final desc = entry.polygon.description.toLowerCase();
+                  return name.contains(query) || desc.contains(query);
+                });
+              },
+              displayStringForOption: (option) => option.polygon.name.isNotEmpty
+                  ? option.polygon.name
+                  : 'Unnamed Polygon',
+              fieldViewBuilder: (context, textEditingController, focusNode,
+                  onFieldSubmitted) {
+                _autocompleteController = textEditingController;
+                _autocompleteFocusNode = focusNode;
+                return TextField(
+                  controller: textEditingController,
+                  focusNode: focusNode,
+                  style:
+                      const TextStyle(color: Color(0xFF202124), fontSize: 14),
+                  decoration: InputDecoration(
+                    hintText: 'Search work areas...',
+                    hintStyle:
+                        const TextStyle(color: Color(0xFF9AA0A6), fontSize: 14),
+                    prefixIcon: const Icon(Icons.search,
+                        size: 20, color: Color(0xFF9AA0A6)),
+                    suffixIcon: textEditingController.text.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(Icons.close,
+                                size: 18, color: Color(0xFF5F6368)),
+                            onPressed: () {
+                              textEditingController.clear();
+                              // Trigger rebuild so suffix icon hides
+                              // ignore: invalid_use_of_protected_member
+                              (context as Element).markNeedsBuild();
                             },
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                  onSelected: (entry) {
-                    _onSearchResultSelected(
-                      provider,
-                      entry.polygon,
-                      entry.layerId,
-                      entry.index,
-                    );
-                    // Clear the search field and dismiss keyboard
-                    _autocompleteController?.clear();
-                    _autocompleteFocusNode?.unfocus();
-                  },
-                ),
-              ),
-              // Context title from adapter (distributor · date · clients)
-              if (provider.adapter != null &&
-                  provider.adapter!.displayName.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(left: 8),
-                  child: Text(
-                    provider.adapter!.displayName,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: Color(0xFF5F6368),
+                          )
+                        : null,
+                    filled: true,
+                    fillColor: const Color(0xFFF1F3F4),
+                    contentPadding:
+                        const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none,
                     ),
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 1,
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: const BorderSide(
+                          color: Color(0xFF1967D2), width: 1.5),
+                    ),
                   ),
-                ),
-            ],
-          ),
-          actions: [
-            const SizedBox(width: 4),
-            // Map tools
-            IconButton(
-              icon: const Icon(Icons.undo, size: 22, color: Color(0xFF5F6368)),
-              tooltip: 'Undo',
-              onPressed: () {
-                // TODO: Implement undo
+                  onChanged: (_) {
+                    // Force rebuild for suffix icon visibility
+                    // ignore: invalid_use_of_protected_member
+                    (context as Element).markNeedsBuild();
+                  },
+                  onSubmitted: (_) => onFieldSubmitted(),
+                );
               },
-            ),
-            IconButton(
-              icon: const Icon(Icons.redo, size: 22, color: Color(0xFF5F6368)),
-              tooltip: 'Redo',
-              onPressed: () {
-                // TODO: Implement redo
-              },
-            ),
-            const SizedBox(width: 8),
-            // Work areas import toggle
-            IconButton(
-              icon: Icon(
-                Icons.workspaces_outlined,
-                size: 22,
-                color: provider.isWorkAreaPickerVisible
-                    ? const Color(0xFF1967D2)
-                    : const Color(0xFF5F6368),
-              ),
-              tooltip: 'Import work areas',
-              onPressed: () {
-                provider.toggleWorkAreaPicker();
-              },
-            ),
-            // Import button — only if capabilities allow
-            if (caps.canImport)
-              IconButton(
-                icon: const Icon(Icons.upload_file,
-                    size: 22, color: Color(0xFF5F6368)),
-                tooltip: 'Import KML/GPX',
-                onPressed: () => MapEditorDialogs.showImportDialog(context),
-              ),
-            // Layers toggle — only if layer management is enabled
-            if (caps.canManageLayers)
-              IconButton(
-                icon: const Icon(Icons.layers_outlined,
-                    size: 22, color: Color(0xFF5F6368)),
-                tooltip: 'Toggle layers',
-                onPressed: () {
-                  provider.toggleSidebar();
-                },
-              ),
-            // Save button — shown when adapter requests it
-            if (caps.showSaveButton && provider.hasAdapter)
-              Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: provider.isSaving
-                    ? const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      )
-                    : IconButton(
-                        icon: const Icon(Icons.save,
-                            size: 22, color: Color(0xFF1967D2)),
-                        tooltip: 'Save',
-                        onPressed: () async {
-                          final success = await provider.saveToAdapter(
-                            captureThumbnail: true,
-                          );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(success
-                                    ? 'Saved successfully'
-                                    : 'Failed to save'),
-                                duration: const Duration(seconds: 2),
+              optionsViewBuilder: (context, onSelected, options) {
+                return Align(
+                  alignment: Alignment.topLeft,
+                  child: Material(
+                    elevation: 4,
+                    borderRadius: BorderRadius.circular(8),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxHeight: 300,
+                        maxWidth: 400,
+                      ),
+                      child: ListView.builder(
+                        padding: EdgeInsets.zero,
+                        shrinkWrap: true,
+                        itemCount: options.length,
+                        itemBuilder: (context, i) {
+                          final entry = options.elementAt(i);
+                          final poly = entry.polygon;
+                          final name = poly.name.isNotEmpty
+                              ? poly.name
+                              : 'Unnamed Polygon';
+                          final areaKm2 = _polygonAreaKm2(poly.points);
+
+                          return ListTile(
+                            dense: true,
+                            leading: Container(
+                              width: 16,
+                              height: 16,
+                              decoration: BoxDecoration(
+                                color: poly.color
+                                    .withValues(alpha: poly.fillOpacity),
+                                border: Border.all(
+                                  color: poly.color,
+                                  width: 2,
+                                ),
+                                borderRadius: BorderRadius.circular(3),
                               ),
-                            );
-                          }
+                            ),
+                            title: Text(
+                              name,
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              _fmtKm2(areaKm2),
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFF5F6368),
+                              ),
+                            ),
+                            onTap: () => onSelected(entry),
+                          );
                         },
                       ),
+                    ),
+                  ),
+                );
+              },
+              onSelected: (entry) {
+                _onSearchResultSelected(
+                  provider,
+                  entry.polygon,
+                  entry.layerId,
+                  entry.index,
+                );
+                // Clear the search field and dismiss keyboard
+                _autocompleteController?.clear();
+                _autocompleteFocusNode?.unfocus();
+              },
+            ),
+          ),
+          // Context title from adapter (distributor · date · clients)
+          if (provider.adapter != null &&
+              provider.adapter!.displayName.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: Text(
+                provider.adapter!.displayName,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: Color(0xFF5F6368),
+                ),
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
               ),
-            // Share button — only for Firestore-backed maps
-            if (provider.adapter is FirestoreMapAdapter)
-              IconButton(
-                icon:
-                    const Icon(Icons.share, size: 22, color: Color(0xFF5F6368)),
-                tooltip: 'Copy share link',
-                onPressed: () => _copyShareLink(context, provider),
-              ),
-            const SizedBox(width: 8),
-          ],
-        );
-      },
+            ),
+        ],
+      ),
+      actions: [
+        const SizedBox(width: 4),
+        // Map tools
+        IconButton(
+          icon: const Icon(Icons.undo, size: 22, color: Color(0xFF5F6368)),
+          tooltip: 'Undo',
+          onPressed: () {
+            // TODO: Implement undo
+          },
+        ),
+        IconButton(
+          icon: const Icon(Icons.redo, size: 22, color: Color(0xFF5F6368)),
+          tooltip: 'Redo',
+          onPressed: () {
+            // TODO: Implement redo
+          },
+        ),
+        const SizedBox(width: 8),
+        // Work areas import toggle (admin only — hidden in Maps flavor)
+        if (!isMapsStandalone)
+          IconButton(
+            icon: Icon(
+              Icons.workspaces_outlined,
+              size: 22,
+              color: provider.isWorkAreaPickerVisible
+                  ? const Color(0xFF1967D2)
+                  : const Color(0xFF5F6368),
+            ),
+            tooltip: 'Import work areas',
+            onPressed: () {
+              provider.toggleWorkAreaPicker();
+            },
+          ),
+        // Import button (admin only — hidden in Maps flavor)
+        if (!isMapsStandalone && caps.canImport)
+          IconButton(
+            icon: const Icon(Icons.upload_file,
+                size: 22, color: Color(0xFF5F6368)),
+            tooltip: 'Import KML/GPX',
+            onPressed: () => MapEditorDialogs.showImportDialog(context),
+          ),
+        // Layers toggle — only if layer management is enabled
+        if (caps.canManageLayers)
+          IconButton(
+            icon: const Icon(Icons.layers_outlined,
+                size: 22, color: Color(0xFF5F6368)),
+            tooltip: 'Toggle layers',
+            onPressed: () {
+              provider.toggleSidebar();
+            },
+          ),
+
+        // Share button — only for Firestore-backed maps
+        if (provider.adapter is FirestoreMapAdapter)
+          IconButton(
+            icon: const Icon(Icons.share, size: 22, color: Color(0xFF5F6368)),
+            tooltip: 'Copy share link',
+            onPressed: () => _copyShareLink(context, provider),
+          ),
+        const SizedBox(width: 8),
+      ],
     );
   }
 
@@ -550,17 +566,27 @@ class MapEditorEmptyState extends StatelessWidget {
 }
 
 /// Google Maps view with drawing capabilities
-class MapViewWidget extends StatefulWidget {
+class MapViewWidget extends riverpod.ConsumerStatefulWidget {
   const MapViewWidget({super.key});
 
   @override
-  State<MapViewWidget> createState() => _MapViewWidgetState();
+  riverpod.ConsumerState<MapViewWidget> createState() => _MapViewWidgetState();
 }
 
-class _MapViewWidgetState extends State<MapViewWidget> {
+class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   // Custom marker icons for vertex editing
   BitmapDescriptor? _vertexMarkerIcon;
   BitmapDescriptor? _midpointMarkerIcon;
+  BitmapDescriptor? _firstVertexMarkerIcon;
+
+  // Cached point category bitmap descriptors
+  Map<PointCategory, BitmapDescriptor>? _pointIcons;
+
+  // Letterbox icon for cloud waypoints
+  BitmapDescriptor? _waypointIcon;
+
+  // Pre-rendered cluster icons (letterbox + count badge) keyed by bucketed count
+  Map<int, BitmapDescriptor> _clusterIconCache = {};
 
   // Live camera position – updated on every onCameraMove so the info window
   // overlay can be reprojected synchronously on each frame.
@@ -609,6 +635,49 @@ class _MapViewWidgetState extends State<MapViewWidget> {
       _midpointMarkerIcon =
           BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
     }
+
+    try {
+      _firstVertexMarkerIcon = await _createCircleMarkerIcon(
+        size: 20.0,
+        fillColor: Colors.green,
+        borderColor: Colors.white,
+        borderWidth: 2.0,
+      );
+    } catch (_) {
+      _firstVertexMarkerIcon =
+          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen);
+    }
+
+    // Preload point category icons
+    try {
+      await PointMarkerIcons.preload();
+      _pointIcons = PointMarkerIcons.allCached;
+    } catch (_) {
+      _pointIcons = null;
+    }
+
+    // Load letterbox icon for cloud waypoints
+    try {
+      final data = await rootBundle.load('assets/letterbox.png');
+      final codec = await ui.instantiateImageCodec(
+        data.buffer.asUint8List(),
+        targetWidth: 16,
+      );
+      final fi = await codec.getNextFrame();
+      final byteData =
+          await fi.image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData != null) {
+        _waypointIcon = BitmapDescriptor.bytes(byteData.buffer.asUint8List());
+      }
+    } catch (_) {
+      _waypointIcon = null;
+    }
+
+    // Pre-render cluster icons (letterbox + count badge) for common buckets
+    try {
+      await MarkerClusterer.loadBaseImage();
+      _clusterIconCache = await MarkerClusterer.warmUpClusterIcons();
+    } catch (_) {}
 
     if (mounted) setState(() {});
   }
@@ -688,7 +757,35 @@ class _MapViewWidgetState extends State<MapViewWidget> {
     return midpoints;
   }
 
-  Set<Marker> _buildEditingMarkers(ShareableMapProvider provider) {
+  void _showDeleteVertexDialog(
+      BuildContext context, ShareableMapProvider provider, int index) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Vertex'),
+        content: Text(
+            'Remove vertex ${index + 1} of ${provider.editingPoints!.length}?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              provider.removeEditingPoint(index);
+              if (mounted) setState(() {});
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Set<Marker> _buildEditingMarkers(
+      BuildContext context, ShareableMapProvider provider) {
     if (!provider.isEditingVertices || provider.editingPoints == null) {
       return {};
     }
@@ -701,6 +798,8 @@ class _MapViewWidgetState extends State<MapViewWidget> {
     final midpointIcon = _midpointMarkerIcon ??
         BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
 
+    final minPoints = provider.isEditingPolygon ? 3 : 2;
+
     for (int i = 0; i < editingPoints.length; i++) {
       markers.add(
         Marker(
@@ -708,6 +807,19 @@ class _MapViewWidgetState extends State<MapViewWidget> {
           icon: vertexIcon,
           position: editingPoints[i],
           draggable: true,
+          consumeTapEvents: true,
+          onTap: () {
+            if (editingPoints.length <= minPoints) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Minimum $minPoints vertices required'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+              return;
+            }
+            _showDeleteVertexDialog(context, provider, i);
+          },
           onDrag: (newPosition) => provider.updateEditingPoint(i, newPosition),
           onDragEnd: (newPosition) =>
               provider.updateEditingPoint(i, newPosition),
@@ -739,12 +851,56 @@ class _MapViewWidgetState extends State<MapViewWidget> {
     return markers;
   }
 
+  // ── Drawing markers (circle bitmaps, first-marker-tap to close) ────────
+
+  Set<Marker> _buildDrawingMarkers(
+      BuildContext context, ShareableMapProvider provider) {
+    if (!provider.isDrawing || provider.drawingPoints.isEmpty) {
+      return {};
+    }
+
+    final points = provider.drawingPoints;
+    final canClose =
+        provider.drawingMode == DrawingMode.polygon && points.length >= 3;
+
+    final normalIcon = _vertexMarkerIcon ??
+        BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+    final firstIcon = canClose
+        ? (_firstVertexMarkerIcon ??
+            BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen))
+        : normalIcon;
+
+    return points.asMap().entries.map((entry) {
+      final index = entry.key;
+      final point = entry.value;
+      final isFirst = index == 0;
+
+      return Marker(
+        markerId: MarkerId('drawing_point_$index'),
+        position: point,
+        icon: isFirst ? firstIcon : normalIcon,
+        anchor: const Offset(0.5, 0.5),
+        zIndex: isFirst ? 1001 : 1000,
+        draggable: false,
+        consumeTapEvents: isFirst && canClose,
+        onTap: isFirst && canClose
+            ? () {
+                // User tapped the first marker — complete the polygon
+                provider.setDialogOpen(true);
+                MapEditorDialogs.showElementNameDialog(context, provider)
+                    .then((_) => provider.setDialogOpen(false));
+              }
+            : null,
+      );
+    }).toSet();
+  }
+
   // ── Info window helpers ────────────────────────────────────────────────
 
   void _dismissInfoWindow() {
-    final provider = context.read<ShareableMapProvider>();
+    final provider = ref.read(shareableMapRiverpod);
     if (provider.infoWindowData != null) {
-      context.read<MapGestureProvider>().enableMapGestures();
+      ref.read(mapGestureRiverpod).enableMapGestures();
       provider.dismissInfoWindow();
     }
   }
@@ -804,6 +960,25 @@ class _MapViewWidgetState extends State<MapViewWidget> {
     final sinLat = (expVal - 1) / (expVal + 1);
     final lat = math.asin(sinLat.clamp(-1.0, 1.0)) * 180 / math.pi;
     return LatLng(lat, lng);
+  }
+
+  /// Estimate the visible map region from the current camera + widget size.
+  /// Uses 20% padding so markers near edges don't pop in/out abruptly.
+  LatLngBounds? _estimateVisibleBounds() {
+    final cam = _currentCamera;
+    if (cam == null || _mapSize == Size.zero) return null;
+    const padding = 1.2;
+    final sw = _screenToLatLng(
+      Offset(-_mapSize.width * (padding - 1), _mapSize.height * padding),
+      cam,
+      _mapSize,
+    );
+    final ne = _screenToLatLng(
+      Offset(_mapSize.width * padding, -_mapSize.height * (padding - 1)),
+      cam,
+      _mapSize,
+    );
+    return LatLngBounds(southwest: sw, northeast: ne);
   }
 
   /// Returns the LatLng of the last pointer-down, falling back to [fallback].
@@ -951,160 +1126,251 @@ class _MapViewWidgetState extends State<MapViewWidget> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ShareableMapProvider>(
-      builder: (context, provider, child) {
-        final map = provider.currentMap!;
-        final iw = provider.infoWindowData;
+    final provider = ref.watch(shareableMapRiverpod);
+    final map = provider.currentMap!;
+    final iw = provider.infoWindowData;
 
-        // Combine completed polygons with drawing preview (or editing preview)
-        final polygons = <Polygon>{
-          if (!provider.isEditingVertices)
-            ...map.getAllGoogleMapsPolygons(
-              selectedElementId: provider.selectedElementId,
-              onTap: (polygonId) =>
-                  _handlePolygonTap(context, provider, polygonId),
-            ),
-          if (provider.isEditingVertices &&
-              provider.getEditingPolygon() != null)
-            provider.getEditingPolygon()!,
-          if (provider.getDrawingPolygon() != null)
-            provider.getDrawingPolygon()!,
-        };
+    // All visible layers (persisted + cloud overlays) sorted by draw order
+    final visibleLayers = provider.layers
+        .where((layer) => layer.isVisible)
+        .toList()
+      ..sort((a, b) => a.order.compareTo(b.order));
 
-        // Combine completed polylines with drawing preview (or editing preview)
-        final polylines = <Polyline>{
-          if (!provider.isEditingVertices)
-            ...map.getAllGoogleMapsPolylines(
-              selectedElementId: provider.selectedElementId,
-              onTap: (polylineId) =>
-                  _handlePolylineTap(context, provider, polylineId),
-            ),
-          if (provider.isEditingVertices &&
-              provider.getEditingPolyline() != null)
-            provider.getEditingPolyline()!,
-          if (provider.getDrawingPolyline() != null)
-            provider.getDrawingPolyline()!,
-        };
+    // All layers sorted by draw order (including hidden ones for stable
+    // marker IDs — hidden layers use markerVisible: false so Google Maps
+    // hides them natively instead of removing from DOM).
+    final allLayersSorted = provider.layers.toList()
+      ..sort((a, b) => a.order.compareTo(b.order));
 
-        // Combine completed markers with drawing/editing markers
-        final markers = <Marker>{
-          if (!provider.isEditingVertices)
-            ...map.getAllGoogleMapsMarkers(
-              selectedElementId: provider.selectedElementId,
-              onTap: (pointId) => _handleMarkerTap(context, provider, pointId),
-            ),
-          ...provider.getDrawingMarkers(),
-          ..._buildEditingMarkers(provider),
-        };
+    // Combine completed polygons with drawing preview (or editing preview)
+    final polygons = <Polygon>{
+      ...visibleLayers.expand((layer) => layer.getGoogleMapsPolygons(
+            selectedElementId: provider.selectedElementId,
+            editingElementId: provider.editingElementId,
+            onTap: provider.isEditingVertices
+                ? null
+                : (polygonId) =>
+                    _handlePolygonTap(context, provider, polygonId),
+          )),
+      if (provider.isEditingVertices && provider.getEditingPolygon() != null)
+        provider.getEditingPolygon()!,
+    };
 
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            final mapSize = Size(constraints.maxWidth, constraints.maxHeight);
-            _mapSize = mapSize;
-            // Reproject anchor LatLng → screen pixel on every frame so the
-            // overlay tracks the geographic point during pan and zoom.
-            final infoScreen = iw != null && _currentCamera != null
-                ? _latLngToScreen(iw.anchor, _currentCamera!, mapSize)
-                : null;
+    // When work area picker is visible, overlay ghost polygons for all
+    // unimported work areas so the user can tap them on the map to add.
+    if (provider.isWorkAreaPickerVisible) {
+      final workAreas = ref.watch(scheduleRiverpod).workAreas;
+      for (final wa in workAreas) {
+        if (provider.isWorkAreaImported(wa.name)) continue;
+        if (wa.polygonPoints.length < 3) continue;
+        polygons.add(Polygon(
+          polygonId: PolygonId('preview_wa_${wa.name}'),
+          points: wa.polygonPoints,
+          strokeColor: Colors.blue.withValues(alpha: 0.7),
+          strokeWidth: 2,
+          fillColor: Colors.blue.withValues(alpha: 0.10),
+          consumeTapEvents: true,
+          onTap: () => _handlePreviewWorkAreaTap(context, provider, wa),
+        ));
+      }
+    }
 
-            return MouseRegion(
-              onHover: (event) => _onHover(event.localPosition, provider),
-              onExit: (_) {
-                if (_hoverTooltipData != null) {
-                  setState(() {
-                    _hoverTooltipData = null;
-                    _hoverPosition = null;
-                  });
-                }
-              },
-              child: Listener(
-                onPointerDown: (e) => _lastPointerDown = e.localPosition,
-                child: Stack(
-                  children: [
-                    GoogleMap(
-                      initialCameraPosition: CameraPosition(
-                        target: map.defaultCenter,
-                        zoom: map.defaultZoom,
-                      ),
-                      onMapCreated: (controller) {
-                        provider.setMapController(controller);
-                      },
-                      onCameraMove: (pos) =>
-                          setState(() => _currentCamera = pos),
-                      webGestureHandling:
-                          context.watch<MapGestureProvider>().gestureHandling,
-                      onTap: (position) {
-                        // Guard: on web, both the Flutter overlay InkWell and
-                        // the underlying GoogleMap HTML element can receive the
-                        // same click. Ignore the map tap if an info-window
-                        // action button was pressed within the last 300 ms.
-                        if (_lastInfoWindowAction != null &&
-                            DateTime.now()
-                                    .difference(_lastInfoWindowAction!)
-                                    .inMilliseconds <
-                                300) {
-                          return;
-                        }
-                        // Dismiss hover tooltip on tap
-                        setState(() {
-                          _hoverTooltipData = null;
-                          _hoverPosition = null;
-                        });
-                        _dismissInfoWindow();
-                        _handleMapTap(context, provider, position);
-                      },
-                      polygons: polygons,
-                      polylines: polylines,
-                      markers: markers,
-                      mapType: provider.mapType,
-                      style: provider.mapStyle,
-                      myLocationButtonEnabled: true,
-                      myLocationEnabled: true,
-                      zoomControlsEnabled: true,
-                      mapToolbarEnabled: false,
-                    ),
-                    if (provider.showStylePanel && infoScreen != null)
-                      _MapStylePanel(screen: infoScreen),
-                    if (infoScreen != null)
-                      _InfoWindowOverlay(
-                        screen: infoScreen,
-                        mapSize: mapSize,
-                        data: iw!,
-                        onDismiss: _dismissInfoWindow,
-                        onStyle: iw.type != 'point'
-                            ? () {
-                                _lastInfoWindowAction = DateTime.now();
-                                provider.toggleStylePanel();
-                              }
-                            : null,
-                        onEditVertices: () {
-                          final elementId = iw.elementId;
-                          final type = iw.type;
-                          _dismissInfoWindow();
-                          if (type == 'polygon' || type == 'polyline') {
-                            provider.startVertexEditing(elementId);
-                          }
-                        },
-                        onPhoto: null,
-                        onDelete: () {
-                          provider.deleteSelectedElement();
-                          _dismissInfoWindow();
-                        },
-                      ),
-                    // Hover tooltip overlay
-                    if (_hoverTooltipData != null &&
-                        _hoverPosition != null &&
-                        iw == null)
-                      _HoverTooltip(
-                        data: _hoverTooltipData!,
-                        position: _hoverPosition!,
-                        mapSize: mapSize,
-                      ),
-                  ],
-                ),
-              ),
-            );
+    // Combine completed polylines with drawing preview (or editing preview)
+    final polylines = <Polyline>{
+      ...visibleLayers.expand((layer) => layer.getGoogleMapsPolylines(
+            selectedElementId: provider.selectedElementId,
+            editingElementId: provider.editingElementId,
+            onTap: provider.isEditingVertices
+                ? null
+                : (polylineId) =>
+                    _handlePolylineTap(context, provider, polylineId),
+          )),
+      if (provider.isEditingVertices && provider.getEditingPolyline() != null)
+        provider.getEditingPolyline()!,
+      if (provider.getDrawingPolyline() != null) provider.getDrawingPolyline()!,
+    };
+
+    // Combine completed markers with drawing/editing markers
+    final isDraggable = !provider.capabilities.readOnly &&
+        !provider.isDrawing &&
+        !provider.isEditingVertices;
+    // Build a special pointIcons map for the cloud waypoints layer
+    // so that its generic markers use the letterbox bitmap.
+    Map<PointCategory, BitmapDescriptor>? waypointPointIcons;
+    if (_waypointIcon != null) {
+      waypointPointIcons = {
+        if (_pointIcons != null) ..._pointIcons!,
+        PointCategory.generic: _waypointIcon!,
+      };
+    }
+
+    // Viewport bounds and zoom for clustering large layers.
+    final viewBounds = _estimateVisibleBounds();
+    final currentZoom = _currentCamera?.zoom ?? map.defaultZoom;
+
+    final markers = <Marker>{
+      if (!provider.isEditingVertices) ...[
+        // Small layers: render all markers directly
+        ...visibleLayers
+            .where((layer) => layer.points.length <= 200)
+            .expand((layer) {
+          final isWaypointLayer =
+              layer.name == ShareableMapProvider.waypointsLayerName;
+          return layer.getGoogleMapsMarkers(
+            selectedElementId: provider.selectedElementId,
+            onTap: (pointId) => _handleMarkerTap(context, provider, pointId),
+            draggable: isDraggable,
+            onDragEnd: isDraggable
+                ? (pointId, newPos) => provider.moveMarker(pointId, newPos)
+                : null,
+            pointIcons: isWaypointLayer
+                ? (waypointPointIcons ?? _pointIcons)
+                : _pointIcons,
+          );
+        }),
+        // Large layers: always include (visible or not) with markerVisible
+        // flag so Google Maps hides/shows natively without add/remove churn.
+        ...allLayersSorted
+            .where((layer) => layer.points.length > 200)
+            .expand((layer) {
+          return MarkerClusterer.clusterSync(
+            points: layer.points,
+            zoom: currentZoom,
+            visibleBounds: viewBounds,
+            selectedElementId: provider.selectedElementId,
+            onTap: (pointId) => _handleMarkerTap(context, provider, pointId),
+            draggable: isDraggable && layer.isVisible,
+            onDragEnd: isDraggable && layer.isVisible
+                ? (pointId, newPos) => provider.moveMarker(pointId, newPos)
+                : null,
+            customIcon: _waypointIcon,
+            clusterIcons: _clusterIconCache,
+            markerVisible: layer.isVisible,
+          );
+        }),
+      ],
+      ..._buildDrawingMarkers(context, provider),
+      ..._buildEditingMarkers(context, provider),
+    };
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final mapSize = Size(constraints.maxWidth, constraints.maxHeight);
+        _mapSize = mapSize;
+        // Reproject anchor LatLng → screen pixel on every frame so the
+        // overlay tracks the geographic point during pan and zoom.
+        final infoScreen = iw != null && _currentCamera != null
+            ? _latLngToScreen(iw.anchor, _currentCamera!, mapSize)
+            : null;
+
+        return MouseRegion(
+          onHover: (event) => _onHover(event.localPosition, provider),
+          onExit: (_) {
+            if (_hoverTooltipData != null) {
+              setState(() {
+                _hoverTooltipData = null;
+                _hoverPosition = null;
+              });
+            }
           },
+          child: Listener(
+            onPointerDown: (e) => _lastPointerDown = e.localPosition,
+            child: Stack(
+              children: [
+                GoogleMap(
+                  initialCameraPosition: CameraPosition(
+                    target: map.defaultCenter,
+                    zoom: map.defaultZoom,
+                  ),
+                  onMapCreated: (controller) {
+                    provider.setMapController(controller);
+                  },
+                  onCameraMove: (pos) => setState(() => _currentCamera = pos),
+                  webGestureHandling:
+                      ref.watch(mapGestureRiverpod).gestureHandling,
+                  onTap: (position) {
+                    // Guard: ignore map tap when user is interacting with
+                    // a UI overlay (gestures disabled by MouseRegion/Listener).
+                    if (ref.read(mapGestureRiverpod).gestureHandling ==
+                        WebGestureHandling.none) {
+                      return;
+                    }
+                    // Guard: on web, both the Flutter overlay InkWell and
+                    // the underlying GoogleMap HTML element can receive the
+                    // same click. Ignore the map tap if an info-window
+                    // action button was pressed within the last 300 ms.
+                    if (_lastInfoWindowAction != null &&
+                        DateTime.now()
+                                .difference(_lastInfoWindowAction!)
+                                .inMilliseconds <
+                            300) {
+                      return;
+                    }
+                    // Dismiss hover tooltip on tap
+                    setState(() {
+                      _hoverTooltipData = null;
+                      _hoverPosition = null;
+                    });
+                    _dismissInfoWindow();
+                    _handleMapTap(context, provider, position);
+                  },
+                  polygons: polygons,
+                  polylines: polylines,
+                  markers: markers,
+                  mapType: provider.mapType,
+                  style: provider.mapStyle,
+                  myLocationButtonEnabled: true,
+                  myLocationEnabled: true,
+                  zoomControlsEnabled: true,
+                  mapToolbarEnabled: false,
+                ),
+                if (provider.showStylePanel && infoScreen != null)
+                  _MapStylePanel(screen: infoScreen),
+                if (infoScreen != null)
+                  _InfoWindowOverlay(
+                    screen: infoScreen,
+                    mapSize: mapSize,
+                    data: iw!,
+                    onDismiss: _dismissInfoWindow,
+                    onStyle: iw.type != 'point'
+                        ? () {
+                            _lastInfoWindowAction = DateTime.now();
+                            provider.toggleStylePanel();
+                          }
+                        : null,
+                    onEditVertices: () {
+                      _lastInfoWindowAction = DateTime.now();
+                      final elementId = iw.elementId;
+                      final type = iw.type;
+                      _dismissInfoWindow();
+                      if (type == 'polygon' || type == 'polyline') {
+                        provider.startVertexEditing(elementId);
+                      }
+                    },
+                    onPhoto: null,
+                    onDelete: () {
+                      _lastInfoWindowAction = DateTime.now();
+                      // Use explicit IDs from the info window data —
+                      // selectedElementId may already be cleared by a
+                      // concurrent web tap-through.
+                      final elementId = iw.elementId;
+                      final layerId = iw.layerId;
+                      _dismissInfoWindow();
+                      provider.deleteElement(elementId, layerId);
+                    },
+                  ),
+                // Hover tooltip overlay
+                if (_hoverTooltipData != null &&
+                    _hoverPosition != null &&
+                    iw == null)
+                  _HoverTooltip(
+                    data: _hoverTooltipData!,
+                    position: _hoverPosition!,
+                    mapSize: mapSize,
+                  ),
+              ],
+            ),
+          ),
         );
       },
     );
@@ -1121,6 +1387,9 @@ class _MapViewWidgetState extends State<MapViewWidget> {
 
     switch (provider.drawingMode) {
       case DrawingMode.polygon:
+        if (!provider.isDrawing) provider.startDrawing();
+        provider.addDrawingPoint(position);
+        break;
       case DrawingMode.polyline:
         if (!provider.isDrawing) provider.startDrawing();
         provider.addDrawingPoint(position);
@@ -1143,8 +1412,14 @@ class _MapViewWidgetState extends State<MapViewWidget> {
   Future<void> _handlePolygonTap(BuildContext context,
       ShareableMapProvider provider, String polygonId) async {
     // Ignore element taps when gestures are disabled (user is over a UI overlay)
-    if (context.read<MapGestureProvider>().gestureHandling ==
+    if (ref.read(mapGestureRiverpod).gestureHandling ==
         WebGestureHandling.none) {
+      return;
+    }
+    // Guard against tap-through from the info window overlay on web.
+    // If the info window is open, dismiss it and swallow the tap.
+    if (provider.infoWindowData != null) {
+      _dismissInfoWindow();
       return;
     }
     if (provider.isDrawing || provider.isEditingVertices) return;
@@ -1170,13 +1445,73 @@ class _MapViewWidgetState extends State<MapViewWidget> {
       subtitle: subtitle,
       type: 'polygon',
       anchor: _tapAnchor(_centroid(polygon.points)),
+      letterBoxEstimate: polygon.letterBoxEstimate,
     ));
+  }
+
+  /// Handle tap on a preview (ghost) work-area polygon shown during import
+  /// mode. Shows a confirmation dialog letting the user add it to the map.
+  void _handlePreviewWorkAreaTap(
+      BuildContext context, ShareableMapProvider provider, WorkArea wa) {
+    final areaKm2 = _polygonAreaKm2(wa.polygonPoints);
+    final perimeterKm = _pathLengthKm(wa.polygonPoints, closed: true);
+
+    showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(wa.name, style: const TextStyle(fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (wa.description.isNotEmpty) ...[
+              Text(wa.description,
+                  style:
+                      const TextStyle(fontSize: 13, color: Color(0xFF5F6368))),
+              const SizedBox(height: 8),
+            ],
+            Text(
+              '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF9AA0A6)),
+            ),
+            if (wa.letterBoxEstimate > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '~${wa.letterBoxEstimate} letter boxes',
+                  style:
+                      const TextStyle(fontSize: 12, color: Color(0xFF9AA0A6)),
+                ),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('Add to Map'),
+          ),
+        ],
+      ),
+    ).then((confirmed) {
+      if (confirmed == true) {
+        provider.addWorkAreaToMap(wa);
+      }
+    });
   }
 
   void _handlePolylineTap(
       BuildContext context, ShareableMapProvider provider, String polylineId) {
-    if (context.read<MapGestureProvider>().gestureHandling ==
+    if (ref.read(mapGestureRiverpod).gestureHandling ==
         WebGestureHandling.none) {
+      return;
+    }
+    if (provider.infoWindowData != null) {
+      _dismissInfoWindow();
       return;
     }
     if (provider.isDrawing || provider.isEditingVertices) return;
@@ -1185,13 +1520,28 @@ class _MapViewWidgetState extends State<MapViewWidget> {
       final found =
           layer.polylines.where((p) => p.id == polylineId).firstOrNull;
       if (found != null) {
-        final lengthKm = _pathLengthKm(found.points);
+        // Build subtitle with track metadata if available
+        String subtitle;
+        if (found.hasTrackMetadata) {
+          final parts = <String>[found.formattedDistance];
+          if (found.formattedTimeRange.isNotEmpty) {
+            parts.add(found.formattedTimeRange);
+          }
+          if (found.formattedDuration.isNotEmpty) {
+            parts.add(found.formattedDuration);
+          }
+          subtitle = parts.join(' · ');
+        } else {
+          final lengthKm = _pathLengthKm(found.points);
+          subtitle = _fmtKm(lengthKm);
+        }
+
         provider.openInfoWindow(InfoWindowData(
           elementId: polylineId,
           layerId: layer.id,
           title: found.name.isNotEmpty ? found.name : 'Unnamed Polyline',
           description: found.description,
-          subtitle: _fmtKm(lengthKm),
+          subtitle: subtitle,
           type: 'polyline',
           anchor: _tapAnchor(_centroid(found.points)),
         ));
@@ -1202,8 +1552,12 @@ class _MapViewWidgetState extends State<MapViewWidget> {
 
   void _handleMarkerTap(
       BuildContext context, ShareableMapProvider provider, String pointId) {
-    if (context.read<MapGestureProvider>().gestureHandling ==
+    if (ref.read(mapGestureRiverpod).gestureHandling ==
         WebGestureHandling.none) {
+      return;
+    }
+    if (provider.infoWindowData != null) {
+      _dismissInfoWindow();
       return;
     }
     for (final layer in provider.layers) {
@@ -1225,247 +1579,265 @@ class _MapViewWidgetState extends State<MapViewWidget> {
 }
 
 /// Sidebar widget with layer management
-class MapSidebarWidget extends StatelessWidget {
+class MapSidebarWidget extends riverpod.ConsumerWidget {
   const MapSidebarWidget({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return Consumer<ShareableMapProvider>(
-      builder: (context, provider, child) {
-        if (!provider.isSidebarVisible) {
-          return const SizedBox.shrink();
-        }
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final provider = ref.watch(shareableMapRiverpod);
+    if (!provider.isSidebarVisible) {
+      return const SizedBox.shrink();
+    }
 
-        return Positioned(
-          left: 0,
-          top: 0,
-          bottom: 0,
-          child: Container(
-            width: 300,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.1),
-                  blurRadius: 8,
-                  offset: const Offset(2, 0),
-                ),
-              ],
-            ),
-            child: MouseRegion(
-              onEnter: (_) =>
-                  context.read<MapGestureProvider>().disableMapGestures(),
-              onExit: (_) =>
-                  context.read<MapGestureProvider>().enableMapGestures(),
-              child: const MapLayersSidebar(),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// Drawing toolbar with tool selection buttons
-class MapDrawingToolbarWidget extends StatelessWidget {
-  const MapDrawingToolbarWidget({super.key});
-
-  @override
-  Widget build(BuildContext context) {
     return Positioned(
-      right: 16,
-      top: 16,
-      child: MouseRegion(
-        onEnter: (_) => context.read<MapGestureProvider>().disableMapGestures(),
-        onExit: (_) => context.read<MapGestureProvider>().enableMapGestures(),
-        child: SizedBox(
-          width: 80,
-          child: const MapDrawingToolbar(),
+      left: 0,
+      top: 0,
+      bottom: 0,
+      child: Container(
+        width: 300,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.1),
+              blurRadius: 8,
+              offset: const Offset(2, 0),
+            ),
+          ],
+        ),
+        child: MouseRegion(
+          onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+          onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+          child: const MapLayersSidebar(),
         ),
       ),
     );
   }
 }
 
+/// Left sidebar for the work-areas editor: table of polygons with name + estimate.
+class _WorkAreaTableSidebar extends riverpod.ConsumerWidget {
+  const _WorkAreaTableSidebar();
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    return Positioned(
+      left: 0,
+      top: 0,
+      bottom: 0,
+      child: Container(
+        width: 320,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.1),
+              blurRadius: 8,
+              offset: const Offset(2, 0),
+            ),
+          ],
+        ),
+        child: MouseRegion(
+          onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+          onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+          child: const WorkAreaTablePanel(),
+        ),
+      ),
+    );
+  }
+}
+
+/// Drawing toolbar with tool selection buttons
+class MapDrawingToolbarWidget extends riverpod.ConsumerWidget {
+  const MapDrawingToolbarWidget({super.key});
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    return Positioned(
+      right: 16,
+      top: 16,
+      child: MouseRegion(
+        onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+        onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+        child: const MapDrawingToolbar(),
+      ),
+    );
+  }
+}
+
 /// Drawing controls panel shown during drawing
-class MapDrawingControlsWidget extends StatelessWidget {
+class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
   const MapDrawingControlsWidget({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return Consumer<ShareableMapProvider>(
-      builder: (context, provider, child) {
-        if (!provider.isDrawing) {
-          return const SizedBox.shrink();
-        }
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final provider = ref.watch(shareableMapRiverpod);
+    if (!provider.isDrawing) {
+      return const SizedBox.shrink();
+    }
 
-        final pointCount = provider.drawingPoints.length;
-        final canComplete = _canCompleteDrawing(provider);
+    final pointCount = provider.drawingPoints.length;
+    final canComplete = _canCompleteDrawing(provider);
 
-        return Positioned(
-          bottom: 16,
-          left: 0,
-          right: 0,
-          child: Center(
-            child: Material(
-              elevation: 8,
-              borderRadius: BorderRadius.circular(8),
-              child: MouseRegion(
-                onEnter: (_) =>
-                    context.read<MapGestureProvider>().disableMapGestures(),
-                onExit: (_) =>
-                    context.read<MapGestureProvider>().enableMapGestures(),
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xFFDADCE0)),
-                  ),
-                  child: Column(
+    return Positioned(
+      bottom: 16,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: Material(
+          elevation: 8,
+          borderRadius: BorderRadius.circular(8),
+          child: MouseRegion(
+            onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+            onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFDADCE0)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Status text
+                  Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      // Status text
-                      Row(
+                      Icon(
+                        _getDrawingModeIcon(provider.drawingMode),
+                        size: 20,
+                        color: const Color(0xFF1967D2),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Drawing ${_getDrawingModeLabel(provider.drawingMode)}',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF202124),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8F0FE),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          '$pointCount ${pointCount == 1 ? 'point' : 'points'}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF1967D2),
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  // Action buttons
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Undo last point
+                      OutlinedButton.icon(
+                        onPressed: pointCount > 0
+                            ? () {
+                                provider.removeLastDrawingPoint();
+                                provider.markIgnoreNextTap();
+                              }
+                            : null,
+                        icon: const Icon(Icons.undo, size: 18),
+                        label: const Text('Undo'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF5F6368),
+                          side: const BorderSide(color: Color(0xFFDADCE0)),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      // Cancel
+                      OutlinedButton.icon(
+                        onPressed: () => provider.cancelDrawing(),
+                        icon: const Icon(Icons.close, size: 18),
+                        label: const Text('Cancel'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFFD93025),
+                          side: const BorderSide(color: Color(0xFFDADCE0)),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      // Complete
+                      ElevatedButton.icon(
+                        onPressed: canComplete
+                            ? () {
+                                // Block drawing while dialog is open
+                                provider.setDialogOpen(true);
+                                MapEditorDialogs.showElementNameDialog(
+                                        context, provider)
+                                    .then((_) {
+                                  // Unblock drawing when dialog closes
+                                  provider.setDialogOpen(false);
+                                });
+                              }
+                            : null,
+                        icon: const Icon(Icons.check, size: 18),
+                        label: const Text('Complete'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF1967D2),
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: const Color(0xFFE8EAED),
+                          disabledForegroundColor: const Color(0xFF80868B),
+                        ),
+                      ),
+                    ],
+                  ),
+                  // Hint text with more guidance
+                  if (!canComplete)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        _getDrawingHint(provider.drawingMode, pointCount),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF5F6368),
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  // Progress indicator for polygons and polylines
+                  if (provider.drawingMode == DrawingMode.polygon ||
+                      provider.drawingMode == DrawingMode.polyline)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Icon(
-                            _getDrawingModeIcon(provider.drawingMode),
-                            size: 20,
-                            color: const Color(0xFF1967D2),
+                            Icons.info_outline,
+                            size: 12,
+                            color: Colors.grey[600],
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 4),
                           Text(
-                            'Drawing ${_getDrawingModeLabel(provider.drawingMode)}',
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: Color(0xFF202124),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFE8F0FE),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '$pointCount ${pointCount == 1 ? 'point' : 'points'}',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFF1967D2),
-                                fontWeight: FontWeight.w500,
-                              ),
+                            'Click map to add points, then complete',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[600],
+                              fontStyle: FontStyle.italic,
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 12),
-                      // Action buttons
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          // Undo last point
-                          OutlinedButton.icon(
-                            onPressed: pointCount > 0
-                                ? () {
-                                    provider.removeLastDrawingPoint();
-                                    provider.markIgnoreNextTap();
-                                  }
-                                : null,
-                            icon: const Icon(Icons.undo, size: 18),
-                            label: const Text('Undo'),
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: const Color(0xFF5F6368),
-                              side: const BorderSide(color: Color(0xFFDADCE0)),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          // Cancel
-                          OutlinedButton.icon(
-                            onPressed: () => provider.cancelDrawing(),
-                            icon: const Icon(Icons.close, size: 18),
-                            label: const Text('Cancel'),
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: const Color(0xFFD93025),
-                              side: const BorderSide(color: Color(0xFFDADCE0)),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          // Complete
-                          ElevatedButton.icon(
-                            onPressed: canComplete
-                                ? () {
-                                    // Block drawing while dialog is open
-                                    provider.setDialogOpen(true);
-                                    MapEditorDialogs.showElementNameDialog(
-                                            context, provider)
-                                        .then((_) {
-                                      // Unblock drawing when dialog closes
-                                      provider.setDialogOpen(false);
-                                    });
-                                  }
-                                : null,
-                            icon: const Icon(Icons.check, size: 18),
-                            label: const Text('Complete'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF1967D2),
-                              foregroundColor: Colors.white,
-                              disabledBackgroundColor: const Color(0xFFE8EAED),
-                              disabledForegroundColor: const Color(0xFF80868B),
-                            ),
-                          ),
-                        ],
-                      ),
-                      // Hint text with more guidance
-                      if (!canComplete)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Text(
-                            _getDrawingHint(provider.drawingMode, pointCount),
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Color(0xFF5F6368),
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                      // Progress indicator for polygons and polylines
-                      if (provider.drawingMode == DrawingMode.polygon ||
-                          provider.drawingMode == DrawingMode.polyline)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 4),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.info_outline,
-                                size: 12,
-                                color: Colors.grey[600],
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                'Click map to add points, then complete',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.grey[600],
-                                  fontStyle: FontStyle.italic,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
+                    ),
+                ],
               ),
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -1575,7 +1947,9 @@ class MapEditorDialogs {
           ElevatedButton(
             onPressed: () {
               if (nameController.text.trim().isNotEmpty) {
-                context.read<ShareableMapProvider>().createNewMap(
+                riverpod.ProviderScope.containerOf(context)
+                    .read(shareableMapRiverpod)
+                    .createNewMap(
                       name: nameController.text.trim(),
                       description: descController.text.trim(),
                     );
@@ -1596,7 +1970,9 @@ class MapEditorDialogs {
     ).then((imported) {
       if (imported == true && context.mounted) {
         // Fit map to show imported data
-        context.read<ShareableMapProvider>().fitMapToBounds();
+        riverpod.ProviderScope.containerOf(context)
+            .read(shareableMapRiverpod)
+            .fitMapToBounds();
       }
     });
   }
@@ -1605,55 +1981,94 @@ class MapEditorDialogs {
       BuildContext context, ShareableMapProvider provider) {
     final nameController = TextEditingController();
     final descController = TextEditingController();
+    final isPoint = provider.drawingMode == DrawingMode.point;
+    PointCategory selectedCategory = PointCategory.generic;
 
     return showDialog(
       context: context,
       barrierDismissible: false, // Prevent dismissing by clicking outside
-      builder: (dialogContext) => AlertDialog(
-        title: Text('Name ${_getDrawingModeLabel(provider.drawingMode)}'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(
-                labelText: 'Name',
-                hintText: 'Enter name',
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: Text('Name ${_getDrawingModeLabel(provider.drawingMode)}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isPoint) ...[
+                DropdownButtonFormField<PointCategory>(
+                  initialValue: selectedCategory,
+                  decoration: const InputDecoration(
+                    labelText: 'Point Type',
+                  ),
+                  items: PointCategory.values.map((cat) {
+                    return DropdownMenuItem(
+                      value: cat,
+                      child: Row(
+                        children: [
+                          Icon(cat.icon, color: cat.color, size: 20),
+                          const SizedBox(width: 8),
+                          Text(cat.label),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                  onChanged: (val) {
+                    if (val != null) {
+                      setDialogState(() => selectedCategory = val);
+                      if (nameController.text.isEmpty ||
+                          PointCategory.values
+                              .any((c) => c.label == nameController.text)) {
+                        nameController.text = val.label;
+                      }
+                    }
+                  },
+                ),
+                const SizedBox(height: 16),
+              ],
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Name',
+                  hintText: 'Enter name',
+                ),
+                autofocus: !isPoint,
               ),
-              autofocus: true,
+              const SizedBox(height: 16),
+              TextField(
+                controller: descController,
+                decoration: const InputDecoration(
+                  labelText: 'Description (optional)',
+                  hintText: 'Enter description',
+                ),
+                maxLines: 2,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                provider.cancelDrawing();
+                Navigator.pop(dialogContext);
+              },
+              child: const Text('Cancel'),
             ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: descController,
-              decoration: const InputDecoration(
-                labelText: 'Description (optional)',
-                hintText: 'Enter description',
-              ),
-              maxLines: 2,
+            ElevatedButton(
+              onPressed: () {
+                final name = nameController.text.trim().isNotEmpty
+                    ? nameController.text.trim()
+                    : (isPoint ? selectedCategory.label : null);
+                if (name != null && name.isNotEmpty) {
+                  provider.completeDrawing(
+                    name: name,
+                    description: descController.text.trim(),
+                    pointCategory: isPoint ? selectedCategory : null,
+                  );
+                  Navigator.pop(dialogContext);
+                }
+              },
+              child: const Text('Save'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              provider.cancelDrawing();
-              Navigator.pop(dialogContext);
-            },
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (nameController.text.trim().isNotEmpty) {
-                provider.completeDrawing(
-                  name: nameController.text.trim(),
-                  description: descController.text.trim(),
-                );
-                Navigator.pop(dialogContext);
-              }
-            },
-            child: const Text('Save'),
-          ),
-        ],
       ),
     );
   }
@@ -1678,13 +2093,13 @@ class MapEditorDialogs {
 
 /// Style panel widget (proper StatelessWidget instead of widget function).
 /// Reads info window data from the provider and delegates style changes.
-class _MapStylePanel extends StatelessWidget {
+class _MapStylePanel extends riverpod.ConsumerWidget {
   final Offset screen;
   const _MapStylePanel({required this.screen});
 
   @override
-  Widget build(BuildContext context) {
-    final provider = context.read<ShareableMapProvider>();
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final provider = ref.read(shareableMapRiverpod);
     final iw = provider.infoWindowData;
     if (iw == null) return const SizedBox.shrink();
 
@@ -1870,7 +2285,7 @@ class _HoverTooltip extends StatelessWidget {
 }
 
 /// Info window overlay that appears at the tap location, matching Google My Maps style.
-class _InfoWindowOverlay extends StatefulWidget {
+class _InfoWindowOverlay extends riverpod.ConsumerStatefulWidget {
   final InfoWindowData data;
   final VoidCallback onDismiss;
 
@@ -1905,10 +2320,12 @@ class _InfoWindowOverlay extends StatefulWidget {
   });
 
   @override
-  State<_InfoWindowOverlay> createState() => _InfoWindowOverlayState();
+  riverpod.ConsumerState<_InfoWindowOverlay> createState() =>
+      _InfoWindowOverlayState();
 }
 
-class _InfoWindowOverlayState extends State<_InfoWindowOverlay> {
+class _InfoWindowOverlayState
+    extends riverpod.ConsumerState<_InfoWindowOverlay> {
   static const double _cardWidth = 260.0;
   static const double _tailHalfWidth = 10.0;
   static const double _tailH = 8.0;
@@ -1953,7 +2370,7 @@ class _InfoWindowOverlayState extends State<_InfoWindowOverlay> {
   void _commitTitle() {
     final newName = _titleController.text.trim();
     if (newName.isNotEmpty && newName != widget.data.title) {
-      context.read<ShareableMapProvider>().renameElement(
+      ref.read(shareableMapRiverpod).renameElement(
             widget.data.layerId,
             widget.data.elementId,
             widget.data.type,
@@ -2010,14 +2427,23 @@ class _InfoWindowOverlayState extends State<_InfoWindowOverlay> {
         ? Positioned(
             left: left,
             bottom: widget.mapSize.height - offset.dy,
-            child: MouseRegion(
-              onEnter: (_) =>
-                  context.read<MapGestureProvider>().disableMapGestures(),
-              onExit: (_) =>
-                  context.read<MapGestureProvider>().enableMapGestures(),
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () {}, // absorb taps so GoogleMap.onTap doesn't fire
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) =>
+                  ref.read(mapGestureRiverpod).disableMapGestures(),
+              onPointerUp: (_) {
+                // Keep gestures disabled briefly so the platform view
+                // doesn't fire GoogleMap.onTap concurrently.
+                Future.delayed(const Duration(milliseconds: 350), () {
+                  if (context.mounted) {
+                    ref.read(mapGestureRiverpod).enableMapGestures();
+                  }
+                });
+              },
+              child: MouseRegion(
+                onEnter: (_) =>
+                    ref.read(mapGestureRiverpod).disableMapGestures(),
+                onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
                 child: column,
               ),
             ),
@@ -2025,14 +2451,21 @@ class _InfoWindowOverlayState extends State<_InfoWindowOverlay> {
         : Positioned(
             left: left,
             top: offset.dy,
-            child: MouseRegion(
-              onEnter: (_) =>
-                  context.read<MapGestureProvider>().disableMapGestures(),
-              onExit: (_) =>
-                  context.read<MapGestureProvider>().enableMapGestures(),
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () {}, // absorb taps so GoogleMap.onTap doesn't fire
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) =>
+                  ref.read(mapGestureRiverpod).disableMapGestures(),
+              onPointerUp: (_) {
+                Future.delayed(const Duration(milliseconds: 350), () {
+                  if (context.mounted) {
+                    ref.read(mapGestureRiverpod).enableMapGestures();
+                  }
+                });
+              },
+              child: MouseRegion(
+                onEnter: (_) =>
+                    ref.read(mapGestureRiverpod).disableMapGestures(),
+                onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
                 child: column,
               ),
             ),
@@ -2059,10 +2492,8 @@ class _InfoWindowOverlayState extends State<_InfoWindowOverlay> {
             // ── Title row ──────────────────────────────────────────
             MouseRegion(
               cursor: SystemMouseCursors.text,
-              onEnter: (_) =>
-                  context.read<MapGestureProvider>().disableMapGestures(),
-              onExit: (_) =>
-                  context.read<MapGestureProvider>().enableMapGestures(),
+              onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+              onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(14, 12, 8, 8),
                 child: Row(
@@ -2131,6 +2562,9 @@ class _InfoWindowOverlayState extends State<_InfoWindowOverlay> {
               ),
             ),
 
+            // ── Point category selector (points only) ──────────────
+            if (data.type == 'point') _buildCategoryRow(data),
+
             // ── Description (optional) ─────────────────────────────
             if (hasDesc)
               Padding(
@@ -2150,7 +2584,8 @@ class _InfoWindowOverlayState extends State<_InfoWindowOverlay> {
               Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                child: _buildStatsRow(data.type, data.subtitle),
+                child: _buildStatsRow(
+                    data.type, data.subtitle, data.letterBoxEstimate),
               ),
             ],
 
@@ -2166,33 +2601,73 @@ class _InfoWindowOverlayState extends State<_InfoWindowOverlay> {
     );
   }
 
-  Widget _buildStatsRow(String type, String subtitle) {
+  Widget _buildStatsRow(String type, String subtitle, int letterBoxEstimate) {
     if (type == 'polygon') {
       // subtitle format: "X.XX km²  ·  X.XX km"
       final parts = subtitle.split('·');
       final areaPart = parts.isNotEmpty ? parts[0].trim() : subtitle;
       final perimPart = parts.length > 1 ? parts[1].trim() : '';
-      return Row(
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _StatItem(
-            icon: _AreaIcon(),
-            label: areaPart,
+          Row(
+            children: [
+              _StatItem(
+                icon: _AreaIcon(),
+                label: areaPart,
+              ),
+              if (perimPart.isNotEmpty) ...[
+                const SizedBox(width: 16),
+                _StatItem(
+                  icon: const Icon(Icons.crop_square,
+                      size: 14, color: Color(0xFF5F6368)),
+                  label: perimPart,
+                ),
+              ],
+            ],
           ),
-          if (perimPart.isNotEmpty) ...[
-            const SizedBox(width: 16),
+          if (letterBoxEstimate > 0) ...[
+            const SizedBox(height: 4),
             _StatItem(
-              icon: const Icon(Icons.crop_square,
+              icon: const Icon(Icons.markunread_mailbox_outlined,
                   size: 14, color: Color(0xFF5F6368)),
-              label: perimPart,
+              label: '~$letterBoxEstimate letter boxes',
             ),
           ],
         ],
       );
     } else {
-      // polyline: subtitle is just a length string
-      return _StatItem(
-        icon: const Icon(Icons.timeline, size: 14, color: Color(0xFF5F6368)),
-        label: subtitle,
+      // polyline: subtitle may contain "distance · timeRange · duration"
+      final parts = subtitle.split('·').map((s) => s.trim()).toList();
+      final distance = parts.isNotEmpty ? parts[0] : subtitle;
+      final timeRange = parts.length > 1 ? parts[1] : '';
+      final duration = parts.length > 2 ? parts[2] : '';
+
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _StatItem(
+            icon:
+                const Icon(Icons.timeline, size: 14, color: Color(0xFF5F6368)),
+            label: distance,
+          ),
+          if (timeRange.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            _StatItem(
+              icon: const Icon(Icons.schedule,
+                  size: 14, color: Color(0xFF5F6368)),
+              label: timeRange,
+            ),
+          ],
+          if (duration.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            _StatItem(
+              icon: const Icon(Icons.timer_outlined,
+                  size: 14, color: Color(0xFF5F6368)),
+              label: duration,
+            ),
+          ],
+        ],
       );
     }
   }
@@ -2239,6 +2714,62 @@ class _InfoWindowOverlayState extends State<_InfoWindowOverlay> {
           ),
         );
       }).toList(),
+    );
+  }
+
+  /// Row of category chips shown for point-type elements.
+  Widget _buildCategoryRow(InfoWindowData data) {
+    // Look up the current point from the provider to get its category.
+    final provider = ref.watch(shareableMapRiverpod);
+    final map = provider.currentMap;
+    PointCategory current = PointCategory.generic;
+    if (map != null) {
+      for (final layer in map.layers) {
+        if (layer.id != data.layerId) continue;
+        for (final pt in layer.points) {
+          if (pt.id == data.elementId) {
+            current = pt.pointCategory;
+            break;
+          }
+        }
+      }
+    }
+
+    return MouseRegion(
+      onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+      onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+        child: DropdownButtonHideUnderline(
+          child: DropdownButton<PointCategory>(
+            value: current,
+            isDense: true,
+            isExpanded: true,
+            icon: const Icon(Icons.arrow_drop_down,
+                size: 18, color: Color(0xFF80868B)),
+            style: const TextStyle(fontSize: 12, color: Color(0xFF202124)),
+            items: PointCategory.values.map((cat) {
+              return DropdownMenuItem(
+                value: cat,
+                child: Row(
+                  children: [
+                    Icon(cat.icon, size: 16, color: cat.color),
+                    const SizedBox(width: 8),
+                    Text(cat.label),
+                  ],
+                ),
+              );
+            }).toList(),
+            onChanged: (cat) {
+              if (cat != null) {
+                ref
+                    .read(shareableMapRiverpod)
+                    .updatePointCategory(data.layerId, data.elementId, cat);
+              }
+            },
+          ),
+        ),
+      ),
     );
   }
 
@@ -2362,12 +2893,12 @@ class _IconAction {
   });
 }
 
-class _ActionIconButton extends StatelessWidget {
+class _ActionIconButton extends riverpod.ConsumerWidget {
   final _IconAction action;
   const _ActionIconButton({required this.action});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final active = action.enabled && action.onTap != null;
     final color = active
         ? (action.color ?? const Color(0xFF444746))
@@ -2376,9 +2907,9 @@ class _ActionIconButton extends StatelessWidget {
     return Tooltip(
       message: action.tooltip,
       child: MouseRegion(
-        cursor: SystemMouseCursors.move,
-        onEnter: (_) => context.read<MapGestureProvider>().disableMapGestures(),
-        onExit: (_) => context.read<MapGestureProvider>().enableMapGestures(),
+        cursor: active ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+        onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
         child: InkWell(
           onTap: active ? action.onTap : null,
           borderRadius: BorderRadius.circular(4),
@@ -2435,7 +2966,7 @@ class _InfoWindowTailPainter extends CustomPainter {
 
 /// Floating style editor panel (colour, opacity, stroke width) for polygons
 /// and polylines. Positioned near the info window's tap anchor.
-class _StylePanelOverlay extends StatefulWidget {
+class _StylePanelOverlay extends riverpod.ConsumerStatefulWidget {
   final Offset screen;
   final String type; // 'polygon' | 'polyline'
   final Color initialColor;
@@ -2460,10 +2991,12 @@ class _StylePanelOverlay extends StatefulWidget {
   });
 
   @override
-  State<_StylePanelOverlay> createState() => _StylePanelOverlayState();
+  riverpod.ConsumerState<_StylePanelOverlay> createState() =>
+      _StylePanelOverlayState();
 }
 
-class _StylePanelOverlayState extends State<_StylePanelOverlay> {
+class _StylePanelOverlayState
+    extends riverpod.ConsumerState<_StylePanelOverlay> {
   late Color _color;
   late double _fillOpacity;
   late double _strokeWidth;
@@ -2494,8 +3027,8 @@ class _StylePanelOverlayState extends State<_StylePanelOverlay> {
       left: left,
       top: top,
       child: MouseRegion(
-        onEnter: (_) => context.read<MapGestureProvider>().disableMapGestures(),
-        onExit: (_) => context.read<MapGestureProvider>().enableMapGestures(),
+        onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+        onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: () {}, // absorb taps so GoogleMap.onTap doesn't fire

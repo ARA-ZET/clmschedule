@@ -1,11 +1,18 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onCall, onRequest, HttpsError } = require("firebase-functions/v2/https");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { onObjectFinalized, onObjectDeleted } = require("firebase-functions/v2/storage");
 const admin = require("firebase-admin");
 const { GoogleGenAI } = require("@google/genai");
+const { XMLParser } = require("fast-xml-parser");
 
 admin.initializeApp();
 const db = admin.firestore();
+
+/** Lazily resolve the default storage bucket. */
+function getBucket() {
+  return admin.storage().bucket();
+}
 
 // Firebase AI Logic — uses Vertex AI backend with ADC (no API key needed)
 // ============================================================
@@ -679,6 +686,52 @@ const chatTools = [
             },
           },
           required: ["jobs"],
+        },
+      },
+      {
+        name: "copyScheduleJobs",
+        description:
+          "Copy schedule grid jobs (distributor assignments) from a source date to a target date. This preserves ALL data including work area polygons/maps. Use this instead of manually fetching and re-adding when the user wants to copy/replicate/duplicate schedule assignments from one date to another. Optionally reassign specific distributors or only copy certain distributors' jobs.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            sourceDate: {
+              type: "STRING",
+              description: "The date to copy jobs FROM, in YYYY-MM-DD format.",
+            },
+            targetDate: {
+              type: "STRING",
+              description: "The date to copy jobs TO, in YYYY-MM-DD format.",
+            },
+            distributorNames: {
+              type: "ARRAY",
+              description: "Optional: Only copy jobs for these specific distributors (by name). If omitted, copies ALL jobs from the source date.",
+              items: { type: "STRING" },
+            },
+            reassignments: {
+              type: "ARRAY",
+              description: "Optional: Reassign distributors during copy. Each entry maps a source distributor to a different target distributor. If omitted, jobs keep their original distributors.",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  fromDistributor: {
+                    type: "STRING",
+                    description: "Name of the distributor in the source jobs.",
+                  },
+                  toDistributor: {
+                    type: "STRING",
+                    description: "Name of the distributor to assign in the target.",
+                  },
+                },
+                required: ["fromDistributor", "toDistributor"],
+              },
+            },
+            statusId: {
+              type: "STRING",
+              description: "Optional: Override status for all copied jobs. Default keeps 'scheduled'.",
+            },
+          },
+          required: ["sourceDate", "targetDate"],
         },
       },
     ],
@@ -1501,6 +1554,189 @@ async function executeAddJobsToSchedule(args, userName) {
   };
 }
 
+/**
+ * Execute the copyScheduleJobs function call from Gemini.
+ * Copies schedule jobs from source date to target date server-side,
+ * preserving ALL data including workMaps polygon data.
+ * Returns preview for user confirmation — does NOT write to Firestore.
+ */
+async function executeCopyScheduleJobs(args) {
+  const sourceDate = (args.sourceDate || "").trim();
+  const targetDate = (args.targetDate || "").trim();
+
+  if (!sourceDate || !targetDate) {
+    return { success: false, error: "Both sourceDate and targetDate are required (YYYY-MM-DD)." };
+  }
+
+  if (sourceDate === targetDate) {
+    return { success: false, error: "Source and target dates must be different." };
+  }
+
+  const monthNames = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+
+  // Parse source date
+  const srcParts = sourceDate.split("-");
+  if (srcParts.length !== 3) {
+    return { success: false, error: "Invalid source date format. Expected YYYY-MM-DD." };
+  }
+  const srcDate = new Date(parseInt(srcParts[0]), parseInt(srcParts[1]) - 1, parseInt(srcParts[2]));
+  if (isNaN(srcDate.getTime())) {
+    return { success: false, error: "Invalid source date." };
+  }
+
+  // Parse target date
+  const tgtParts = targetDate.split("-");
+  if (tgtParts.length !== 3) {
+    return { success: false, error: "Invalid target date format. Expected YYYY-MM-DD." };
+  }
+  const tgtDate = new Date(parseInt(tgtParts[0]), parseInt(tgtParts[1]) - 1, parseInt(tgtParts[2]));
+  if (isNaN(tgtDate.getTime())) {
+    return { success: false, error: "Invalid target date." };
+  }
+
+  const srcMonthId = `${monthNames[srcDate.getMonth()]} ${srcDate.getFullYear()}`;
+  const srcDailyId = `${srcParts[0]}-${srcParts[1]}-${srcParts[2]}`;
+  const tgtMonthId = `${monthNames[tgtDate.getMonth()]} ${tgtDate.getFullYear()}`;
+  const tgtDailyId = `${tgtParts[0]}-${tgtParts[1]}-${tgtParts[2]}`;
+
+  // Fetch source day jobs
+  const srcDayDoc = await db
+    .collection("schedules")
+    .doc(srcMonthId)
+    .collection("days")
+    .doc(srcDailyId)
+    .get();
+
+  if (!srcDayDoc.exists) {
+    return { success: false, error: `No schedule data found for source date ${sourceDate}.` };
+  }
+
+  const srcData = srcDayDoc.data();
+  const srcJobs = srcData.jobs || [];
+
+  if (srcJobs.length === 0) {
+    return { success: false, error: `No schedule jobs found on ${sourceDate}.` };
+  }
+
+  const { distributorMap, statusMap } = await getLookupMaps();
+
+  // Build distributor name-to-ID lookup for reassignments
+  const distributorsSnap = await db.collection("distributors").get();
+  const distributorList = [];
+  for (const doc of distributorsSnap.docs) {
+    const data = doc.data();
+    distributorList.push({ id: doc.id, name: (data.name || "").trim() });
+  }
+
+  // Parse reassignment map if provided
+  const reassignMap = {};
+  if (args.reassignments && Array.isArray(args.reassignments)) {
+    for (const r of args.reassignments) {
+      const fromName = (r.fromDistributor || "").trim().toLowerCase();
+      const toName = (r.toDistributor || "").trim();
+      if (fromName && toName) {
+        // Resolve target distributor
+        let matched = distributorList.find((d) => d.name.toLowerCase() === toName.toLowerCase());
+        if (!matched) {
+          matched = distributorList.find(
+            (d) => d.name.toLowerCase().includes(toName.toLowerCase()) ||
+                   toName.toLowerCase().includes(d.name.toLowerCase())
+          );
+        }
+        if (matched) {
+          reassignMap[fromName] = { id: matched.id, name: matched.name };
+        }
+      }
+    }
+  }
+
+  // Filter by distributor names if specified
+  const filterNames = (args.distributorNames || []).map((n) => n.toLowerCase().trim());
+
+  const tgtDateStr = `${tgtDate.getDate()} ${monthNames[tgtDate.getMonth()]} ${tgtDate.getFullYear()}`;
+  const srcDateStr = `${srcDate.getDate()} ${monthNames[srcDate.getMonth()]} ${srcDate.getFullYear()}`;
+  const overrideStatus = args.statusId || "scheduled";
+
+  const copiedJobs = [];
+  const errors = [];
+
+  for (let i = 0; i < srcJobs.length; i++) {
+    const job = srcJobs[i];
+    const srcDistId = job.distributorId || "";
+    const srcDistName = distributorMap[srcDistId] || "Unknown";
+
+    // Filter by distributor names if provided
+    if (filterNames.length > 0) {
+      const nameMatch = filterNames.some(
+        (fn) => srcDistName.toLowerCase().includes(fn) || fn.includes(srcDistName.toLowerCase())
+      );
+      if (!nameMatch) continue;
+    }
+
+    // Apply reassignment if configured
+    let targetDistId = srcDistId;
+    let targetDistName = srcDistName;
+    const reassignKey = srcDistName.toLowerCase();
+    if (reassignMap[reassignKey]) {
+      targetDistId = reassignMap[reassignKey].id;
+      targetDistName = reassignMap[reassignKey].name;
+    }
+
+    const clients = job.clients || [job.client || ""];
+    const areas = job.workingAreas || [job.workingArea || ""];
+    const statusId = overrideStatus;
+    const statusName = statusMap[statusId] || statusId;
+
+    copiedJobs.push({
+      distributorId: targetDistId,
+      distributorName: targetDistName,
+      clients: clients,
+      workingAreas: areas,
+      workMaps: job.workMaps || [],  // FULL polygon data preserved server-side
+      date: targetDate,
+      monthId: tgtMonthId,
+      dailyId: tgtDailyId,
+      statusId: statusId,
+      statusName: statusName,
+      dateDisplay: tgtDateStr,
+    });
+  }
+
+  if (copiedJobs.length === 0) {
+    const reason = filterNames.length > 0
+      ? `No jobs found matching the specified distributors on ${sourceDate}.`
+      : `No jobs to copy from ${sourceDate}.`;
+    return { success: false, error: reason };
+  }
+
+  const summaryLines = copiedJobs.map((j, i) =>
+    `${i + 1}. **${j.distributorName}** → ${j.clients.join(", ")}${j.workingAreas.length > 0 ? ` (${j.workingAreas.join(", ")})` : ""}${j.workMaps.length > 0 ? " 🗺️" : ""}`
+  );
+
+  const polygonCount = copiedJobs.reduce((sum, j) => sum + (j.workMaps ? j.workMaps.length : 0), 0);
+  let summary = `Ready to copy **${copiedJobs.length}** schedule assignment(s) from ${srcDateStr} to **${tgtDateStr}**:\n${summaryLines.join("\n")}`;
+  if (polygonCount > 0) {
+    summary += `\n\n🗺️ ${polygonCount} work area polygon(s) will be included.`;
+  }
+  if (errors.length > 0) {
+    summary += `\n\n⚠️ ${errors.length} issue(s):\n${errors.join("\n")}`;
+  }
+
+  console.log(`[copyScheduleJobs] Copying ${copiedJobs.length} jobs from ${sourceDate} to ${targetDate} (${polygonCount} polygons)`);
+
+  return {
+    success: true,
+    needsConfirmation: true,
+    summary: summary,
+    scheduleJobsData: copiedJobs,
+    errorCount: errors.length,
+    errors: errors,
+  };
+}
+
 // ============================================================
 // SHARED: Build system prompt for AI chat
 // ============================================================
@@ -1547,11 +1783,12 @@ SCHEDULE GRID OPERATIONS:
 
 COPYING SCHEDULE JOBS FROM PREVIOUS DATES / LAST MONTH:
 - When the user asks to "copy schedule from last month", "replicate last week's assignments", or "same assignments as [date]":
-  1. Use getScheduleJobsByDate to fetch the source date's assignments.
-  2. Optionally use getAvailableDistributors on the target date to check who's free.
-  3. Build the new assignments with the same client/area combinations but on the target date.
-  4. Use addJobsToSchedule to create them all at once.
-  5. **IMPORTANT**: Always pass through the workMaps array from the source jobs to preserve polygon/map data. Include the full workMaps objects exactly as received.
+  **ALWAYS use copyScheduleJobs** — this copies jobs server-side and guarantees ALL data is preserved, including work area polygons/maps.
+  1. Call copyScheduleJobs with sourceDate and targetDate.
+  2. Optionally specify distributorNames to only copy certain distributors' jobs.
+  3. Optionally specify reassignments to change which distributor gets assigned.
+  4. The user will see a confirmation preview including polygon/map indicators (🗺️).
+- Do NOT use getScheduleJobsByDate + addJobsToSchedule for copying — use copyScheduleJobs instead, as it preserves work area polygon data reliably.
 - When copying from a different month, the user may say "copy February's schedule to March" — you'll need to copy day by day or ask which specific dates.
 
 ALLOCATING TO AVAILABLE DISTRIBUTORS:
@@ -1773,6 +2010,11 @@ async function processFunctionCalls(fnCalls, userName, authUid) {
       fnResult = await executeGetAvailableDistributors(fnCall.args);
     } else if (fnCall.name === "addJobsToSchedule") {
       fnResult = await executeAddJobsToSchedule(fnCall.args, userName);
+      if (fnResult.success && fnResult.needsConfirmation) {
+        action = { type: "schedulePendingConfirmation", scheduleJobsData: fnResult.scheduleJobsData };
+      }
+    } else if (fnCall.name === "copyScheduleJobs") {
+      fnResult = await executeCopyScheduleJobs(fnCall.args);
       if (fnResult.success && fnResult.needsConfirmation) {
         action = { type: "schedulePendingConfirmation", scheduleJobsData: fnResult.scheduleJobsData };
       }
@@ -2423,5 +2665,290 @@ exports.chatWithAssistantStream = onRequest(
       sendEvent({ type: "error", content: e.message || "Failed to get AI response" });
       res.end();
     }
+  }
+);
+
+// =============================================================================
+// GPX Compilation — compiles individual GPX files into lightweight JSON
+// =============================================================================
+// Triggered when a .gpx file is uploaded or deleted in the Distribution folder.
+// Compiles all GPX files in the same folder into two JSON summary files:
+//   _compiled_tracks.json   — all track polylines with metadata
+//   _compiled_waypoints.json — all waypoints
+//
+// The client downloads one small JSON file instead of N large GPX files.
+// =============================================================================
+
+const COMPILED_TRACKS_FILE = "_compiled_tracks.json";
+const COMPILED_WAYPOINTS_FILE = "_compiled_waypoints.json";
+
+/**
+ * Parse a GPX file's bytes into tracks and waypoints with metadata.
+ * Extracts: coordinates, timestamps, distance, duration.
+ */
+function parseGpxFile(xmlString, fileName) {
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: "@_",
+    textNodeName: "#text",
+    isArray: (name) => ["trk", "trkseg", "trkpt", "wpt", "rtept", "rte"].includes(name),
+  });
+
+  const doc = parser.parse(xmlString);
+  const gpx = doc.gpx;
+  if (!gpx) return { tracks: [], waypoints: [] };
+
+  const tracks = [];
+  const waypoints = [];
+
+  // ── Waypoints ──
+  const wpts = gpx.wpt || [];
+  for (const wpt of wpts) {
+    const lat = parseFloat(wpt["@_lat"]);
+    const lon = parseFloat(wpt["@_lon"]);
+    if (isNaN(lat) || isNaN(lon)) continue;
+    const name = wpt.name || "";
+    const desc = wpt.desc || "";
+    waypoints.push({ name, desc, lat, lon });
+  }
+
+  // ── Tracks ──
+  const trks = gpx.trk || [];
+  for (let ti = 0; ti < trks.length; ti++) {
+    const trk = trks[ti];
+    const trkName = trk.name || "";
+    const trkDesc = trk.desc || "";
+    const segs = trk.trkseg || [];
+
+    for (let si = 0; si < segs.length; si++) {
+      const seg = segs[si];
+      const pts = seg.trkpt || [];
+      if (pts.length < 2) continue;
+
+      const coords = [];
+      const times = [];
+
+      for (const pt of pts) {
+        const lat = parseFloat(pt["@_lat"]);
+        const lon = parseFloat(pt["@_lon"]);
+        if (isNaN(lat) || isNaN(lon)) continue;
+        coords.push([lat, lon]);
+        if (pt.time) {
+          times.push(new Date(pt.time).getTime());
+        }
+      }
+
+      if (coords.length < 2) continue;
+
+      // Calculate distance (Haversine)
+      let distanceMeters = 0;
+      for (let i = 0; i < coords.length - 1; i++) {
+        distanceMeters += haversine(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
+      }
+
+      // Time metadata
+      const validTimes = times.filter((t) => !isNaN(t));
+      const startTime = validTimes.length > 0 ? Math.min(...validTimes) : null;
+      const endTime = validTimes.length > 0 ? Math.max(...validTimes) : null;
+      const durationMs = startTime && endTime ? endTime - startTime : null;
+
+      const segName = trkName || `Track ${ti + 1}`;
+      const name = segs.length > 1 ? `${segName} (seg ${si + 1})` : segName;
+
+      tracks.push({
+        name,
+        desc: trkDesc,
+        file: fileName,
+        points: coords,
+        distanceMeters: Math.round(distanceMeters),
+        startTime,
+        endTime,
+        durationMs,
+      });
+    }
+  }
+
+  // ── Routes (rte > rtept) ──
+  const rtes = gpx.rte || [];
+  for (let ri = 0; ri < rtes.length; ri++) {
+    const rte = rtes[ri];
+    const rteName = rte.name || `Route ${ri + 1}`;
+    const rteDesc = rte.desc || "";
+    const pts = rte.rtept || [];
+
+    const coords = [];
+    for (const pt of pts) {
+      const lat = parseFloat(pt["@_lat"]);
+      const lon = parseFloat(pt["@_lon"]);
+      if (isNaN(lat) || isNaN(lon)) continue;
+      coords.push([lat, lon]);
+    }
+    if (coords.length < 2) continue;
+
+    let distanceMeters = 0;
+    for (let i = 0; i < coords.length - 1; i++) {
+      distanceMeters += haversine(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
+    }
+
+    tracks.push({
+      name: rteName,
+      desc: rteDesc,
+      file: fileName,
+      points: coords,
+      distanceMeters: Math.round(distanceMeters),
+      startTime: null,
+      endTime: null,
+      durationMs: null,
+    });
+  }
+
+  return { tracks, waypoints };
+}
+
+/** Haversine distance in meters */
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.asin(Math.sqrt(a));
+}
+
+/**
+ * Compile all GPX files in a folder into summary JSON files.
+ * Called by the Storage triggers.
+ */
+async function compileGpxFolder(folderPath) {
+  const sw = Date.now();
+  console.log(`[compileGpx] START folder=${folderPath}`);
+
+  const bucket = getBucket();
+
+  // List all files in the folder
+  const [files] = await bucket.getFiles({ prefix: folderPath + "/" });
+  const gpxFiles = files.filter(
+    (f) => f.name.toLowerCase().endsWith(".gpx") && !f.name.startsWith("_compiled")
+  );
+
+  console.log(`[compileGpx] Found ${gpxFiles.length} GPX files in ${Date.now() - sw}ms`);
+
+  if (gpxFiles.length === 0) {
+    // Clean up compiled files if no GPX files remain
+    try { await bucket.file(`${folderPath}/${COMPILED_TRACKS_FILE}`).delete(); } catch (_) {}
+    try { await bucket.file(`${folderPath}/${COMPILED_WAYPOINTS_FILE}`).delete(); } catch (_) {}
+    console.log(`[compileGpx] No GPX files — removed compiled files`);
+    return;
+  }
+
+  // Download and parse all GPX files in parallel
+  const allTracks = [];
+  const allWaypoints = [];
+  let totalBytes = 0;
+
+  const parseResults = await Promise.allSettled(
+    gpxFiles.map(async (file) => {
+      const [buf] = await file.download();
+      totalBytes += buf.length;
+      const xmlString = buf.toString("utf-8");
+      return { fileName: file.name.split("/").pop(), ...parseGpxFile(xmlString, file.name.split("/").pop()) };
+    })
+  );
+
+  for (const r of parseResults) {
+    if (r.status === "fulfilled") {
+      allTracks.push(...r.value.tracks);
+      allWaypoints.push(...r.value.waypoints);
+    } else {
+      console.warn(`[compileGpx] Failed to parse file: ${r.reason}`);
+    }
+  }
+
+  console.log(`[compileGpx] Parsed ${gpxFiles.length} files (${(totalBytes / 1024).toFixed(1)}KB) → ${allTracks.length} tracks, ${allWaypoints.length} waypoints in ${Date.now() - sw}ms`);
+
+  // Write compiled tracks JSON
+  const tracksJson = JSON.stringify({
+    version: 1,
+    compiledAt: new Date().toISOString(),
+    fileCount: gpxFiles.length,
+    trackCount: allTracks.length,
+    waypointCount: allWaypoints.length,
+    tracks: allTracks,
+  });
+
+  await bucket.file(`${folderPath}/${COMPILED_TRACKS_FILE}`).save(tracksJson, {
+    contentType: "application/json",
+    metadata: { cacheControl: "public, max-age=300" },
+  });
+
+  // Write compiled waypoints JSON
+  const waypointsJson = JSON.stringify({
+    version: 1,
+    compiledAt: new Date().toISOString(),
+    fileCount: gpxFiles.length,
+    waypointCount: allWaypoints.length,
+    waypoints: allWaypoints,
+  });
+
+  await bucket.file(`${folderPath}/${COMPILED_WAYPOINTS_FILE}`).save(waypointsJson, {
+    contentType: "application/json",
+    metadata: { cacheControl: "public, max-age=300" },
+  });
+
+  const tracksKB = (tracksJson.length / 1024).toFixed(1);
+  const waypointsKB = (waypointsJson.length / 1024).toFixed(1);
+  console.log(`[compileGpx] DONE in ${Date.now() - sw}ms — tracks: ${tracksKB}KB, waypoints: ${waypointsKB}KB`);
+}
+
+/**
+ * Extract the parent folder path from a file path.
+ * e.g. "Distribution/2026/Mar 2026/Jo Lombard/track.gpx" → "Distribution/2026/Mar 2026/Jo Lombard"
+ */
+function getParentFolder(filePath) {
+  const parts = filePath.split("/");
+  parts.pop(); // remove filename
+  return parts.join("/");
+}
+
+// Triggered when a GPX file is uploaded/updated in Storage
+exports.compileGpxOnUpload = onObjectFinalized(
+  { region: "us-central1" },
+  async (event) => {
+    const filePath = event.data.name;
+    if (!filePath.toLowerCase().endsWith(".gpx")) return;
+    if (filePath.includes("_compiled_")) return; // skip our own output
+
+    const folder = getParentFolder(filePath);
+    console.log(`[compileGpxOnUpload] Triggered by: ${filePath}`);
+    await compileGpxFolder(folder);
+  }
+);
+
+// Triggered when a GPX file is deleted from Storage
+exports.compileGpxOnDelete = onObjectDeleted(
+  { region: "us-central1" },
+  async (event) => {
+    const filePath = event.data.name;
+    if (!filePath.toLowerCase().endsWith(".gpx")) return;
+    if (filePath.includes("_compiled_")) return;
+
+    const folder = getParentFolder(filePath);
+    console.log(`[compileGpxOnDelete] Triggered by deletion of: ${filePath}`);
+    await compileGpxFolder(folder);
+  }
+);
+
+// Callable function to manually trigger compilation for a folder
+exports.compileGpxFolder = onCall(
+  { region: "us-central1" },
+  async (request) => {
+    const folderPath = request.data.folderPath;
+    if (!folderPath || typeof folderPath !== "string") {
+      throw new HttpsError("invalid-argument", "folderPath is required");
+    }
+    await compileGpxFolder(folderPath);
+    return { success: true };
   }
 );

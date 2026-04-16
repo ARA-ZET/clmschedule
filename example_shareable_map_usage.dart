@@ -1,5 +1,8 @@
+// ignore_for_file: uri_does_not_exist, undefined_method, undefined_identifier
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+// NOTE: This example still uses provider package syntax.
+// TODO: Update to use Riverpod when needed.
+// import 'package:provider/provider.dart';
 import 'lib/shareable_maps.dart';
 
 /// Example: How to integrate ShareableMapEditor into your app

@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/schedule.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
 import '../services/firestore_service.dart';
+
+final scheduleRiverpod = riverpod.ChangeNotifierProvider<ScheduleProvider>(
+  (ref) => ScheduleProvider(),
+);
 
 class ScheduleProvider extends ChangeNotifier {
   final FirestoreService _firestoreService;

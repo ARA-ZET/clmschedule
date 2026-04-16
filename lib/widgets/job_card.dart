@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/job.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
@@ -12,14 +12,14 @@ import '../shareable_maps/providers/shareable_map_provider.dart';
 import '../shareable_maps/adapters/schedule_job_adapter.dart';
 import '../shareable_maps/widgets/shareable_map_editor.dart';
 
-class JobCard extends StatelessWidget {
+class JobCard extends riverpod.ConsumerWidget {
   final Job job;
   final bool isFullscreen;
 
   const JobCard({super.key, required this.job, required this.isFullscreen});
 
-  Color _getStatusColor(BuildContext context) {
-    final statusProvider = context.watch<JobStatusProvider>();
+  Color _getStatusColor(riverpod.WidgetRef ref) {
+    final statusProvider = ref.watch(jobStatusRiverpod);
 
     // Safety check for provider loading state
     if (statusProvider.isLoading || statusProvider.statuses.isEmpty) {
@@ -33,7 +33,8 @@ class JobCard extends StatelessWidget {
 
   void _printMapLink(BuildContext context) {
     // Get distributor name from the schedule provider
-    final scheduleProvider = context.read<ScheduleProvider>();
+    final scheduleProvider =
+        riverpod.ProviderScope.containerOf(context).read(scheduleRiverpod);
     String? distributorName;
 
     try {
@@ -70,10 +71,10 @@ class JobCard extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
     // isFullscreen is passed from the parent grid (single TogglerProvider subscription
     // at the grid level), avoiding per-card Provider subscriptions.
-    final statusColor = _getStatusColor(context);
+    final statusColor = _getStatusColor(ref);
 
     return Card(
       margin: const EdgeInsets.all(1),
@@ -138,7 +139,9 @@ class _JobClientSection extends StatelessWidget {
               job: job,
               onClientsChanged: (List<String> updatedClients) {
                 // Get fresh job data from provider to avoid stale state
-                final scheduleProvider = context.read<ScheduleProvider>();
+                final scheduleProvider =
+                    riverpod.ProviderScope.containerOf(context)
+                        .read(scheduleRiverpod);
                 final freshJob = scheduleProvider.jobs.firstWhere(
                   (j) => j.id == job.id,
                   orElse: () => job,
@@ -177,7 +180,9 @@ class _JobWorkAreaSection extends StatelessWidget {
               job: job,
               onWorkAreasChanged: (List<CustomPolygon> updatedWorkMaps) {
                 // Get fresh job data from provider to avoid stale state
-                final scheduleProvider = context.read<ScheduleProvider>();
+                final scheduleProvider =
+                    riverpod.ProviderScope.containerOf(context)
+                        .read(scheduleRiverpod);
                 final freshJob = scheduleProvider.jobs.firstWhere(
                   (j) => j.id == job.id,
                   orElse: () => job,
@@ -204,7 +209,7 @@ class _JobWorkAreaSection extends StatelessWidget {
 }
 
 /// Actions section with print map and status buttons
-class _JobActionsSection extends StatelessWidget {
+class _JobActionsSection extends riverpod.ConsumerWidget {
   final Job job;
   final Color statusColor;
   final VoidCallback onPrintMap;
@@ -216,8 +221,8 @@ class _JobActionsSection extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final scaleProvider = context.read<ScaleProvider>();
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final scaleProvider = ref.read(scaleRiverpod);
 
     return Flexible(
       flex: 1,
@@ -253,7 +258,7 @@ class _JobActionsSection extends StatelessWidget {
 }
 
 /// Status button for changing job status
-class _JobStatusButton extends StatelessWidget {
+class _JobStatusButton extends riverpod.ConsumerWidget {
   final Job job;
   final Color statusColor;
 
@@ -263,36 +268,33 @@ class _JobStatusButton extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final scaleProvider = context.read<ScaleProvider>();
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final scaleProvider = ref.read(scaleRiverpod);
+    final statusProvider = ref.watch(jobStatusRiverpod);
+    final currentStatus = statusProvider.getStatusById(job.statusId);
 
     return Tooltip(
       message: 'Change job status',
-      child: Consumer<JobStatusProvider>(
-        builder: (context, statusProvider, child) {
-          final currentStatus = statusProvider.getStatusById(job.statusId);
-          return TextButton(
-            onPressed: () => _showStatusDialog(context, statusProvider),
-            style: TextButton.styleFrom(
-              backgroundColor: statusColor,
-              padding: const EdgeInsets.symmetric(
-                horizontal: 8,
-                vertical: 4,
-              ),
-              minimumSize: Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: Text(
-              (currentStatus?.label ?? 'UNKNOWN').toUpperCase(),
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: scaleProvider.smallFontSize,
-              ),
-              overflow: TextOverflow.ellipsis,
-              maxLines: 1,
-            ),
-          );
-        },
+      child: TextButton(
+        onPressed: () => _showStatusDialog(context, statusProvider),
+        style: TextButton.styleFrom(
+          backgroundColor: statusColor,
+          padding: const EdgeInsets.symmetric(
+            horizontal: 8,
+            vertical: 4,
+          ),
+          minimumSize: Size.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        child: Text(
+          (currentStatus?.label ?? 'UNKNOWN').toUpperCase(),
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: scaleProvider.smallFontSize,
+          ),
+          overflow: TextOverflow.ellipsis,
+          maxLines: 1,
+        ),
       ),
     );
   }
@@ -322,7 +324,9 @@ class _JobStatusButton extends StatelessWidget {
                 ),
                 onTap: () {
                   // Get fresh job data from provider to avoid stale state
-                  final scheduleProvider = context.read<ScheduleProvider>();
+                  final scheduleProvider =
+                      riverpod.ProviderScope.containerOf(context)
+                          .read(scheduleRiverpod);
                   final freshJob = scheduleProvider.jobs.firstWhere(
                     (j) => j.id == job.id,
                     orElse: () => job,
@@ -405,8 +409,9 @@ class _ClientListEditorState extends State<_ClientListEditor> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ScaleProvider>(
-      builder: (context, scaleProvider, child) {
+    return riverpod.Consumer(
+      builder: (context, ref, child) {
+        final scaleProvider = ref.watch(scaleRiverpod);
         return Row(
           children: [
             Expanded(
@@ -532,8 +537,10 @@ class _ClientListDialogState extends State<_ClientListDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<JobListProvider, ScaleProvider>(
-      builder: (context, jobListProvider, scaleProvider, child) {
+    return riverpod.Consumer(
+      builder: (context, ref, child) {
+        final scaleProvider = ref.watch(scaleRiverpod);
+        final jobListProvider = ref.watch(jobListRiverpod);
         // Get unique client names for suggestions
         final uniqueClients = jobListProvider.jobListItems
             .map((item) => item.client)
@@ -790,8 +797,9 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ScaleProvider>(
-      builder: (context, scaleProvider, child) {
+    return riverpod.Consumer(
+      builder: (context, ref, child) {
+        final scaleProvider = ref.watch(scaleRiverpod);
         return Row(
           children: [
             Expanded(
@@ -831,8 +839,8 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                   if (!context.mounted) return;
 
                   // Use the ShareableMapEditor with ScheduleJobAdapter
-                  final mapProvider = context.read<ShareableMapProvider>();
-                  final scheduleProvider = context.read<ScheduleProvider>();
+                  final mapProvider = ref.read(shareableMapRiverpod);
+                  final scheduleProvider = ref.read(scheduleRiverpod);
 
                   // Resolve distributor name for the map editor title
                   String? distributorName;
@@ -847,6 +855,13 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                     job: widget.job,
                     distributorName: distributorName,
                     onSave: (polygons, workingAreaNames) async {
+                      debugPrint(
+                          '[JobCard.onSave] Received ${polygons.length} polygons to save');
+                      for (final p in polygons) {
+                        debugPrint(
+                            '  "${p.name}" type=${p.type} points=${p.points.length} '
+                            'pointCategory=${p.pointCategory.id}');
+                      }
                       final freshJob = scheduleProvider.jobs.firstWhere(
                         (j) => j.id == widget.job.id,
                         orElse: () => widget.job,
@@ -855,6 +870,13 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                         workingAreas: workingAreaNames,
                         workMaps: polygons,
                       );
+                      debugPrint(
+                          '[JobCard.onSave] modifiedJob workMaps: ${modifiedJob.workMaps.length}');
+                      for (final wm in modifiedJob.workMaps) {
+                        debugPrint(
+                            '  "${wm.name}" type=${wm.type} points=${wm.points.length} '
+                            'pointCategory=${wm.pointCategory.id}');
+                      }
                       await scheduleProvider.updateJobWithUndo(
                         freshJob,
                         modifiedJob,
@@ -905,7 +927,7 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
   }
 }
 
-class _WorkAreaListDialog extends StatefulWidget {
+class _WorkAreaListDialog extends riverpod.ConsumerStatefulWidget {
   final List<CustomPolygon> workMaps;
   final Function(List<CustomPolygon>, bool) onWorkAreasChanged;
   final VoidCallback onSaveChanges;
@@ -917,10 +939,12 @@ class _WorkAreaListDialog extends StatefulWidget {
   });
 
   @override
-  State<_WorkAreaListDialog> createState() => _WorkAreaListDialogState();
+  riverpod.ConsumerState<_WorkAreaListDialog> createState() =>
+      _WorkAreaListDialogState();
 }
 
-class _WorkAreaListDialogState extends State<_WorkAreaListDialog> {
+class _WorkAreaListDialogState
+    extends riverpod.ConsumerState<_WorkAreaListDialog> {
   late List<CustomPolygon> _workMaps;
   bool _hasUnsavedChanges = false;
 
@@ -1003,170 +1027,166 @@ class _WorkAreaListDialogState extends State<_WorkAreaListDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<ScheduleProvider, ScaleProvider>(
-      builder: (context, scheduleProvider, scaleProvider, child) {
-        final workAreas = scheduleProvider.workAreas;
+    final scheduleProvider = ref.watch(scheduleRiverpod);
+    final workAreas = scheduleProvider.workAreas;
 
-        return AlertDialog(
-          title: Row(
-            children: [
-              const Text('Manage Work Areas'),
-              if (_hasUnsavedChanges)
-                Container(
-                  margin: const EdgeInsets.only(left: 8),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Colors.amber,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Text(
-                    'Unsaved',
-                    style: TextStyle(fontSize: 10, color: Colors.black),
-                  ),
-                ),
-            ],
-          ),
-          content: SizedBox(
-            width: 500,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text('Current work areas:'),
-                const SizedBox(height: 8),
-                if (_workMaps.isEmpty)
-                  const Text('No work areas selected')
-                else
-                  Flexible(
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: _workMaps.length,
-                      itemBuilder: (context, index) {
-                        final workMap = _workMaps[index];
-                        return Card(
-                          child: ListTile(
-                            leading: Container(
-                              width: 20,
-                              height: 20,
-                              decoration: BoxDecoration(
-                                color: workMap.color,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                            title: Text(workMap.name),
-                            subtitle: Text(workMap.description),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.delete),
-                              onPressed: () => _removeWorkArea(index),
-                              tooltip: 'Remove work area',
-                            ),
+    return AlertDialog(
+      title: Row(
+        children: [
+          const Text('Manage Work Areas'),
+          if (_hasUnsavedChanges)
+            Container(
+              margin: const EdgeInsets.only(left: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.amber,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Text(
+                'Unsaved',
+                style: TextStyle(fontSize: 10, color: Colors.black),
+              ),
+            ),
+        ],
+      ),
+      content: SizedBox(
+        width: 500,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Current work areas:'),
+            const SizedBox(height: 8),
+            if (_workMaps.isEmpty)
+              const Text('No work areas selected')
+            else
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: _workMaps.length,
+                  itemBuilder: (context, index) {
+                    final workMap = _workMaps[index];
+                    return Card(
+                      child: ListTile(
+                        leading: Container(
+                          width: 20,
+                          height: 20,
+                          decoration: BoxDecoration(
+                            color: workMap.color,
+                            shape: BoxShape.circle,
                           ),
-                        );
-                      },
-                    ),
-                  ),
-                const SizedBox(height: 16),
-                const Text('Add work area:'),
-                const SizedBox(height: 8),
-                Autocomplete<WorkArea>(
-                  optionsBuilder: (TextEditingValue textEditingValue) {
-                    if (textEditingValue.text.isEmpty) {
-                      return workAreas.where((area) =>
-                          !_workMaps.any((wm) => wm.name == area.name));
-                    }
-                    return workAreas.where((WorkArea area) {
-                      if (_workMaps.any((wm) => wm.name == area.name)) {
-                        return false; // Don't show already added areas
-                      }
-                      return area.name.toLowerCase().contains(
-                                textEditingValue.text.toLowerCase(),
-                              ) ||
-                          area.description.toLowerCase().contains(
-                                textEditingValue.text.toLowerCase(),
-                              );
-                    });
-                  },
-                  displayStringForOption: (WorkArea area) => area.name,
-                  onSelected: (WorkArea area) {
-                    _addWorkArea(area);
-                  },
-                  fieldViewBuilder: (
-                    BuildContext context,
-                    TextEditingController controller,
-                    FocusNode focusNode,
-                    VoidCallback onFieldSubmitted,
-                  ) {
-                    return TextFormField(
-                      controller: controller,
-                      focusNode: focusNode,
-                      decoration: const InputDecoration(
-                        labelText: 'Search work areas...',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.search),
-                      ),
-                      onFieldSubmitted: (String value) {
-                        onFieldSubmitted();
-                      },
-                    );
-                  },
-                  optionsViewBuilder: (
-                    BuildContext context,
-                    void Function(WorkArea) onSelected,
-                    Iterable<WorkArea> options,
-                  ) {
-                    return Align(
-                      alignment: Alignment.topLeft,
-                      child: Material(
-                        elevation: 4.0,
-                        child: Container(
-                          width: 400,
-                          constraints: const BoxConstraints(
-                            maxHeight: 200,
-                          ),
-                          child: ListView.builder(
-                            padding: EdgeInsets.zero,
-                            shrinkWrap: true,
-                            itemCount: options.length,
-                            itemBuilder: (BuildContext context, int index) {
-                              final WorkArea option = options.elementAt(index);
-                              return InkWell(
-                                onTap: () {
-                                  onSelected(option);
-                                },
-                                child: ListTile(
-                                  dense: true,
-                                  title: Text(option.name),
-                                  subtitle: Text(option.description),
-                                ),
-                              );
-                            },
-                          ),
+                        ),
+                        title: Text(workMap.name),
+                        subtitle: Text(workMap.description),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete),
+                          onPressed: () => _removeWorkArea(index),
+                          tooltip: 'Remove work area',
                         ),
                       ),
                     );
                   },
                 ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: _discardChanges,
-              child: const Text('Cancel'),
-            ),
-            if (_hasUnsavedChanges)
-              ElevatedButton(
-                onPressed: _saveChanges,
-                child: const Text('Save Changes'),
               ),
+            const SizedBox(height: 16),
+            const Text('Add work area:'),
+            const SizedBox(height: 8),
+            Autocomplete<WorkArea>(
+              optionsBuilder: (TextEditingValue textEditingValue) {
+                if (textEditingValue.text.isEmpty) {
+                  return workAreas.where(
+                      (area) => !_workMaps.any((wm) => wm.name == area.name));
+                }
+                return workAreas.where((WorkArea area) {
+                  if (_workMaps.any((wm) => wm.name == area.name)) {
+                    return false; // Don't show already added areas
+                  }
+                  return area.name.toLowerCase().contains(
+                            textEditingValue.text.toLowerCase(),
+                          ) ||
+                      area.description.toLowerCase().contains(
+                            textEditingValue.text.toLowerCase(),
+                          );
+                });
+              },
+              displayStringForOption: (WorkArea area) => area.name,
+              onSelected: (WorkArea area) {
+                _addWorkArea(area);
+              },
+              fieldViewBuilder: (
+                BuildContext context,
+                TextEditingController controller,
+                FocusNode focusNode,
+                VoidCallback onFieldSubmitted,
+              ) {
+                return TextFormField(
+                  controller: controller,
+                  focusNode: focusNode,
+                  decoration: const InputDecoration(
+                    labelText: 'Search work areas...',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.search),
+                  ),
+                  onFieldSubmitted: (String value) {
+                    onFieldSubmitted();
+                  },
+                );
+              },
+              optionsViewBuilder: (
+                BuildContext context,
+                void Function(WorkArea) onSelected,
+                Iterable<WorkArea> options,
+              ) {
+                return Align(
+                  alignment: Alignment.topLeft,
+                  child: Material(
+                    elevation: 4.0,
+                    child: Container(
+                      width: 400,
+                      constraints: const BoxConstraints(
+                        maxHeight: 200,
+                      ),
+                      child: ListView.builder(
+                        padding: EdgeInsets.zero,
+                        shrinkWrap: true,
+                        itemCount: options.length,
+                        itemBuilder: (BuildContext context, int index) {
+                          final WorkArea option = options.elementAt(index);
+                          return InkWell(
+                            onTap: () {
+                              onSelected(option);
+                            },
+                            child: ListTile(
+                              dense: true,
+                              title: Text(option.name),
+                              subtitle: Text(option.description),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
           ],
-        );
-      },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _discardChanges,
+          child: const Text('Cancel'),
+        ),
+        if (_hasUnsavedChanges)
+          ElevatedButton(
+            onPressed: _saveChanges,
+            child: const Text('Save Changes'),
+          ),
+      ],
     );
   }
 }
 
-class _DeleteJobButton extends StatefulWidget {
+class _DeleteJobButton extends riverpod.ConsumerStatefulWidget {
   final String jobId;
 
   const _DeleteJobButton({
@@ -1174,10 +1194,11 @@ class _DeleteJobButton extends StatefulWidget {
   });
 
   @override
-  State<_DeleteJobButton> createState() => _DeleteJobButtonState();
+  riverpod.ConsumerState<_DeleteJobButton> createState() =>
+      _DeleteJobButtonState();
 }
 
-class _DeleteJobButtonState extends State<_DeleteJobButton> {
+class _DeleteJobButtonState extends riverpod.ConsumerState<_DeleteJobButton> {
   bool _isDeleting = false;
 
   Future<void> _deleteJob() async {
@@ -1188,7 +1209,7 @@ class _DeleteJobButtonState extends State<_DeleteJobButton> {
     });
 
     try {
-      await context.read<ScheduleProvider>().deleteJob(widget.jobId);
+      await ref.read(scheduleRiverpod).deleteJob(widget.jobId);
 
       if (context.mounted) {
         Navigator.of(context).pop(); // Close confirmation dialog

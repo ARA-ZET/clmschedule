@@ -1,9 +1,17 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/collection_job.dart';
 import '../models/job_list_item.dart';
 import '../models/work_area.dart';
 import '../services/firestore_service.dart';
 import 'job_list_provider.dart';
+
+final collectionScheduleRiverpod =
+    riverpod.ChangeNotifierProvider<CollectionScheduleProvider>(
+  (ref) => CollectionScheduleProvider(
+    jobListProvider: ref.read(jobListRiverpod),
+  ),
+);
 
 class CollectionScheduleProvider extends ChangeNotifier {
   final FirestoreService _firestoreService;

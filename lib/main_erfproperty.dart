@@ -4,11 +4,10 @@
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import 'config/flavor_config.dart';
 import 'firebase_options.dart';
-import 'erf_property/providers/erf_property_provider.dart';
 import 'erf_property/pages/erf_property_screen.dart';
 
 void main() async {
@@ -23,10 +22,7 @@ void main() async {
   );
 
   runApp(
-    MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (_) => ErfPropertyProvider()),
-      ],
+    riverpod.ProviderScope(
       child: const ErfPropertyApp(),
     ),
   );

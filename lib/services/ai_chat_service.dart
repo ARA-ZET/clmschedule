@@ -5,7 +5,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:http/http.dart' as http;
+
+final aiChatServiceRiverpod = riverpod.Provider<AiChatService>(
+  (ref) => AiChatService(),
+);
 
 /// A single knowledge entry that teaches the AI about the system
 class AiKnowledgeEntry {

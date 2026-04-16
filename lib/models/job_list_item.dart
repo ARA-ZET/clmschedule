@@ -93,6 +93,8 @@ class JobListItem {
   final List<JobReminder> reminders; // List of reminders for invoice chase
   final CategorizedTools?
       toolsNeeded; // Tools needed for Happy Sun jobs (window/solar cleaning)
+  final String shareableMapId; // Link to ShareableMap document
+  final String storageFolderPath; // Cloud Storage folder for tracks/waypoints
 
   JobListItem({
     required this.id,
@@ -118,6 +120,8 @@ class JobListItem {
     this.customPolygons = const [], // Default to empty list
     this.reminders = const [], // Default to empty list
     this.toolsNeeded, // Optional tools for Happy Sun jobs
+    this.shareableMapId = '', // Optional link to shareable map
+    this.storageFolderPath = '', // Optional cloud storage folder path
   });
 
   // Create from Firestore
@@ -207,6 +211,8 @@ class JobListItem {
           ? CategorizedTools.fromMap(
               data['toolsNeeded'] as Map<String, dynamic>)
           : null,
+      shareableMapId: data['shareableMapId'] as String? ?? '',
+      storageFolderPath: data['storageFolderPath'] as String? ?? '',
     );
   }
 
@@ -236,6 +242,8 @@ class JobListItem {
           customPolygons.map((polygon) => polygon.toMap()).toList(),
       'reminders': reminders.map((reminder) => reminder.toMap()).toList(),
       if (toolsNeeded != null) 'toolsNeeded': toolsNeeded!.toMap(),
+      if (shareableMapId.isNotEmpty) 'shareableMapId': shareableMapId,
+      if (storageFolderPath.isNotEmpty) 'storageFolderPath': storageFolderPath,
     };
   }
 
@@ -263,6 +271,8 @@ class JobListItem {
     List<JobListItemUpdate>? updates,
     List<CustomPolygon>? customPolygons,
     List<JobReminder>? reminders,
+    String? shareableMapId,
+    String? storageFolderPath,
   }) {
     return JobListItem(
       id: id,
@@ -287,6 +297,8 @@ class JobListItem {
       updates: updates ?? this.updates,
       customPolygons: customPolygons ?? this.customPolygons,
       reminders: reminders ?? this.reminders,
+      shareableMapId: shareableMapId ?? this.shareableMapId,
+      storageFolderPath: storageFolderPath ?? this.storageFolderPath,
     );
   }
 

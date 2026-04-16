@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/happy_sun_project.dart';
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/auth_provider.dart';
 
-class HappySunChecklistDialog extends StatefulWidget {
+class HappySunChecklistDialog extends riverpod.ConsumerStatefulWidget {
   final HappySunProject project;
 
   const HappySunChecklistDialog({
@@ -13,11 +13,12 @@ class HappySunChecklistDialog extends StatefulWidget {
   });
 
   @override
-  State<HappySunChecklistDialog> createState() =>
+  riverpod.ConsumerState<HappySunChecklistDialog> createState() =>
       _HappySunChecklistDialogState();
 }
 
-class _HappySunChecklistDialogState extends State<HappySunChecklistDialog> {
+class _HappySunChecklistDialogState
+    extends riverpod.ConsumerState<HappySunChecklistDialog> {
   final _notesController = TextEditingController();
   final List<ChecklistItem> _checklistItems = [];
   bool _isLoading = false;
@@ -197,8 +198,8 @@ class _HappySunChecklistDialogState extends State<HappySunChecklistDialog> {
       _isLoading = true;
     });
 
-    final projectProvider = context.read<HappySunProjectProvider>();
-    final authProvider = context.read<AuthProvider>();
+    final projectProvider = ref.read(happySunProjectRiverpod);
+    final authProvider = ref.read(authRiverpod);
     final userId = authProvider.user?.uid ?? 'unknown';
 
     final success = await projectProvider.performChecklist(

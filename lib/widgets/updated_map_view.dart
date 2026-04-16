@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
@@ -14,9 +14,10 @@ import '../models/gpx_track.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/map_view_provider.dart';
+import '../shareable_maps/utils/point_marker_icons.dart';
 import 'mymaps_kml_downloader.dart';
 
-class UpdatedMapView extends StatefulWidget {
+class UpdatedMapView extends riverpod.ConsumerStatefulWidget {
   final String? jobId;
   final String? workAreaId;
   final WorkArea? customWorkArea;
@@ -36,12 +37,14 @@ class UpdatedMapView extends StatefulWidget {
   });
 
   @override
-  State<UpdatedMapView> createState() => _UpdatedMapViewState();
+  riverpod.ConsumerState<UpdatedMapView> createState() =>
+      _UpdatedMapViewState();
 }
 
-class _UpdatedMapViewState extends State<UpdatedMapView> {
+class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
   GoogleMapController? _controller;
   final Set<Polygon> _polygons = {};
+  final Set<Polyline> _customPolylines = {};
   LatLng _center = const LatLng(-33.925, 18.425); // Cape Town city center
   bool _isLoading = true;
   List<WorkArea> _workAreas = [];
@@ -63,6 +66,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
 
   BitmapDescriptor? _circleMarkerIcon;
   BitmapDescriptor? _midpointMarkerIcon;
+  Map<PointCategory, BitmapDescriptor>? _pointIcons;
   int? _draggingMidpointIndex;
 
   // GPX-related state
@@ -97,8 +101,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
     super.didUpdateWidget(oldWidget);
 
     // Get provider reference after super call
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
 
     if (kDebugMode) {
       print(
@@ -142,6 +145,14 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
 
     // Create midpoint marker (smaller, different color)
     _midpointMarkerIcon = await _createMidpointMarkerIcon();
+
+    // Preload point category icons
+    try {
+      await PointMarkerIcons.preload();
+      _pointIcons = PointMarkerIcons.allCached;
+    } catch (_) {
+      _pointIcons = null;
+    }
   }
 
   Future<BitmapDescriptor> _createMidpointMarkerIcon() async {
@@ -191,8 +202,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   Set<Marker> _buildEditingMarkers() {
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
     final editingPoints = mapViewProvider.editingPoints;
     final markers = <Marker>{};
 
@@ -252,8 +262,14 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   void _onMapTap(LatLng tappedPoint) {
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
+
+    if (mapViewProvider.isPlacingMarker) {
+      // Handle marker placement — single tap places the marker
+      mapViewProvider.placeMarker(tappedPoint);
+      _updateMapView();
+      return;
+    }
 
     if (mapViewProvider.isCreatingNewPolygon) {
       // Handle new polygon creation
@@ -271,8 +287,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   Set<Marker> _buildNewPolygonMarkers() {
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
     final newPolygonPoints = mapViewProvider.newPolygonPoints;
     Set<Marker> markers = {};
 
@@ -296,6 +311,36 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
           },
         ),
       );
+    }
+
+    return markers;
+  }
+
+  /// Build Google Maps Marker objects from marker-type and point-type CustomPolygons.
+  Set<Marker> _buildCustomMarkers() {
+    final mapViewProvider = ref.read(mapViewRiverpod);
+    final customPolygons = mapViewProvider.customPolygons;
+    Set<Marker> markers = {};
+
+    for (int i = 0; i < customPolygons.length; i++) {
+      final cp = customPolygons[i];
+      if ((!cp.isMarker && !cp.isPoint) || cp.points.isEmpty) continue;
+
+      final isSelected = i == mapViewProvider.selectedPolygonIndex;
+
+      final marker = cp.toGoogleMapsMarker(
+        markerId: 'custom_marker_$i',
+        isSelected: isSelected,
+        onTap: () {
+          mapViewProvider.selectPolygon(i);
+          _updateMapView();
+          _showPolygonInfoPopup(i, cp.points.first);
+        },
+        customIcon: _pointIcons?[cp.pointCategory],
+      );
+      if (marker != null) {
+        markers.add(marker);
+      }
     }
 
     return markers;
@@ -338,8 +383,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   Future<void> _initializeMap() async {
     try {
       // Get provider reference
-      final mapViewProvider =
-          Provider.of<MapViewProvider>(context, listen: false);
+      final mapViewProvider = ref.read(mapViewRiverpod);
 
       // Check if we're using the new CustomPolygon system
       if (widget.customPolygons != null && widget.customPolygons!.isNotEmpty) {
@@ -358,7 +402,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
         }
       } else {
         // Legacy system: Load WorkAreas from service
-        final workAreaService = context.read<WorkAreaService>();
+        final workAreaService = ref.read(workAreaServiceRiverpod);
         _workAreas = await workAreaService.getWorkAreas().first;
 
         // Initialize the editable work areas collection for this job
@@ -384,8 +428,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
 
         // Initialize editing points if editing is enabled and we have a selected area
         if (widget.isEditable && _selectedWorkArea != null) {
-          final mapViewProvider =
-              Provider.of<MapViewProvider>(context, listen: false);
+          final mapViewProvider = ref.read(mapViewRiverpod);
           mapViewProvider
               .updateEditingPoints(List.from(_selectedWorkArea!.polygonPoints));
           mapViewProvider.startEditing(0);
@@ -407,9 +450,9 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
 
   void _updateMapView() {
     _polygons.clear();
+    _customPolylines.clear();
     // Get provider data
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
     final customPolygons = mapViewProvider.customPolygons;
     final selectedPolygonIndex = mapViewProvider.selectedPolygonIndex;
     final isEditing = mapViewProvider.isEditing;
@@ -423,9 +466,39 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
 
     // Check if we're using the new CustomPolygon system
     if (customPolygons.isNotEmpty) {
-      // New system: Add CustomPolygons
+      // New system: Add CustomPolygons (skip markers — they render as Google Maps Markers)
       for (int i = 0; i < customPolygons.length; i++) {
         final customPolygon = customPolygons[i];
+
+        // Skip marker-type elements — they are rendered via the markers set
+        if (customPolygon.isMarker) continue;
+
+        // Handle polyline-type elements
+        if (customPolygon.isPolyline && customPolygon.points.length >= 2) {
+          final isSelected = i == selectedPolygonIndex;
+          _customPolylines.add(
+            Polyline(
+              polylineId: PolylineId('custom_polyline_$i'),
+              points: customPolygon.points,
+              color: isSelected ? Colors.red : customPolygon.color,
+              width: isSelected ? 4 : customPolygon.strokeWidth,
+              patterns: customPolygon.isDashed
+                  ? [PatternItem.dash(20), PatternItem.gap(10)]
+                  : [],
+              onTap: !isEditing && !isCreatingNewPolygon && !isPopupVisible
+                  ? () {
+                      mapViewProvider.selectPolygon(i);
+                      _updateMapView();
+                      final center =
+                          _calculatePolygonCenter(customPolygon.points);
+                      _showPolygonInfoPopup(i, center);
+                    }
+                  : null,
+            ),
+          );
+          continue;
+        }
+
         final isCurrentlyEditing = isEditing && i == selectedPolygonIndex;
         final isSelected = i == selectedPolygonIndex;
 
@@ -468,8 +541,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
       }
     } else {
       // Legacy system: Add WorkAreas
-      final mapViewProvider =
-          Provider.of<MapViewProvider>(context, listen: false);
+      final mapViewProvider = ref.read(mapViewRiverpod);
       for (int i = 0; i < _editableWorkAreas.length; i++) {
         final area = _editableWorkAreas[i];
         final isCurrentlyEditing =
@@ -525,8 +597,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   void _updateMapCenter({bool forceUpdate = false}) {
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
 
     // Only auto-center on initial load or when explicitly requested
     if (mapViewProvider.hasInitiallyPositioned && !forceUpdate) {
@@ -656,13 +727,14 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   void _showPolygonInfoPopup(int polygonIndex, LatLng tapPosition) async {
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
     if (polygonIndex >= mapViewProvider.customPolygons.length) return;
 
     final polygon = mapViewProvider.customPolygons[polygonIndex];
-    final area = _calculatePolygonArea(polygon.points);
-    final perimeter = _calculatePolygonPerimeter(polygon.points);
+    final isMarkerType = polygon.isMarker;
+    final area = isMarkerType ? 0.0 : _calculatePolygonArea(polygon.points);
+    final perimeter =
+        isMarkerType ? 0.0 : _calculatePolygonPerimeter(polygon.points);
 
     // Set popup state to disable polygon onTap
     mapViewProvider.openPopup(polygonIndex, tapPosition);
@@ -749,46 +821,66 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                     ),
                     const SizedBox(height: 12),
 
-                    // Area and perimeter info
-                    Row(
-                      children: [
-                        Icon(Icons.crop_free,
-                            size: 16, color: Colors.grey.shade600),
-                        const SizedBox(width: 4),
-                        Text(
-                          '${area.toStringAsFixed(2)} km²',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: Colors.grey.shade700,
+                    // Info section: area/perimeter for polygons, coordinates for markers
+                    if (isMarkerType && polygon.points.isNotEmpty)
+                      Row(
+                        children: [
+                          Icon(Icons.location_on,
+                              size: 16, color: Colors.grey.shade600),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              '${polygon.points.first.latitude.toStringAsFixed(5)}, ${polygon.points.first.longitude.toStringAsFixed(5)}',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.grey.shade700,
+                              ),
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 16),
-                        Icon(Icons.straighten,
-                            size: 16, color: Colors.grey.shade600),
-                        const SizedBox(width: 4),
-                        Text(
-                          '${perimeter.toStringAsFixed(1)} km',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: Colors.grey.shade700,
+                        ],
+                      )
+                    else
+                      Row(
+                        children: [
+                          Icon(Icons.crop_free,
+                              size: 16, color: Colors.grey.shade600),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${area.toStringAsFixed(2)} km²',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.grey.shade700,
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
+                          const SizedBox(width: 16),
+                          Icon(Icons.straighten,
+                              size: 16, color: Colors.grey.shade600),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${perimeter.toStringAsFixed(1)} km',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.grey.shade700,
+                            ),
+                          ),
+                        ],
+                      ),
                     const SizedBox(height: 16),
 
                     // Action buttons
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                       children: [
-                        _buildActionButton(
-                          icon: Icons.edit,
-                          onPressed: () {
-                            Navigator.of(context).pop();
-                            _startEditingPolygon(polygonIndex);
-                          },
-                          tooltip: 'Edit Points',
-                        ),
+                        // Edit points only for polygons, not markers
+                        if (!isMarkerType)
+                          _buildActionButton(
+                            icon: Icons.edit,
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              _startEditingPolygon(polygonIndex);
+                            },
+                            tooltip: 'Edit Points',
+                          ),
                         _buildActionButton(
                           icon: Icons.palette,
                           onPressed: () {
@@ -803,7 +895,9 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                             Navigator.of(context).pop();
                             _zoomToPolygon(polygonIndex);
                           },
-                          tooltip: 'Zoom to Polygon',
+                          tooltip: isMarkerType
+                              ? 'Zoom to Marker'
+                              : 'Zoom to Polygon',
                         ),
                         _buildActionButton(
                           icon: Icons.delete,
@@ -934,8 +1028,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   void _startEditingPolygon(int polygonIndex) {
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
     if (polygonIndex >= mapViewProvider.customPolygons.length) return;
 
     mapViewProvider.startEditing(polygonIndex);
@@ -943,8 +1036,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   void _zoomToPolygon(int polygonIndex) {
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
     if (polygonIndex >= mapViewProvider.customPolygons.length) return;
 
     final points = mapViewProvider.customPolygons[polygonIndex].points;
@@ -980,14 +1072,17 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   void _deletePolygon(int polygonIndex) {
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
     if (polygonIndex >= mapViewProvider.customPolygons.length) return;
+
+    final elementName = mapViewProvider.customPolygons[polygonIndex].isMarker
+        ? 'Marker'
+        : 'Polygon';
 
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete Polygon'),
+        title: Text('Delete $elementName'),
         content: Text(
           'Are you sure you want to delete "${mapViewProvider.customPolygons[polygonIndex].name}"?',
         ),
@@ -1012,8 +1107,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
 
   void _saveChanges() async {
     try {
-      final mapViewProvider =
-          Provider.of<MapViewProvider>(context, listen: false);
+      final mapViewProvider = ref.read(mapViewRiverpod);
 
       // Apply editing changes if in editing mode
       if (mapViewProvider.isEditing &&
@@ -1031,8 +1125,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
 
         // Try to find and update job in JobListProvider first
         try {
-          final jobListProvider =
-              Provider.of<JobListProvider>(context, listen: false);
+          final jobListProvider = ref.read(jobListRiverpod);
           final job = jobListProvider.jobListItems.firstWhere(
             (job) => job.id == widget.jobId,
           );
@@ -1059,8 +1152,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
         // If not found in JobListProvider, try ScheduleProvider
         if (!jobUpdated) {
           try {
-            final scheduleProvider =
-                Provider.of<ScheduleProvider>(context, listen: false);
+            final scheduleProvider = ref.read(scheduleRiverpod);
             final job = scheduleProvider.jobs.firstWhere(
               (job) => job.id == widget.jobId,
             );
@@ -1112,8 +1204,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   Future<void> _showEditNameDialog() async {
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
     if (mapViewProvider.selectedCustomPolygon == null ||
         mapViewProvider.selectedPolygonIndex == null) {
       return;
@@ -1223,8 +1314,9 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<MapViewProvider>(
-      builder: (context, mapViewProvider, child) {
+    final mapViewProvider = ref.watch(mapViewRiverpod);
+    return Builder(
+      builder: (context) {
         return Scaffold(
           appBar: AppBar(
             leading: CloseButton(onPressed: () async {
@@ -1273,7 +1365,8 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                 ? [
                     // Create new area button (always available when editable)
                     if (!mapViewProvider.isEditing &&
-                        !mapViewProvider.isCreatingNewPolygon)
+                        !mapViewProvider.isCreatingNewPolygon &&
+                        !mapViewProvider.isPlacingMarker)
                       IconButton(
                         icon: const Icon(Icons.add_location),
                         tooltip: 'Create new area',
@@ -1283,11 +1376,27 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                         },
                       ),
 
-                    // Edit existing area button (only when area is selected)
+                    // Add marker/point button
                     if (!mapViewProvider.isEditing &&
                         !mapViewProvider.isCreatingNewPolygon &&
+                        !mapViewProvider.isPlacingMarker)
+                      IconButton(
+                        icon: const Icon(Icons.add_location_alt),
+                        tooltip: 'Add marker point',
+                        onPressed: () {
+                          mapViewProvider.startPlacingMarker();
+                          _updateMapView();
+                        },
+                      ),
+
+                    // Edit existing area button (only when polygon area is selected, not markers)
+                    if (!mapViewProvider.isEditing &&
+                        !mapViewProvider.isCreatingNewPolygon &&
+                        !mapViewProvider.isPlacingMarker &&
                         (_selectedWorkArea != null ||
-                            mapViewProvider.selectedCustomPolygon != null))
+                            (mapViewProvider.selectedCustomPolygon != null &&
+                                mapViewProvider
+                                    .selectedCustomPolygon!.isPolygon)))
                       IconButton(
                         icon: const Icon(Icons.edit),
                         tooltip: 'Edit area boundary',
@@ -1303,6 +1412,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                     // Edit polygon properties button (only for CustomPolygons)
                     if (!mapViewProvider.isEditing &&
                         !mapViewProvider.isCreatingNewPolygon &&
+                        !mapViewProvider.isPlacingMarker &&
                         mapViewProvider.selectedCustomPolygon != null)
                       IconButton(
                         icon: const Icon(Icons.edit_note),
@@ -1310,14 +1420,17 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                         onPressed: _showEditNameDialog,
                       ),
 
-                    // Cancel buttons for editing/creating
+                    // Cancel buttons for editing/creating/placing marker
                     if (mapViewProvider.isEditing ||
-                        mapViewProvider.isCreatingNewPolygon)
+                        mapViewProvider.isCreatingNewPolygon ||
+                        mapViewProvider.isPlacingMarker)
                       IconButton(
                         icon: const Icon(Icons.close),
-                        tooltip: mapViewProvider.isCreatingNewPolygon
-                            ? 'Cancel creation'
-                            : 'Cancel changes',
+                        tooltip: mapViewProvider.isPlacingMarker
+                            ? 'Cancel marker'
+                            : mapViewProvider.isCreatingNewPolygon
+                                ? 'Cancel creation'
+                                : 'Cancel changes',
                         onPressed: () async {
                           if (mapViewProvider.isEditing &&
                               mapViewProvider.hasUnsavedChanges) {
@@ -1326,6 +1439,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                           }
                           mapViewProvider.cancelEditing();
                           mapViewProvider.cancelCreatingPolygon();
+                          mapViewProvider.cancelPlacingMarker();
                           _updateMapView();
                         },
                       ),
@@ -1370,8 +1484,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                               // Try to find and update job in JobListProvider first
                               try {
                                 final jobListProvider =
-                                    Provider.of<JobListProvider>(context,
-                                        listen: false);
+                                    ref.read(jobListRiverpod);
                                 final job =
                                     jobListProvider.jobListItems.firstWhere(
                                   (job) => job.id == widget.jobId,
@@ -1400,8 +1513,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                               if (!jobUpdated) {
                                 try {
                                   final scheduleProvider =
-                                      Provider.of<ScheduleProvider>(context,
-                                          listen: false);
+                                      ref.read(scheduleRiverpod);
                                   final job = scheduleProvider.jobs.firstWhere(
                                     (job) => job.id == widget.jobId,
                                   );
@@ -1511,15 +1623,23 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                       initialCameraPosition:
                           CameraPosition(target: _center, zoom: 12),
                       polygons: _polygons,
-                      polylines:
-                          _gpxData.allPolylines.toSet(), // Add GPX polylines
+                      polylines: {
+                        ..._gpxData.allPolylines.toSet(),
+                        ..._customPolylines
+                      }, // Add GPX + custom polylines
                       markers: mapViewProvider.isEditing &&
                               _circleMarkerIcon != null &&
                               _midpointMarkerIcon != null
-                          ? _buildEditingMarkers()
+                          ? {
+                              ..._buildEditingMarkers(),
+                              ..._buildCustomMarkers()
+                            }
                           : mapViewProvider.isCreatingNewPolygon
-                              ? _buildNewPolygonMarkers()
-                              : {},
+                              ? {
+                                  ..._buildNewPolygonMarkers(),
+                                  ..._buildCustomMarkers()
+                                }
+                              : _buildCustomMarkers(),
                       mapType: MapType.normal,
                       myLocationEnabled: true,
                       myLocationButtonEnabled: true,
@@ -1639,9 +1759,34 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
                         ),
                       ),
 
+                    // Instructions overlay for marker placement
+                    if (mapViewProvider.isPlacingMarker)
+                      Positioned(
+                        top: 16,
+                        left: 16,
+                        right: 16,
+                        child: Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.shade700,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Text(
+                            'Tap on the map to place a marker point. Useful for collection addresses or traffic light intersections.',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+
                     // Instructions overlay for polygon selection
                     if (!mapViewProvider.isCreatingNewPolygon &&
                         !mapViewProvider.isEditing &&
+                        !mapViewProvider.isPlacingMarker &&
                         _editableWorkAreas.length > 1)
                       Positioned(
                         top: 16,
@@ -1807,56 +1952,52 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   }
 
   Widget _buildClientMapsSection() {
-    return Consumer<JobListProvider>(
-      builder: (context, jobListProvider, child) {
-        return Column(
-          children: [
-            // Client Maps Header
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.orange.shade50,
-                border: Border(
-                  top: BorderSide(color: Colors.grey.shade300),
-                  bottom: BorderSide(color: Colors.grey.shade300),
+    return Column(
+      children: [
+        // Client Maps Header
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.orange.shade50,
+            border: Border(
+              top: BorderSide(color: Colors.grey.shade300),
+              bottom: BorderSide(color: Colors.grey.shade300),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.map, color: Colors.orange.shade700),
+              const SizedBox(width: 8),
+              Text(
+                'Client Maps',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.orange.shade700,
                 ),
               ),
-              child: Row(
-                children: [
-                  Icon(Icons.map, color: Colors.orange.shade700),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Client Maps',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.orange.shade700,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            ],
+          ),
+        ),
 
-            // URL/Text input with client suggestions
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const SizedBox(height: 24),
+        // URL/Text input with client suggestions
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 24),
 
-                    // KML Downloader Widget
-                    MyMapsKmlDownloader(
-                      onKmlDataRetrieved: _handleKmlData,
-                    ),
-                  ],
+                // KML Downloader Widget
+                MyMapsKmlDownloader(
+                  onKmlDataRetrieved: _handleKmlData,
                 ),
-              ),
+              ],
             ),
-          ],
-        );
-      },
+          ),
+        ),
+      ],
     );
   }
 
@@ -2069,8 +2210,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
   /// Handle KML data retrieved from MyMapsKmlDownloader
   void _handleKmlData(Uint8List kmlBytes, String fileName) async {
     try {
-      final mapViewProvider =
-          Provider.of<MapViewProvider>(context, listen: false);
+      final mapViewProvider = ref.read(mapViewRiverpod);
       // Parse KML data using KmlParserService
       final result = await KmlParserService.parseKmlData(kmlBytes, fileName);
       final polygons = result.polygons;
@@ -2133,8 +2273,7 @@ class _UpdatedMapViewState extends State<UpdatedMapView> {
     }
 
     // Clear the provider state when the widget is disposed
-    final mapViewProvider =
-        Provider.of<MapViewProvider>(context, listen: false);
+    final mapViewProvider = ref.read(mapViewRiverpod);
     mapViewProvider.resetMapState();
 
     super.dispose();

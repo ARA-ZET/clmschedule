@@ -7,6 +7,7 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:gpx/gpx.dart';
 import '../models/styled_polygon.dart';
 import '../models/te_gpx_file_entry.dart';
@@ -14,8 +15,13 @@ import '../models/tab_item.dart';
 import '../../models/distributor.dart';
 import '../../models/custom_polygon.dart';
 import '../../providers/schedule_provider.dart';
+import '../../services/gpx_storage_service.dart';
 import '../services/point_in_polygon.dart';
 import 'te_tabs_provider.dart';
+
+final teProcessingRiverpod =
+    riverpod.ChangeNotifierProvider<TEProcessingProvider>(
+        (ref) => TEProcessingProvider());
 
 class TEProcessingProvider extends ChangeNotifier {
   // ── State ──────────────────────────────────────────────────────────────────
@@ -195,6 +201,7 @@ class TEProcessingProvider extends ChangeNotifier {
         _matchDistributor(pair.matchKey, scheduleProvider.distributors);
 
     final workMapPolygons = <TEStyledPolygon>[];
+    String? storageFolderPath;
     if (trackDate != null && distributor != null) {
       debugPrint(
           '🔄 Fetching jobs for ${distributor.name} on ${trackDate.toLocal().toString().substring(0, 10)}...');
@@ -207,6 +214,22 @@ class TEProcessingProvider extends ChangeNotifier {
           workMapPolygons.add(_customPolygonToStyled(wm));
         }
       }
+      // Resolve storage folder path from the first matched job's client
+      if (jobs.isNotEmpty && jobs.first.clients.isNotEmpty) {
+        try {
+          final gpxStorage = GpxStorageService();
+          final primaryClient = jobs.first.clients.first;
+          final nextRound =
+              await gpxStorage.nextRoundNumber(trackDate, primaryClient);
+          // Use the latest existing round (or Round 1 if none yet)
+          final round = nextRound > 1 ? nextRound - 1 : 1;
+          storageFolderPath =
+              gpxStorage.roundFolderPath(trackDate, primaryClient, round);
+          debugPrint('☁️ Storage folder: $storageFolderPath');
+        } catch (e) {
+          debugPrint('⚠️ Could not resolve storage folder: $e');
+        }
+      }
     }
     debugPrint('🗺  Work-map polygons loaded: ${workMapPolygons.length}');
 
@@ -216,6 +239,7 @@ class TEProcessingProvider extends ChangeNotifier {
       tracks: [...pair.trackFile.tracks],
       waypoints: [...pair.waypointsFile.waypoints],
       targetPolygons: [],
+      storageFolderPath: storageFolderPath,
     );
     debugPrint(
         '✅ Tab "${pair.tabTitle}" — tracks: ${tab.tracks.length}, wpts: ${tab.waypoints.length}, polys: ${tab.polygons.length}');

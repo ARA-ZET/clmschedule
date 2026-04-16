@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter_web_plugins/url_strategy.dart';
 import 'config/flavor_config.dart';
 import 'shareable_maps/providers/shareable_map_provider.dart';
-import 'shareable_maps/providers/shareable_maps_gallery_provider.dart';
-import 'shareable_maps/widgets/shareable_maps_gallery.dart';
 import 'shareable_maps/widgets/shareable_map_editor.dart';
 import 'shareable_maps/adapters/firestore_adapter.dart';
 import 'shareable_maps/services/shareable_maps_firestore_service.dart';
@@ -26,11 +24,7 @@ void main() async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   runApp(
-    MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (_) => ShareableMapProvider()),
-        ChangeNotifierProvider(create: (_) => ShareableMapsGalleryProvider()),
-      ],
+    riverpod.ProviderScope(
       child: const CLMMapApp(),
     ),
   );
@@ -66,9 +60,9 @@ class CLMMapApp extends StatelessWidget {
           );
         }
 
-        // Default route — gallery
+        // Default route — invalid link page (no gallery exposed)
         return MaterialPageRoute(
-          builder: (_) => const ShareableMapsGallery(),
+          builder: (_) => const _InvalidLinkPage(),
         );
       },
     );
@@ -86,7 +80,6 @@ class _DeepLinkMapLoader extends StatefulWidget {
 
 class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
   bool _loading = true;
-  String? _error;
 
   @override
   void initState() {
@@ -99,10 +92,7 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
       final linkService = MapLinkService();
       final linkData = await linkService.resolveShareCode(widget.shareCode);
       if (linkData == null) {
-        setState(() {
-          _loading = false;
-          _error = 'Map not found. The link may have expired or been deleted.';
-        });
+        setState(() => _loading = false);
         return;
       }
 
@@ -115,7 +105,8 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
         service: service,
       );
 
-      final provider = context.read<ShareableMapProvider>();
+      final provider = riverpod.ProviderScope.containerOf(context)
+          .read(shareableMapRiverpod);
       await provider.loadFromAdapter(adapter);
 
       if (mounted) {
@@ -126,10 +117,7 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
       }
     } catch (e) {
       if (mounted) {
-        setState(() {
-          _loading = false;
-          _error = 'Failed to load map: $e';
-        });
+        setState(() => _loading = false);
       }
     }
   }
@@ -151,25 +139,48 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
       );
     }
 
+    return const _InvalidLinkPage();
+  }
+}
+
+/// Shown when there is no valid share code — either the user navigated
+/// to the root URL or the deep link could not be resolved.
+class _InvalidLinkPage extends StatelessWidget {
+  const _InvalidLinkPage();
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.error_outline, size: 64, color: Colors.red),
-            const SizedBox(height: 16),
-            Text(
-              _error ?? 'Something went wrong',
-              style: const TextStyle(fontSize: 16),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            FilledButton.icon(
-              onPressed: () => Navigator.pushReplacementNamed(context, '/'),
-              icon: const Icon(Icons.home),
-              label: const Text('Go to Gallery'),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.link_off_rounded,
+                  size: 72, color: Colors.grey.shade400),
+              const SizedBox(height: 24),
+              const Text(
+                'Invalid Map Link',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF202124),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'This link is invalid or has expired.\n'
+                'Please contact Community Life Media for assistance.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 15,
+                  color: Color(0xFF5F6368),
+                  height: 1.5,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

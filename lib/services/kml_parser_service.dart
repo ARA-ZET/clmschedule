@@ -76,6 +76,14 @@ class KmlParserService {
     Uint8List kmlData,
     String fileName,
   ) async {
+    return parseKmlDataSync(kmlData, fileName);
+  }
+
+  /// Synchronous version of [parseKmlData] for use in isolates.
+  static ParsedMapResult parseKmlDataSync(
+    Uint8List kmlData,
+    String fileName,
+  ) {
     try {
       final lowerName = fileName.toLowerCase();
 
@@ -86,7 +94,6 @@ class KmlParserService {
 
       // KMZ (ZIP archive containing KML)
       if (lowerName.endsWith('.kmz') || _isKmzData(kmlData)) {
-        debugPrint('Detected KMZ file format, extracting...');
         kmlData = extractKmlFromKmz(kmlData);
       }
 

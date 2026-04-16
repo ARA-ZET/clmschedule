@@ -1,5 +1,5 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import '../models/happy_sun_shared.dart';
 import '../models/happy_sun_project.dart';
 import '../models/inventory_tool.dart';
@@ -8,7 +8,7 @@ import '../providers/inventory_provider.dart';
 import '../services/sound_service.dart';
 import 'happy_sun_qr_scanner_widget.dart';
 
-class HappySunChecklistScreen extends StatefulWidget {
+class HappySunChecklistScreen extends riverpod.ConsumerStatefulWidget {
   final HappySunProject project;
 
   const HappySunChecklistScreen({
@@ -17,11 +17,12 @@ class HappySunChecklistScreen extends StatefulWidget {
   });
 
   @override
-  State<HappySunChecklistScreen> createState() =>
+  riverpod.ConsumerState<HappySunChecklistScreen> createState() =>
       _HappySunChecklistScreenState();
 }
 
-class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
+class _HappySunChecklistScreenState
+    extends riverpod.ConsumerState<HappySunChecklistScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   final GlobalKey<HappySunQRScannerWidgetState> _scannerKey = GlobalKey();
@@ -91,7 +92,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
   }
 
   void _handleBarcodeScan(String code) {
-    final inventoryProvider = context.read<InventoryProvider>();
+    final inventoryProvider = ref.read(inventoryRiverpod);
 
     // Find the tool in inventory by QR code or tool ID
     try {
@@ -207,7 +208,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     try {
       // Save as progress (not completed)
       final checklistData = _buildChecklistData(isCompleted: false);
-      final jobProvider = context.read<HappySunProjectProvider>();
+      final jobProvider = ref.read(happySunProjectRiverpod);
 
       await jobProvider.updateChecklistData(
         widget.project.id,
@@ -291,7 +292,7 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     try {
       // Save as completed
       final checklistData = _buildChecklistData(isCompleted: true);
-      final jobProvider = context.read<HappySunProjectProvider>();
+      final jobProvider = ref.read(happySunProjectRiverpod);
 
       await jobProvider.updateChecklistData(
         widget.project.id,
@@ -553,8 +554,8 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
   }
 
   Widget _buildScanTab() {
-    return Consumer<InventoryProvider>(
-      builder: (context, inventoryProvider, child) {
+    return Builder(
+      builder: (context) {
         final isScanning = _scannerKey.currentState?.isScanning ?? false;
         return SingleChildScrollView(
           child: Column(
@@ -873,8 +874,9 @@ class _HappySunChecklistScreenState extends State<HappySunChecklistScreen>
     final sortedGroups = groupedTools.entries.toList()
       ..sort((a, b) => a.key.compareTo(b.key));
 
-    return Consumer<InventoryProvider>(
-      builder: (context, inventoryProvider, child) {
+    return Builder(
+      builder: (context) {
+        final inventoryProvider = ref.watch(inventoryRiverpod);
         final inventoryTools = inventoryProvider.tools;
 
         return ListView.builder(

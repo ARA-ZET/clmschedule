@@ -1,7 +1,7 @@
 import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 
 import '../models/collection_job.dart';
@@ -52,14 +52,16 @@ class _JobVisualStyling {
   });
 }
 
-class CollectionScheduleGrid extends StatefulWidget {
+class CollectionScheduleGrid extends riverpod.ConsumerStatefulWidget {
   const CollectionScheduleGrid({super.key});
 
   @override
-  State<CollectionScheduleGrid> createState() => _CollectionScheduleGridState();
+  riverpod.ConsumerState<CollectionScheduleGrid> createState() =>
+      _CollectionScheduleGridState();
 }
 
-class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
+class _CollectionScheduleGridState
+    extends riverpod.ConsumerState<CollectionScheduleGrid> {
   // Keep track of current month to reset scroll position when it changes
   String _currentMonthDisplay = '';
   bool _hasScrolledToToday = false;
@@ -236,10 +238,11 @@ class _CollectionScheduleGridState extends State<CollectionScheduleGrid> {
 
   @override
   Widget build(BuildContext context) {
-    final bool isFullview =
-        context.watch<TogglerProvider>().isFullviewCollection;
-    return Consumer2<CollectionScheduleProvider, ScaleProvider>(
-      builder: (context, collectionProvider, scaleProvider, child) {
+    final bool isFullview = ref.watch(togglerRiverpod).isFullviewCollection;
+    final scaleProvider = ref.watch(scaleRiverpod);
+    return Builder(
+      builder: (context) {
+        final collectionProvider = ref.watch(collectionScheduleRiverpod);
         // Check if month changed and reset scroll state
         if (_currentMonthDisplay != collectionProvider.currentMonthDisplay) {
           _currentMonthDisplay = collectionProvider.currentMonthDisplay;
@@ -728,7 +731,7 @@ void _showAddCollectionJobDialog(BuildContext context, VehicleType vehicleType,
   );
 }
 
-class _AddCollectionJobDialog extends StatefulWidget {
+class _AddCollectionJobDialog extends riverpod.ConsumerStatefulWidget {
   final VehicleType vehicleType;
   final DateTime date;
   final String timeSlot;
@@ -740,11 +743,12 @@ class _AddCollectionJobDialog extends StatefulWidget {
   });
 
   @override
-  State<_AddCollectionJobDialog> createState() =>
+  riverpod.ConsumerState<_AddCollectionJobDialog> createState() =>
       _AddCollectionJobDialogState();
 }
 
-class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
+class _AddCollectionJobDialogState
+    extends riverpod.ConsumerState<_AddCollectionJobDialog> {
   final _locationController = TextEditingController();
   final _staffController = TextEditingController();
   TrailerType _selectedTrailerType = TrailerType.noTrailer;
@@ -898,7 +902,7 @@ class _AddCollectionJobDialogState extends State<_AddCollectionJobDialog> {
     );
 
     // Add to job list provider instead of collection provider
-    final jobListProvider = context.read<JobListProvider>();
+    final jobListProvider = ref.read(jobListRiverpod);
     jobListProvider.addJobListItem(jobListItem);
 
     Navigator.of(context).pop();

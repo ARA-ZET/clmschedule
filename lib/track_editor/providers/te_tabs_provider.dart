@@ -1,9 +1,14 @@
 // track_editor/providers/te_tabs_provider.dart
 import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:gpx/gpx.dart';
 import '../models/styled_polygon.dart';
 import '../models/tab_item.dart';
 import 'te_mode_provider.dart';
+
+final teTabsRiverpod =
+    riverpod.ChangeNotifierProvider<TETabsProvider>((ref) => TETabsProvider());
 
 List<TETabItem> _defaultTabs() => [
       TETabItem(
@@ -94,6 +99,15 @@ class TETabsProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Reset tabs across all modes back to a single default tab.
+  void clearAllTabs() {
+    for (final mode in TEMode.values) {
+      _tabsByMode[mode] = _defaultTabs();
+      _currentByMode[mode] = 0;
+    }
+    notifyListeners();
+  }
+
   void addData(TETabItem data) {
     final list = tabs;
     final cur = _currentByMode[_activeMode]!;
@@ -152,5 +166,100 @@ class TETabsProvider with ChangeNotifier {
       style: p.style,
     );
     notifyListeners();
+  }
+
+  // ── Track operations ──────────────────────────────────────────────────────
+
+  /// Remove a track by index from the given tab.
+  void removeTrack(int tabIndex, int trackIndex) {
+    final list = tabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final tracks = list[tabIndex].tracks;
+    if (trackIndex < 0 || trackIndex >= tracks.length) return;
+    tracks.removeAt(trackIndex);
+    notifyListeners();
+  }
+
+  // ── Waypoint operations ───────────────────────────────────────────────────
+
+  /// Remove a waypoint by index from the given tab.
+  void removeWaypoint(int tabIndex, int waypointIndex) {
+    final list = tabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final waypoints = list[tabIndex].waypoints;
+    if (waypointIndex < 0 || waypointIndex >= waypoints.length) return;
+    waypoints.removeAt(waypointIndex);
+    notifyListeners();
+  }
+
+  /// Remove multiple waypoints by index. Indices are sorted descending
+  /// so removals don't shift later indices.
+  void removeWaypoints(int tabIndex, Set<int> waypointIndices) {
+    final list = tabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final waypoints = list[tabIndex].waypoints;
+    final sorted = waypointIndices.toList()..sort((a, b) => b.compareTo(a));
+    for (final idx in sorted) {
+      if (idx >= 0 && idx < waypoints.length) waypoints.removeAt(idx);
+    }
+    notifyListeners();
+  }
+
+  /// Split a track at a global trackpoint index (flattened across all segments).
+  ///
+  /// The original track is replaced by two new tracks: one containing all
+  /// points up to and including [globalPointIndex], the other containing
+  /// all points from [globalPointIndex] onward (the split point is shared
+  /// by both halves so there is no gap).
+  ///
+  /// Returns true if the split succeeded.
+  bool splitTrack(int tabIndex, int trackIndex, int globalPointIndex) {
+    final list = tabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return false;
+    final tracks = list[tabIndex].tracks;
+    if (trackIndex < 0 || trackIndex >= tracks.length) return false;
+
+    final trk = tracks[trackIndex];
+
+    // Flatten all segments to find total point count and locate the split.
+    final allPts = <Wpt>[];
+    final segBoundaries = <int>[]; // start index of each segment in allPts
+    for (final seg in trk.trksegs) {
+      segBoundaries.add(allPts.length);
+      allPts.addAll(seg.trkpts);
+    }
+
+    if (globalPointIndex <= 0 || globalPointIndex >= allPts.length - 1) {
+      return false; // can't split at first or last point
+    }
+
+    // Build two halves — the split point appears in both so there's no gap.
+    final firstHalf = allPts.sublist(0, globalPointIndex + 1);
+    final secondHalf = allPts.sublist(globalPointIndex);
+
+    final baseName = trk.name ?? 'Track';
+    final trkA = Trk(
+      name: '$baseName (1)',
+      cmt: trk.cmt,
+      desc: trk.desc,
+      src: trk.src,
+      number: trk.number,
+      type: trk.type,
+      trksegs: [Trkseg(trkpts: firstHalf)],
+    );
+    final trkB = Trk(
+      name: '$baseName (2)',
+      cmt: trk.cmt,
+      desc: trk.desc,
+      src: trk.src,
+      number: trk.number,
+      type: trk.type,
+      trksegs: [Trkseg(trkpts: secondHalf)],
+    );
+
+    // Replace the original track with the two halves.
+    tracks.replaceRange(trackIndex, trackIndex + 1, [trkA, trkB]);
+    notifyListeners();
+    return true;
   }
 }

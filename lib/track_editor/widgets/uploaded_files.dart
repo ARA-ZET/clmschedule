@@ -1,15 +1,14 @@
 // track_editor/widgets/uploaded_files.dart
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/te_files_provider.dart';
 
-class TEUploadedFiles extends StatelessWidget {
+class TEUploadedFiles extends riverpod.ConsumerWidget {
   const TEUploadedFiles({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final selectedFileNames =
-        context.watch<TEFilesProvider>().selectedFileNames;
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final selectedFileNames = ref.watch(teFilesRiverpod).selectedFileNames;
 
     return Container(
       decoration: BoxDecoration(

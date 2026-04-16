@@ -1,8 +1,13 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'dart:async';
 import 'dart:typed_data';
 import '../models/chat_message.dart';
+
+final chatServiceRiverpod = riverpod.Provider<ChatService>(
+  (ref) => ChatService(FirebaseFirestore.instance),
+);
 
 class ChatService {
   final FirebaseFirestore _firestore;

@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/happy_sun_project.dart';
 import '../providers/happy_sun_project_provider.dart';
 import '../providers/inventory_provider.dart';
 import '../providers/auth_provider.dart';
 
-class HappySunCheckoutDialog extends StatefulWidget {
+class HappySunCheckoutDialog extends riverpod.ConsumerStatefulWidget {
   final HappySunProject project;
 
   const HappySunCheckoutDialog({
@@ -14,10 +14,12 @@ class HappySunCheckoutDialog extends StatefulWidget {
   });
 
   @override
-  State<HappySunCheckoutDialog> createState() => _HappySunCheckoutDialogState();
+  riverpod.ConsumerState<HappySunCheckoutDialog> createState() =>
+      _HappySunCheckoutDialogState();
 }
 
-class _HappySunCheckoutDialogState extends State<HappySunCheckoutDialog> {
+class _HappySunCheckoutDialogState
+    extends riverpod.ConsumerState<HappySunCheckoutDialog> {
   final _notesController = TextEditingController();
   final List<CheckedOutTool> _selectedTools = [];
   bool _isLoading = false;
@@ -113,8 +115,9 @@ class _HappySunCheckoutDialogState extends State<HappySunCheckoutDialog> {
   }
 
   Widget _buildToolsList() {
-    return Consumer<InventoryProvider>(
-      builder: (context, inventoryProvider, child) {
+    return Builder(
+      builder: (context) {
+        final inventoryProvider = ref.watch(inventoryRiverpod);
         final tools = inventoryProvider.tools;
 
         if (tools.isEmpty) {
@@ -227,8 +230,8 @@ class _HappySunCheckoutDialogState extends State<HappySunCheckoutDialog> {
       _isLoading = true;
     });
 
-    final projectProvider = context.read<HappySunProjectProvider>();
-    final authProvider = context.read<AuthProvider>();
+    final projectProvider = ref.read(happySunProjectRiverpod);
+    final authProvider = ref.read(authRiverpod);
     final userId = authProvider.user?.uid ?? 'unknown';
 
     final success = await projectProvider.performCheckout(

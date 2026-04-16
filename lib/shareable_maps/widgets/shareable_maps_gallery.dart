@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
+import '../../env.dart';
 import '../models/shareable_map.dart';
 import '../providers/shareable_maps_gallery_provider.dart';
 import '../providers/shareable_map_provider.dart';
@@ -13,14 +14,16 @@ import 'shareable_map_editor.dart';
 
 /// Gallery screen for viewing all shareable maps as tiles, grouped by month.
 /// Modelled after the Google My Maps dashboard.
-class ShareableMapsGallery extends StatefulWidget {
+class ShareableMapsGallery extends riverpod.ConsumerStatefulWidget {
   const ShareableMapsGallery({super.key});
 
   @override
-  State<ShareableMapsGallery> createState() => _ShareableMapsGalleryState();
+  riverpod.ConsumerState<ShareableMapsGallery> createState() =>
+      _ShareableMapsGalleryState();
 }
 
-class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
+class _ShareableMapsGalleryState
+    extends riverpod.ConsumerState<ShareableMapsGallery> {
   final TextEditingController _searchController = TextEditingController();
 
   @override
@@ -28,7 +31,7 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
     super.initState();
     // Start listening for maps as soon as the gallery opens.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ShareableMapsGalleryProvider>().startListening();
+      ref.read(shareableMapsGalleryRiverpod).startListening();
     });
   }
 
@@ -42,8 +45,9 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: _buildAppBar(context),
-      body: Consumer<ShareableMapsGalleryProvider>(
-        builder: (context, gallery, _) {
+      body: riverpod.Consumer(
+        builder: (context, ref, _) {
+          final gallery = ref.watch(shareableMapsGalleryRiverpod);
           if (gallery.isLoading && gallery.allMaps.isEmpty) {
             return const Center(child: CircularProgressIndicator());
           }
@@ -100,8 +104,8 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
                           icon: const Icon(Icons.clear, size: 18),
                           onPressed: () {
                             _searchController.clear();
-                            context
-                                .read<ShareableMapsGalleryProvider>()
+                            ref
+                                .read(shareableMapsGalleryRiverpod)
                                 .setSearchQuery('');
                           },
                         )
@@ -116,9 +120,7 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
                       const EdgeInsets.symmetric(vertical: 0, horizontal: 12),
                 ),
                 onChanged: (value) {
-                  context
-                      .read<ShareableMapsGalleryProvider>()
-                      .setSearchQuery(value);
+                  ref.read(shareableMapsGalleryRiverpod).setSearchQuery(value);
                   setState(() {}); // Refresh suffix icon visibility
                 },
               ),
@@ -128,8 +130,9 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
       ),
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(48),
-        child: Consumer<ShareableMapsGalleryProvider>(
-          builder: (context, gallery, _) {
+        child: riverpod.Consumer(
+          builder: (context, ref, _) {
+            final gallery = ref.watch(shareableMapsGalleryRiverpod);
             return _FilterTabs(
               selectedTab: gallery.filterTab,
               onTabChanged: (tab) => gallery.setFilterTab(tab),
@@ -142,7 +145,7 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
           icon: const Icon(Icons.refresh),
           tooltip: 'Refresh',
           onPressed: () {
-            context.read<ShareableMapsGalleryProvider>().startListening();
+            ref.read(shareableMapsGalleryRiverpod).startListening();
           },
         ),
       ],
@@ -216,7 +219,7 @@ class _ShareableMapsGalleryState extends State<ShareableMapsGallery> {
       service: service,
     );
 
-    final provider = context.read<ShareableMapProvider>();
+    final provider = ref.read(shareableMapRiverpod);
     await provider.loadFromAdapter(adapter);
 
     // Persist immediately so the map shows up in the gallery.
@@ -311,7 +314,7 @@ class _FilterTabs extends StatelessWidget {
 // Gallery Body (scrollable grid grouped by month)
 // =============================================================================
 
-class _GalleryBody extends StatelessWidget {
+class _GalleryBody extends riverpod.ConsumerWidget {
   final List<MonthGroup> monthGroups;
   final String filterTab;
   final List<String> unloadedMonths;
@@ -327,10 +330,10 @@ class _GalleryBody extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
     // If filter is 'recent', show a flat grid without month headers.
     if (filterTab == 'recent') {
-      final gallery = context.read<ShareableMapsGalleryProvider>();
+      final gallery = ref.read(shareableMapsGalleryRiverpod);
       final items = gallery.filteredMaps;
       if (items.isEmpty) {
         return const Center(
@@ -501,19 +504,19 @@ class _MapGrid extends StatelessWidget {
 // Map Tile
 // =============================================================================
 
-class _MapTile extends StatelessWidget {
+class _MapTile extends riverpod.ConsumerWidget {
   final MapGalleryItem item;
 
   const _MapTile({required this.item});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
     return Card(
       clipBehavior: Clip.antiAlias,
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       child: InkWell(
-        onTap: () => _openMap(context),
+        onTap: () => _openMap(context, ref),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -582,7 +585,10 @@ class _MapTile extends StatelessWidget {
     );
   }
 
-  Future<void> _openMap(BuildContext context) async {
+  Future<void> _openMap(BuildContext context, riverpod.WidgetRef ref) async {
+    final openSw = Stopwatch()..start();
+    debugPrint('[MapOpen] START opening map ${item.docId}');
+
     final service = ShareableMapsFirestoreService();
     final adapter = FirestoreMapAdapter.existing(
       docId: item.docId,
@@ -590,17 +596,24 @@ class _MapTile extends StatelessWidget {
       service: service,
     );
 
-    final provider = context.read<ShareableMapProvider>();
+    final provider = ref.read(shareableMapRiverpod);
     try {
       await provider.loadFromAdapter(adapter);
+      debugPrint(
+          '[MapOpen] loadFromAdapter done in ${openSw.elapsedMilliseconds}ms');
       if (context.mounted) {
-        // Update browser URL to the shareable link
+        debugPrint(
+            '[MapOpen] Navigator.push at ${openSw.elapsedMilliseconds}ms');
+
+        // Resolve share code in the background (don't block navigation)
         final linkService = MapLinkService();
-        final code =
-            await linkService.getShareCodeForMap(item.monthKey, item.docId);
-        if (code != null) {
-          url_updater.updateBrowserUrl('/map/$code');
-        }
+        linkService.getShareCodeForMap(item.monthKey, item.docId).then((code) {
+          if (code != null) {
+            url_updater.updateBrowserUrl('/map/$code');
+          }
+          debugPrint(
+              '[MapOpen] getShareCodeForMap done in ${openSw.elapsedMilliseconds}ms');
+        });
 
         if (context.mounted) {
           await Navigator.push(
@@ -633,43 +646,79 @@ class _MapThumbnail extends StatelessWidget {
 
   const _MapThumbnail({required this.item});
 
+  /// Build a lightweight Static Maps API URL with clean style for gallery preview.
+  String _staticMapUrl() {
+    final apiKey = Env.googleMapsApiKey;
+    return 'https://maps.googleapis.com/maps/api/staticmap'
+        '?center=${item.centerLat},${item.centerLng}'
+        '&zoom=13&size=400x300&scale=2&maptype=roadmap'
+        '&style=feature:poi|visibility:off'
+        '&style=feature:poi.park|element:geometry|visibility:on|color:0xc8e6c9'
+        '&style=feature:transit|visibility:off'
+        '&style=feature:road|element:labels.icon|visibility:off'
+        '&style=feature:road.highway|element:geometry.fill|color:0xffd54f'
+        '&style=feature:road.highway|element:geometry.stroke|color:0xffca28'
+        '&style=feature:road.arterial|element:geometry.fill|color:0xffffff'
+        '&style=feature:road.local|element:geometry.fill|color:0xf5f5f5'
+        '&style=feature:water|element:geometry|color:0xbbdefb'
+        '&style=feature:landscape|element:geometry|color:0xf5f5f5'
+        '&style=element:labels.text.fill|color:0x616161'
+        '&style=element:labels.text.stroke|color:0xffffff'
+        '&key=$apiKey';
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Use stored thumbnail URL, or fall back to live Static Maps API
+    final imageUrl =
+        (item.thumbnailUrl != null && item.thumbnailUrl!.isNotEmpty)
+            ? item.thumbnailUrl!
+            : _staticMapUrl();
+
     return Stack(
       fit: StackFit.expand,
       children: [
-        // Background: real thumbnail or gradient fallback
-        if (item.thumbnailUrl != null && item.thumbnailUrl!.isNotEmpty)
-          Image.network(
-            item.thumbnailUrl!,
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) =>
+        Image.network(
+          imageUrl,
+          fit: BoxFit.cover,
+          errorBuilder: (_, error, ___) {
+            debugPrint('[Thumbnail] Failed to load for ${item.docId}: $error');
+            // If stored URL failed, try live Static Maps API as fallback
+            if (item.thumbnailUrl != null &&
+                item.thumbnailUrl!.isNotEmpty &&
+                imageUrl == item.thumbnailUrl) {
+              return Image.network(
+                _staticMapUrl(),
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) =>
+                    _GradientPlaceholder(docId: item.docId),
+              );
+            }
+            return _GradientPlaceholder(docId: item.docId);
+          },
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return Stack(
+              fit: StackFit.expand,
+              children: [
                 _GradientPlaceholder(docId: item.docId),
-            loadingBuilder: (context, child, loadingProgress) {
-              if (loadingProgress == null) return child;
-              return Stack(
-                fit: StackFit.expand,
-                children: [
-                  _GradientPlaceholder(docId: item.docId),
-                  Center(
-                    child: SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        value: loadingProgress.expectedTotalBytes != null
-                            ? loadingProgress.cumulativeBytesLoaded /
-                                loadingProgress.expectedTotalBytes!
-                            : null,
-                      ),
+                Center(
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      value: loadingProgress.expectedTotalBytes != null
+                          ? loadingProgress.cumulativeBytesLoaded /
+                              loadingProgress.expectedTotalBytes!
+                          : null,
                     ),
                   ),
-                ],
-              );
-            },
-          )
-        else
-          _GradientPlaceholder(docId: item.docId),
+                ),
+              ],
+            );
+          },
+        ),
 
         // Element count badge
         if (item.elementCount > 0)
@@ -829,13 +878,13 @@ class _CopyLinkButton extends StatelessWidget {
 // Tile Popup Menu (share / delete)
 // =============================================================================
 
-class _TilePopupMenu extends StatelessWidget {
+class _TilePopupMenu extends riverpod.ConsumerWidget {
   final MapGalleryItem item;
 
   const _TilePopupMenu({required this.item});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
     return PopupMenuButton<String>(
       icon: Icon(Icons.more_vert, size: 18, color: Colors.grey.shade600),
       padding: EdgeInsets.zero,
@@ -854,7 +903,7 @@ class _TilePopupMenu extends StatelessWidget {
             await _renameMap(context);
             break;
           case 'delete':
-            await _deleteMap(context);
+            await _deleteMap(context, ref);
             break;
         }
       },
@@ -942,7 +991,7 @@ class _TilePopupMenu extends StatelessWidget {
     }
   }
 
-  Future<void> _deleteMap(BuildContext context) async {
+  Future<void> _deleteMap(BuildContext context, riverpod.WidgetRef ref) async {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -965,8 +1014,8 @@ class _TilePopupMenu extends StatelessWidget {
     if (confirm != true || !context.mounted) return;
 
     try {
-      await context
-          .read<ShareableMapsGalleryProvider>()
+      await ref
+          .read(shareableMapsGalleryRiverpod)
           .deleteMap(item.monthKey, item.docId);
     } catch (e) {
       if (context.mounted) {
@@ -1010,13 +1059,13 @@ class _EmptyGallery extends StatelessWidget {
   }
 }
 
-class _ErrorView extends StatelessWidget {
+class _ErrorView extends riverpod.ConsumerWidget {
   final String error;
 
   const _ErrorView({required this.error});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -1034,7 +1083,7 @@ class _ErrorView extends StatelessWidget {
             const SizedBox(height: 16),
             FilledButton.icon(
               onPressed: () {
-                context.read<ShareableMapsGalleryProvider>().startListening();
+                ref.read(shareableMapsGalleryRiverpod).startListening();
               },
               icon: const Icon(Icons.refresh),
               label: const Text('Retry'),

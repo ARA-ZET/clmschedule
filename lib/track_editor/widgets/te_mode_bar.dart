@@ -1,9 +1,9 @@
 // track_editor/widgets/te_mode_bar.dart
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/te_mode_provider.dart';
 
-class TEModeBar extends StatelessWidget {
+class TEModeBar extends riverpod.ConsumerWidget {
   const TEModeBar({super.key});
 
   static const _modes = [
@@ -16,9 +16,9 @@ class TEModeBar extends StatelessWidget {
   ];
 
   @override
-  Widget build(BuildContext context) {
-    final current = context.watch<TEModeProvider>().mode;
-    final provider = context.read<TEModeProvider>();
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final current = ref.watch(teModeRiverpod).mode;
+    final provider = ref.read(teModeRiverpod);
 
     return Container(
       decoration: BoxDecoration(

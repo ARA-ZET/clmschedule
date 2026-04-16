@@ -1,21 +1,21 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import '../models/inventory_tool.dart';
 import '../providers/inventory_provider.dart';
 
-class AddToolDialog extends StatefulWidget {
+class AddToolDialog extends riverpod.ConsumerStatefulWidget {
   final InventoryTool? tool; // If provided, edit mode
 
   const AddToolDialog({super.key, this.tool});
 
   @override
-  State<AddToolDialog> createState() => _AddToolDialogState();
+  riverpod.ConsumerState<AddToolDialog> createState() => _AddToolDialogState();
 }
 
-class _AddToolDialogState extends State<AddToolDialog> {
+class _AddToolDialogState extends riverpod.ConsumerState<AddToolDialog> {
   final _formKey = GlobalKey<FormState>();
   late TextEditingController _nameController;
   late TextEditingController _descriptionController;
@@ -111,7 +111,7 @@ class _AddToolDialogState extends State<AddToolDialog> {
 
     try {
       final quantity = int.parse(_quantityController.text);
-      final inventoryProvider = context.read<InventoryProvider>();
+      final inventoryProvider = ref.read(inventoryRiverpod);
 
       if (widget.tool == null) {
         // Add new tools (creates multiple entries if quantity > 1)

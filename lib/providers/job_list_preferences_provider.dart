@@ -1,8 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'dart:async';
 import '../models/job_list_preferences.dart';
 import '../services/job_list_preferences_service.dart';
 import 'auth_provider.dart';
+
+final jobListPreferencesRiverpod =
+    riverpod.ChangeNotifierProvider<JobListPreferencesProvider>(
+  (ref) => JobListPreferencesProvider(
+    ref.read(jobListPreferencesServiceRiverpod),
+    ref.read(authRiverpod),
+  ),
+);
 
 /// Provider for managing job list column preferences
 class JobListPreferencesProvider extends ChangeNotifier {

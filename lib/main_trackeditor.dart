@@ -4,20 +4,12 @@
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import 'config/flavor_config.dart';
 import 'firebase_options.dart';
 import 'providers/schedule_provider.dart';
-import 'track_editor/providers/te_files_provider.dart';
-import 'track_editor/providers/te_points_in_polygon_provider.dart';
-import 'track_editor/providers/te_polygons_provider.dart';
-import 'track_editor/providers/te_processing_provider.dart';
-import 'track_editor/providers/te_map_layer_provider.dart';
-import 'track_editor/providers/te_tabs_provider.dart';
-import 'track_editor/providers/te_tracks_provider.dart';
-import 'track_editor/providers/te_waypoints_provider.dart';
-import 'track_editor/providers/te_mode_provider.dart';
+// TE provider imports migrated to Riverpod
 import 'track_editor/pages/track_editor_screen.dart';
 
 void main() async {
@@ -33,19 +25,10 @@ void main() async {
   );
 
   runApp(
-    MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (_) => TEModeProvider()),
-        ChangeNotifierProvider(
-            create: (_) => ScheduleProvider()..initForTrackEditor()),
-        ChangeNotifierProvider(create: (_) => TEFilesProvider()),
-        ChangeNotifierProvider(create: (_) => TETabsProvider()),
-        ChangeNotifierProvider(create: (_) => TEPolygonsProvider()),
-        ChangeNotifierProvider(create: (_) => TEWaypointsProvider()),
-        ChangeNotifierProvider(create: (_) => TETracksProvider()),
-        ChangeNotifierProvider(create: (_) => TEPointsInPolygonProvider()),
-        ChangeNotifierProvider(create: (_) => TEProcessingProvider()),
-        ChangeNotifierProvider(create: (_) => TEMapLayerProvider()),
+    riverpod.ProviderScope(
+      overrides: [
+        scheduleRiverpod
+            .overrideWith((ref) => ScheduleProvider()..initForTrackEditor()),
       ],
       child: const TrackEditorApp(),
     ),

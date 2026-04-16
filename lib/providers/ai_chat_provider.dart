@@ -1,7 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../services/ai_chat_service.dart';
+
+final aiChatRiverpod = riverpod.ChangeNotifierProvider<AiChatProvider>(
+  (ref) => AiChatProvider(ref.read(aiChatServiceRiverpod)),
+);
 
 /// Callback type for when the AI performs an action (e.g., adds a job)
 typedef AiActionCallback = void Function(AiChatAction action);

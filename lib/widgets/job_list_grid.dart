@@ -1,7 +1,7 @@
 import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/job_list_item.dart';
 import '../models/job_reminder.dart';
 import '../providers/job_list_provider.dart';
@@ -22,6 +22,7 @@ import 'simple_date_filter.dart';
 import 'job_list_columns_dialog.dart';
 import 'job_list_column_config.dart';
 import 'reminder_dialog.dart' as reminder;
+import 'map_picker_dialog.dart';
 
 // Reusable DataTable column header widget
 class DataTableHeaderWidget extends StatelessWidget {
@@ -256,8 +257,10 @@ class JobListFrozenHeaders extends StatelessWidget {
             width: 1,
           ),
         ),
-        child: Consumer<JobListProvider>(
-          builder: (context, provider, child) {
+        child: Builder(
+          builder: (context) {
+            final provider = riverpod.ProviderScope.containerOf(context)
+                .read(jobListRiverpod);
             return IconButton(
               onPressed: provider.isRefreshingLastChecked
                   ? null
@@ -345,7 +348,7 @@ class JobListFrozenHeaders extends StatelessWidget {
 }
 
 // Stateless widget for building data cells
-class JobListDataCellsBuilder extends StatelessWidget {
+class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
   final JobListItem item;
   final JobListProvider jobListProvider;
   final ScaleProvider scaleProvider;
@@ -373,7 +376,7 @@ class JobListDataCellsBuilder extends StatelessWidget {
     required this.getVehicleTrailerComboFromQuantity,
   });
 
-  List<DataCell> buildCells(BuildContext context) {
+  List<DataCell> buildCells(BuildContext context, riverpod.WidgetRef ref) {
     final cells = <DataCell>[];
 
     // Date — skip building (hidden behind frozen column overlay)
@@ -389,8 +392,9 @@ class JobListDataCellsBuilder extends StatelessWidget {
     // Job Status
     if (prefsProvider.isColumnVisible('jobStatus')) {
       cells.add(DataCell(
-        Consumer<JobListStatusProvider>(
-          builder: (context, statusProvider, child) {
+        Builder(
+          builder: (context) {
+            final statusProvider = ref.watch(jobListStatusRiverpod);
             final currentStatus =
                 statusProvider.getStatusById(item.jobStatusId);
             final filteredStatuses =
@@ -453,9 +457,9 @@ class JobListDataCellsBuilder extends StatelessWidget {
                   if (newStatusId != null) {
                     final updatedItem = item.copyWith(jobStatusId: newStatusId);
                     final jobListStatusProvider =
-                        context.read<JobListStatusProvider>();
+                        ref.read(jobListStatusRiverpod);
                     final invoiceStatusProvider =
-                        context.read<InvoiceStatusProvider>();
+                        ref.read(invoiceStatusRiverpod);
                     Future.microtask(
                         () => jobListProvider.updateJobListItemWithTracking(
                               item,
@@ -483,8 +487,9 @@ class JobListDataCellsBuilder extends StatelessWidget {
     // Invoice Status
     if (prefsProvider.isColumnVisible('invoiceStatus')) {
       cells.add(DataCell(
-        Consumer<InvoiceStatusProvider>(
-          builder: (context, statusProvider, child) {
+        Builder(
+          builder: (context) {
+            final statusProvider = ref.watch(invoiceStatusRiverpod);
             final currentStatus =
                 statusProvider.getStatusById(item.invoiceStatusId);
             return Container(
@@ -537,7 +542,7 @@ class JobListDataCellsBuilder extends StatelessWidget {
                     // Check if the new status is "paid" - auto-complete active reminders
                     List<JobReminder> updatedReminders = item.reminders;
                     final invoiceStatusProvider =
-                        context.read<InvoiceStatusProvider>();
+                        ref.read(invoiceStatusRiverpod);
                     final newStatus =
                         invoiceStatusProvider.getStatusById(newStatusId);
 
@@ -563,7 +568,7 @@ class JobListDataCellsBuilder extends StatelessWidget {
                       reminders: updatedReminders,
                     );
                     final jobListStatusProvider =
-                        context.read<JobListStatusProvider>();
+                        ref.read(jobListStatusRiverpod);
                     Future.microtask(
                         () => jobListProvider.updateJobListItemWithTracking(
                               item,
@@ -671,8 +676,9 @@ class JobListDataCellsBuilder extends StatelessWidget {
     // Job Type
     if (prefsProvider.isColumnVisible('jobType')) {
       cells.add(DataCell(
-        Consumer<JobTypeProvider>(
-          builder: (context, jobTypeProvider, child) {
+        Builder(
+          builder: (context) {
+            final jobTypeProvider = ref.watch(jobTypeRiverpod);
             final jobTypes = jobTypeProvider.jobTypes;
             final currentLabel =
                 jobTypeProvider.getJobTypeLabel(item.jobTypeId);
@@ -722,8 +728,26 @@ class JobListDataCellsBuilder extends StatelessWidget {
                 child: LinkCell(
                   value: item.area,
                   onSave: (value) => onUpdateField(item, 'area', value),
-                  width: JobListColumnConfig.getWidth('area') - 28,
+                  width: JobListColumnConfig.getWidth('area') - 52,
                   maxLines: 2,
+                ),
+              ),
+              SizedBox(
+                width: 24,
+                child: IconButton(
+                  icon: Icon(
+                    Icons.link,
+                    size: 16,
+                    color: item.shareableMapId.isNotEmpty
+                        ? Colors.green
+                        : Colors.grey,
+                  ),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  tooltip: item.shareableMapId.isNotEmpty
+                      ? 'Map linked'
+                      : 'Link existing map',
+                  onPressed: () => _showMapLinkOptions(context, item, ref),
                 ),
               ),
               SizedBox(
@@ -739,7 +763,7 @@ class JobListDataCellsBuilder extends StatelessWidget {
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(),
                   tooltip: 'Edit area on map',
-                  onPressed: () => _openJobListAreaEditor(context, item),
+                  onPressed: () => _openJobListAreaEditor(context, item, ref),
                 ),
               ),
             ],
@@ -980,9 +1004,10 @@ class JobListDataCellsBuilder extends StatelessWidget {
     return cells;
   }
 
-  void _openJobListAreaEditor(BuildContext context, JobListItem item) async {
+  void _openJobListAreaEditor(
+      BuildContext context, JobListItem item, riverpod.WidgetRef ref) async {
     try {
-      final mapProvider = context.read<ShareableMapProvider>();
+      final mapProvider = ref.read(shareableMapRiverpod);
 
       final adapter = JobListAreaAdapter(
         item: item,
@@ -991,9 +1016,9 @@ class JobListDataCellsBuilder extends StatelessWidget {
             customPolygons: polygons,
             area: areaLink ?? item.area,
           );
-          final jobListProvider = context.read<JobListProvider>();
-          final jobListStatusProvider = context.read<JobListStatusProvider>();
-          final invoiceStatusProvider = context.read<InvoiceStatusProvider>();
+          final jobListProvider = ref.read(jobListRiverpod);
+          final jobListStatusProvider = ref.read(jobListStatusRiverpod);
+          final invoiceStatusProvider = ref.read(invoiceStatusRiverpod);
           await jobListProvider.updateJobListItemWithTracking(
             item,
             updatedItem,
@@ -1027,20 +1052,50 @@ class JobListDataCellsBuilder extends StatelessWidget {
     }
   }
 
+  void _showMapLinkOptions(
+      BuildContext context, JobListItem item, riverpod.WidgetRef ref) async {
+    if (item.id.isEmpty) return;
+
+    final result = await showDialog<MapPickerResult>(
+      context: context,
+      builder: (context) => const MapPickerDialog(),
+    );
+
+    if (result == null || !context.mounted) return;
+
+    final jobListProvider = ref.read(jobListRiverpod);
+    await jobListProvider.linkExistingMapToJob(
+      jobId: item.id,
+      mapId: result.mapId,
+      monthKey: result.monthKey,
+      mapName: result.mapName,
+      storageFolderPath: result.storageFolderPath,
+    );
+
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Map "${result.mapName}" linked to job'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
     throw UnimplementedError('Use buildCells() method instead');
   }
 }
 
-class JobListGrid extends StatefulWidget {
+class JobListGrid extends riverpod.ConsumerStatefulWidget {
   const JobListGrid({super.key});
 
   @override
-  State<JobListGrid> createState() => _JobListGridState();
+  riverpod.ConsumerState<JobListGrid> createState() => _JobListGridState();
 }
 
-class _JobListGridState extends State<JobListGrid> {
+class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
   final ScrollController _horizontalScrollController = ScrollController();
   final ScrollController _frozenHeaderScrollController = ScrollController();
   final ScrollController _mainVerticalScrollController = ScrollController();
@@ -1167,9 +1222,11 @@ class _JobListGridState extends State<JobListGrid> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer3<JobListProvider, ScaleProvider,
-        JobListPreferencesProvider>(
-      builder: (context, jobListProvider, scaleProvider, prefsProvider, child) {
+    final jobListProvider = ref.watch(jobListRiverpod);
+    final prefsProvider = ref.watch(jobListPreferencesRiverpod);
+    return Builder(
+      builder: (context) {
+        final scaleProvider = ref.watch(scaleRiverpod);
         final jobListItems = jobListProvider.jobListItems;
         final hasError = jobListProvider.error != null;
         final isLoading = jobListProvider.isLoading;
@@ -1581,8 +1638,8 @@ class _JobListGridState extends State<JobListGrid> {
                                             jobListProvider: jobListProvider,
                                             scaleProvider: scaleProvider,
                                             prefsProvider: prefsProvider,
-                                            statusProvider: context
-                                                .read<JobListStatusProvider>(),
+                                            statusProvider:
+                                                ref.read(jobListStatusRiverpod),
                                           ),
                                         ),
                                       ),
@@ -1627,8 +1684,8 @@ class _JobListGridState extends State<JobListGrid> {
                                       builder: (context) {
                                         // Use already-available data from outer Consumer3
                                         final frozenItems = jobListItems;
-                                        final frozenStatusProvider = context
-                                            .read<JobListStatusProvider>();
+                                        final frozenStatusProvider =
+                                            ref.read(jobListStatusRiverpod);
                                         return ListView.builder(
                                           controller:
                                               _frozenVerticalScrollController,
@@ -1865,7 +1922,7 @@ class _JobListGridState extends State<JobListGrid> {
           getVehicleTypeStringFromQuantity: _getVehicleTypeStringFromQuantity,
           getVehicleTrailerComboFromQuantity:
               _getVehicleTrailerComboFromQuantity,
-        ).buildCells(context);
+        ).buildCells(context, ref);
 
         // Map cells to columns, enforcing exact header widths and
         // inserting empty placeholders for header-only columns (refresh)
@@ -1984,11 +2041,11 @@ class _JobListGridState extends State<JobListGrid> {
       }
 
       // Get label resolvers from providers
-      final jobListStatusProvider = context.read<JobListStatusProvider>();
-      final invoiceStatusProvider = context.read<InvoiceStatusProvider>();
+      final jobListStatusProvider = ref.read(jobListStatusRiverpod);
+      final invoiceStatusProvider = ref.read(invoiceStatusRiverpod);
 
       // Use debounced update system with change tracking
-      context.read<JobListProvider>().updateJobListItemWithTracking(
+      ref.read(jobListRiverpod).updateJobListItemWithTracking(
             item,
             updatedItem,
             resolveJobStatusLabel: (statusId) =>
@@ -2047,7 +2104,7 @@ class _JobListGridState extends State<JobListGrid> {
               );
             }
           } else {
-            await context.read<JobListProvider>().addJobListItem(job);
+            await ref.read(jobListRiverpod).addJobListItem(job);
             if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
@@ -2086,9 +2143,9 @@ class _JobListGridState extends State<JobListGrid> {
 
     if (result != null && context.mounted) {
       try {
-        final jobListStatusProvider = context.read<JobListStatusProvider>();
-        final invoiceStatusProvider = context.read<InvoiceStatusProvider>();
-        await context.read<JobListProvider>().updateJobListItemWithTracking(
+        final jobListStatusProvider = ref.read(jobListStatusRiverpod);
+        final invoiceStatusProvider = ref.read(invoiceStatusRiverpod);
+        await ref.read(jobListRiverpod).updateJobListItemWithTracking(
               item,
               result,
               resolveJobStatusLabel: (statusId) =>
@@ -2173,7 +2230,7 @@ class _JobListGridState extends State<JobListGrid> {
           }
         } else {
           // Add job to database
-          await context.read<JobListProvider>().addJobListItem(job);
+          await ref.read(jobListRiverpod).addJobListItem(job);
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
@@ -2213,9 +2270,7 @@ class _JobListGridState extends State<JobListGrid> {
               onPressed: () async {
                 Navigator.of(context).pop();
                 try {
-                  await context
-                      .read<JobListProvider>()
-                      .deleteJobListItem(item.id);
+                  await ref.read(jobListRiverpod).deleteJobListItem(item.id);
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Job deleted successfully')),
@@ -2238,7 +2293,7 @@ class _JobListGridState extends State<JobListGrid> {
   }
 
   void _showUpdateHistory(BuildContext context, JobListItem item) {
-    final provider = context.read<JobListProvider>();
+    final provider = ref.read(jobListRiverpod);
     final allUpdates = item.updates;
     final recentUpdates = provider.getUpdatesAfterLastCheck(item);
 

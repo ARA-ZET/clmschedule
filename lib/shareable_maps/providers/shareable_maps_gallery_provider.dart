@@ -1,8 +1,14 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../services/shareable_maps_firestore_service.dart';
 import '../services/map_link_service.dart';
 import '../services/map_thumbnail_service.dart';
+
+/// Riverpod provider for ShareableMapsGalleryProvider.
+final shareableMapsGalleryRiverpod =
+    riverpod.ChangeNotifierProvider<ShareableMapsGalleryProvider>(
+        (ref) => ShareableMapsGalleryProvider());
 
 /// Lightweight metadata for gallery display.
 /// Avoids holding full layer data in memory for every card.

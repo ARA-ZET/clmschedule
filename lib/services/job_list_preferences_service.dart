@@ -1,5 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/job_list_preferences.dart';
+
+final jobListPreferencesServiceRiverpod =
+    riverpod.Provider<JobListPreferencesService>(
+  (ref) => JobListPreferencesService(FirebaseFirestore.instance),
+);
 
 /// Service for managing job list preferences in Firestore
 class JobListPreferencesService {

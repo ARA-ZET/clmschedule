@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
 import '../providers/shareable_map_provider.dart';
 import '../models/map_layer.dart';
@@ -9,25 +9,22 @@ import '../models/map_polyline.dart';
 import 'map_import_dialog.dart';
 
 /// Sidebar widget for managing map layers - Google My Maps style
-class MapLayersSidebar extends StatelessWidget {
+class MapLayersSidebar extends riverpod.ConsumerWidget {
   const MapLayersSidebar({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return Consumer<ShareableMapProvider>(
-      builder: (context, provider, child) {
-        return Column(
-          children: [
-            _buildHeader(context, provider),
-            _buildActionButtons(context, provider),
-            const Divider(height: 1),
-            Expanded(
-              child: _buildLayersList(context, provider),
-            ),
-            _buildBaseMapSection(context),
-          ],
-        );
-      },
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final provider = ref.watch(shareableMapRiverpod);
+    return Column(
+      children: [
+        _buildHeader(context, provider),
+        _buildActionButtons(context, provider),
+        const Divider(height: 1),
+        Expanded(
+          child: _buildLayersList(context, provider),
+        ),
+        _buildBaseMapSection(context, ref),
+      ],
     );
   }
 
@@ -179,163 +176,279 @@ class MapLayersSidebar extends StatelessWidget {
   Widget _buildLayersList(BuildContext context, ShareableMapProvider provider) {
     final layers = provider.layers;
 
-    return ListView(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      children: [
-        ...layers.map((layer) => _buildLayerSection(context, provider, layer)),
-        _buildUntitledLayerSection(context, provider),
+    return CustomScrollView(
+      slivers: [
+        const SliverPadding(padding: EdgeInsets.only(top: 8)),
+        for (final layer in layers)
+          ..._buildLayerSlivers(context, provider, layer),
+        const SliverPadding(padding: EdgeInsets.only(bottom: 8)),
       ],
     );
   }
 
-  Widget _buildLayerSection(
+  List<Widget> _buildLayerSlivers(
     BuildContext context,
     ShareableMapProvider provider,
     MapLayer layer,
   ) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Layer header
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Row(
-            children: [
-              Checkbox(
-                value: layer.isVisible,
-                onChanged: (_) => provider.toggleLayerVisibility(layer.id),
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                visualDensity: VisualDensity.compact,
-              ),
-              Expanded(
-                child: InkWell(
-                  onTap: () => provider.toggleLayerExpanded(layer.id),
-                  child: Row(
-                    children: [
-                      Icon(
-                        layer.isExpanded
-                            ? Icons.expand_more
-                            : Icons.chevron_right,
-                        size: 20,
-                        color: const Color(0xFF5F6368),
+    final isWaypointLayer = provider.isCloudOverlayLayer(layer.id) &&
+        layer.name == ShareableMapProvider.waypointsLayerName;
+
+    final header = SliverToBoxAdapter(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          children: [
+            Checkbox(
+              value: layer.isVisible,
+              onChanged: (_) => provider.toggleLayerVisibility(layer.id),
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.compact,
+            ),
+            Expanded(
+              child: InkWell(
+                onTap: () => provider.toggleLayerExpanded(layer.id),
+                child: Row(
+                  children: [
+                    Icon(
+                      layer.isExpanded
+                          ? Icons.expand_more
+                          : Icons.chevron_right,
+                      size: 20,
+                      color: const Color(0xFF5F6368),
+                    ),
+                    const SizedBox(width: 4),
+                    Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: layer.defaultColor,
+                        shape: BoxShape.circle,
                       ),
-                      const SizedBox(width: 4),
-                      Container(
-                        width: 12,
-                        height: 12,
-                        decoration: BoxDecoration(
-                          color: layer.defaultColor,
-                          shape: BoxShape.circle,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        layer.name,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF202124),
                         ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          layer.name,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                            color: Color(0xFF202124),
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
-              PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert,
-                    size: 18, color: Color(0xFF5F6368)),
-                itemBuilder: (context) => [
-                  const PopupMenuItem(value: 'edit', child: Text('Edit layer')),
+            ),
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert,
+                  size: 18, color: Color(0xFF5F6368)),
+              itemBuilder: (context) {
+                if (!provider.isCloudOverlayLayer(layer.id)) {
+                  return [
+                    const PopupMenuItem(
+                        value: 'edit', child: Text('Edit layer')),
+                    const PopupMenuItem(
+                        value: 'duplicate', child: Text('Duplicate')),
+                    const PopupMenuItem(
+                        value: 'delete', child: Text('Delete layer')),
+                  ];
+                }
+                // Cloud overlay menu
+                final isWaypoints =
+                    layer.name == ShareableMapProvider.waypointsLayerName;
+                final isTracks =
+                    layer.name == ShareableMapProvider.tracksLayerName;
+                return [
+                  if (isWaypoints && !provider.cloudWaypointsLoaded)
+                    const PopupMenuItem(
+                        value: 'load_waypoints', child: Text('Load waypoints')),
+                  if (isWaypoints && provider.cloudWaypointsLoaded)
+                    const PopupMenuItem(
+                        value: 'reload_waypoints',
+                        child: Text('Reload waypoints')),
+                  if (isTracks && provider.cloudTracksLoaded)
+                    const PopupMenuItem(
+                        value: 'reload_tracks', child: Text('Reload tracks')),
                   const PopupMenuItem(
-                      value: 'duplicate', child: Text('Duplicate')),
-                  const PopupMenuItem(
-                      value: 'delete', child: Text('Delete layer')),
-                ],
-                onSelected: (value) {
-                  if (value == 'edit') {
-                    _showEditLayerDialog(context, provider, layer);
-                  } else if (value == 'duplicate') {
-                    _duplicateLayer(provider, layer);
-                  } else if (value == 'delete') {
-                    _deleteLayer(context, provider, layer);
-                  }
-                },
-              ),
-            ],
-          ),
+                      value: 'info', child: Text('Cloud overlay (read-only)')),
+                ];
+              },
+              onSelected: (value) {
+                if (value == 'edit') {
+                  _showEditLayerDialog(context, provider, layer);
+                } else if (value == 'duplicate') {
+                  _duplicateLayer(provider, layer);
+                } else if (value == 'delete') {
+                  _deleteLayer(context, provider, layer);
+                } else if (value == 'load_waypoints') {
+                  provider.loadCloudFolderWaypoints();
+                } else if (value == 'reload_waypoints') {
+                  provider.loadCloudFolderWaypoints(force: true);
+                } else if (value == 'reload_tracks') {
+                  provider.loadCloudFolderTracks(force: true);
+                }
+              },
+            ),
+          ],
         ),
-        // Layer items (when expanded)
-        if (layer.isExpanded) ...[
-          ...layer.points.map((point) => _buildLayerItem(
-                context,
-                provider: provider,
-                layer: layer,
-                icon: Icons.place,
-                color: point.color,
-                title: point.name,
-                elementId: point.id,
-                onTap: () => _selectElement(provider, point.id),
-                onEdit: () =>
-                    _showEditPointDialog(context, provider, layer, point),
-                onDelete: () =>
-                    _deletePoint(context, provider, layer, point.id),
-                onMoveTo: (targetLayerId) =>
-                    provider.movePointToLayer(layer, point.id, targetLayerId),
-              )),
-          ...layer.polygons.asMap().entries.map((entry) {
-            final index = entry.key;
-            final polygon = entry.value;
-            final elementId = '${layer.id}_polygon_$index';
+      ),
+    );
+
+    if (!layer.isExpanded) return [header];
+
+    final pointCount = layer.points.length;
+    final polygonCount = layer.polygons.length;
+    final polylineCount = layer.polylines.length;
+    final totalCount = pointCount + polygonCount + polylineCount;
+
+    if (totalCount == 0) {
+      return [
+        header,
+        SliverToBoxAdapter(
+          child: _buildEmptyLayerWidget(context, provider, layer),
+        ),
+      ];
+    }
+
+    return [
+      header,
+      SliverList.builder(
+        itemCount: totalCount,
+        itemBuilder: (context, index) {
+          if (index < pointCount) {
+            final point = layer.points[index];
             return _buildLayerItem(
               context,
               provider: provider,
               layer: layer,
-              icon: Icons.crop_square,
-              color: polygon.color,
+              iconWidget: isWaypointLayer
+                  ? Image.asset('assets/letterbox.png', width: 18, height: 18)
+                  : Icon(Icons.place, size: 18, color: point.color),
+              title: point.name,
+              elementId: point.id,
+              onTap: () => _selectElement(provider, point.id),
+              onEdit: () =>
+                  _showEditPointDialog(context, provider, layer, point),
+              onDelete: () => _deletePoint(context, provider, layer, point.id),
+              onMoveTo: (targetLayerId) =>
+                  provider.movePointToLayer(layer, point.id, targetLayerId),
+            );
+          } else if (index < pointCount + polygonCount) {
+            final polygonIndex = index - pointCount;
+            final polygon = layer.polygons[polygonIndex];
+            final elementId = '${layer.id}_polygon_$polygonIndex';
+            return _buildLayerItem(
+              context,
+              provider: provider,
+              layer: layer,
+              iconWidget:
+                  Icon(Icons.crop_square, size: 18, color: polygon.color),
               title: polygon.name,
               elementId: elementId,
               onTap: () => _selectElement(provider, elementId),
               onEdit: () => _showEditPolygonDialog(
-                  context, provider, layer, index, polygon),
-              onDelete: () => _deletePolygon(context, provider, layer, index),
-              onMoveTo: (targetLayerId) =>
-                  provider.movePolygonToLayer(layer, index, targetLayerId),
+                  context, provider, layer, polygonIndex, polygon),
+              onDelete: () =>
+                  _deletePolygon(context, provider, layer, polygonIndex),
+              onMoveTo: (targetLayerId) => provider.movePolygonToLayer(
+                  layer, polygonIndex, targetLayerId),
             );
-          }),
-          ...layer.polylines.map((polyline) => _buildLayerItem(
-                context,
-                provider: provider,
-                layer: layer,
-                icon: Icons.timeline,
-                color: polyline.color,
-                title: polyline.name,
-                elementId: polyline.id,
-                onTap: () => _selectElement(provider, polyline.id),
-                onEdit: () =>
-                    _showEditPolylineDialog(context, provider, layer, polyline),
-                onDelete: () =>
-                    _deletePolyline(context, provider, layer, polyline.id),
-                onMoveTo: (targetLayerId) => provider.movePolylineToLayer(
-                    layer, polyline.id, targetLayerId),
-              )),
-          if (layer.elementCount == 0)
-            Padding(
-              padding: const EdgeInsets.only(left: 56, right: 16, bottom: 8),
-              child: Text(
-                'No places in this layer',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.grey[600],
-                  fontStyle: FontStyle.italic,
+          } else {
+            final polylineIndex = index - pointCount - polygonCount;
+            final polyline = layer.polylines[polylineIndex];
+            return _buildLayerItem(
+              context,
+              provider: provider,
+              layer: layer,
+              iconWidget: Icon(Icons.timeline, size: 18, color: polyline.color),
+              title: polyline.name,
+              elementId: polyline.id,
+              onTap: () => _selectElement(provider, polyline.id),
+              onEdit: () =>
+                  _showEditPolylineDialog(context, provider, layer, polyline),
+              onDelete: () =>
+                  _deletePolyline(context, provider, layer, polyline.id),
+              onMoveTo: (targetLayerId) => provider.movePolylineToLayer(
+                  layer, polyline.id, targetLayerId),
+            );
+          }
+        },
+      ),
+    ];
+  }
+
+  Widget _buildEmptyLayerWidget(
+    BuildContext context,
+    ShareableMapProvider provider,
+    MapLayer layer,
+  ) {
+    if (provider.isCloudOverlayLayer(layer.id) &&
+        layer.name == ShareableMapProvider.waypointsLayerName &&
+        !provider.cloudWaypointsLoaded) {
+      return Padding(
+        padding: const EdgeInsets.only(left: 40, right: 16, bottom: 8),
+        child: provider.isLoadingCloudWaypoints
+            ? const Row(
+                children: [
+                  SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2)),
+                  SizedBox(width: 8),
+                  Text('Loading…',
+                      style:
+                          TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
+                ],
+              )
+            : InkWell(
+                onTap: () => provider.loadCloudFolderWaypoints(),
+                child: Row(
+                  children: [
+                    Icon(Icons.cloud_download,
+                        size: 16, color: Colors.blue[600]),
+                    const SizedBox(width: 6),
+                    Text('Tap to load waypoints',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.blue[600],
+                          fontStyle: FontStyle.italic,
+                        )),
+                  ],
                 ),
               ),
-            ),
-        ],
-      ],
+      );
+    } else if (provider.isCloudOverlayLayer(layer.id) &&
+        layer.name == ShareableMapProvider.tracksLayerName &&
+        provider.isLoadingCloudTracks) {
+      return const Padding(
+        padding: EdgeInsets.only(left: 40, right: 16, bottom: 8),
+        child: Row(
+          children: [
+            SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 8),
+            Text('Loading tracks…',
+                style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
+          ],
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(left: 56, right: 16, bottom: 8),
+      child: Text(
+        'No places in this layer',
+        style: TextStyle(
+          fontSize: 12,
+          color: Colors.grey[600],
+          fontStyle: FontStyle.italic,
+        ),
+      ),
     );
   }
 
@@ -343,8 +456,7 @@ class MapLayersSidebar extends StatelessWidget {
     BuildContext context, {
     required ShareableMapProvider provider,
     required MapLayer layer,
-    required IconData icon,
-    required Color color,
+    required Widget iconWidget,
     required String title,
     required String elementId,
     required VoidCallback onTap,
@@ -363,7 +475,7 @@ class MapLayersSidebar extends StatelessWidget {
         color: isSelected ? const Color(0xFFE8F0FE) : null,
         child: Row(
           children: [
-            Icon(icon, size: 18, color: color),
+            iconWidget,
             const SizedBox(width: 12),
             Expanded(
               child: Text(
@@ -521,49 +633,44 @@ class MapLayersSidebar extends StatelessWidget {
     );
   }
 
-  Widget _buildBaseMapSection(BuildContext context) {
-    return Consumer<ShareableMapProvider>(
-      builder: (context, provider, child) {
-        final selectedKey = provider.selectedBaseMap;
-        final options = ShareableMapProvider.baseMapOptions;
-
-        return Container(
-          decoration: const BoxDecoration(
-            border: Border(top: BorderSide(color: Color(0xFFDADCE0), width: 1)),
+  Widget _buildBaseMapSection(BuildContext context, riverpod.WidgetRef ref) {
+    final provider = ref.watch(shareableMapRiverpod);
+    final selectedKey = provider.selectedBaseMap;
+    final options = ShareableMapProvider.baseMapOptions;
+    return Container(
+      decoration: const BoxDecoration(
+        border: Border(top: BorderSide(color: Color(0xFFDADCE0), width: 1)),
+      ),
+      child: ExpansionTile(
+        leading: const Icon(Icons.map, size: 20, color: Color(0xFF5F6368)),
+        title: const Text(
+          'Base map',
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: Color(0xFF202124),
           ),
-          child: ExpansionTile(
-            leading: const Icon(Icons.map, size: 20, color: Color(0xFF5F6368)),
-            title: const Text(
-              'Base map',
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: Color(0xFF202124),
-              ),
+        ),
+        initiallyExpanded: false,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: options.map((option) {
+                final isSelected = selectedKey == option.key;
+                return _BaseMapTile(
+                  option: option,
+                  isSelected: isSelected,
+                  onTap: () => provider.setBaseMap(option.key),
+                );
+              }).toList(),
             ),
-            initiallyExpanded: false,
-            children: [
-              Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: options.map((option) {
-                    final isSelected = selectedKey == option.key;
-                    return _BaseMapTile(
-                      option: option,
-                      isSelected: isSelected,
-                      onTap: () => provider.setBaseMap(option.key),
-                    );
-                  }).toList(),
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
           ),
-        );
-      },
+          const SizedBox(height: 8),
+        ],
+      ),
     );
   }
 
@@ -649,7 +756,9 @@ class MapLayersSidebar extends StatelessWidget {
     ).then((imported) {
       if (imported == true && context.mounted) {
         // Fit map to show imported data
-        context.read<ShareableMapProvider>().fitMapToBounds();
+        riverpod.ProviderScope.containerOf(context)
+            .read(shareableMapRiverpod)
+            .fitMapToBounds();
       }
     });
   }
@@ -1041,6 +1150,7 @@ class MapLayersSidebar extends StatelessWidget {
     final nameController = TextEditingController(text: point.name);
     final descController = TextEditingController(text: point.description);
     Color selectedColor = point.color;
+    PointCategory selectedCategory = point.pointCategory;
 
     showDialog(
       context: context,
@@ -1050,6 +1160,30 @@ class MapLayersSidebar extends StatelessWidget {
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              DropdownButtonFormField<PointCategory>(
+                initialValue: selectedCategory,
+                decoration: const InputDecoration(labelText: 'Point Type'),
+                items: PointCategory.values.map((cat) {
+                  return DropdownMenuItem(
+                    value: cat,
+                    child: Row(
+                      children: [
+                        Icon(cat.icon, color: cat.color, size: 20),
+                        const SizedBox(width: 8),
+                        Text(cat.label),
+                      ],
+                    ),
+                  );
+                }).toList(),
+                onChanged: (cat) {
+                  if (cat == null) return;
+                  setState(() {
+                    selectedCategory = cat;
+                    selectedColor = cat.color;
+                  });
+                },
+              ),
+              const SizedBox(height: 12),
               TextField(
                 controller: nameController,
                 decoration: const InputDecoration(labelText: 'Name'),
@@ -1112,6 +1246,7 @@ class MapLayersSidebar extends StatelessWidget {
                   name: nameController.text.trim(),
                   description: descController.text.trim(),
                   color: selectedColor,
+                  pointCategory: selectedCategory,
                 );
                 provider.updatePoint(layer, point.id, updatedPoint);
                 Navigator.pop(context);

@@ -48,7 +48,7 @@ dependencies:
   cloud_functions: ^5.1.0
 
   # State Management
-  provider: ^6.1.1
+  flutter_riverpod: ^2.6.1
 
   # Utilities
   intl: ^0.20.2
@@ -59,7 +59,7 @@ dependencies:
   video_player_web: ^2.3.2
   two_dimensional_scrollables: ^0.3.7
   google_maps_flutter: ^2.9.0
-  google_maps_flutter_web: 0.5.10
+  google_maps_flutter_web: 0.5.12+2
   xml: ^6.5.0
   file_picker: ^8.0.6
   archive: ^4.0.7
@@ -85,6 +85,7 @@ dependencies:
 
   # Track Editor flavor
   gpx: ^2.3.0
+  pointer_interceptor: ^0.10.1+2
 
 dev_dependencies:
   flutter_test:
@@ -142,5 +143,5 @@ flutter:
 # see https://flutter.dev/to/font-from-package
 
 dependency_overrides:
-  google_maps_flutter_web: 0.5.10
+  google_maps_flutter_web: 0.5.12+2
   firebase_auth_web: 5.12.6 # More compatible version

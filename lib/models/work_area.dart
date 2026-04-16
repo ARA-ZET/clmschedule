@@ -8,6 +8,7 @@ class WorkArea {
   final String description;
   final List<LatLng> polygonPoints;
   final String kmlFileName;
+  final int letterBoxEstimate;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -17,6 +18,7 @@ class WorkArea {
     required this.description,
     required this.polygonPoints,
     required this.kmlFileName,
+    this.letterBoxEstimate = 0,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -31,6 +33,7 @@ class WorkArea {
       name: data['name'] ?? '',
       description: data['description'] ?? '',
       kmlFileName: data['kmlFileName'] ?? '',
+      letterBoxEstimate: (data['letterBoxEstimate'] as num?)?.toInt() ?? 0,
       polygonPoints: points.map((point) {
         final GeoPoint geoPoint = point as GeoPoint;
         return LatLng(geoPoint.latitude, geoPoint.longitude);
@@ -46,6 +49,7 @@ class WorkArea {
       'name': name,
       'description': description,
       'kmlFileName': kmlFileName,
+      'letterBoxEstimate': letterBoxEstimate,
       'polygonPoints': polygonPoints.map((point) {
         return GeoPoint(point.latitude, point.longitude);
       }).toList(),
@@ -63,6 +67,7 @@ class WorkArea {
       name: data['name'] ?? '',
       description: data['description'] ?? '',
       kmlFileName: data['kmlFileName'] ?? '',
+      letterBoxEstimate: (data['letterBoxEstimate'] as num?)?.toInt() ?? 0,
       polygonPoints: points.map((point) {
         if (point is GeoPoint) {
           return LatLng(point.latitude, point.longitude);
@@ -90,6 +95,7 @@ class WorkArea {
       'name': name,
       'description': description,
       'kmlFileName': kmlFileName,
+      'letterBoxEstimate': letterBoxEstimate,
       'polygonPoints': polygonPoints
           .map(
             (point) => {
@@ -122,6 +128,7 @@ class WorkArea {
     String? description,
     List<LatLng>? polygonPoints,
     String? kmlFileName,
+    int? letterBoxEstimate,
   }) {
     return WorkArea(
       id: id ?? this.id,
@@ -129,6 +136,7 @@ class WorkArea {
       description: description ?? this.description,
       polygonPoints: polygonPoints ?? this.polygonPoints,
       kmlFileName: kmlFileName ?? this.kmlFileName,
+      letterBoxEstimate: letterBoxEstimate ?? this.letterBoxEstimate,
       createdAt: createdAt,
       updatedAt: DateTime.now(),
     );

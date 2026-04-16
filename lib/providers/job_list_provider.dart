@@ -1,12 +1,27 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
+import 'package:intl/intl.dart';
 import '../models/job_list_item.dart';
 import '../models/job_list_item_update.dart';
 import '../models/job_reminder.dart';
 import '../services/job_list_service.dart';
+import '../services/gpx_storage_service.dart';
+import '../shareable_maps/models/shareable_map.dart';
+import '../shareable_maps/models/map_layer.dart';
+import '../shareable_maps/services/shareable_maps_firestore_service.dart';
+import '../shareable_maps/services/map_link_service.dart';
 import '../config/flavor_config.dart';
 import 'auth_provider.dart';
+
+final jobListRiverpod = riverpod.ChangeNotifierProvider<JobListProvider>(
+  (ref) => JobListProvider(
+    ref.read(jobListServiceRiverpod),
+    ref.read(authRiverpod),
+  ),
+);
 
 class JobListProvider extends ChangeNotifier {
   final JobListService _jobListService;
@@ -680,7 +695,11 @@ class JobListProvider extends ChangeNotifier {
   // Add job list item
   Future<void> addJobListItem(JobListItem jobListItem) async {
     try {
-      await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+      final generatedId =
+          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+
+      // Auto-create linked shareable map and storage folder
+      _autoCreateMapAndFolder(generatedId, jobListItem);
 
       // NOTE: Do NOT trigger Happy Sun sync here because we don't have the generated ID yet.
       // The Firestore listener will pick up the new job, and if needed, callers should use
@@ -697,6 +716,10 @@ class JobListProvider extends ChangeNotifier {
     try {
       final generatedId =
           await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+
+      // Auto-create linked shareable map and storage folder
+      final result = await _autoCreateMapAndFolder(generatedId, jobListItem);
+
       final savedJob = JobListItem(
         id: generatedId,
         invoice: jobListItem.invoice,
@@ -717,6 +740,8 @@ class JobListProvider extends ChangeNotifier {
         reportAddresses: jobListItem.reportAddresses,
         whoToInvoice: jobListItem.whoToInvoice,
         collectionJobId: jobListItem.collectionJobId,
+        shareableMapId: result.$1,
+        storageFolderPath: result.$2,
       );
 
       // Track this job as locally added to prevent duplicate sync from listener
@@ -744,7 +769,11 @@ class JobListProvider extends ChangeNotifier {
   // Add job list item without allocation (skip schedule assignment)
   Future<void> addJobListItemWithoutAllocation(JobListItem jobListItem) async {
     try {
-      await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+      final generatedId =
+          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+
+      // Auto-create linked shareable map and storage folder
+      _autoCreateMapAndFolder(generatedId, jobListItem);
 
       // NOTE: Happy Sun sync will be triggered by the Firestore listener when it detects the new job
       // This prevents issues with missing/temporary IDs
@@ -752,6 +781,194 @@ class JobListProvider extends ChangeNotifier {
       _error = error.toString();
       notifyListeners();
       rethrow;
+    }
+  }
+
+  /// Creates a shareable map and storage folder for a newly created job list item.
+  /// Copies customPolygons into the map, generates share link for area field.
+  /// Returns (shareableMapId, storageFolderPath). Non-fatal on failure.
+  Future<(String, String)> _autoCreateMapAndFolder(
+      String jobId, JobListItem jobListItem) async {
+    String storageFolderPath = '';
+    String shareableMapId = '';
+    try {
+      final gpxStorage = GpxStorageService();
+      final roundNumber = await gpxStorage.nextRoundNumber(
+          jobListItem.date, jobListItem.client);
+      storageFolderPath = gpxStorage.roundFolderPath(
+          jobListItem.date, jobListItem.client, roundNumber);
+
+      // Build map layers — include job's customPolygons if present
+      final now = DateTime.now();
+      final defaultLayer = MapLayer.create(
+        name: jobListItem.area.isNotEmpty ? jobListItem.area : 'Layer 1',
+        description: 'Target areas for ${jobListItem.client}',
+        order: 0,
+      );
+      final layerWithPolygons = jobListItem.customPolygons.isNotEmpty
+          ? MapLayer(
+              id: defaultLayer.id,
+              name: defaultLayer.name,
+              description: defaultLayer.description,
+              order: 0,
+              defaultColor: defaultLayer.defaultColor,
+              polygons: List.from(jobListItem.customPolygons),
+              createdAt: now,
+              updatedAt: now,
+            )
+          : defaultLayer;
+
+      // Compute center from polygons
+      LatLng? center;
+      if (jobListItem.customPolygons.isNotEmpty) {
+        double latSum = 0, lngSum = 0;
+        int count = 0;
+        for (final p in jobListItem.customPolygons) {
+          for (final pt in p.points) {
+            latSum += pt.latitude;
+            lngSum += pt.longitude;
+            count++;
+          }
+        }
+        if (count > 0) center = LatLng(latSum / count, lngSum / count);
+      }
+
+      final shareableMap = ShareableMap(
+        id: 'map_${now.millisecondsSinceEpoch}',
+        name: jobListItem.client,
+        description: '${jobListItem.area} - Round $roundNumber',
+        layers: [layerWithPolygons],
+        defaultCenter: center ?? const LatLng(-33.925, 18.425),
+        defaultZoom: 13.0,
+        createdAt: now,
+        updatedAt: now,
+        jobListItemId: jobId,
+        storageFolderPath: storageFolderPath,
+      );
+
+      // Create map in Firestore
+      final mapService =
+          ShareableMapsFirestoreService(firestore: FirebaseFirestore.instance);
+      final monthKey = DateFormat('MM-yyyy').format(jobListItem.date);
+      shareableMapId =
+          await mapService.createMap(shareableMap, monthKey: monthKey);
+
+      // Generate share link and build URL for area field
+      String areaLink = jobListItem.area;
+      try {
+        final linkService =
+            MapLinkService(firestore: FirebaseFirestore.instance);
+        final shareCode = await linkService.createShareLink(
+          monthKey: monthKey,
+          mapId: shareableMapId,
+          mapName: jobListItem.client,
+        );
+        areaLink = MapLinkService.buildShareUrl(shareCode);
+      } catch (e) {
+        debugPrint('⚠️ Share link creation failed: $e');
+      }
+
+      // Update Firestore job with the links and area URL
+      final jobWithId = JobListItem(
+        id: jobId,
+        invoice: jobListItem.invoice,
+        amount: jobListItem.amount,
+        client: jobListItem.client,
+        jobStatusId: jobListItem.jobStatusId,
+        invoiceStatusId: jobListItem.invoiceStatusId,
+        jobTypeId: jobListItem.jobTypeId,
+        area: areaLink,
+        quantity: jobListItem.quantity,
+        manDays: jobListItem.manDays,
+        date: jobListItem.date,
+        collectionAddress: jobListItem.collectionAddress,
+        collectionDate: jobListItem.collectionDate,
+        specialInstructions: jobListItem.specialInstructions,
+        quantityDistributed: jobListItem.quantityDistributed,
+        invoiceDetails: jobListItem.invoiceDetails,
+        reportAddresses: jobListItem.reportAddresses,
+        whoToInvoice: jobListItem.whoToInvoice,
+        collectionJobId: jobListItem.collectionJobId,
+        shareableMapId: shareableMapId,
+        storageFolderPath: storageFolderPath,
+        customPolygons: jobListItem.customPolygons,
+      );
+      await _jobListService.updateJobListItem(jobWithId, jobWithId.date);
+    } catch (e) {
+      debugPrint('⚠️ Auto-create shareable map failed: $e');
+    }
+    return (shareableMapId, storageFolderPath);
+  }
+
+  /// Links an existing shareable map to a job list item.
+  /// Updates the job's shareableMapId, storageFolderPath, and area (with share URL).
+  Future<void> linkExistingMapToJob({
+    required String jobId,
+    required String mapId,
+    required String monthKey,
+    required String mapName,
+    String? storageFolderPath,
+  }) async {
+    try {
+      final job = getJobListItemById(jobId);
+      if (job == null) return;
+
+      // Generate/get share link for the area field
+      String areaLink = job.area;
+      try {
+        final linkService =
+            MapLinkService(firestore: FirebaseFirestore.instance);
+        final shareCode = await linkService.createShareLink(
+          monthKey: monthKey,
+          mapId: mapId,
+          mapName: mapName,
+        );
+        areaLink = MapLinkService.buildShareUrl(shareCode);
+      } catch (e) {
+        debugPrint('⚠️ Share link for existing map failed: $e');
+      }
+
+      // Update the map's jobListItemId reference
+      try {
+        final mapService = ShareableMapsFirestoreService(
+            firestore: FirebaseFirestore.instance);
+        await mapService.updateMapFields(
+          monthKey,
+          mapId,
+          {'jobListItemId': jobId},
+        );
+      } catch (e) {
+        debugPrint('⚠️ Failed to update map jobListItemId: $e');
+      }
+
+      final updatedJob = JobListItem(
+        id: jobId,
+        invoice: job.invoice,
+        amount: job.amount,
+        client: job.client,
+        jobStatusId: job.jobStatusId,
+        invoiceStatusId: job.invoiceStatusId,
+        jobTypeId: job.jobTypeId,
+        area: areaLink,
+        quantity: job.quantity,
+        manDays: job.manDays,
+        date: job.date,
+        collectionAddress: job.collectionAddress,
+        collectionDate: job.collectionDate,
+        specialInstructions: job.specialInstructions,
+        quantityDistributed: job.quantityDistributed,
+        invoiceDetails: job.invoiceDetails,
+        reportAddresses: job.reportAddresses,
+        whoToInvoice: job.whoToInvoice,
+        collectionJobId: job.collectionJobId,
+        shareableMapId: mapId,
+        storageFolderPath: storageFolderPath ?? job.storageFolderPath,
+        customPolygons: job.customPolygons,
+      );
+      await _jobListService.updateJobListItem(updatedJob, updatedJob.date);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('⚠️ Link existing map to job failed: $e');
     }
   }
 

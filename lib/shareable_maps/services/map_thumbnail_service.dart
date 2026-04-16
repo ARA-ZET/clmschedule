@@ -143,6 +143,19 @@ class MapThumbnailService {
       'scale=2', // retina
       'maptype=roadmap',
       'key=$apiKey',
+      // Clean map style — minimal look for thumbnails
+      'style=feature:poi|visibility:off',
+      'style=feature:poi.park|element:geometry|visibility:on|color:0xc8e6c9',
+      'style=feature:transit|visibility:off',
+      'style=feature:road|element:labels.icon|visibility:off',
+      'style=feature:road.highway|element:geometry.fill|color:0xffd54f',
+      'style=feature:road.highway|element:geometry.stroke|color:0xffca28',
+      'style=feature:road.arterial|element:geometry.fill|color:0xffffff',
+      'style=feature:road.local|element:geometry.fill|color:0xf5f5f5',
+      'style=feature:water|element:geometry|color:0xbbdefb',
+      'style=feature:landscape|element:geometry|color:0xf5f5f5',
+      'style=element:labels.text.fill|color:0x616161',
+      'style=element:labels.text.stroke|color:0xffffff',
     ];
 
     // Use bounds if available for auto-fit, otherwise center + zoom.

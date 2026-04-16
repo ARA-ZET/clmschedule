@@ -8,6 +8,7 @@ class TETabItem {
   final List<Trk> tracks;
   final List<Wpt> waypoints;
   final List<TETargetPolygon> targetPolygons;
+  final String? storageFolderPath;
 
   TETabItem({
     required this.title,
@@ -15,5 +16,6 @@ class TETabItem {
     required this.tracks,
     required this.waypoints,
     required this.targetPolygons,
+    this.storageFolderPath,
   });
 }

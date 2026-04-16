@@ -1,5 +1,10 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+
+/// Riverpod provider for MapGestureProvider.
+final mapGestureRiverpod = riverpod.ChangeNotifierProvider<MapGestureProvider>(
+    (ref) => MapGestureProvider());
 
 /// Provider to manage web gesture handling for Google Maps
 /// Controls whether map gestures should be enabled based on mouse position over UI widgets

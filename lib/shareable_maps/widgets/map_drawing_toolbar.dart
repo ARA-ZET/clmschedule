@@ -1,22 +1,51 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/shareable_map_provider.dart';
+import 'map_address_search_bar.dart';
 
 /// Toolbar widget for map drawing tools — capability-driven.
 /// Hides tools that are not available for the active adapter.
-class MapDrawingToolbar extends StatelessWidget {
+class MapDrawingToolbar extends riverpod.ConsumerStatefulWidget {
   const MapDrawingToolbar({super.key});
 
   @override
+  riverpod.ConsumerState<MapDrawingToolbar> createState() =>
+      _MapDrawingToolbarState();
+}
+
+class _MapDrawingToolbarState
+    extends riverpod.ConsumerState<MapDrawingToolbar> {
+  bool _showSearch = false;
+
+  @override
   Widget build(BuildContext context) {
-    return Consumer<ShareableMapProvider>(
-      builder: (context, provider, child) {
-        final caps = provider.capabilities;
-        return Card(
+    final provider = ref.watch(shareableMapRiverpod);
+    final caps = provider.capabilities;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Search panel (expands to the left of the toolbar)
+        if (_showSearch)
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: MapAddressSearchBar(
+              alwaysExpanded: true,
+              onClose: () => setState(() => _showSearch = false),
+            ),
+          ),
+        // Toolbar buttons
+        Card(
           elevation: 8,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // Search button — available for all adapters
+              _SearchToolButton(
+                isActive: _showSearch,
+                onTap: () => setState(() => _showSearch = !_showSearch),
+              ),
+              const Divider(height: 1),
               DrawingToolButton(
                 icon: Icons.pan_tool,
                 label: 'Select',
@@ -50,8 +79,46 @@ class MapDrawingToolbar extends StatelessWidget {
                 ),
             ],
           ),
-        );
-      },
+        ),
+      ],
+    );
+  }
+}
+
+/// Search toggle button for the toolbar
+class _SearchToolButton extends StatelessWidget {
+  final bool isActive;
+  final VoidCallback onTap;
+
+  const _SearchToolButton({required this.isActive, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = isActive ? Colors.blue : Colors.grey.shade700;
+    return Tooltip(
+      message: 'Search address',
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          color: isActive ? Colors.blue.shade100 : null,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.search, color: color, size: 28),
+              const SizedBox(height: 4),
+              Text(
+                'Search',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: color,
+                  fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -61,7 +128,7 @@ class MapDrawingToolbar extends StatelessWidget {
 // ============================================================================
 
 /// Individual tool button widget
-class DrawingToolButton extends StatelessWidget {
+class DrawingToolButton extends riverpod.ConsumerWidget {
   final IconData icon;
   final String label;
   final DrawingMode mode;
@@ -76,45 +143,42 @@ class DrawingToolButton extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Consumer<ShareableMapProvider>(
-      builder: (context, provider, child) {
-        final isActive = provider.drawingMode == mode;
-        final isLocked = provider.isDrawing || provider.isEditingVertices;
-        final effectiveColor = isLocked
-            ? Colors.grey.shade400
-            : isActive
-                ? Colors.blue
-                : Colors.grey.shade700;
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final provider = ref.watch(shareableMapRiverpod);
+    final isActive = provider.drawingMode == mode;
+    final isLocked = provider.isDrawing || provider.isEditingVertices;
+    final effectiveColor = isLocked
+        ? Colors.grey.shade400
+        : isActive
+            ? Colors.blue
+            : Colors.grey.shade700;
 
-        return Tooltip(
-          message: isLocked ? '' : tooltip,
-          child: InkWell(
-            onTap: isLocked ? null : () => provider.setDrawingMode(mode),
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              color: isActive && !isLocked ? Colors.blue.shade100 : null,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(icon, color: effectiveColor, size: 28),
-                  const SizedBox(height: 4),
-                  Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: effectiveColor,
-                      fontWeight: isActive && !isLocked
-                          ? FontWeight.bold
-                          : FontWeight.normal,
-                    ),
-                  ),
-                ],
+    return Tooltip(
+      message: isLocked ? '' : tooltip,
+      child: InkWell(
+        onTap: isLocked ? null : () => provider.setDrawingMode(mode),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          color: isActive && !isLocked ? Colors.blue.shade100 : null,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: effectiveColor, size: 28),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: effectiveColor,
+                  fontWeight: isActive && !isLocked
+                      ? FontWeight.bold
+                      : FontWeight.normal,
+                ),
               ),
-            ),
+            ],
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }

@@ -1,10 +1,16 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../models/erf_property.dart';
 import '../services/csg_property_service.dart';
 import '../services/erf_property_firestore_service.dart';
 import '../../services/geocoding_service.dart';
+
+/// Riverpod provider for ErfPropertyProvider.
+final erfPropertyRiverpod =
+    riverpod.ChangeNotifierProvider<ErfPropertyProvider>(
+        (ref) => ErfPropertyProvider());
 
 /// Provider for managing ERF property data.
 ///

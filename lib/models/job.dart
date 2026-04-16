@@ -110,6 +110,11 @@ class Job {
                     description: wm.description,
                     points: List.from(wm.points),
                     color: wm.color,
+                    fillOpacity: wm.fillOpacity,
+                    strokeWidth: wm.strokeWidth,
+                    isDashed: wm.isDashed,
+                    type: wm.type,
+                    pointCategory: wm.pointCategory,
                   ))
               .toList()
           : this
@@ -119,6 +124,11 @@ class Job {
                     description: wm.description,
                     points: List.from(wm.points),
                     color: wm.color,
+                    fillOpacity: wm.fillOpacity,
+                    strokeWidth: wm.strokeWidth,
+                    isDashed: wm.isDashed,
+                    type: wm.type,
+                    pointCategory: wm.pointCategory,
                   ))
               .toList(),
       distributorId: distributorId ?? this.distributorId,

@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../shareable_maps/adapters/date_schedule_adapter.dart';
-import '../shareable_maps/providers/map_gesture_provider.dart';
 import '../shareable_maps/providers/shareable_map_provider.dart';
 import '../shareable_maps/widgets/shareable_map_editor.dart';
 import '../shareable_maps/services/map_export_service.dart';
@@ -13,7 +12,7 @@ import 'print_map_view.dart';
 /// A map page launched from the schedule grid that shows all work-area
 /// polygons for one date, with tabs for each distributor so the user
 /// can quickly switch between them and print/export.
-class DateScheduleMapPage extends StatefulWidget {
+class DateScheduleMapPage extends riverpod.ConsumerStatefulWidget {
   final DateTime date;
   final List<Job> jobs;
   final List<Distributor> distributors;
@@ -26,11 +25,12 @@ class DateScheduleMapPage extends StatefulWidget {
   });
 
   @override
-  State<DateScheduleMapPage> createState() => _DateScheduleMapPageState();
+  riverpod.ConsumerState<DateScheduleMapPage> createState() =>
+      _DateScheduleMapPageState();
 }
 
-class _DateScheduleMapPageState extends State<DateScheduleMapPage>
-    with SingleTickerProviderStateMixin {
+class _DateScheduleMapPageState extends riverpod
+    .ConsumerState<DateScheduleMapPage> with SingleTickerProviderStateMixin {
   late final TabController _tabController;
 
   /// Distributor entries that actually have work-map polygons on this date.
@@ -82,7 +82,7 @@ class _DateScheduleMapPageState extends State<DateScheduleMapPage>
 
   /// Load the adapter for the given tab index and request fit-to-bounds.
   void _loadTab(int index) {
-    final provider = context.read<ShareableMapProvider>();
+    final provider = ref.read(shareableMapRiverpod);
 
     final List<Job> jobs;
     if (index == 0) {
@@ -102,7 +102,7 @@ class _DateScheduleMapPageState extends State<DateScheduleMapPage>
   }
 
   void _exportKml(BuildContext context) {
-    final provider = context.read<ShareableMapProvider>();
+    final provider = ref.read(shareableMapRiverpod);
     final map = provider.currentMap;
     if (map == null) return;
 
@@ -255,7 +255,7 @@ class _DateScheduleMapPageState extends State<DateScheduleMapPage>
                 size: 22, color: Color(0xFF5F6368)),
             tooltip: 'Fit to bounds',
             onPressed: () {
-              context.read<ShareableMapProvider>().fitMapToBounds();
+              ref.read(shareableMapRiverpod).fitMapToBounds();
             },
           ),
           IconButton(
@@ -286,21 +286,19 @@ class _DateScheduleMapPageState extends State<DateScheduleMapPage>
               )
             : null,
       ),
-      body: ChangeNotifierProvider(
-        create: (_) => MapGestureProvider(),
-        child: Consumer<ShareableMapProvider>(
-          builder: (context, provider, child) {
-            if (provider.isLoading) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            if (provider.currentMap == null) {
-              return const MapEditorEmptyState();
-            }
-            return const MapViewWidget();
-          },
-        ),
-      ),
+      body: _buildMapBody(),
     );
+  }
+
+  Widget _buildMapBody() {
+    final provider = ref.watch(shareableMapRiverpod);
+    if (provider.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (provider.currentMap == null) {
+      return const MapEditorEmptyState();
+    }
+    return const MapViewWidget();
   }
 }
 

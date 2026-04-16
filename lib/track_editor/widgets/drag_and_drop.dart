@@ -5,7 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:gpx/gpx.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../models/tab_item.dart';
 import '../providers/te_files_provider.dart';
@@ -15,16 +15,16 @@ import '../providers/te_waypoints_provider.dart';
 import '../utils/html_file_reader.dart';
 import 'mymaps_link.dart';
 
-class TEDragAndDrop extends StatefulWidget {
+class TEDragAndDrop extends riverpod.ConsumerStatefulWidget {
   final void Function(List<({Uint8List bytes, String name})>) onFilesPicked;
 
   const TEDragAndDrop({super.key, required this.onFilesPicked});
 
   @override
-  State<TEDragAndDrop> createState() => _TEDragAndDropState();
+  riverpod.ConsumerState<TEDragAndDrop> createState() => _TEDragAndDropState();
 }
 
-class _TEDragAndDropState extends State<TEDragAndDrop> {
+class _TEDragAndDropState extends riverpod.ConsumerState<TEDragAndDrop> {
   Future<void> _pickFiles() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -67,8 +67,8 @@ class _TEDragAndDropState extends State<TEDragAndDrop> {
   void _finalizeFileProcessing(
       List<({Uint8List bytes, String name})> filesData) {
     if (filesData.isNotEmpty) {
-      context
-          .read<TEFilesProvider>()
+      ref
+          .read(teFilesRiverpod)
           .addFileNames(filesData.map((e) => e.name).toList());
       widget.onFilesPicked(filesData);
     }
@@ -98,9 +98,9 @@ class _TEDragAndDropState extends State<TEDragAndDrop> {
     try {
       final xml = String.fromCharCodes(bytes);
       final gpx = GpxReader().fromString(xml);
-      context.read<TEWaypointsProvider>().addWaypoints(gpx.wpts);
-      context.read<TETracksProvider>().addTracks(gpx.trks);
-      context.read<TETabsProvider>().addData(
+      ref.read(teWaypointsRiverpod).addWaypoints(gpx.wpts);
+      ref.read(teTracksRiverpod).addTracks(gpx.trks);
+      ref.read(teTabsRiverpod).addData(
             TETabItem(
               title: name,
               polygons: [],
@@ -130,7 +130,7 @@ class _TEDragAndDropState extends State<TEDragAndDrop> {
 
   @override
   Widget build(BuildContext context) {
-    context.watch<TEFilesProvider>().selectedFileNames;
+    ref.watch(teFilesRiverpod).selectedFileNames;
 
     return DragTarget<Object>(
       onWillAcceptWithDetails: (_) => true,

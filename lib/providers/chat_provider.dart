@@ -1,9 +1,17 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:typed_data';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/chat_message.dart';
 import '../services/chat_service.dart';
 import 'auth_provider.dart';
+
+final chatRiverpod = riverpod.ChangeNotifierProvider<ChatProvider>(
+  (ref) => ChatProvider(
+    ref.read(chatServiceRiverpod),
+    ref.read(authRiverpod),
+  ),
+);
 
 class ChatProvider extends ChangeNotifier {
   final ChatService _chatService;

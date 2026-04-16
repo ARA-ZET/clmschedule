@@ -3,20 +3,20 @@
 // "Processing" mode left-panel: pick multiple GPX files, auto-match
 // Track/Waypoints pairs, open each pair as a tab, and manually pair leftovers.
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/te_gpx_file_entry.dart';
 import '../providers/te_processing_provider.dart';
 import '../providers/te_tabs_provider.dart';
 import '../../providers/schedule_provider.dart';
 
-class TEProcessingPanel extends StatelessWidget {
+class TEProcessingPanel extends riverpod.ConsumerWidget {
   const TEProcessingPanel({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final proc = context.watch<TEProcessingProvider>();
-    final tabsProvider = context.read<TETabsProvider>();
-    final scheduleProvider = context.read<ScheduleProvider>();
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final proc = ref.watch(teProcessingRiverpod);
+    final tabsProvider = ref.read(teTabsRiverpod);
+    final scheduleProvider = ref.read(scheduleRiverpod);
 
     final pairs = proc.matchedPairs;
     final unmatched = proc.unmatchedFiles;

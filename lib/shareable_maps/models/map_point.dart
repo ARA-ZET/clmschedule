@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../../models/custom_polygon.dart' show PointCategory;
 
 /// Represents a point/marker on the map
 class MapPoint {
@@ -9,6 +10,7 @@ class MapPoint {
   final LatLng position;
   final Color color;
   final String icon; // Icon identifier (e.g., 'pin', 'star', 'flag')
+  final PointCategory pointCategory;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -19,6 +21,7 @@ class MapPoint {
     required this.position,
     required this.color,
     this.icon = 'pin',
+    this.pointCategory = PointCategory.generic,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -30,6 +33,7 @@ class MapPoint {
     required LatLng position,
     Color? color,
     String icon = 'pin',
+    PointCategory pointCategory = PointCategory.generic,
   }) {
     final now = DateTime.now();
     return MapPoint(
@@ -37,8 +41,9 @@ class MapPoint {
       name: name,
       description: description,
       position: position,
-      color: color ?? Colors.red,
+      color: color ?? pointCategory.color,
       icon: icon,
+      pointCategory: pointCategory,
       createdAt: now,
       updatedAt: now,
     );
@@ -56,6 +61,7 @@ class MapPoint {
       ),
       color: Color(data['color'] as int? ?? Colors.red.toARGB32()),
       icon: data['icon'] as String? ?? 'pin',
+      pointCategory: PointCategory.fromId(data['pointCategory'] as String?),
       createdAt: data['createdAt'] != null
           ? DateTime.fromMillisecondsSinceEpoch(data['createdAt'] as int)
           : DateTime.now(),
@@ -74,6 +80,8 @@ class MapPoint {
       'longitude': position.longitude,
       'color': color.toARGB32(),
       'icon': icon,
+      if (pointCategory != PointCategory.generic)
+        'pointCategory': pointCategory.id,
       'createdAt': createdAt.millisecondsSinceEpoch,
       'updatedAt': updatedAt.millisecondsSinceEpoch,
     };
@@ -86,6 +94,7 @@ class MapPoint {
     LatLng? position,
     Color? color,
     String? icon,
+    PointCategory? pointCategory,
     DateTime? updatedAt,
   }) {
     return MapPoint(
@@ -95,6 +104,7 @@ class MapPoint {
       position: position ?? this.position,
       color: color ?? this.color,
       icon: icon ?? this.icon,
+      pointCategory: pointCategory ?? this.pointCategory,
       createdAt: createdAt,
       updatedAt: updatedAt ?? DateTime.now(),
     );
@@ -106,15 +116,24 @@ class MapPoint {
     bool isSelected = false,
     VoidCallback? onTap,
     BitmapDescriptor? customIcon,
+    bool draggable = false,
+    ValueChanged<LatLng>? onDragEnd,
+    bool visible = true,
   }) {
     return Marker(
       markerId: MarkerId(id),
       position: position,
       infoWindow: InfoWindow.noText,
-      icon:
-          customIcon ?? BitmapDescriptor.defaultMarkerWithHue(_getMarkerHue()),
+      icon: customIcon ??
+          BitmapDescriptor.defaultMarkerWithHue(
+              pointCategory != PointCategory.generic
+                  ? HSLColor.fromColor(pointCategory.color).hue
+                  : _getMarkerHue()),
       alpha: isSelected ? 1.0 : 0.9,
+      visible: visible,
       onTap: onTap,
+      draggable: draggable,
+      onDragEnd: onDragEnd,
     );
   }
 

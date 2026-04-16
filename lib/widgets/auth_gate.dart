@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/auth_provider.dart';
 import 'login_screen.dart';
 
 /// Authentication gate that controls access to the main app
 /// Redirects unauthenticated users to login screen
 /// Provides persistent login functionality across app sessions
-class AuthGate extends StatelessWidget {
+class AuthGate extends riverpod.ConsumerWidget {
   final Widget child;
 
   const AuthGate({
@@ -15,23 +15,20 @@ class AuthGate extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Consumer<AuthProvider>(
-      builder: (context, authProvider, _) {
-        // Show loading screen while auth is initializing
-        if (!authProvider.isInitialized) {
-          return const _AuthLoadingScreen();
-        }
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final authProvider = ref.watch(authRiverpod);
+    // Show loading screen while auth is initializing
+    if (!authProvider.isInitialized) {
+      return const _AuthLoadingScreen();
+    }
 
-        // Show main app if user is authenticated
-        if (authProvider.isAuthenticated) {
-          return child;
-        }
+    // Show main app if user is authenticated
+    if (authProvider.isAuthenticated) {
+      return child;
+    }
 
-        // Show login screen if user is not authenticated
-        return const LoginScreen();
-      },
-    );
+    // Show login screen if user is not authenticated
+    return const LoginScreen();
   }
 }
 

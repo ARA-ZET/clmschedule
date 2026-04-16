@@ -1,31 +1,30 @@
-import 'package:clmschedule/shareable_maps/providers/map_gesture_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'config/flavor_config.dart';
-import 'providers/toggler_provider.dart';
+// import 'providers/toggler_provider.dart'; // Migrated to Riverpod
 import 'providers/schedule_provider.dart';
 import 'providers/collection_schedule_provider.dart';
 import 'providers/job_list_provider.dart';
-import 'providers/job_status_provider.dart';
-import 'providers/job_list_status_provider.dart';
-import 'providers/invoice_status_provider.dart';
-import 'providers/job_list_preferences_provider.dart';
-import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
-import 'providers/vehicle_driver_provider.dart';
-import 'providers/scale_provider.dart';
-import 'providers/map_view_provider.dart';
 import 'providers/inventory_provider.dart';
 import 'providers/happy_sun_project_provider.dart';
+// import 'providers/job_status_provider.dart'; // Migrated to Riverpod
+// import 'providers/job_list_status_provider.dart'; // Migrated to Riverpod
+// import 'providers/invoice_status_provider.dart'; // Migrated to Riverpod
+// import 'providers/job_list_preferences_provider.dart'; // Migrated to Riverpod
+import 'providers/auth_provider.dart';
+// import 'providers/vehicle_driver_provider.dart'; // REMOVED: unused provider
+// import 'providers/scale_provider.dart'; // Migrated to Riverpod
+// import 'providers/map_view_provider.dart'; // Migrated to Riverpod
 import 'providers/app_version_provider.dart';
 import 'providers/tool_settings_provider.dart';
-import 'providers/job_type_provider.dart';
+// import 'providers/job_type_provider.dart'; // Migrated to Riverpod
+import 'providers/unfinished_work_areas_provider.dart';
 import 'shareable_maps/providers/shareable_map_provider.dart';
-import 'shareable_maps/providers/shareable_maps_gallery_provider.dart';
 import 'shareable_maps/widgets/shareable_maps_gallery.dart';
 import 'models/happy_sun_project.dart';
 import 'models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
@@ -42,6 +41,7 @@ import 'widgets/job_type_management_dialog.dart';
 import 'widgets/auth_gate.dart';
 import 'widgets/chat_dialog.dart';
 import 'widgets/chat_admin_panel.dart';
+import 'widgets/unfinished_work_areas_panel.dart';
 import 'widgets/app_update_dialog.dart';
 import 'widgets/happy_sun_inventory_view.dart';
 import 'widgets/happy_sun_job_projects_screen.dart';
@@ -52,26 +52,18 @@ import 'shareable_maps/services/shareable_maps_firestore_service.dart';
 import 'shareable_maps/services/map_link_service.dart';
 import 'widgets/suburb_list_screen.dart';
 import 'track_editor/pages/track_editor_screen.dart';
-import 'track_editor/providers/te_files_provider.dart';
-import 'track_editor/providers/te_points_in_polygon_provider.dart';
-import 'track_editor/providers/te_polygons_provider.dart';
-import 'track_editor/providers/te_processing_provider.dart';
-import 'track_editor/providers/te_map_layer_provider.dart';
-import 'track_editor/providers/te_tabs_provider.dart';
-import 'track_editor/providers/te_tracks_provider.dart';
-import 'track_editor/providers/te_waypoints_provider.dart';
-import 'track_editor/providers/te_mode_provider.dart';
-import 'erf_property/providers/erf_property_provider.dart';
+// TE provider imports migrated to Riverpod
+// ErfPropertyProvider migrated to Riverpod
 import 'erf_property/pages/erf_property_screen.dart';
 import 'services/version_service.dart';
 
-import 'services/work_area_service.dart';
-import 'services/job_list_service.dart';
-import 'services/job_list_preferences_service.dart';
-import 'services/user_service.dart';
-import 'services/chat_service.dart';
-import 'services/ai_chat_service.dart';
-import 'providers/ai_chat_provider.dart';
+// import 'services/work_area_service.dart'; // Migrated to Riverpod
+// import 'services/job_list_service.dart'; // Migrated to Riverpod
+// import 'services/job_list_preferences_service.dart'; // Migrated to Riverpod
+// import 'services/user_service.dart'; // Migrated to Riverpod
+// import 'services/chat_service.dart'; // Migrated to Riverpod
+// import 'services/ai_chat_service.dart'; // Migrated to Riverpod
+// import 'providers/ai_chat_provider.dart'; // Migrated to Riverpod
 import 'widgets/ai_chat_dialog.dart';
 import 'services/inventory_service.dart';
 import 'services/connectivity_service.dart';
@@ -125,156 +117,18 @@ void main() async {
     print('Firestore settings already configured: $e');
   }
 
-  runApp(MultiProvider(providers: [
-    // Authentication Provider (must be first for initialization)
-    ChangeNotifierProvider(create: (context) => AuthProvider()),
-
-    // ScheduleProvider only for CLM flavor (Happy Sun doesn't use Schedule Grid)
-    if (FlavorConfig.instance.isCLM)
-      ChangeNotifierProvider(create: (context) => ScheduleProvider()),
-    ChangeNotifierProvider(create: (context) => ScaleProvider()),
-    ChangeNotifierProvider(create: (context) => VehicleDriverProvider()),
-    // Track Editor providers
-    ChangeNotifierProvider(create: (_) => TEModeProvider()),
-    ChangeNotifierProvider(create: (_) => TEFilesProvider()),
-    ChangeNotifierProvider(create: (_) => TETabsProvider()),
-    ChangeNotifierProvider(create: (_) => TEPolygonsProvider()),
-    ChangeNotifierProvider(create: (_) => TEWaypointsProvider()),
-    ChangeNotifierProvider(create: (_) => TETracksProvider()),
-    ChangeNotifierProvider(create: (_) => TEPointsInPolygonProvider()),
-    ChangeNotifierProvider(create: (_) => TEProcessingProvider()),
-    ChangeNotifierProvider(create: (_) => TEMapLayerProvider()),
-    ChangeNotifierProvider(create: (context) => MapViewProvider()),
-    ChangeNotifierProvider(
-      create: (context) => TogglerProvider(),
-    ),
-
-    Provider(
-      create: (context) => WorkAreaService(FirebaseFirestore.instance),
-    ),
-    Provider(
-      create: (context) => JobListService(FirebaseFirestore.instance),
-    ),
-    Provider(
-      create: (context) =>
-          JobListPreferencesService(FirebaseFirestore.instance),
-    ),
-    Provider(
-      create: (context) => UserService(FirebaseFirestore.instance),
-    ),
-    Provider(
-      create: (context) => ChatService(FirebaseFirestore.instance),
-    ),
-    Provider(
-      create: (context) => AiChatService(),
-    ),
-    ChangeNotifierProxyProvider<AiChatService, AiChatProvider>(
-      create: (context) => AiChatProvider(context.read<AiChatService>()),
-      update: (context, aiChatService, previous) =>
-          previous ?? AiChatProvider(aiChatService),
-    ),
-    // InventoryService for all flavors (Happy Sun needs it)
-    Provider(
-      create: (context) => InventoryService(FirebaseFirestore.instance),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => JobStatusProvider(),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => JobListStatusProvider(),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => InvoiceStatusProvider(),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => JobTypeProvider(),
-    ),
-    ChangeNotifierProxyProvider<AuthProvider, JobListPreferencesProvider>(
-      create: (context) => JobListPreferencesProvider(
-        context.read<JobListPreferencesService>(),
-        context.read<AuthProvider>(),
-      ),
-      update: (context, authProvider, previous) =>
-          previous ??
-          JobListPreferencesProvider(
-            context.read<JobListPreferencesService>(),
-            authProvider,
-          ),
-    ),
-    ChangeNotifierProxyProvider<AuthProvider, JobListProvider>(
-      create: (context) => JobListProvider(
-        context.read<JobListService>(),
-        context.read<AuthProvider>(),
-      ),
-      update: (context, authProvider, previous) =>
-          previous ??
-          JobListProvider(
-            context.read<JobListService>(),
-            authProvider,
-          ),
-    ),
-    ChangeNotifierProxyProvider2<ChatService, AuthProvider, ChatProvider>(
-      create: (context) => ChatProvider(
-        context.read<ChatService>(),
-        context.read<AuthProvider>(),
-      ),
-      update: (context, chatService, authProvider, previous) =>
-          previous ??
-          ChatProvider(
-            chatService,
-            authProvider,
-          ),
-    ),
-    // CollectionScheduleProvider only for clm flavor
-    if (FlavorConfig.instance.isCLM)
-      ChangeNotifierProxyProvider<JobListProvider, CollectionScheduleProvider>(
-        create: (context) => CollectionScheduleProvider(
-          jobListProvider: context.read<JobListProvider>(),
-        ),
-        update: (context, jobListProvider, previous) {
-          // Always return the existing instance to prevent rebuilds on every JobListProvider change
-          // Collection schedule will manually refresh when needed via refresh() method
-          return previous!;
-        },
-      ),
-    // HappySun providers for both flavors (but Happy Sun flavor focuses on it)
-    ChangeNotifierProvider(
-      create: (context) => InventoryProvider(
-        context.read<InventoryService>(),
-      ),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => HappySunProjectProvider(),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => ToolSettingsProvider(),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => AppVersionProvider(),
-    ),
-    ChangeNotifierProvider(create: (context) => MapGestureProvider()),
-    ChangeNotifierProvider(
-      create: (context) => ShareableMapProvider(),
-    ),
-    ChangeNotifierProvider(
-      create: (context) => ShareableMapsGalleryProvider(),
-    ),
-    // ERF Property provider for CLM flavor
-    if (FlavorConfig.instance.isCLM)
-      ChangeNotifierProvider(
-        create: (context) => ErfPropertyProvider(),
-      ),
-  ], child: const MyApp()));
+  // All providers migrated to Riverpod - no more MultiProvider needed
+  runApp(const riverpod.ProviderScope(child: MyApp()));
 }
 
-class MyApp extends StatefulWidget {
+class MyApp extends riverpod.ConsumerStatefulWidget {
   const MyApp({super.key});
 
   @override
-  State<MyApp> createState() => _MyAppState();
+  riverpod.ConsumerState<MyApp> createState() => _MyAppState();
 }
 
-class _MyAppState extends State<MyApp> {
+class _MyAppState extends riverpod.ConsumerState<MyApp> {
   late final VersionService _versionService;
   bool _isInitialized = false;
 
@@ -302,10 +156,10 @@ class _MyAppState extends State<MyApp> {
 
   void _setupHappySunSync() {
     // Set up callbacks to sync Happy Sun projects with Job List items
-    final jobListProvider = context.read<JobListProvider>();
-    final happySunProjectProvider = context.read<HappySunProjectProvider>();
-    final toolSettingsProvider = context.read<ToolSettingsProvider>();
-    final inventoryProvider = context.read<InventoryProvider>();
+    final jobListProvider = ref.read(jobListRiverpod);
+    final happySunProjectProvider = ref.read(happySunProjectRiverpod);
+    final toolSettingsProvider = ref.read(toolSettingsRiverpod);
+    final inventoryProvider = ref.read(inventoryRiverpod);
 
     jobListProvider.setHappySunCallbacks(
       onAdded: (jobListItem) async {
@@ -538,9 +392,9 @@ class _MyAppState extends State<MyApp> {
         await _imageCacheService!.initialize();
 
         // Get providers
-        final happySunProvider = context.read<HappySunProjectProvider>();
-        final inventoryProvider = context.read<InventoryProvider>();
-        final inventoryService = context.read<InventoryService>();
+        final happySunProvider = ref.read(happySunProjectRiverpod);
+        final inventoryProvider = ref.read(inventoryRiverpod);
+        final inventoryService = ref.read(inventoryServiceRiverpod);
 
         // Initialize project sync service
         _syncService = HappySunSyncService(
@@ -582,22 +436,23 @@ class _MyAppState extends State<MyApp> {
 
     // Build initialization list based on flavor
     final List<Future<void>> initializations = [
-      context.read<AuthProvider>().initialize(),
-      context.read<JobListProvider>().initialize(),
-      context.read<InventoryProvider>().initialize(),
-      context.read<ToolSettingsProvider>().loadSettings(),
+      ref.read(authRiverpod).initialize(),
+      ref.read(jobListRiverpod).initialize(),
+      ref.read(inventoryRiverpod).initialize(),
+      ref.read(toolSettingsRiverpod).loadSettings(),
     ];
 
     // Only initialize ScheduleProvider for CLM flavor
     if (FlavorConfig.instance.isCLM) {
-      initializations.add(context.read<ScheduleProvider>().initialize());
+      initializations.add(ref.read(scheduleRiverpod).initialize());
+      initializations.add(ref.read(unfinishedWorkAreasRiverpod).initialize());
     }
 
     // Run all provider initializations in parallel for fast startup
     await Future.wait(initializations);
 
     // Ensure lastCheckedTime is loaded now that auth is guaranteed ready
-    await context.read<JobListProvider>().ensureLastCheckedTimeLoaded();
+    await ref.read(jobListRiverpod).ensureLastCheckedTimeLoaded();
 
     // CollectionScheduleProvider loads lazily when tab opens (depends on JobListProvider data)
 
@@ -615,7 +470,7 @@ class _MyAppState extends State<MyApp> {
   }
 
   void _initializeVersionCheck() async {
-    final versionProvider = context.read<AppVersionProvider>();
+    final versionProvider = ref.read(appVersionRiverpod);
 
     // Get current app version from package info
     try {
@@ -632,7 +487,7 @@ class _MyAppState extends State<MyApp> {
   }
 
   void _setupVersionListener() {
-    final versionProvider = context.read<AppVersionProvider>();
+    final versionProvider = ref.read(appVersionRiverpod);
 
     // Listen for version changes
     versionProvider.addListener(() {
@@ -782,7 +637,8 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
         service: service,
       );
 
-      final provider = context.read<ShareableMapProvider>();
+      final provider = riverpod.ProviderScope.containerOf(context)
+          .read(shareableMapRiverpod);
       await provider.loadFromAdapter(adapter);
 
       if (mounted) {
@@ -843,14 +699,15 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
   }
 }
 
-class DashboardScreen extends StatefulWidget {
+class DashboardScreen extends riverpod.ConsumerStatefulWidget {
   const DashboardScreen({super.key});
 
   @override
-  State<DashboardScreen> createState() => _DashboardScreenState();
+  riverpod.ConsumerState<DashboardScreen> createState() =>
+      _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen>
+class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   int _currentTabIndex = 0;
@@ -973,7 +830,9 @@ class _DashboardScreenState extends State<DashboardScreen>
                   IconButton(
                     icon: const Icon(Icons.layers),
                     onPressed: () async {
-                      final provider = context.read<ShareableMapProvider>();
+                      final provider =
+                          riverpod.ProviderScope.containerOf(context)
+                              .read(shareableMapRiverpod);
                       try {
                         await provider
                             .loadFromAdapter(WorkAreaCollectionAdapter());
@@ -1097,7 +956,9 @@ class _DashboardScreenState extends State<DashboardScreen>
                         );
 
                         if (confirmed == true && context.mounted) {
-                          await context.read<AuthProvider>().signOut();
+                          await riverpod.ProviderScope.containerOf(context)
+                              .read(authRiverpod)
+                              .signOut();
                         }
                       }
                     },
@@ -1206,8 +1067,10 @@ class _DashboardScreenState extends State<DashboardScreen>
               ),
           ],
         ),
-        floatingActionButton: Consumer2<ChatProvider, AuthProvider>(
-          builder: (context, chatProvider, authProvider, child) {
+        floatingActionButton: Builder(
+          builder: (context) {
+            final chatProvider = ref.watch(chatRiverpod);
+            final authProvider = ref.watch(authRiverpod);
             return Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1287,14 +1150,14 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 }
 
-class ScheduleTab extends StatefulWidget {
+class ScheduleTab extends riverpod.ConsumerStatefulWidget {
   const ScheduleTab({super.key});
 
   @override
-  State<ScheduleTab> createState() => _ScheduleTabState();
+  riverpod.ConsumerState<ScheduleTab> createState() => _ScheduleTabState();
 }
 
-class _ScheduleTabState extends State<ScheduleTab>
+class _ScheduleTabState extends riverpod.ConsumerState<ScheduleTab>
     with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
@@ -1303,39 +1166,46 @@ class _ScheduleTabState extends State<ScheduleTab>
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
 
-    return Consumer<ScheduleProvider>(
-      builder: (context, scheduleProvider, child) {
-        // No initialization needed - provider is preloaded in main.dart
-        final isLoading = scheduleProvider.distributors.isEmpty &&
-            scheduleProvider.jobs.isEmpty;
+    final scheduleProvider = ref.watch(scheduleRiverpod);
+    final unfinishedProvider = ref.watch(unfinishedWorkAreasRiverpod);
+    // No initialization needed - provider is preloaded in main.dart
+    final isLoading =
+        scheduleProvider.distributors.isEmpty && scheduleProvider.jobs.isEmpty;
 
-        return Stack(
+    return Stack(
+      children: [
+        Row(
           children: [
-            LazyLoadingIndicator(
-              isLoading: isLoading,
-              message: 'Loading Schedule...',
-              child: isLoading
-                  ? Container(
-                      color: Theme.of(context).scaffoldBackgroundColor,
-                      child: const SizedBox.expand(),
-                    )
-                  : const ScheduleGrid(),
+            Expanded(
+              child: LazyLoadingIndicator(
+                isLoading: isLoading,
+                message: 'Loading Schedule...',
+                child: isLoading
+                    ? Container(
+                        color: Theme.of(context).scaffoldBackgroundColor,
+                        child: const SizedBox.expand(),
+                      )
+                    : const ScheduleGrid(),
+              ),
             ),
+            // Unfinished Work Areas side panel
+            if (unfinishedProvider.isPanelVisible)
+              const UnfinishedWorkAreasPanel(),
           ],
-        );
-      },
+        ),
+      ],
     );
   }
 }
 
-class JobListTab extends StatefulWidget {
+class JobListTab extends riverpod.ConsumerStatefulWidget {
   const JobListTab({super.key});
 
   @override
-  State<JobListTab> createState() => _JobListTabState();
+  riverpod.ConsumerState<JobListTab> createState() => _JobListTabState();
 }
 
-class _JobListTabState extends State<JobListTab>
+class _JobListTabState extends riverpod.ConsumerState<JobListTab>
     with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
@@ -1344,74 +1214,72 @@ class _JobListTabState extends State<JobListTab>
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
 
-    return Consumer<JobListProvider>(
-      builder: (context, jobListProvider, child) {
-        // Show error state if there's an error
-        if (jobListProvider.error != null && jobListProvider.isInitialized) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(
-                  Icons.error_outline,
-                  size: 64,
-                  color: Colors.red,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'Error loading Job List',
-                  style: Theme.of(context).textTheme.headlineSmall,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  jobListProvider.error!,
-                  style: Theme.of(context).textTheme.bodyMedium,
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () {
-                    // Retry by reinitializing
-                    jobListProvider.initialize();
-                  },
-                  child: const Text('Retry'),
-                ),
-              ],
-            ),
-          );
-        }
-
-        // Show loading state only if not initialized yet
-        if (!jobListProvider.isInitialized) {
-          return LazyLoadingIndicator(
-            isLoading: true,
-            message: 'Initializing Job List...',
-            child: Container(
-              color: Theme.of(context).scaffoldBackgroundColor,
-              child: const SizedBox.expand(),
-            ),
-          );
-        }
-
-        return const Stack(
+    final jobListProvider = ref.watch(jobListRiverpod);
+    // Show error state if there's an error
+    if (jobListProvider.error != null && jobListProvider.isInitialized) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            JobListGrid(),
+            const Icon(
+              Icons.error_outline,
+              size: 64,
+              color: Colors.red,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Error loading Job List',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              jobListProvider.error!,
+              style: Theme.of(context).textTheme.bodyMedium,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: () {
+                // Retry by reinitializing
+                jobListProvider.initialize();
+              },
+              child: const Text('Retry'),
+            ),
           ],
-        );
-      },
+        ),
+      );
+    }
+
+    // Show loading state only if not initialized yet
+    if (!jobListProvider.isInitialized) {
+      return LazyLoadingIndicator(
+        isLoading: true,
+        message: 'Initializing Job List...',
+        child: Container(
+          color: Theme.of(context).scaffoldBackgroundColor,
+          child: const SizedBox.expand(),
+        ),
+      );
+    }
+
+    return const Stack(
+      children: [
+        JobListGrid(),
+      ],
     );
   }
 }
 
-class CollectionScheduleTab extends StatefulWidget {
+class CollectionScheduleTab extends riverpod.ConsumerStatefulWidget {
   const CollectionScheduleTab({super.key});
 
   @override
-  State<CollectionScheduleTab> createState() => _CollectionScheduleTabState();
+  riverpod.ConsumerState<CollectionScheduleTab> createState() =>
+      _CollectionScheduleTabState();
 }
 
-class _CollectionScheduleTabState extends State<CollectionScheduleTab>
-    with AutomaticKeepAliveClientMixin {
+class _CollectionScheduleTabState extends riverpod
+    .ConsumerState<CollectionScheduleTab> with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
 
@@ -1420,36 +1288,33 @@ class _CollectionScheduleTabState extends State<CollectionScheduleTab>
   @override
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
-    return Consumer<CollectionScheduleProvider>(
-      builder: (context, collectionProvider, child) {
-        // Initialize the provider when the tab is first opened
-        if (!_hasInitialized) {
-          _hasInitialized = true;
-          // Call initialize after the current frame to avoid calling during build
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            collectionProvider.initialize();
-          });
-        }
+    final collectionProvider = ref.watch(collectionScheduleRiverpod);
+    // Initialize the provider when the tab is first opened
+    if (!_hasInitialized) {
+      _hasInitialized = true;
+      // Call initialize after the current frame to avoid calling during build
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        collectionProvider.initialize();
+      });
+    }
 
-        final isLoading = collectionProvider.isLoading ||
-            (!collectionProvider.isInitialized &&
-                collectionProvider.collectionJobs.isEmpty);
+    final isLoading = collectionProvider.isLoading ||
+        (!collectionProvider.isInitialized &&
+            collectionProvider.collectionJobs.isEmpty);
 
-        return Stack(
-          children: [
-            LazyLoadingIndicator(
-              isLoading: isLoading,
-              message: 'Loading Collection Schedule...',
-              child: isLoading
-                  ? Container(
-                      color: Theme.of(context).scaffoldBackgroundColor,
-                      child: const SizedBox.expand(),
-                    )
-                  : const CollectionScheduleGrid(),
-            ),
-          ],
-        );
-      },
+    return Stack(
+      children: [
+        LazyLoadingIndicator(
+          isLoading: isLoading,
+          message: 'Loading Collection Schedule...',
+          child: isLoading
+              ? Container(
+                  color: Theme.of(context).scaffoldBackgroundColor,
+                  child: const SizedBox.expand(),
+                )
+              : const CollectionScheduleGrid(),
+        ),
+      ],
     );
   }
 }

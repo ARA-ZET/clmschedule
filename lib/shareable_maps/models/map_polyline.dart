@@ -14,6 +14,12 @@ class MapPolyline {
   final DateTime createdAt;
   final DateTime updatedAt;
 
+  // ── Track metadata (populated from compiled JSON) ──
+  final double? distanceMeters;
+  final DateTime? startTime;
+  final DateTime? endTime;
+  final Duration? duration;
+
   const MapPolyline({
     required this.id,
     required this.name,
@@ -24,6 +30,10 @@ class MapPolyline {
     this.isDashed = false,
     required this.createdAt,
     required this.updatedAt,
+    this.distanceMeters,
+    this.startTime,
+    this.endTime,
+    this.duration,
   });
 
   /// Create a new polyline with generated ID
@@ -102,6 +112,10 @@ class MapPolyline {
     double? strokeWidth,
     bool? isDashed,
     DateTime? updatedAt,
+    double? distanceMeters,
+    DateTime? startTime,
+    DateTime? endTime,
+    Duration? duration,
   }) {
     return MapPolyline(
       id: id,
@@ -113,6 +127,10 @@ class MapPolyline {
       isDashed: isDashed ?? this.isDashed,
       createdAt: createdAt,
       updatedAt: updatedAt ?? DateTime.now(),
+      distanceMeters: distanceMeters ?? this.distanceMeters,
+      startTime: startTime ?? this.startTime,
+      endTime: endTime ?? this.endTime,
+      duration: duration ?? this.duration,
     );
   }
 
@@ -177,12 +195,32 @@ class MapPolyline {
 
   /// Get formatted distance string
   String get formattedDistance {
-    final distance = totalDistanceMeters;
+    final distance = distanceMeters ?? totalDistanceMeters;
     if (distance < 1000) {
       return '${distance.toStringAsFixed(0)} m';
     } else {
       return '${(distance / 1000).toStringAsFixed(2)} km';
     }
+  }
+
+  /// Whether this polyline has pre-compiled track metadata.
+  bool get hasTrackMetadata => distanceMeters != null;
+
+  /// Formatted duration string (e.g. "2h 15m" or "45m").
+  String get formattedDuration {
+    if (duration == null) return '';
+    final h = duration!.inHours;
+    final m = duration!.inMinutes % 60;
+    if (h > 0) return '${h}h ${m}m';
+    return '${m}m';
+  }
+
+  /// Formatted time range string (e.g. "08:30 – 10:45").
+  String get formattedTimeRange {
+    if (startTime == null || endTime == null) return '';
+    String fmt(DateTime t) =>
+        '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+    return '${fmt(startTime!)} – ${fmt(endTime!)}';
   }
 
   /// Check if polyline is valid (has at least 2 points)

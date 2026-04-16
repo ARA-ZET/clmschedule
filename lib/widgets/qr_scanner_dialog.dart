@@ -1,17 +1,17 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:provider/provider.dart';
 import '../providers/inventory_provider.dart';
 import 'tool_details_dialog.dart';
 
-class QrScannerDialog extends StatefulWidget {
+class QrScannerDialog extends riverpod.ConsumerStatefulWidget {
   const QrScannerDialog({super.key});
 
   @override
-  State<QrScannerDialog> createState() => _QrScannerDialogState();
+  riverpod.ConsumerState<QrScannerDialog> createState() => _QrScannerDialogState();
 }
 
-class _QrScannerDialogState extends State<QrScannerDialog> {
+class _QrScannerDialogState extends riverpod.ConsumerState<QrScannerDialog> {
   final MobileScannerController controller = MobileScannerController();
   bool _isProcessing = false;
 
@@ -33,7 +33,7 @@ class _QrScannerDialogState extends State<QrScannerDialog> {
     setState(() => _isProcessing = true);
 
     try {
-      final inventoryProvider = context.read<InventoryProvider>();
+      final inventoryProvider = ref.read(inventoryRiverpod);
       final tool = await inventoryProvider.getToolByQrCode(code);
 
       if (!mounted) return;
