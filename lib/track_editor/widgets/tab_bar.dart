@@ -200,8 +200,7 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                   isActive: drawingMode == TEDrawingMode.polygon,
                   activeColor: Colors.blue,
                   isLocked: scissorsMode,
-                  onTap: () =>
-                      ref.read(teToolsRiverpod).toggleDrawPolygon(),
+                  onTap: () => ref.read(teToolsRiverpod).toggleDrawPolygon(),
                 ),
                 // Draw point tool
                 _ToolButton(
@@ -212,8 +211,7 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                   isActive: drawingMode == TEDrawingMode.point,
                   activeColor: Colors.blue,
                   isLocked: scissorsMode,
-                  onTap: () =>
-                      ref.read(teToolsRiverpod).toggleDrawPoint(),
+                  onTap: () => ref.read(teToolsRiverpod).toggleDrawPoint(),
                 ),
               ],
             ),

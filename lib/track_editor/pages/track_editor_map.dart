@@ -201,8 +201,10 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       if (_drawingPoints.length >= 3) {
         final first = _drawingPoints.first;
         final dist = _haversineDistance(
-          latLng.latitude, latLng.longitude,
-          first.latitude, first.longitude,
+          latLng.latitude,
+          latLng.longitude,
+          first.latitude,
+          first.longitude,
         );
         // Close if within ~100m of the first point
         if (dist < 0.1) {
@@ -239,12 +241,15 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
         anchor: const Offset(0.5, 0.5),
         icon: canClose
             ? (_drawingFirstVertexIcon ??
-                BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen))
+                BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueGreen))
             : (_drawingVertexIcon ??
-                BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue)),
+                BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueBlue)),
         zIndex: 20,
         onTap: canClose
-            ? () => _showPolygonNameClientDialog(context, ref.read(teTabsRiverpod).currentTab)
+            ? () => _showPolygonNameClientDialog(
+                context, ref.read(teTabsRiverpod).currentTab)
             : null,
       ));
     }
@@ -349,8 +354,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                     return sortedClients
                         .where((c) => c.toLowerCase().contains(q));
                   },
-                  fieldViewBuilder:
-                      (ctx, controller, focusNode, onSubmitted) {
+                  fieldViewBuilder: (ctx, controller, focusNode, onSubmitted) {
                     // Sync the autocomplete controller with our controller
                     clientCtrl.addListener(() {
                       if (controller.text != clientCtrl.text) {
@@ -1216,9 +1220,19 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                       }
                     },
                     onCameraMove: (pos) => setState(() => _currentCamera = pos),
-                    polygons: {...mapPolygons, ..._buildDrawingPreviewPolygon()},
-                    markers: {...mapMarkers, ...vertexMarkers, ..._buildDrawingMarkers()},
-                    polylines: {...polylines, ..._buildDrawingPreviewPolyline()},
+                    polygons: {
+                      ...mapPolygons,
+                      ..._buildDrawingPreviewPolygon()
+                    },
+                    markers: {
+                      ...mapMarkers,
+                      ...vertexMarkers,
+                      ..._buildDrawingMarkers()
+                    },
+                    polylines: {
+                      ...polylines,
+                      ..._buildDrawingPreviewPolyline()
+                    },
                     cloudMapId: '29325755824913c4',
                   )),
               // ── Shift+drag selection interceptor ─────────────────────────
@@ -1558,8 +1572,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                                     icon: const Icon(Icons.check, size: 18),
                                     label: const Text('Complete'),
                                     style: ElevatedButton.styleFrom(
-                                      backgroundColor:
-                                          const Color(0xFF1967D2),
+                                      backgroundColor: const Color(0xFF1967D2),
                                       foregroundColor: Colors.white,
                                       disabledBackgroundColor:
                                           const Color(0xFFE8EAED),
