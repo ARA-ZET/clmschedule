@@ -14,6 +14,7 @@ enum Flavor {
   maps,
   trackEditor,
   erfProperty,
+  dropsheet,
 }
 
 class FlavorConfig {
@@ -71,6 +72,13 @@ class FlavorConfig {
           enableHappySun: false,
           enableCollectionSchedule: false,
         );
+      case 'dropsheet':
+        return FlavorConfig._(
+          flavor: Flavor.dropsheet,
+          appName: 'CLM Dropsheet',
+          enableHappySun: false,
+          enableCollectionSchedule: false,
+        );
       case 'clm':
       default:
         return FlavorConfig._(
@@ -87,6 +95,7 @@ class FlavorConfig {
   bool get isMaps => flavor == Flavor.maps;
   bool get isTrackEditor => flavor == Flavor.trackEditor;
   bool get isErfProperty => flavor == Flavor.erfProperty;
+  bool get isDropsheet => flavor == Flavor.dropsheet;
 
   @override
   String toString() => 'FlavorConfig(flavor: $flavor, appName: $appName)';

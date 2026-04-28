@@ -3,7 +3,6 @@
 // Manages GPX track/waypoint files in Firebase Cloud Storage.
 // Folder structure: Distribution/{year}/{MMM YYYY}/{clientName}/Round {N}/
 import 'dart:convert';
-import 'dart:math' as math;
 
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
@@ -268,12 +267,9 @@ class GpxStorageService {
   /// Returns the full path of the new file.
   /// Preserves content type when available. If a file already exists at the
   /// destination it will be overwritten.
-  ///
-  /// Uses a 100 MB ceiling for [getData] so large tracking GPX files (which
-  /// can easily exceed the default 10 MB limit on web) can be renamed/moved.
   Future<String> copyFile(String fromFullPath, String toFullPath) async {
     final srcRef = _storage.ref(fromFullPath);
-    final bytes = await srcRef.getData(100 * 1024 * 1024);
+    final bytes = await srcRef.getData();
     if (bytes == null) {
       throw StateError('copyFile: source returned no data ($fromFullPath)');
     }
@@ -292,9 +288,7 @@ class GpxStorageService {
     return toFullPath;
   }
 
-  /// Move a file by copying then deleting the source. A failed delete leaves
-  /// a duplicate at the destination, so surface that as an error instead of
-  /// silently succeeding (callers can then keep the old name and retry).
+  /// Move a file by copying then deleting the source.
   Future<String> moveFile(String fromFullPath, String toFullPath) async {
     if (fromFullPath == toFullPath) return toFullPath;
     await copyFile(fromFullPath, toFullPath);
@@ -302,13 +296,6 @@ class GpxStorageService {
       await _storage.ref(fromFullPath).delete();
     } catch (e) {
       debugPrint('moveFile: source delete failed ($fromFullPath): $e');
-      // Roll back: try to remove the copy so the user doesn't see duplicates.
-      try {
-        await _storage.ref(toFullPath).delete();
-      } catch (_) {}
-      throw StateError(
-        'Could not remove original file ($fromFullPath): $e',
-      );
     }
     return toFullPath;
   }
@@ -451,125 +438,6 @@ class GpxStorageService {
       debugPrint('regenerateCompiledWaypoints error ($folderPath): $e');
       return null;
     }
-  }
-
-  // ── Compiled tracks ───────────────────────────────────────────────────────
-
-  /// Rebuild `_compiled_tracks.json` for [folderPath] by re-reading every
-  /// track GPX file in that folder and aggregating each `<trk>` into one
-  /// entry. Mirrors the schema produced by the Cloud Function and consumed
-  /// by [ShareableMapProvider]:
-  /// ```json
-  /// { "trackCount": N,
-  ///   "tracks": [ { "name":..., "desc":..., "points":[[lat,lon],...],
-  ///                 "distanceMeters":..., "startTime":ms, "endTime":ms,
-  ///                 "durationMs":..., "sourceFile":... }, ... ] }
-  /// ```
-  /// Returns the track count on success, or `null` on failure.
-  Future<int?> regenerateCompiledTracks(String folderPath) async {
-    try {
-      final result = await _storage.ref(folderPath).listAll();
-      final gpxItems = result.items
-          .where((i) => i.name.toLowerCase().endsWith('.gpx'))
-          .toList();
-
-      final aggregated = <Map<String, dynamic>>[];
-      for (final item in gpxItems) {
-        try {
-          final bytes = await item.getData();
-          if (bytes == null) continue;
-          final xml = String.fromCharCodes(bytes);
-          final gpx = GpxReader().fromString(xml);
-          if (gpx.trks.isEmpty) continue;
-
-          for (final trk in gpx.trks) {
-            // Flatten all track segments into a single point sequence.
-            final points = <List<double>>[];
-            DateTime? firstTime;
-            DateTime? lastTime;
-            for (final seg in trk.trksegs) {
-              for (final p in seg.trkpts) {
-                if (p.lat == null || p.lon == null) continue;
-                points.add([p.lat!, p.lon!]);
-                if (p.time != null) {
-                  firstTime ??= p.time;
-                  lastTime = p.time;
-                }
-              }
-            }
-            if (points.length < 2) continue;
-
-            // Haversine length.
-            double distMeters = 0;
-            for (int i = 1; i < points.length; i++) {
-              distMeters += _haversineMeters(
-                points[i - 1][0], points[i - 1][1],
-                points[i][0], points[i][1],
-              );
-            }
-
-            final entry = <String, dynamic>{
-              'name': trk.name ?? item.name.replaceAll('.gpx', ''),
-              if (trk.desc != null) 'desc': trk.desc,
-              'points': points,
-              'distanceMeters': distMeters,
-              'sourceFile': item.name,
-            };
-            if (firstTime != null && lastTime != null) {
-              entry['startTime'] = firstTime.millisecondsSinceEpoch;
-              entry['endTime'] = lastTime.millisecondsSinceEpoch;
-              entry['durationMs'] =
-                  lastTime.difference(firstTime).inMilliseconds;
-            }
-            aggregated.add(entry);
-          }
-        } catch (e) {
-          debugPrint('regenerateCompiledTracks: '
-              'failed to parse ${item.fullPath}: $e');
-        }
-      }
-
-      final compiledPath = '$folderPath/_compiled_tracks.json';
-      final compiledRef = _storage.ref(compiledPath);
-
-      if (aggregated.isEmpty) {
-        // No tracks left — remove any stale compiled file if it exists.
-        try {
-          await compiledRef.delete();
-        } catch (_) {
-          // Ignore "object-not-found" errors.
-        }
-        return 0;
-      }
-
-      final payload = jsonEncode({
-        'trackCount': aggregated.length,
-        'tracks': aggregated,
-      });
-      await compiledRef.putData(
-        Uint8List.fromList(utf8.encode(payload)),
-        SettableMetadata(contentType: 'application/json'),
-      );
-      return aggregated.length;
-    } catch (e) {
-      debugPrint('regenerateCompiledTracks error ($folderPath): $e');
-      return null;
-    }
-  }
-
-  /// Great-circle distance between two WGS84 points in meters.
-  static double _haversineMeters(
-      double lat1, double lon1, double lat2, double lon2) {
-    const r = 6371000.0; // earth radius in meters
-    final dLat = (lat2 - lat1) * math.pi / 180;
-    final dLon = (lon2 - lon1) * math.pi / 180;
-    final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(lat1 * math.pi / 180) *
-            math.cos(lat2 * math.pi / 180) *
-            math.sin(dLon / 2) *
-            math.sin(dLon / 2);
-    final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
-    return r * c;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────

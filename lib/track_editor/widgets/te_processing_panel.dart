@@ -463,14 +463,12 @@ class _UnmatchedFileTile extends StatelessWidget {
                   if (trkCount > 0)
                     _MiniStat(
                         icon: Icons.timeline,
-                        label:
-                            '$trkCount track${trkCount == 1 ? '' : 's'}',
+                        label: '$trkCount track${trkCount == 1 ? '' : 's'}',
                         color: Colors.blue.shade700),
                   if (wptCount > 0)
                     _MiniStat(
                         icon: Icons.place,
-                        label:
-                            '$wptCount waypoint${wptCount == 1 ? '' : 's'}',
+                        label: '$wptCount waypoint${wptCount == 1 ? '' : 's'}',
                         color: Colors.teal.shade700),
                 ],
               ),
@@ -488,9 +486,8 @@ class _UnmatchedFileTile extends StatelessWidget {
     final candidates = unmatched.where((f) => f.type == oppositeType).toList();
     // Also expose every OTHER unmatched file so the user can still pair
     // with an unknown-type file (e.g. combined GPX or mis-named exports).
-    final otherCandidates = unmatched
-        .where((f) => f != entry && !candidates.contains(f))
-        .toList();
+    final otherCandidates =
+        unmatched.where((f) => f != entry && !candidates.contains(f)).toList();
 
     showDialog<void>(
       context: context,
@@ -601,8 +598,7 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
                 style:
                     const TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
               ),
-              if (widget.candidates.isEmpty &&
-                  widget.otherCandidates.isEmpty)
+              if (widget.candidates.isEmpty && widget.otherCandidates.isEmpty)
                 Text(
                   'No other unmatched files available.',
                   style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
@@ -695,7 +691,8 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
           },
           icon: const Icon(Icons.tab, size: 16),
           label: const Text('Open as is'),
-          style: TextButton.styleFrom(foregroundColor: Colors.blueGrey.shade700),
+          style:
+              TextButton.styleFrom(foregroundColor: Colors.blueGrey.shade700),
         ),
         FilledButton.icon(
           onPressed: _selected == null

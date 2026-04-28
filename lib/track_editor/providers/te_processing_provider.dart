@@ -159,9 +159,8 @@ class TEProcessingProvider extends ChangeNotifier {
     // Use the same entry on both sides — `_buildTabForPair` reads
     // `trackFile.tracks` and `waypointsFile.waypoints`, so a combined GPX
     // (or single-type file) will still surface everything it contains.
-    final key = entry.matchKey.isEmpty
-        ? '_single_${entry.filename}'
-        : entry.matchKey;
+    final key =
+        entry.matchKey.isEmpty ? '_single_${entry.filename}' : entry.matchKey;
     await _openPairAsTab(
       TEGpxMatchedPair(
         trackFile: entry,

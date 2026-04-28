@@ -15,7 +15,6 @@ import '../../providers/schedule_provider.dart';
 import '../../services/gpx_storage_service.dart';
 import '../models/styled_polygon.dart';
 import '../models/tab_item.dart';
-import '../providers/te_cloud_save_state_provider.dart';
 import '../providers/te_tabs_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
@@ -31,7 +30,10 @@ class TECloudSavePanel extends riverpod.ConsumerStatefulWidget {
 }
 
 class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
-  TETabItem? _lastTab;
+  bool _loading = false;
+  List<_ClientEntry> _clients = [];
+  String? _error;
+  int _lastTabIndex = -1;
 
   TETabItem get _tab {
     final tabs = ref.read(teTabsRiverpod);
@@ -41,32 +43,21 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
   @override
   Widget build(BuildContext context) {
     final tabsProvider = ref.watch(teTabsRiverpod);
-    final cloudSave = ref.watch(teCloudSaveRiverpod);
     final currentIndex = tabsProvider.currentTab;
-    final tab = tabsProvider.tabs[currentIndex];
 
+    // Re-resolve clients whenever the active tab changes.
+    if (currentIndex != _lastTabIndex) {
+      _lastTabIndex = currentIndex;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _resolveClients();
+      });
+    }
+
+    final tab = tabsProvider.tabs[currentIndex];
     final hasTracks = tab.tracks.isNotEmpty;
     final hasWaypoints = tab.waypoints.isNotEmpty;
 
-    // Auto-resolve the first time we land on a tab that has data but no
-    // cached state yet. State is keyed by [TETabItem] identity, so switching
-    // back to an already-resolved tab is a no-op.
-    if (tab != _lastTab) {
-      _lastTab = tab;
-      if ((hasTracks || hasWaypoints) &&
-          !cloudSave.isResolved(tab) &&
-          !cloudSave.isLoading(tab)) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _resolveClients();
-        });
-      }
-    }
-
     if (!hasTracks && !hasWaypoints) return const SizedBox.shrink();
-
-    final loading = cloudSave.isLoading(tab);
-    final error = cloudSave.errorFor(tab);
-    final clients = cloudSave.clientsFor(tab);
 
     return Container(
       width: 420,
@@ -91,7 +82,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
             ],
           ),
           const Divider(height: 16),
-          if (loading)
+          if (_loading)
             const Center(
               child: Padding(
                 padding: EdgeInsets.all(12),
@@ -109,7 +100,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
                 ),
               ),
             )
-          else if (error != null)
+          else if (_error != null)
             Padding(
               padding: const EdgeInsets.all(8),
               child: Row(
@@ -118,7 +109,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
                   Icon(Icons.warning_amber,
                       color: Colors.orange.shade700, size: 18),
                   Expanded(
-                    child: Text(error,
+                    child: Text(_error!,
                         style: TextStyle(
                             fontSize: 12, color: Colors.orange.shade800)),
                   ),
@@ -131,16 +122,14 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
               ),
             )
           else ...[
-            if (clients.isEmpty)
+            if (_clients.isEmpty)
               const Padding(
                 padding: EdgeInsets.all(8),
                 child: Text('No clients found.',
                     style: TextStyle(fontSize: 12, color: Colors.grey)),
               )
             else
-              ...clients.map((entry) => _ClientTile(
-                    key: ValueKey('${identityHashCode(tab)}_${entry.matchKey}'),
-                    tab: tab,
+              ..._clients.map((entry) => _ClientTile(
                     entry: entry,
                     tracks: tab.tracks,
                     waypoints: tab.waypoints,
@@ -189,12 +178,8 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     // Expect: Distribution / year / month / client / [round]
     final clientName = segments.length >= 4 ? segments[3] : segments.last;
 
-    final tab = _tab;
-    final cloudSave = ref.read(teCloudSaveRiverpod);
-    final existing = cloudSave.clientsFor(tab);
-
     // Check if already in the list.
-    if (existing
+    if (_clients
         .any((c) => c.clientName == clientName && c.folderPath == picked)) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -208,20 +193,19 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     }
 
     // Get distributor name from existing entries or tab title.
-    final distributorName = existing.isNotEmpty
-        ? existing.first.distributorName
+    final distributorName = _clients.isNotEmpty
+        ? _clients.first.distributorName
         : _matchDistributor(ref.read(scheduleRiverpod))?.name ?? '';
 
-    cloudSave.addClient(
-      tab,
-      TECloudSaveClientEntry(
+    setState(() {
+      _clients.add(_ClientEntry(
         clientName: clientName,
         distributorName: distributorName,
         folderPath: picked,
         date: date,
         polygons: const [],
-      ),
-    );
+      ));
+    });
   }
 
   /// Extract date from the first timestamped track point.
@@ -253,7 +237,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     }
     // Also include clients already resolved for this panel, in case the
     // joblist doesn't cover them yet.
-    for (final c in ref.read(teCloudSaveRiverpod).clientsFor(_tab)) {
+    for (final c in _clients) {
       final name = c.clientName.trim();
       if (name.isEmpty) continue;
       if (seen.add(name.toLowerCase())) result.add(name);
@@ -292,9 +276,10 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
   }
 
   Future<void> _resolveClients() async {
-    final tab = _tab;
-    final cloudSave = ref.read(teCloudSaveRiverpod);
-    cloudSave.beginResolve(tab);
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
 
     try {
       final schedule = ref.read(scheduleRiverpod);
@@ -302,27 +287,29 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
       final match = _matchDistributor(schedule);
 
       if (date == null || match == null) {
-        cloudSave.finishResolveError(
-          tab,
-          date == null
+        setState(() {
+          _loading = false;
+          _error = date == null
               ? 'No timestamp found in tracks'
-              : 'Could not match distributor',
-        );
+              : 'Could not match distributor';
+        });
         return;
       }
 
       final jobs =
           await schedule.fetchJobsForDistributorAndDate(match.id, date);
       if (jobs.isEmpty) {
-        cloudSave.finishResolveError(
-            tab, 'No jobs found for this date & distributor');
+        setState(() {
+          _loading = false;
+          _error = 'No jobs found for this date & distributor';
+        });
         return;
       }
 
       // Group by client — one entry per unique client name.
       final gpxStorage = GpxStorageService();
       final seen = <String>{};
-      final entries = <TECloudSaveClientEntry>[];
+      final entries = <_ClientEntry>[];
 
       // Month folder is the safe fallback — Firebase Storage will NOT create
       // folders for uploads we refuse to perform, so pointing here keeps us
@@ -367,7 +354,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
             }
           }
 
-          entries.add(TECloudSaveClientEntry(
+          entries.add(_ClientEntry(
             clientName: client,
             distributorName: match.name,
             folderPath: folderPath,
@@ -378,27 +365,52 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
         }
       }
 
-      cloudSave.finishResolveSuccess(tab, entries);
+      setState(() {
+        _clients = entries;
+        _loading = false;
+      });
     } catch (e) {
-      cloudSave.finishResolveError(tab, 'Error: $e');
+      setState(() {
+        _loading = false;
+        _error = 'Error: $e';
+      });
     }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATA MODEL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _ClientEntry {
+  final String clientName;
+  final String distributorName;
+  final String folderPath;
+  final DateTime date;
+  final List<TEStyledPolygon> polygons;
+  final bool folderExists;
+
+  _ClientEntry({
+    required this.clientName,
+    required this.distributorName,
+    required this.folderPath,
+    required this.date,
+    required this.polygons,
+    this.folderExists = true,
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CLIENT TILE — one per client with "Save As-Is" and "Trim & Save" sections
 // ═══════════════════════════════════════════════════════════════════════════════
 
-class _ClientTile extends riverpod.ConsumerStatefulWidget {
-  final TETabItem tab;
-  final TECloudSaveClientEntry entry;
+class _ClientTile extends StatefulWidget {
+  final _ClientEntry entry;
   final List<Trk> tracks;
   final List<Wpt> waypoints;
   final List<String> Function()? clientSuggestionsBuilder;
 
   const _ClientTile({
-    super.key,
-    required this.tab,
     required this.entry,
     required this.tracks,
     required this.waypoints,
@@ -406,27 +418,33 @@ class _ClientTile extends riverpod.ConsumerStatefulWidget {
   });
 
   @override
-  riverpod.ConsumerState<_ClientTile> createState() => _ClientTileState();
+  State<_ClientTile> createState() => _ClientTileState();
 }
 
-class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
-  // In-flight upload indicators \u2014 short-lived per widget instance.
-  // Everything that must survive tab switches lives on [widget.entry] and
-  // is written through the TECloudSaveStateProvider.
+class _ClientTileState extends State<_ClientTile> {
   bool _saving = false;
   bool _trimming = false;
+  bool _expanded = false;
+  // Track whether the user has already completed each action in this
+  // session so we can recolour the buttons orange as a visual confirmation
+  // that the upload happened (instead of leaving them identical to their
+  // pre-save state which made it easy to double-click by mistake).
+  bool _savedAsIs = false;
+  bool _trimmedSaved = false;
+  final Set<int> _selectedPolyIndices = {};
+  late String _folderPath;
+  late bool _folderExists;
 
-  // Shortcut accessors so the rest of the method bodies stay readable.
-  String get _folderPath => widget.entry.folderPath;
-  bool get _folderExists => widget.entry.folderExists;
-  bool get _savedAsIs => widget.entry.savedAsIs;
-  bool get _trimmedSaved => widget.entry.trimmedSaved;
-  bool get _expanded => widget.entry.expanded;
-  Set<int> get _selectedPolyIndices => widget.entry.selectedPolyIndices;
+  @override
+  void initState() {
+    super.initState();
+    _folderPath = widget.entry.folderPath;
+    _folderExists = widget.entry.folderExists;
+  }
 
   String get _dateStr => DateFormat('dd MMM yyyy').format(widget.entry.date);
 
-  /// Extract round number from folder path (e.g. ".../Round 3" \u2192 3).
+  /// Extract round number from folder path (e.g. ".../Round 3" → 3).
   int? get _roundNumber {
     final match = RegExp(r'Round (\d+)$').firstMatch(_folderPath);
     return match != null ? int.tryParse(match.group(1)!) : null;
@@ -504,8 +522,7 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
                 skipped > 0 && uploaded == 0 ? Colors.orange : Colors.green,
           ),
         );
-        setState(() {});
-        ref.read(teCloudSaveRiverpod).markSavedAsIs(widget.entry, true);
+        setState(() => _savedAsIs = true);
       }
     } catch (e) {
       if (mounted) {
@@ -589,8 +606,7 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
                 : Colors.deepOrange,
           ),
         );
-        setState(() {});
-        ref.read(teCloudSaveRiverpod).markTrimmedSaved(widget.entry, true);
+        setState(() => _trimmedSaved = true);
       }
     } catch (e) {
       if (mounted) {
@@ -615,9 +631,10 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
       ),
     );
     if (picked != null && picked != _folderPath && mounted) {
-      ref
-          .read(teCloudSaveRiverpod)
-          .setFolder(widget.entry, picked, exists: true);
+      setState(() {
+        _folderPath = picked;
+        _folderExists = true;
+      });
     }
   }
 
@@ -641,10 +658,6 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
 
   @override
   Widget build(BuildContext context) {
-    // Watch the provider so flag changes (saved/trim/folder/expand/selection)
-    // rebuild this tile. State values are read via getters on widget.entry.
-    ref.watch(teCloudSaveRiverpod);
-    final cloudSave = ref.read(teCloudSaveRiverpod);
     final hasPolygons = widget.entry.polygons.isNotEmpty;
     final busy = _saving || _trimming;
 
@@ -661,7 +674,7 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
         children: [
           // ── Client header ─────────────────────────────────────────────
           InkWell(
-            onTap: () => cloudSave.setExpanded(widget.entry, !_expanded),
+            onTap: () => setState(() => _expanded = !_expanded),
             borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -822,8 +835,19 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
                       return InkWell(
                         onTap: busy
                             ? null
-                            : () =>
-                                cloudSave.toggleSelectedPoly(widget.entry, i),
+                            : () {
+                                setState(() {
+                                  if (isSelected) {
+                                    _selectedPolyIndices.remove(i);
+                                  } else {
+                                    _selectedPolyIndices.add(i);
+                                  }
+                                  // Any selection change means the next
+                                  // trim will produce different output,
+                                  // so reset the "saved" indicator.
+                                  _trimmedSaved = false;
+                                });
+                              },
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 3),
                           child: Row(
@@ -835,8 +859,16 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
                                   value: isSelected,
                                   onChanged: busy
                                       ? null
-                                      : (v) => cloudSave.toggleSelectedPoly(
-                                          widget.entry, i),
+                                      : (v) {
+                                          setState(() {
+                                            if (v == true) {
+                                              _selectedPolyIndices.add(i);
+                                            } else {
+                                              _selectedPolyIndices.remove(i);
+                                            }
+                                            _trimmedSaved = false;
+                                          });
+                                        },
                                   materialTapTargetSize:
                                       MaterialTapTargetSize.shrinkWrap,
                                   visualDensity: VisualDensity.compact,
@@ -875,12 +907,14 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
                         TextButton(
                           onPressed: busy
                               ? null
-                              : () => cloudSave.setSelectedPolys(widget.entry, {
-                                    for (var i = 0;
-                                        i < widget.entry.polygons.length;
-                                        i++)
-                                      i
-                                  }),
+                              : () {
+                                  setState(() {
+                                    _selectedPolyIndices.addAll(List.generate(
+                                        widget.entry.polygons.length,
+                                        (i) => i));
+                                    _trimmedSaved = false;
+                                  });
+                                },
                           style: TextButton.styleFrom(
                             padding: const EdgeInsets.symmetric(horizontal: 8),
                             textStyle: const TextStyle(fontSize: 11),
@@ -890,8 +924,12 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
                         TextButton(
                           onPressed: busy
                               ? null
-                              : () => cloudSave.setSelectedPolys(
-                                  widget.entry, const <int>{}),
+                              : () {
+                                  setState(() {
+                                    _selectedPolyIndices.clear();
+                                    _trimmedSaved = false;
+                                  });
+                                },
                           style: TextButton.styleFrom(
                             padding: const EdgeInsets.symmetric(horizontal: 8),
                             textStyle: const TextStyle(fontSize: 11),

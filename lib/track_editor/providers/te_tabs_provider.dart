@@ -26,13 +26,11 @@ class TETabsProvider with ChangeNotifier {
     TEMode.import: _defaultTabs(),
     TEMode.trim: _defaultTabs(),
     TEMode.processing: _defaultTabs(),
-    TEMode.update: _defaultTabs(),
   };
   final Map<TEMode, int> _currentByMode = {
     TEMode.import: 0,
     TEMode.trim: 0,
     TEMode.processing: 0,
-    TEMode.update: 0,
   };
 
   TEMode _activeMode = TEMode.processing;

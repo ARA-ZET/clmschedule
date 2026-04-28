@@ -279,21 +279,15 @@ class CloudFileManagerProvider with ChangeNotifier {
   Future<List<String>> listAllFolderPaths() =>
       _storage.listAllFolderPaths(rootPath: rootPath);
 
-  /// Trigger a compiled-waypoints and compiled-tracks rebuild for each
-  /// folder, skipping any operations that the storage service cannot
-  /// service.
+  /// Trigger a compiled-waypoints rebuild for each folder, skipping any
+  /// operations that the storage service cannot service.
   Future<void> _rebuildCompiledFor(Iterable<String> folders) async {
     for (final f in folders) {
       if (f.isEmpty) continue;
       try {
         await _storage.regenerateCompiledWaypoints(f);
       } catch (e) {
-        debugPrint('_rebuildCompiledFor($f) waypoints: $e');
-      }
-      try {
-        await _storage.regenerateCompiledTracks(f);
-      } catch (e) {
-        debugPrint('_rebuildCompiledFor($f) tracks: $e');
+        debugPrint('_rebuildCompiledFor($f): $e');
       }
     }
   }

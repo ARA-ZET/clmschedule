@@ -23,9 +23,9 @@ echo -e "${GREEN}================================${NC}"
 echo ""
 
 # Validate flavor
-if [[ "$FLAVOR" != "clm" && "$FLAVOR" != "happysun" && "$FLAVOR" != "maps" && "$FLAVOR" != "trackEditor" && "$FLAVOR" != "erfProperty" ]]; then
+if [[ "$FLAVOR" != "clm" && "$FLAVOR" != "happysun" && "$FLAVOR" != "maps" && "$FLAVOR" != "trackEditor" && "$FLAVOR" != "erfProperty" && "$FLAVOR" != "dropsheet" ]]; then
     echo -e "${RED}Error: Invalid flavor '$FLAVOR'${NC}"
-    echo "Valid flavors: clm, happysun, maps, trackEditor, erfProperty"
+    echo "Valid flavors: clm, happysun, maps, trackEditor, erfProperty, dropsheet"
     exit 1
 fi
 

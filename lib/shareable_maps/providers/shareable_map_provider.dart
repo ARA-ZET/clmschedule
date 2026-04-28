@@ -323,13 +323,6 @@ class ShareableMapProvider extends ChangeNotifier {
           '[loadFromAdapter] cleanup done in ${sw.elapsedMilliseconds}ms');
       _adapter = adapter;
 
-      // Reset cloud overlay state from any previously-loaded map so the
-      // new map starts with a clean slate. Without this, switching maps in
-      // the gallery leaves the previous map's "Movements of the
-      // Distributors" and "Letter Boxes Reached" data on screen because
-      // the *Loaded flags short-circuit the loader for the new folder.
-      _resetCloudOverlayState();
-
       // Load the map data
       final map = await adapter.load();
       debugPrint(
@@ -802,10 +795,9 @@ class ShareableMapProvider extends ChangeNotifier {
       final map = _currentMap!;
       final bounds = map.getBounds();
 
-      // Gather polygon data only — tracks/polylines are intentionally skipped
-      // to keep the gallery thumbnail lightweight and the Static Maps URL
-      // well under the ~8K char limit.
+      // Gather polygon/polyline data with actual colors from visible layers.
       final polygons = <ThumbnailPathData>[];
+      final polylines = <ThumbnailPathData>[];
       for (final layer in map.visibleLayersSorted) {
         for (final polygon in layer.polygons) {
           if (polygon.points.isNotEmpty) {
@@ -816,6 +808,32 @@ class ShareableMapProvider extends ChangeNotifier {
             ));
           }
         }
+        for (final polyline in layer.polylines) {
+          if (polyline.points.isNotEmpty) {
+            polylines.add(ThumbnailPathData(
+              points: polyline.points,
+              color: polyline.color,
+            ));
+          }
+        }
+      }
+
+      // Include visible cloud tracks in the thumbnail.
+      // Limit to avoid exceeding Static Maps API URL length.
+      if (_cloudTracksLayer != null && _cloudTracksLayer!.isVisible) {
+        for (final polyline in _cloudTracksLayer!.polylines) {
+          if (polyline.points.isNotEmpty) {
+            polylines.add(ThumbnailPathData(
+              points: polyline.points,
+              color: polyline.color,
+            ));
+          }
+        }
+      }
+      // Cap total polylines so the Static Maps URL stays under the limit.
+      const maxPolylines = 15;
+      if (polylines.length > maxPolylines) {
+        polylines.removeRange(maxPolylines, polylines.length);
       }
 
       final thumbnailService = MapThumbnailService();
@@ -826,6 +844,7 @@ class ShareableMapProvider extends ChangeNotifier {
         zoom: map.defaultZoom,
         bounds: bounds,
         polygons: polygons.isNotEmpty ? polygons : null,
+        polylines: polylines.isNotEmpty ? polylines : null,
       );
 
       if (url != null && _currentMap != null) {
@@ -1010,21 +1029,8 @@ class ShareableMapProvider extends ChangeNotifier {
     _selectedElementId = null;
     _drawingMode = DrawingMode.none;
     _clearDrawingState();
-    _resetCloudOverlayState();
     debugPrint('Cleared map');
     notifyListeners();
-  }
-
-  /// Reset all ephemeral cloud overlay state (layers, loaded flags, in-flight
-  /// loading flags). Used when switching between maps so the previous map's
-  /// track/waypoint data does not leak into the newly-opened map.
-  void _resetCloudOverlayState() {
-    _cloudTracksLayer = null;
-    _cloudWaypointsLayer = null;
-    _cloudTracksLoaded = false;
-    _cloudWaypointsLoaded = false;
-    _isLoadingCloudTracks = false;
-    _isLoadingCloudWaypoints = false;
   }
 
   /// Update map metadata
@@ -1065,8 +1071,7 @@ class ShareableMapProvider extends ChangeNotifier {
     final alreadyExists = layer.polygons.any((p) => p.name == workArea.name);
     if (alreadyExists) return;
 
-    // Convert WorkArea to CustomPolygon and add it.
-    // Copy letterBoxEstimate so shared maps carry the same distribution data.
+    // Convert WorkArea to CustomPolygon and add it
     final polygon = CustomPolygon(
       name: workArea.name,
       description: workArea.description,
@@ -1074,7 +1079,6 @@ class ShareableMapProvider extends ChangeNotifier {
       color: color ?? Colors.orange,
       fillOpacity: 0.25,
       strokeWidth: 2,
-      letterBoxEstimate: workArea.letterBoxEstimate,
     );
 
     final updatedLayer = layer.addPolygon(polygon);

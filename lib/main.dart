@@ -68,6 +68,7 @@ import 'services/version_service.dart';
 // import 'services/ai_chat_service.dart'; // Migrated to Riverpod
 // import 'providers/ai_chat_provider.dart'; // Migrated to Riverpod
 import 'widgets/ai_chat_dialog.dart';
+import 'widgets/dropsheet/dropsheet_tab.dart';
 import 'services/inventory_service.dart';
 import 'services/connectivity_service.dart';
 import 'services/happy_sun_local_storage.dart';
@@ -699,9 +700,11 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
 
   // Dynamic tab count based on flavor
   int get _tabCount {
-    // CLM flavor: Schedule + Job List + Collection Schedule + Happy Sun = 4 tabs
+    // CLM flavor: Schedule + Job List + Collection Schedule + Dropsheet + Happy Sun = 5 tabs
+    // Dropsheet flavor: Dropsheet only = 1 tab
     // Happy Sun flavor: Happy Sun only = 1 tab (simplified for solar projects only)
-    return FlavorConfig.instance.isCLM ? 4 : 1;
+    if (FlavorConfig.instance.isCLM) return 5;
+    return 1;
   }
 
   @override
@@ -739,8 +742,9 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
 
     return Scaffold(
         backgroundColor: const Color.fromARGB(255, 222, 222, 222),
-        appBar: FlavorConfig.instance.isHappySun
-            ? null // No AppBar for Happy Sun (sign-out moved to project screen)
+        appBar: FlavorConfig.instance.isHappySun ||
+                FlavorConfig.instance.isDropsheet
+            ? null // No AppBar for Happy Sun or Dropsheet flavors (each tab provides its own header)
             : AppBar(
                 leading: isSmallScreen
                     ? null
@@ -780,6 +784,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         text: isSmallScreen
                             ? 'Collection'
                             : 'Collection Schedule'),
+                    Tab(text: isSmallScreen ? 'Drop' : 'Dropsheet'),
                     Tab(text: isSmallScreen ? 'Solar' : 'Happy Sun'),
                   ],
                 ),
@@ -1018,13 +1023,17 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
             IndexedStack(
               index: _currentTabIndex,
               children: [
-                // CLM flavor has all tabs: Schedule, Job List, Collection Schedule, Happy Sun
+                // CLM flavor has all tabs: Schedule, Job List, Collection Schedule, Dropsheet, Happy Sun
                 if (FlavorConfig.instance.isCLM) ...[
                   const ScheduleTab(),
                   const JobListTab(),
                   const CollectionScheduleTab(),
+                  const DropsheetTab(),
                   const HappySunTab(),
                 ],
+                // Dropsheet flavor only has the Dropsheet tab
+                if (FlavorConfig.instance.isDropsheet)
+                  const SafeArea(child: DropsheetTab()),
                 // Happy Sun flavor only has Happy Sun tab (Job List filtered in background)
                 // Wrap in SafeArea to avoid system UI overlays (status bar, navigation bar)
                 if (FlavorConfig.instance.isHappySun)

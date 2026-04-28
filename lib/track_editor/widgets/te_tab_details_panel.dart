@@ -13,7 +13,6 @@ import 'package:intl/intl.dart';
 import '../../models/work_area.dart';
 import '../models/styled_polygon.dart';
 import '../providers/te_map_layer_provider.dart';
-import '../providers/te_mode_provider.dart';
 import '../providers/te_tabs_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
@@ -27,7 +26,6 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final provider = ref.watch(teTabsRiverpod);
-    final mode = ref.watch(teModeRiverpod).mode;
     final tabIdx = provider.currentTab;
     final tab = provider.tabs[tabIdx];
 
@@ -58,7 +56,6 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
             polygons: tab.polygons,
             storageFolderPath: tab.storageFolderPath,
             sourceStoragePath: tab.sourceStoragePath,
-            mode: mode,
           ),
       ],
     );
@@ -1188,14 +1185,12 @@ class _SaveTrimSection extends StatefulWidget {
   final List<TEStyledPolygon> polygons;
   final String? storageFolderPath;
   final String? sourceStoragePath;
-  final TEMode mode;
 
   const _SaveTrimSection({
     required this.tabTitle,
     required this.tracks,
     required this.waypoints,
     required this.polygons,
-    required this.mode,
     this.storageFolderPath,
     this.sourceStoragePath,
   });
@@ -1382,8 +1377,8 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
   }
 
   /// Overwrite the original cloud file this tab was opened from with the
-  /// current tracks/waypoints, then rebuild the matching
-  /// `_compiled_waypoints.json` / `_compiled_tracks.json` aggregates.
+  /// current tracks/waypoints, then rebuild `_compiled_waypoints.json`
+  /// if the file's waypoints changed.
   Future<void> _onOverwriteSource(BuildContext context) async {
     final sourcePath = widget.sourceStoragePath;
     if (sourcePath == null || sourcePath.isEmpty) return;
@@ -1392,24 +1387,8 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
     final folderPath = sourcePath.contains('/')
         ? sourcePath.substring(0, sourcePath.lastIndexOf('/'))
         : '';
-
-    // Classify by content first, then fall back to the filename hint.
-    // A tab with only waypoints is unambiguous; same for tracks-only. Mixed
-    // content falls back to the filename to preserve the original role.
-    final bool hasWpts = widget.waypoints.isNotEmpty;
-    final bool hasTrks = widget.tracks.isNotEmpty;
-    final bool nameHintsWaypoints =
-        fileName.toLowerCase().contains('waypoint');
-    final bool writeWaypoints;
-    if (hasWpts && !hasTrks) {
-      writeWaypoints = true;
-    } else if (hasTrks && !hasWpts) {
-      writeWaypoints = false;
-    } else if (hasWpts && hasTrks) {
-      writeWaypoints = nameHintsWaypoints;
-    } else {
-      writeWaypoints = false; // nothing to write
-    }
+    final isWaypointFile = fileName.toLowerCase().contains('waypoint') ||
+        widget.waypoints.isNotEmpty;
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1439,12 +1418,13 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       final fm = TEFileManager();
       final gpxStorage = GpxStorageService();
 
+      // Pick serializer: waypoint-named file → waypoints, else tracks.
       final String gpxContent;
-      if (writeWaypoints && hasWpts) {
+      if (isWaypointFile && widget.waypoints.isNotEmpty) {
         gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
-      } else if (hasTrks) {
+      } else if (widget.tracks.isNotEmpty) {
         gpxContent = await fm.toGpxTracksString(widget.tracks);
-      } else if (hasWpts) {
+      } else if (widget.waypoints.isNotEmpty) {
         gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
       } else {
         throw StateError('Nothing to save: no tracks or waypoints.');
@@ -1454,23 +1434,15 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       await gpxStorage.deleteFile(sourcePath);
       await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
 
-      // Rebuild the matching compiled aggregate(s).
-      int? rebuiltWpts;
-      int? rebuiltTrks;
-      if (folderPath.isNotEmpty) {
-        if (writeWaypoints) {
-          rebuiltWpts =
-              await gpxStorage.regenerateCompiledWaypoints(folderPath);
-        } else {
-          rebuiltTrks = await gpxStorage.regenerateCompiledTracks(folderPath);
-        }
+      // If the file carried waypoints, rebuild the compiled aggregate.
+      int? rebuiltCount;
+      if (isWaypointFile && folderPath.isNotEmpty) {
+        rebuiltCount = await gpxStorage.regenerateCompiledWaypoints(folderPath);
       }
 
       if (mounted) {
-        final parts = <String>[];
-        if (rebuiltWpts != null) parts.add('waypoints: $rebuiltWpts');
-        if (rebuiltTrks != null) parts.add('tracks: $rebuiltTrks');
-        final suffix = parts.isEmpty ? '' : ' · compiled ${parts.join(', ')}';
+        final suffix =
+            rebuiltCount != null ? ' · compiled waypoints: $rebuiltCount' : '';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Overwrote $fileName$suffix'),
@@ -1582,22 +1554,6 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
     final hasPolygons = widget.polygons.isNotEmpty;
     final hasSource = (widget.sourceStoragePath ?? '').isNotEmpty;
     final busy = _saveBusy || _trimBusy || _cloudBusy || _overwriteBusy;
-
-    // ── Update mode: collapse the whole section into a single "Update File"
-    // call that overwrites the original cloud file the tab was opened from.
-    if (widget.mode == TEMode.update) {
-      return Container(
-        width: 420,
-        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: _buildUpdateFileButton(
-          context: context,
-          hasSource: hasSource,
-          hasTracks: hasTracks,
-          hasWaypoints: hasWaypoints,
-          busy: busy,
-        ),
-      );
-    }
 
     final trimButton = ElevatedButton.icon(
       onPressed: (busy || !hasPolygons) ? null : () => _onTrim(context),
@@ -1779,80 +1735,6 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
           ),
         ],
       ),
-    );
-  }
-
-  /// Update-mode sidebar button. Overwrites the original cloud file the tab
-  /// was opened from, preserving path + filename. Disabled when the tab has
-  /// no source (e.g. a local import) or nothing to save.
-  Widget _buildUpdateFileButton({
-    required BuildContext context,
-    required bool hasSource,
-    required bool hasTracks,
-    required bool hasWaypoints,
-    required bool busy,
-  }) {
-    if (!hasSource) {
-      return Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: Colors.orange.shade50,
-          border: Border.all(color: Colors.orange.shade200),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.info_outline, size: 18, color: Colors.orange.shade800),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'This tab was not opened from cloud — nothing to update.',
-                style: TextStyle(fontSize: 12, color: Colors.orange.shade900),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    final fileName = widget.sourceStoragePath!.split('/').last;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(bottom: 6),
-          child: Text(
-            'Updating: $fileName',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 11,
-              color: Colors.grey.shade700,
-              fontStyle: FontStyle.italic,
-            ),
-          ),
-        ),
-        ElevatedButton.icon(
-          onPressed: (busy || (!hasTracks && !hasWaypoints))
-              ? null
-              : () => _onOverwriteSource(context),
-          icon: _overwriteBusy
-              ? const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colors.white),
-                )
-              : const Icon(Icons.save_as, size: 16),
-          label: const Text('Update File'),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.indigo[700],
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-            textStyle:
-                const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-        ),
-      ],
     );
   }
 }
