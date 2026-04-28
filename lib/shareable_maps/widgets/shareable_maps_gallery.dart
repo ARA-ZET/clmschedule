@@ -895,7 +895,8 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
 
   const _TilePopupMenu({required this.item});
 
-  Future<void> _duplicateMap(BuildContext context, riverpod.WidgetRef ref) async {
+  Future<void> _duplicateMap(
+      BuildContext context, riverpod.WidgetRef ref) async {
     // Prompt for new map details
     final nameController = TextEditingController(text: item.name + ' (Copy)');
     final descController = TextEditingController(text: item.description);
@@ -960,13 +961,16 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
     }
 
     // Copy only local layers (exclude cloud-linked layers and storageFolderPath)
-    final filteredLayers = originalMap.layers.where((layer) {
-      // Exclude layers that are cloud overlays or linked to cloud folders
-      // (Assume cloud layers have a specific flag or name, adjust as needed)
-      // Here, we exclude layers with names containing 'Cloud' or 'cloud', and skip storageFolderPath
-      final lname = layer.name.toLowerCase();
-      return !lname.contains('cloud');
-    }).map((layer) => layer.copyWith()).toList();
+    final filteredLayers = originalMap.layers
+        .where((layer) {
+          // Exclude layers that are cloud overlays or linked to cloud folders
+          // (Assume cloud layers have a specific flag or name, adjust as needed)
+          // Here, we exclude layers with names containing 'Cloud' or 'cloud', and skip storageFolderPath
+          final lname = layer.name.toLowerCase();
+          return !lname.contains('cloud');
+        })
+        .map((layer) => layer.copyWith())
+        .toList();
 
     final newMap = ShareableMap.createWithDefaultLayer(
       name: newName,
@@ -1101,7 +1105,8 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
 
     try {
       final service = ShareableMapsFirestoreService();
-      await service.updateMapFields(item.monthKey, item.docId, {'name': newName});
+      await service
+          .updateMapFields(item.monthKey, item.docId, {'name': newName});
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1134,7 +1139,9 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
     if (confirm != true || !context.mounted) return;
 
     try {
-      await ref.read(shareableMapsGalleryRiverpod).deleteMap(item.monthKey, item.docId);
+      await ref
+          .read(shareableMapsGalleryRiverpod)
+          .deleteMap(item.monthKey, item.docId);
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
