@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:intl/intl.dart';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import '../../config/flavor_config.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/work_area.dart';
 import '../../providers/schedule_provider.dart';
+import '../../providers/unfinished_work_areas_provider.dart';
 import '../providers/shareable_map_provider.dart';
 import '../providers/map_gesture_provider.dart';
 import '../services/map_link_service.dart';
@@ -20,6 +22,8 @@ import 'map_drawing_toolbar.dart';
 import 'map_import_dialog.dart';
 import 'work_area_picker_panel.dart';
 import 'work_area_table_panel.dart';
+import '../../widgets/cloud_file_manager_screen.dart';
+import '../../track_editor/pages/track_editor_screen.dart';
 
 /// Main map editor widget for the universal map editor.
 /// Displays Google Maps with drawing tools and layer management.
@@ -58,30 +62,37 @@ class ShareableMapEditor extends riverpod.ConsumerWidget {
                   top: 8,
                   left: 0,
                   right: 0,
-                  child: Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.92),
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.15),
-                              blurRadius: 8),
-                        ],
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2)),
-                          SizedBox(width: 8),
-                          Text('Loading cloud tracks…',
-                              style: TextStyle(fontSize: 13)),
-                        ],
+                  child: MouseRegion(
+                    onEnter: (_) =>
+                        ref.read(mapGestureRiverpod).disableMapGestures(),
+                    onExit: (_) =>
+                        ref.read(mapGestureRiverpod).enableMapGestures(),
+                    child: Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.92),
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: [
+                            BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.15),
+                                blurRadius: 8),
+                          ],
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(
+                                width: 16,
+                                height: 16,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2)),
+                            SizedBox(width: 8),
+                            Text('Loading cloud tracks…',
+                                style: TextStyle(fontSize: 13)),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -91,8 +102,14 @@ class ShareableMapEditor extends riverpod.ConsumerWidget {
                 Positioned(
                   top: 8,
                   right: 8,
-                  child: WorkAreaPickerPanel(
-                    onClose: () => provider.hideWorkAreaPicker(),
+                  child: MouseRegion(
+                    onEnter: (_) =>
+                        ref.read(mapGestureRiverpod).disableMapGestures(),
+                    onExit: (_) =>
+                        ref.read(mapGestureRiverpod).enableMapGestures(),
+                    child: WorkAreaPickerPanel(
+                      onClose: () => provider.hideWorkAreaPicker(),
+                    ),
                   ),
                 ),
             ],
@@ -464,6 +481,29 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
             },
           ),
 
+        // Polygon draw toggle — draw polygon and save to unfinished work areas
+        IconButton(
+          icon: Icon(
+            Icons.pentagon_outlined,
+            size: 22,
+            color: provider.drawingMode == DrawingMode.polygon &&
+                    provider.isDrawingForUnfinished
+                ? const Color(0xFF1967D2)
+                : const Color(0xFF5F6368),
+          ),
+          tooltip: provider.drawingMode == DrawingMode.polygon &&
+                  provider.isDrawingForUnfinished
+              ? 'Cancel polygon drawing'
+              : 'Draw polygon (save to unfinished)',
+          onPressed: () {
+            if (provider.drawingMode == DrawingMode.polygon &&
+                provider.isDrawingForUnfinished) {
+              provider.cancelDrawing();
+            } else {
+              provider.startDrawingForUnfinished();
+            }
+          },
+        ),
         // Share button — only for Firestore-backed maps
         if (provider.adapter is FirestoreMapAdapter)
           IconButton(
@@ -471,8 +511,64 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
             tooltip: 'Copy share link',
             onPressed: () => _copyShareLink(context, provider),
           ),
+        // Cloud files — jump to the folder linked to this map, or fall back
+        // to the month folder matching the map's creation date.
+        if (provider.adapter is FirestoreMapAdapter)
+          IconButton(
+            icon: const Icon(Icons.folder_open,
+                size: 22, color: Color(0xFF5F6368)),
+            tooltip: 'Open cloud files folder',
+            onPressed: () => _openCloudFolder(context, provider),
+          ),
         const SizedBox(width: 8),
       ],
+    );
+  }
+
+  /// Resolve the folder path to open in the Cloud File Manager:
+  /// prefer the map's linked [storageFolderPath]; otherwise fall back to
+  /// `Distribution/<year>/<MMM yyyy>` derived from the map's [createdAt].
+  String _resolveCloudFolderPath(ShareableMapProvider provider) {
+    final map = provider.currentMap;
+    final linked = map?.storageFolderPath;
+    if (linked != null && linked.trim().isNotEmpty) {
+      return linked.trim();
+    }
+    final created = map?.createdAt ?? DateTime.now();
+    final year = created.year.toString();
+    final month = DateFormat('MMM yyyy').format(created);
+    return 'Distribution/$year/$month';
+  }
+
+  void _openCloudFolder(BuildContext context, ShareableMapProvider provider) {
+    final path = _resolveCloudFolderPath(provider);
+    final navigator = Navigator.of(context);
+    navigator.push(
+      MaterialPageRoute(
+        builder: (_) => CloudFileManagerScreen(
+          initialPath: path,
+          onOpenInTrackEditor: (fileName, bytes, sourcePath) {
+            // Close the cloud browser, then launch the Track Editor with
+            // the file pre-loaded in Update mode. Without this handler the
+            // default behaviour pops the route and returns data here,
+            // which would leave the user sitting back on the map.
+            final container =
+                riverpod.ProviderScope.containerOf(navigator.context);
+            navigator.pop();
+            navigator.push(
+              MaterialPageRoute(
+                builder: (_) => const TrackEditorScreen(),
+              ),
+            );
+            loadCloudFileIntoTrackEditor(
+              container: container,
+              fileName: fileName,
+              bytes: bytes,
+              sourcePath: sourcePath,
+            );
+          },
+        ),
+      ),
     );
   }
 
@@ -600,6 +696,9 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   // against GoogleMap.onTap firing concurrently on web (platform view
   // limitation where the underlying HTML element also receives the click).
   DateTime? _lastInfoWindowAction;
+
+  // Selected preview work area while its info window is open.
+  WorkArea? _previewWorkAreaForInfoWindow;
 
   // ── Hover tooltip state ────────────────────────────────────────────────
   /// Current mouse position in local coordinates (null when outside map).
@@ -761,25 +860,28 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       BuildContext context, ShareableMapProvider provider, int index) {
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete Vertex'),
-        content: Text(
-            'Remove vertex ${index + 1} of ${provider.editingPoints!.length}?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              provider.removeEditingPoint(index);
-              if (mounted) setState(() {});
-            },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-          ),
-        ],
+      builder: (ctx) => _gestureAwareOverlay(
+        ctx,
+        child: AlertDialog(
+          title: const Text('Delete Vertex'),
+          content: Text(
+              'Remove vertex ${index + 1} of ${provider.editingPoints!.length}?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                provider.removeEditingPoint(index);
+                if (mounted) setState(() {});
+              },
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Delete'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -899,6 +1001,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
 
   void _dismissInfoWindow() {
     final provider = ref.read(shareableMapRiverpod);
+    _previewWorkAreaForInfoWindow = null;
     if (provider.infoWindowData != null) {
       ref.read(mapGestureRiverpod).enableMapGestures();
       provider.dismissInfoWindow();
@@ -1332,7 +1435,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                     mapSize: mapSize,
                     data: iw!,
                     onDismiss: _dismissInfoWindow,
-                    onStyle: iw.type != 'point'
+                    onStyle: (iw.type == 'polygon' || iw.type == 'polyline')
                         ? () {
                             _lastInfoWindowAction = DateTime.now();
                             provider.toggleStylePanel();
@@ -1358,6 +1461,16 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                       _dismissInfoWindow();
                       provider.deleteElement(elementId, layerId);
                     },
+                    onAddToMap: iw.type == 'preview_work_area'
+                        ? () {
+                            _lastInfoWindowAction = DateTime.now();
+                            final selected = _previewWorkAreaForInfoWindow;
+                            if (selected != null) {
+                              provider.addWorkAreaToMap(selected);
+                              _dismissInfoWindow();
+                            }
+                          }
+                        : null,
                   ),
                 // Hover tooltip overlay
                 if (_hoverTooltipData != null &&
@@ -1398,13 +1511,14 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         if (!provider.isDrawing) provider.startDrawing();
         provider.addDrawingPoint(position);
         provider.setDialogOpen(true);
-        MapEditorDialogs.showElementNameDialog(context, provider)
-            .then((_) => provider.setDialogOpen(false));
+        MapEditorDialogs.showElementNameDialog(context, provider);
         break;
       case DrawingMode.none:
         provider.selectElement('');
         break;
       case DrawingMode.edit:
+        break;
+      case DrawingMode.lassoSelect:
         break;
     }
   }
@@ -1450,58 +1564,35 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   }
 
   /// Handle tap on a preview (ghost) work-area polygon shown during import
-  /// mode. Shows a confirmation dialog letting the user add it to the map.
+  /// mode. Opens the map info window with Add/Cancel actions.
   void _handlePreviewWorkAreaTap(
       BuildContext context, ShareableMapProvider provider, WorkArea wa) {
+    if (provider.shouldIgnoreNextTap()) return;
+    if (ref.read(mapGestureRiverpod).gestureHandling ==
+        WebGestureHandling.none) {
+      return;
+    }
+    if (provider.infoWindowData != null) {
+      _dismissInfoWindow();
+      return;
+    }
+
     final areaKm2 = _polygonAreaKm2(wa.polygonPoints);
     final perimeterKm = _pathLengthKm(wa.polygonPoints, closed: true);
-
-    showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(wa.name, style: const TextStyle(fontSize: 16)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (wa.description.isNotEmpty) ...[
-              Text(wa.description,
-                  style:
-                      const TextStyle(fontSize: 13, color: Color(0xFF5F6368))),
-              const SizedBox(height: 8),
-            ],
-            Text(
-              '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}',
-              style: const TextStyle(fontSize: 12, color: Color(0xFF9AA0A6)),
-            ),
-            if (wa.letterBoxEstimate > 0)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  '~${wa.letterBoxEstimate} letter boxes',
-                  style:
-                      const TextStyle(fontSize: 12, color: Color(0xFF9AA0A6)),
-                ),
-              ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton.icon(
-            onPressed: () => Navigator.pop(ctx, true),
-            icon: const Icon(Icons.add, size: 18),
-            label: const Text('Add to Map'),
-          ),
-        ],
-      ),
-    ).then((confirmed) {
-      if (confirmed == true) {
-        provider.addWorkAreaToMap(wa);
-      }
+    setState(() {
+      _previewWorkAreaForInfoWindow = wa;
     });
+
+    provider.openInfoWindow(InfoWindowData(
+      elementId: 'preview_wa_${wa.name}',
+      layerId: '__preview_work_areas__',
+      title: wa.name,
+      description: wa.description,
+      subtitle: '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}',
+      type: 'preview_work_area',
+      anchor: _tapAnchor(_centroid(wa.polygonPoints)),
+      letterBoxEstimate: wa.letterBoxEstimate,
+    ));
   }
 
   void _handlePolylineTap(
@@ -1905,6 +1996,16 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
 // Dialog Utilities
 // ============================================================================
 
+Widget _gestureAwareOverlay(BuildContext context, {required Widget child}) {
+  final gestureProvider =
+      riverpod.ProviderScope.containerOf(context).read(mapGestureRiverpod);
+  return MouseRegion(
+    onEnter: (_) => gestureProvider.disableMapGestures(),
+    onExit: (_) => gestureProvider.enableMapGestures(),
+    child: child,
+  );
+}
+
 /// Utility class for showing various map editor dialogs
 class MapEditorDialogs {
   MapEditorDialogs._();
@@ -1915,50 +2016,53 @@ class MapEditorDialogs {
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Create New Map'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(
-                labelText: 'Map Name',
-                hintText: 'Enter map name',
+      builder: (context) => _gestureAwareOverlay(
+        context,
+        child: AlertDialog(
+          title: const Text('Create New Map'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Map Name',
+                  hintText: 'Enter map name',
+                ),
+                autofocus: true,
               ),
-              autofocus: true,
+              const SizedBox(height: 16),
+              TextField(
+                controller: descController,
+                decoration: const InputDecoration(
+                  labelText: 'Description (optional)',
+                  hintText: 'Enter description',
+                ),
+                maxLines: 3,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
             ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: descController,
-              decoration: const InputDecoration(
-                labelText: 'Description (optional)',
-                hintText: 'Enter description',
-              ),
-              maxLines: 3,
+            ElevatedButton(
+              onPressed: () {
+                if (nameController.text.trim().isNotEmpty) {
+                  riverpod.ProviderScope.containerOf(context)
+                      .read(shareableMapRiverpod)
+                      .createNewMap(
+                        name: nameController.text.trim(),
+                        description: descController.text.trim(),
+                      );
+                  Navigator.pop(context);
+                }
+              },
+              child: const Text('Create'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (nameController.text.trim().isNotEmpty) {
-                riverpod.ProviderScope.containerOf(context)
-                    .read(shareableMapRiverpod)
-                    .createNewMap(
-                      name: nameController.text.trim(),
-                      description: descController.text.trim(),
-                    );
-                Navigator.pop(context);
-              }
-            },
-            child: const Text('Create'),
-          ),
-        ],
       ),
     );
   }
@@ -1966,7 +2070,8 @@ class MapEditorDialogs {
   static void showImportDialog(BuildContext context) {
     showDialog(
       context: context,
-      builder: (context) => const MapImportDialog(),
+      builder: (context) =>
+          _gestureAwareOverlay(context, child: const MapImportDialog()),
     ).then((imported) {
       if (imported == true && context.mounted) {
         // Fit map to show imported data
@@ -1979,6 +2084,11 @@ class MapEditorDialogs {
 
   static Future<void> showElementNameDialog(
       BuildContext context, ShareableMapProvider provider) {
+    // When drawing for unfinished work areas, show the dedicated simpler dialog.
+    if (provider.isDrawingForUnfinished) {
+      return _showUnfinishedWorkAreaDialog(context, provider);
+    }
+
     final nameController = TextEditingController();
     final descController = TextEditingController();
     final isPoint = provider.drawingMode == DrawingMode.point;
@@ -1986,62 +2096,258 @@ class MapEditorDialogs {
 
     return showDialog(
       context: context,
-      barrierDismissible: false, // Prevent dismissing by clicking outside
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) => AlertDialog(
-          title: Text('Name ${_getDrawingModeLabel(provider.drawingMode)}'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (isPoint) ...[
-                DropdownButtonFormField<PointCategory>(
-                  initialValue: selectedCategory,
-                  decoration: const InputDecoration(
-                    labelText: 'Point Type',
-                  ),
-                  items: PointCategory.values.map((cat) {
-                    return DropdownMenuItem(
-                      value: cat,
-                      child: Row(
-                        children: [
-                          Icon(cat.icon, color: cat.color, size: 20),
-                          const SizedBox(width: 8),
-                          Text(cat.label),
-                        ],
-                      ),
-                    );
-                  }).toList(),
-                  onChanged: (val) {
-                    if (val != null) {
-                      setDialogState(() => selectedCategory = val);
-                      if (nameController.text.isEmpty ||
-                          PointCategory.values
-                              .any((c) => c.label == nameController.text)) {
-                        nameController.text = val.label;
+      barrierDismissible: false,
+      builder: (dialogContext) => _gestureAwareOverlay(
+        dialogContext,
+        child: StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            title: Text('Name ${_getDrawingModeLabel(provider.drawingMode)}'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (isPoint) ...[
+                  DropdownButtonFormField<PointCategory>(
+                    initialValue: selectedCategory,
+                    decoration: const InputDecoration(
+                      labelText: 'Point Type',
+                    ),
+                    items: PointCategory.values.map((cat) {
+                      return DropdownMenuItem(
+                        value: cat,
+                        child: Row(
+                          children: [
+                            Icon(cat.icon, color: cat.color, size: 20),
+                            const SizedBox(width: 8),
+                            Text(cat.label),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      if (val != null) {
+                        setDialogState(() => selectedCategory = val);
+                        if (nameController.text.isEmpty ||
+                            PointCategory.values
+                                .any((c) => c.label == nameController.text)) {
+                          nameController.text = val.label;
+                        }
                       }
-                    }
-                  },
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                TextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Name',
+                    hintText: 'Enter name',
+                  ),
+                  autofocus: !isPoint,
                 ),
                 const SizedBox(height: 16),
+                TextField(
+                  controller: descController,
+                  decoration: const InputDecoration(
+                    labelText: 'Description (optional)',
+                    hintText: 'Enter description',
+                  ),
+                  maxLines: 2,
+                ),
               ],
-              TextField(
-                controller: nameController,
-                decoration: const InputDecoration(
-                  labelText: 'Name',
-                  hintText: 'Enter name',
-                ),
-                autofocus: !isPoint,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  provider.cancelDrawing();
+                  Navigator.pop(dialogContext);
+                },
+                child: const Text('Cancel'),
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: descController,
-                decoration: const InputDecoration(
-                  labelText: 'Description (optional)',
-                  hintText: 'Enter description',
-                ),
-                maxLines: 2,
+              ElevatedButton(
+                onPressed: () {
+                  final name = nameController.text.trim().isNotEmpty
+                      ? nameController.text.trim()
+                      : (isPoint ? selectedCategory.label : null);
+                  if (name != null && name.isNotEmpty) {
+                    provider.completeDrawing(
+                      name: name,
+                      description: descController.text.trim(),
+                      pointCategory: isPoint ? selectedCategory : null,
+                    );
+                    Navigator.pop(dialogContext);
+                  }
+                },
+                child: const Text('Save'),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Simplified dialog shown when drawing a polygon via the app-bar
+  /// "draw to unfinished" button. Asks for polygon name and client name with
+  /// autocomplete suggestions (matching the track editor UX) and also shows
+  /// overlapping existing work areas. Saves to the unfinished work areas list.
+  static Future<void> _showUnfinishedWorkAreaDialog(
+      BuildContext context, ShareableMapProvider provider) {
+    final nameController = TextEditingController();
+    final clientController = TextEditingController();
+
+    final container = riverpod.ProviderScope.containerOf(context);
+    final scheduleProvider = container.read(scheduleRiverpod);
+    final workAreas = scheduleProvider.workAreas;
+    final drawingPoints = List<LatLng>.from(provider.drawingPoints);
+
+    // Overlap: existing work areas that contain any drawing vertex.
+    final overlapping = <String>[];
+    for (final wa in workAreas) {
+      if (wa.polygonPoints.isEmpty) continue;
+      for (final dp in drawingPoints) {
+        if (_pointInPoly(dp, wa.polygonPoints)) {
+          overlapping.add(wa.name);
+          break;
+        }
+      }
+    }
+
+    // Client suggestions from all jobs.
+    final clientSuggestions = <String>{};
+    for (final job in scheduleProvider.jobs) {
+      for (final c in job.clients) {
+        if (c.isNotEmpty) clientSuggestions.add(c);
+      }
+    }
+    final sortedClients = clientSuggestions.toList()..sort();
+
+    // Work area name suggestions for polygon name field.
+    final workAreaNames = workAreas
+        .map((wa) => wa.name)
+        .where((n) => n.isNotEmpty)
+        .toList()
+      ..sort();
+
+    return showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => _gestureAwareOverlay(
+        dialogContext,
+        child: AlertDialog(
+          title: const Text('Unfinished Area', style: TextStyle(fontSize: 16)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Autocomplete<String>(
+                  optionsBuilder: (textEditingValue) {
+                    if (textEditingValue.text.isEmpty) return workAreaNames;
+                    final q = textEditingValue.text.toLowerCase();
+                    return workAreaNames
+                        .where((n) => n.toLowerCase().contains(q));
+                  },
+                  fieldViewBuilder: (ctx, controller, focusNode, onSubmitted) {
+                    controller.addListener(() {
+                      if (nameController.text != controller.text) {
+                        nameController.text = controller.text;
+                      }
+                    });
+                    nameController.addListener(() {
+                      if (controller.text != nameController.text) {
+                        controller.text = nameController.text;
+                      }
+                    });
+                    return TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Polygon Name',
+                        hintText: 'e.g. Block A, Zone 3',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    );
+                  },
+                  onSelected: (val) => nameController.text = val,
+                ),
+                const SizedBox(height: 12),
+                Autocomplete<String>(
+                  optionsBuilder: (textEditingValue) {
+                    if (textEditingValue.text.isEmpty) return sortedClients;
+                    final q = textEditingValue.text.toLowerCase();
+                    return sortedClients
+                        .where((c) => c.toLowerCase().contains(q));
+                  },
+                  fieldViewBuilder: (ctx, controller, focusNode, onSubmitted) {
+                    clientController.addListener(() {
+                      if (controller.text != clientController.text) {
+                        controller.text = clientController.text;
+                      }
+                    });
+                    controller.addListener(() {
+                      if (clientController.text != controller.text) {
+                        clientController.text = controller.text;
+                      }
+                    });
+                    return TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      decoration: const InputDecoration(
+                        labelText: 'Client Name',
+                        hintText: 'Type or select from list',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    );
+                  },
+                  onSelected: (val) => clientController.text = val,
+                ),
+                if (overlapping.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.teal.shade50,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.teal.shade200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(Icons.layers,
+                                size: 14, color: Colors.teal.shade700),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Overlapping Work Areas',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.teal.shade700,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        ...overlapping.map((name) => Padding(
+                              padding: const EdgeInsets.only(left: 20, top: 2),
+                              child: Text('• $name',
+                                  style: const TextStyle(fontSize: 11)),
+                            )),
+                      ],
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Text(
+                  '${drawingPoints.length} vertices drawn',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
           ),
           actions: [
             TextButton(
@@ -2051,19 +2357,29 @@ class MapEditorDialogs {
               },
               child: const Text('Cancel'),
             ),
-            ElevatedButton(
+            FilledButton(
               onPressed: () {
-                final name = nameController.text.trim().isNotEmpty
-                    ? nameController.text.trim()
-                    : (isPoint ? selectedCategory.label : null);
-                if (name != null && name.isNotEmpty) {
-                  provider.completeDrawing(
+                final name = nameController.text.trim();
+                if (name.isEmpty) return;
+                final clientName = clientController.text.trim();
+
+                provider.completeDrawing(name: name);
+
+                if (drawingPoints.length >= 3) {
+                  final customPoly = CustomPolygon(
                     name: name,
-                    description: descController.text.trim(),
-                    pointCategory: isPoint ? selectedCategory : null,
+                    description: clientName,
+                    points: drawingPoints,
+                    color: Colors.indigo.shade600,
                   );
-                  Navigator.pop(dialogContext);
+                  container.read(unfinishedWorkAreasRiverpod).addItem(
+                    clients: clientName.isNotEmpty ? [clientName] : const [],
+                    workingAreas: [name],
+                    workMaps: [customPoly],
+                  );
                 }
+
+                Navigator.pop(dialogContext);
               },
               child: const Text('Save'),
             ),
@@ -2071,6 +2387,23 @@ class MapEditorDialogs {
         ),
       ),
     );
+  }
+
+  /// Ray-casting point-in-polygon test (local helper for the unfinished
+  /// work area dialog overlap detection).
+  static bool _pointInPoly(LatLng point, List<LatLng> polygon) {
+    if (polygon.length < 3) return false;
+    bool inside = false;
+    for (int i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      final xi = polygon[i].latitude, yi = polygon[i].longitude;
+      final xj = polygon[j].latitude, yj = polygon[j].longitude;
+      if (((yi > point.longitude) != (yj > point.longitude)) &&
+          (point.latitude <
+              (xj - xi) * (point.longitude - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
   }
 
   static String _getDrawingModeLabel(DrawingMode mode) {
@@ -2301,6 +2634,9 @@ class _InfoWindowOverlay extends riverpod.ConsumerStatefulWidget {
   /// Called when the delete button is confirmed.
   final VoidCallback onDelete;
 
+  /// Called for preview work-area windows to add the selected area to map.
+  final VoidCallback? onAddToMap;
+
   final Offset screen;
 
   /// Size of the parent Stack (map widget). Used to correctly position the
@@ -2317,6 +2653,7 @@ class _InfoWindowOverlay extends riverpod.ConsumerStatefulWidget {
     required this.onEditVertices,
     required this.onPhoto,
     required this.onDelete,
+    this.onAddToMap,
   });
 
   @override
@@ -2335,12 +2672,22 @@ class _InfoWindowOverlayState
   late FocusNode _titleFocusNode;
   bool _isEditingTitle = false;
 
+  late TextEditingController _estimateController;
+  late FocusNode _estimateFocusNode;
+
   @override
   void initState() {
     super.initState();
     _titleController = TextEditingController(text: widget.data.title);
     _titleFocusNode = FocusNode();
     _titleFocusNode.addListener(_onFocusChanged);
+    _estimateController = TextEditingController(
+      text: widget.data.letterBoxEstimate > 0
+          ? widget.data.letterBoxEstimate.toString()
+          : '',
+    );
+    _estimateFocusNode = FocusNode();
+    _estimateFocusNode.addListener(_onEstimateFocusChanged);
   }
 
   @override
@@ -2350,6 +2697,15 @@ class _InfoWindowOverlayState
     if (oldWidget.data.elementId != widget.data.elementId) {
       _titleController.text = widget.data.title;
       _isEditingTitle = false;
+      _estimateController.text = widget.data.letterBoxEstimate > 0
+          ? widget.data.letterBoxEstimate.toString()
+          : '';
+    } else if (oldWidget.data.letterBoxEstimate !=
+            widget.data.letterBoxEstimate &&
+        !_estimateFocusNode.hasFocus) {
+      _estimateController.text = widget.data.letterBoxEstimate > 0
+          ? widget.data.letterBoxEstimate.toString()
+          : '';
     }
   }
 
@@ -2358,12 +2714,21 @@ class _InfoWindowOverlayState
     _titleFocusNode.removeListener(_onFocusChanged);
     _titleFocusNode.dispose();
     _titleController.dispose();
+    _estimateFocusNode.removeListener(_onEstimateFocusChanged);
+    _estimateFocusNode.dispose();
+    _estimateController.dispose();
     super.dispose();
   }
 
   void _onFocusChanged() {
     if (!_titleFocusNode.hasFocus && _isEditingTitle) {
       _commitTitle();
+    }
+  }
+
+  void _onEstimateFocusChanged() {
+    if (!_estimateFocusNode.hasFocus) {
+      _commitEstimate();
     }
   }
 
@@ -2381,6 +2746,35 @@ class _InfoWindowOverlayState
       _titleController.text = widget.data.title;
     }
     setState(() => _isEditingTitle = false);
+  }
+
+  /// Parse the estimate text field and persist it on the underlying polygon
+  /// via the provider. Only applies to polygon-type info windows.
+  void _commitEstimate() {
+    if (widget.data.type != 'polygon') return;
+    final text = _estimateController.text.trim();
+    final newVal = text.isEmpty ? 0 : int.tryParse(text);
+    if (newVal == null) {
+      // Invalid input — revert.
+      _estimateController.text = widget.data.letterBoxEstimate > 0
+          ? widget.data.letterBoxEstimate.toString()
+          : '';
+      return;
+    }
+    if (newVal == widget.data.letterBoxEstimate) return;
+
+    final match =
+        RegExp(r'^(.+)_polygon_(\d+)$').firstMatch(widget.data.elementId);
+    if (match == null) return;
+    final layerId = match.group(1)!;
+    final idx = int.parse(match.group(2)!);
+
+    final provider = ref.read(shareableMapRiverpod);
+    final layer = provider.layers.where((l) => l.id == layerId).firstOrNull;
+    if (layer == null || idx >= layer.polygons.length) return;
+
+    final updated = layer.polygons[idx].copyWith(letterBoxEstimate: newVal);
+    provider.updatePolygon(layer, idx, updated);
   }
 
   @override
@@ -2477,6 +2871,7 @@ class _InfoWindowOverlayState
     final hasSubtitle = data.subtitle.isNotEmpty;
     final hasDesc = data.description.isNotEmpty;
     final isShapeable = data.type == 'polygon' || data.type == 'polyline';
+    final isPreviewWorkArea = data.type == 'preview_work_area';
 
     return Material(
       elevation: 6,
@@ -2499,7 +2894,7 @@ class _InfoWindowOverlayState
                 child: Row(
                   children: [
                     Expanded(
-                      child: _isEditingTitle
+                      child: _isEditingTitle && !isPreviewWorkArea
                           ? TextField(
                               controller: _titleController,
                               focusNode: _titleFocusNode,
@@ -2523,19 +2918,23 @@ class _InfoWindowOverlayState
                               onSubmitted: (_) => _commitTitle(),
                             )
                           : GestureDetector(
-                              onTap: () {
-                                setState(() => _isEditingTitle = true);
-                                // Request focus after the frame so the
-                                // TextField is mounted.
-                                WidgetsBinding.instance
-                                    .addPostFrameCallback((_) {
-                                  _titleFocusNode.requestFocus();
-                                  _titleController.selection = TextSelection(
-                                    baseOffset: 0,
-                                    extentOffset: _titleController.text.length,
-                                  );
-                                });
-                              },
+                              onTap: isPreviewWorkArea
+                                  ? null
+                                  : () {
+                                      setState(() => _isEditingTitle = true);
+                                      // Request focus after the frame so the
+                                      // TextField is mounted.
+                                      WidgetsBinding.instance
+                                          .addPostFrameCallback((_) {
+                                        _titleFocusNode.requestFocus();
+                                        _titleController.selection =
+                                            TextSelection(
+                                          baseOffset: 0,
+                                          extentOffset:
+                                              _titleController.text.length,
+                                        );
+                                      });
+                                    },
                               child: Text(
                                 data.title,
                                 style: const TextStyle(
@@ -2550,7 +2949,10 @@ class _InfoWindowOverlayState
                     ),
                     const SizedBox(width: 4),
                     GestureDetector(
-                      onTap: widget.onDismiss,
+                      onTap: () {
+                        ref.read(shareableMapRiverpod).markIgnoreNextTap();
+                        widget.onDismiss();
+                      },
                       child: const Padding(
                         padding: EdgeInsets.all(4),
                         child: Icon(Icons.close,
@@ -2593,7 +2995,9 @@ class _InfoWindowOverlayState
             const Divider(height: 1, thickness: 1, color: Color(0xFFE8EAED)),
             SizedBox(
               height: 42,
-              child: _buildActionsRow(context, isShapeable),
+              child: isPreviewWorkArea
+                  ? _buildPreviewActionsRow(context)
+                  : _buildActionsRow(context, isShapeable),
             ),
           ],
         ),
@@ -2601,8 +3005,95 @@ class _InfoWindowOverlayState
     );
   }
 
+  Widget _buildPreviewActionsRow(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: MouseRegion(
+            onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+            onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+            child: TextButton(
+              onPressed: () {
+                // Guard against web tap-through to underlying preview polygon.
+                ref.read(shareableMapRiverpod).markIgnoreNextTap();
+                widget.onDismiss();
+              },
+              child: const Text('Cancel'),
+            ),
+          ),
+        ),
+        Container(width: 1, height: 24, color: const Color(0xFFE8EAED)),
+        Expanded(
+          child: MouseRegion(
+            onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+            onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+            child: FilledButton.icon(
+              onPressed: () {
+                // Guard against web tap-through to underlying preview polygon.
+                ref.read(shareableMapRiverpod).markIgnoreNextTap();
+                widget.onAddToMap?.call();
+              },
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('Add to Map'),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEditableEstimateRow() {
+    return MouseRegion(
+      onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+      onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const Icon(Icons.markunread_mailbox_outlined,
+              size: 14, color: Color(0xFF5F6368)),
+          const SizedBox(width: 6),
+          const Text('~',
+              style: TextStyle(fontSize: 12, color: Color(0xFF5F6368))),
+          IntrinsicWidth(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 20, maxWidth: 80),
+              child: TextField(
+                controller: _estimateController,
+                focusNode: _estimateFocusNode,
+                style:
+                    const TextStyle(fontSize: 12, color: Color(0xFF5F6368)),
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: InputDecoration(
+                  isDense: true,
+                  isCollapsed: true,
+                  hintText: '0',
+                  hintStyle:
+                      TextStyle(fontSize: 12, color: Colors.grey.shade400),
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 2, vertical: 0),
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                ),
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) {
+                  _commitEstimate();
+                  _estimateFocusNode.unfocus();
+                },
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          const Text('letter boxes',
+              style: TextStyle(fontSize: 12, color: Color(0xFF5F6368))),
+        ],
+      ),
+    );
+  }
+
   Widget _buildStatsRow(String type, String subtitle, int letterBoxEstimate) {
-    if (type == 'polygon') {
+    if (type == 'polygon' || type == 'preview_work_area') {
       // subtitle format: "X.XX km²  ·  X.XX km"
       final parts = subtitle.split('·');
       final areaPart = parts.isNotEmpty ? parts[0].trim() : subtitle;
@@ -2626,7 +3117,10 @@ class _InfoWindowOverlayState
               ],
             ],
           ),
-          if (letterBoxEstimate > 0) ...[
+          if (type == 'polygon') ...[
+            const SizedBox(height: 4),
+            _buildEditableEstimateRow(),
+          ] else if (letterBoxEstimate > 0) ...[
             const SizedBox(height: 4),
             _StatItem(
               icon: const Icon(Icons.markunread_mailbox_outlined,
@@ -2776,20 +3270,24 @@ class _InfoWindowOverlayState
   void _confirmDelete(BuildContext context) {
     showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Delete element?'),
-        content: Text('Delete "${widget.data.title}"? This cannot be undone.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-          ),
-        ],
+      builder: (dialogContext) => _gestureAwareOverlay(
+        dialogContext,
+        child: AlertDialog(
+          title: const Text('Delete element?'),
+          content:
+              Text('Delete "${widget.data.title}"? This cannot be undone.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Delete'),
+            ),
+          ],
+        ),
       ),
     ).then((ok) {
       if (ok == true) widget.onDelete();

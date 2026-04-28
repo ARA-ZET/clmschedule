@@ -2,32 +2,53 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:gpx/gpx.dart';
+import 'te_mode_provider.dart';
 
 final teWaypointsRiverpod =
     riverpod.ChangeNotifierProvider<TEWaypointsProvider>(
         (ref) => TEWaypointsProvider());
 
 class TEWaypointsProvider extends ChangeNotifier {
-  final List<Wpt> _waypoints = [];
-  List<Wpt> get waypoints => _waypoints;
+  final Map<TEMode, List<Wpt>> _wptsByMode = {
+    TEMode.import: [],
+    TEMode.trim: [],
+    TEMode.processing: [],
+    TEMode.update: [],
+  };
+  TEMode _activeMode = TEMode.processing;
+
+  List<Wpt> get waypoints => _wptsByMode[_activeMode]!;
+
+  void setActiveMode(TEMode mode) {
+    if (_activeMode == mode) return;
+    _activeMode = mode;
+    notifyListeners();
+  }
 
   void addWaypoint(Wpt waypoint) {
-    _waypoints.add(waypoint);
+    _wptsByMode[_activeMode]!.add(waypoint);
     notifyListeners();
   }
 
   void addWaypoints(List<Wpt> waypoints) {
-    _waypoints.addAll(waypoints);
+    _wptsByMode[_activeMode]!.addAll(waypoints);
     notifyListeners();
   }
 
   void removeWaypoint(Wpt waypoint) {
-    _waypoints.remove(waypoint);
+    _wptsByMode[_activeMode]!.remove(waypoint);
     notifyListeners();
   }
 
   void clearWaypoints() {
-    _waypoints.clear();
+    _wptsByMode[_activeMode]!.clear();
+    notifyListeners();
+  }
+
+  void clearAll() {
+    for (final mode in TEMode.values) {
+      _wptsByMode[mode]!.clear();
+    }
     notifyListeners();
   }
 }

@@ -23,6 +23,8 @@ import 'providers/auth_provider.dart';
 import 'providers/app_version_provider.dart';
 import 'providers/tool_settings_provider.dart';
 // import 'providers/job_type_provider.dart'; // Migrated to Riverpod
+import 'providers/job_type_provider.dart'
+    show JobTypeProvider; // static accessor only
 import 'providers/unfinished_work_areas_provider.dart';
 import 'shareable_maps/providers/shareable_map_provider.dart';
 import 'shareable_maps/widgets/shareable_maps_gallery.dart';
@@ -50,6 +52,7 @@ import 'shareable_maps/adapters/work_area_adapter.dart';
 import 'shareable_maps/adapters/firestore_adapter.dart';
 import 'shareable_maps/services/shareable_maps_firestore_service.dart';
 import 'shareable_maps/services/map_link_service.dart';
+import 'shareable_maps/widgets/clm_maps_splash.dart';
 import 'widgets/suburb_list_screen.dart';
 import 'track_editor/pages/track_editor_screen.dart';
 // TE provider imports migrated to Riverpod
@@ -254,10 +257,10 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
             }
           }
 
-          // Determine job type
-          final jobType = jobListItem.jobTypeId == 'windowCleaning'
-              ? 'windowCleaning'
-              : 'solarPanelCleaning';
+          // Determine job type. We pass the raw jobTypeId through so that
+          // any Happy Sun-flagged service (window, solar, or future ones
+          // added via Settings) is preserved on the HappySunProject.
+          final jobType = jobListItem.jobTypeId;
 
           // Create HappySunProject with consolidated fields
           final project = HappySunProject(
@@ -295,8 +298,8 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
                   oldItem.area != newItem.area ||
                   oldItem.jobStatusId != newItem.jobStatusId ||
                   oldItem.toolsNeeded != newItem.toolsNeeded) &&
-              (newItem.jobTypeId == 'windowCleaning' ||
-                  newItem.jobTypeId == 'solarPanelCleaning')) {
+              (JobTypeProvider.instance?.isHappySunService(newItem.jobTypeId) ??
+                  false)) {
             final existingProject =
                 happySunProjectProvider.getProjectById(newItem.id);
             if (existingProject != null) {
@@ -355,9 +358,11 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
       },
       onDeleted: (jobListItem) async {
         try {
-          // Delete corresponding HappySunProject when window/solar cleaning job is deleted
-          if (jobListItem.jobTypeId == 'windowCleaning' ||
-              jobListItem.jobTypeId == 'solarPanelCleaning') {
+          // Delete corresponding HappySunProject when a Happy Sun-flagged
+          // job is deleted.
+          if (JobTypeProvider.instance
+                  ?.isHappySunService(jobListItem.jobTypeId) ??
+              false) {
             await happySunProjectProvider.deleteProject(jobListItem.id);
             debugPrint('   Happy Sun project deleted: ${jobListItem.id}');
           }
@@ -578,21 +583,7 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
   }
 
   Widget _buildLoadingScaffold() {
-    return Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const CircularProgressIndicator(),
-            const SizedBox(height: 16),
-            Text(
-              'Loading ${FlavorConfig.instance.appName}...',
-              style: const TextStyle(fontSize: 16),
-            ),
-          ],
-        ),
-      ),
-    );
+    return const ClmMapsSplash();
   }
 }
 
@@ -631,14 +622,18 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
 
       // Load the map via the Firestore adapter
       final service = ShareableMapsFirestoreService();
+      final container = riverpod.ProviderScope.containerOf(context);
+      final unfinishedProvider = FlavorConfig.instance.isMaps
+          ? null
+          : container.read(unfinishedWorkAreasRiverpod);
       final adapter = FirestoreMapAdapter.existing(
         docId: linkData.mapId,
         monthKey: linkData.monthKey,
         service: service,
+        unfinishedProvider: unfinishedProvider,
       );
 
-      final provider = riverpod.ProviderScope.containerOf(context)
-          .read(shareableMapRiverpod);
+      final provider = container.read(shareableMapRiverpod);
       await provider.loadFromAdapter(adapter);
 
       if (mounted) {
@@ -661,18 +656,7 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CircularProgressIndicator(),
-              SizedBox(height: 16),
-              Text('Loading shared map...', style: TextStyle(fontSize: 16)),
-            ],
-          ),
-        ),
-      );
+      return const ClmMapsSplash();
     }
 
     return Scaffold(

@@ -1,8 +1,14 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../../models/custom_polygon.dart';
+import '../../providers/unfinished_work_areas_provider.dart';
+import '../models/map_layer.dart';
 import '../models/shareable_map.dart';
 import '../services/shareable_maps_firestore_service.dart';
 import 'map_data_adapter.dart';
+import 'schedule_job_adapter.dart' show kUnfinishedAreasLayerId;
 
 /// Adapter that bridges the ShareableMapEditor to Firestore persistence.
 ///
@@ -28,6 +34,15 @@ class FirestoreMapAdapter extends MapDataAdapter {
   /// In-memory seed used when creating a brand-new map.
   final ShareableMap? _seed;
 
+  /// Optional provider used to inject a read/write "Unfinished Areas" layer
+  /// composed of polygons whose source item's `clients` match the map name.
+  /// Only passed in schedule flavors.
+  final UnfinishedWorkAreasProvider? _unfinishedProvider;
+
+  /// Maps polygon name → source unfinished item id. Populated during [load]
+  /// so we can route edits back to the right Firestore doc on [save].
+  final Map<String, String> _polygonNameToUnfinishedId = {};
+
   /// Active snapshot subscription for real-time updates.
   StreamSubscription<ShareableMap?>? _subscription;
 
@@ -39,8 +54,10 @@ class FirestoreMapAdapter extends MapDataAdapter {
     required String docId,
     required this.monthKey,
     required ShareableMapsFirestoreService service,
+    UnfinishedWorkAreasProvider? unfinishedProvider,
   })  : _docId = docId,
         _seed = null,
+        _unfinishedProvider = unfinishedProvider,
         _service = service;
 
   /// Create an adapter for a *new* map that will be persisted on first save.
@@ -48,8 +65,10 @@ class FirestoreMapAdapter extends MapDataAdapter {
     required ShareableMap seed,
     required this.monthKey,
     required ShareableMapsFirestoreService service,
+    UnfinishedWorkAreasProvider? unfinishedProvider,
   })  : _docId = null,
         _seed = seed,
+        _unfinishedProvider = unfinishedProvider,
         _service = service;
 
   @override
@@ -107,18 +126,128 @@ class FirestoreMapAdapter extends MapDataAdapter {
     // overlay system (deferred until the map controller is ready), so we
     // no longer block here.
 
+    final unfinishedLayers = _buildUnfinishedLayers(map);
+    if (unfinishedLayers.isNotEmpty) {
+      map = map.copyWith(layers: [...map.layers, ...unfinishedLayers]);
+    }
+
     debugPrint(
         '[adapter.load] TOTAL: ${sw.elapsedMilliseconds}ms (layers=${map.layers.length})');
     return map;
   }
 
+  /// Build the "Unfinished Areas" layer by scanning [_unfinishedProvider]
+  /// for items whose `clients` are referenced by the map's [name] (case
+  /// insensitive substring match). Also populates
+  /// [_polygonNameToUnfinishedId] for routing edits back on save.
+  List<MapLayer> _buildUnfinishedLayers(ShareableMap map) {
+    final provider = _unfinishedProvider;
+    _polygonNameToUnfinishedId.clear();
+    if (provider == null) {
+      debugPrint('[UnfinishedLayer/Firestore] skipped: provider is null');
+      return const [];
+    }
+    final mapNameLower = map.name.trim().toLowerCase();
+    if (mapNameLower.isEmpty) {
+      debugPrint('[UnfinishedLayer/Firestore] skipped: map name is empty');
+      return const [];
+    }
+    debugPrint(
+        '[UnfinishedLayer/Firestore] mapName="${map.name}" (norm="$mapNameLower") '
+        'scanning ${provider.items.length} unfinished item(s)');
+
+    final matchedPolygons = <CustomPolygon>[];
+    for (final item in provider.items) {
+      final hits = <String>[];
+      for (final c in item.clients) {
+        final cl = c.trim().toLowerCase();
+        if (cl.isEmpty) continue;
+        if (mapNameLower.contains(cl) || cl.contains(mapNameLower)) {
+          hits.add(c);
+        }
+      }
+      final hasMatch = hits.isNotEmpty;
+      debugPrint(
+          '[UnfinishedLayer/Firestore]  item "${item.id}" clients=${item.clients} '
+          'polygons=${item.workMaps.where((p) => p.isPolygon).length} '
+          'match=$hasMatch hits=$hits');
+      if (!hasMatch) continue;
+
+      for (final wm in item.workMaps.where((p) => p.isPolygon)) {
+        if (wm.name.isEmpty) continue;
+        matchedPolygons.add(CustomPolygon(
+          name: wm.name,
+          description: wm.description,
+          points: List<LatLng>.from(wm.points),
+          color: wm.color,
+          fillOpacity: wm.fillOpacity,
+          strokeWidth: wm.strokeWidth,
+          type: wm.type,
+        ));
+        _polygonNameToUnfinishedId[wm.name] = item.id;
+      }
+    }
+
+    debugPrint(
+        '[UnfinishedLayer/Firestore] total matched polygons: ${matchedPolygons.length}');
+    if (matchedPolygons.isEmpty) return const [];
+
+    final now = DateTime.now();
+    return [
+      MapLayer(
+        id: kUnfinishedAreasLayerId,
+        name: 'Unfinished Areas',
+        description: 'Matched from unfinished work areas by client name',
+        order: map.layers.length,
+        defaultColor: Colors.indigo.shade600,
+        polygons: matchedPolygons,
+        polylines: const [],
+        points: const [],
+        createdAt: now,
+        updatedAt: now,
+      ),
+    ];
+  }
+
   @override
   Future<void> save(ShareableMap map) async {
+    // Route polygons from the unfinished-areas layer back to their source
+    // unfinished items, and strip that layer before persisting on the map.
+    final unfinishedLayers = map.layers
+        .where((l) => l.id == kUnfinishedAreasLayerId)
+        .toList();
+    final persistMap = unfinishedLayers.isEmpty
+        ? map
+        : map.copyWith(
+            layers:
+                map.layers.where((l) => l.id != kUnfinishedAreasLayerId).toList(),
+          );
+
+    if (_unfinishedProvider != null && unfinishedLayers.isNotEmpty) {
+      final provider = _unfinishedProvider;
+      final polysByItemId = <String, List<CustomPolygon>>{};
+      for (final layer in unfinishedLayers) {
+        for (final p in layer.polygons) {
+          final itemId = _polygonNameToUnfinishedId[p.name];
+          if (itemId == null) continue;
+          polysByItemId.putIfAbsent(itemId, () => []).add(p);
+        }
+      }
+      for (final entry in polysByItemId.entries) {
+        try {
+          await provider.updateItemWorkMaps(entry.key, entry.value);
+        } catch (e) {
+          debugPrint(
+              '[UnfinishedLayer/Firestore] failed to update item ${entry.key}: $e');
+        }
+      }
+    }
+
     if (_docId != null) {
-      await _service.saveMap(monthKey, _docId!, map);
+      await _service.saveMap(monthKey, _docId!, persistMap);
     } else {
       // First save – create the document.
-      _docId = await _service.createMap(map, monthKey: monthKey);
+      _docId = await _service.createMap(persistMap, monthKey: monthKey);
       // Auto-start listening now that we have a docId.
       startListening();
     }

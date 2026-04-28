@@ -20,8 +20,23 @@ List<TEStyledPolygon> parseKmlWithStyles(Uint8List bytes) {
   final doc = XmlDocument.parse(String.fromCharCodes(bytes));
   const kmlNs = 'http://www.opengis.net/kml/2.2';
 
-  // 1) Build style map
+  // 1) Build style map — also index StyleMap normal-style references.
   final styles = <String, TEKmlStyle>{};
+  final styleMapNormal = <String, String>{};
+
+  for (final smNode in doc.findAllElements('StyleMap', namespace: kmlNs)) {
+    final smId = smNode.getAttribute('id');
+    if (smId == null) continue;
+    for (final pair in smNode.findAllElements('Pair', namespace: kmlNs)) {
+      final key = pair.getElement('key', namespace: kmlNs)?.innerText;
+      final url = pair
+          .getElement('styleUrl', namespace: kmlNs)
+          ?.innerText
+          .replaceFirst('#', '');
+      if (key == 'normal' && url != null) styleMapNormal[smId] = url;
+    }
+  }
+
   for (final styleNode in doc.findAllElements('Style', namespace: kmlNs)) {
     final styleId = styleNode.getAttribute('id')!;
     Color strokeColor = Colors.black;
@@ -32,16 +47,16 @@ List<TEStyledPolygon> parseKmlWithStyles(Uint8List bytes) {
 
     final lineStyle = styleNode.getElement('LineStyle', namespace: kmlNs);
     if (lineStyle != null) {
-      final c = lineStyle.getElement('color', namespace: kmlNs)?.value;
-      if (c != null) strokeColor = _kmlColorToFlutter(c);
-      final w = lineStyle.getElement('width', namespace: kmlNs)?.value;
+      final c = lineStyle.getElement('color', namespace: kmlNs)?.innerText;
+      if (c != null && c.isNotEmpty) strokeColor = _kmlColorToFlutter(c);
+      final w = lineStyle.getElement('width', namespace: kmlNs)?.innerText;
       if (w != null) strokeWidth = double.tryParse(w) ?? 1.0;
     }
 
     final polyStyle = styleNode.getElement('PolyStyle', namespace: kmlNs);
     if (polyStyle != null) {
       final c = polyStyle.getElement('color', namespace: kmlNs)?.innerText;
-      if (c != null) fillColor = _kmlColorToFlutter(c);
+      if (c != null && c.isNotEmpty) fillColor = _kmlColorToFlutter(c);
       fill = polyStyle.getElement('fill', namespace: kmlNs)?.innerText == '1';
       outline =
           polyStyle.getElement('outline', namespace: kmlNs)?.innerText == '1';
@@ -56,44 +71,98 @@ List<TEStyledPolygon> parseKmlWithStyles(Uint8List bytes) {
     );
   }
 
-  // 2) Parse each Placemark → TEStyledPolygon
-  final polygons = <TEStyledPolygon>[];
-  for (final pm in doc.findAllElements('Placemark', namespace: kmlNs)) {
-    final name = pm.getElement('name', namespace: kmlNs)?.value ?? 'polygon';
-    final styleUrl = pm
-        .getElement('styleUrl', namespace: kmlNs)
-        ?.value
-        ?.replaceFirst('#', '');
-    final style = styles[styleUrl] ??
-        TEKmlStyle(
-          strokeColor: Colors.black,
-          strokeWidth: 1,
-          fillColor: Colors.transparent,
-          fill: false,
-          outline: true,
-        );
+  // Resolve StyleMap references so a styleUrl pointing at a StyleMap gets the
+  // correct underlying Style object.
+  TEKmlStyle resolveStyle(String? rawUrl) {
+    if (rawUrl == null) {
+      return TEKmlStyle(
+        strokeColor: Colors.black,
+        strokeWidth: 1,
+        fillColor: Colors.transparent,
+        fill: false,
+        outline: true,
+      );
+    }
+    final id = rawUrl.replaceFirst('#', '');
+    // Direct style hit
+    if (styles.containsKey(id)) return styles[id]!;
+    // StyleMap → resolve normal style
+    final normalId = styleMapNormal[id];
+    if (normalId != null && styles.containsKey(normalId)) {
+      return styles[normalId]!;
+    }
+    return TEKmlStyle(
+      strokeColor: Colors.black,
+      strokeWidth: 1,
+      fillColor: Colors.transparent,
+      fill: false,
+      outline: true,
+    );
+  }
 
-    final coordNode = pm
-        .findAllElements('Polygon', namespace: kmlNs)
-        .expand((poly) => poly.findAllElements('coordinates', namespace: kmlNs))
-        .firstOrNull;
-    if (coordNode == null) continue;
-
+  /// Extract coordinate points from a <Polygon> element.
+  List<LatLng>? parsePolygonCoords(XmlElement polyEl) {
+    final coordNode =
+        polyEl.findAllElements('coordinates', namespace: kmlNs).firstOrNull;
+    if (coordNode == null) return null;
     final coordsText = coordNode.innerText.trim();
-    final points =
-        coordsText.split(RegExp(r'\s+')).where((s) => s.isNotEmpty).map((line) {
-      final parts = line.split(',');
-      final lon = double.parse(parts[0]);
-      final lat = double.parse(parts[1]);
-      return LatLng(lat, lon);
-    }).toList();
+    final points = coordsText
+        .split(RegExp(r'\s+'))
+        .where((s) => s.isNotEmpty)
+        .map((line) {
+          final parts = line.split(',');
+          if (parts.length < 2) return null;
+          final lon = double.tryParse(parts[0]);
+          final lat = double.tryParse(parts[1]);
+          if (lon == null || lat == null) return null;
+          return LatLng(lat, lon);
+        })
+        .whereType<LatLng>()
+        .toList();
+    return points.length >= 3 ? points : null;
+  }
 
-    polygons.add(TEStyledPolygon(
-      id: name,
-      name: name,
-      points: points,
-      style: style,
-    ));
+  // 2) Parse each Placemark → TEStyledPolygon(s)
+  final polygons = <TEStyledPolygon>[];
+  int seq = 0;
+  for (final pm in doc.findAllElements('Placemark', namespace: kmlNs)) {
+    final name =
+        pm.getElement('name', namespace: kmlNs)?.innerText.trim() ?? 'polygon';
+    final styleUrl =
+        pm.getElement('styleUrl', namespace: kmlNs)?.innerText.trim();
+    final style = resolveStyle(styleUrl);
+
+    // ── Direct <Polygon> ──────────────────────────────────────────────────
+    for (final polyEl in pm.findAllElements('Polygon', namespace: kmlNs)) {
+      final pts = parsePolygonCoords(polyEl);
+      if (pts == null) continue;
+      final polyName =
+          polygons.any((p) => p.id == name) ? '$name (${++seq})' : name;
+      polygons.add(TEStyledPolygon(
+        id: polyName,
+        name: polyName,
+        points: pts,
+        style: style,
+      ));
+    }
+
+    // ── <MultiGeometry> containing polygons ───────────────────────────────
+    for (final mg in pm.findAllElements('MultiGeometry', namespace: kmlNs)) {
+      int sub = 0;
+      for (final child in mg.childElements) {
+        if (child.name.local != 'Polygon') continue;
+        final pts = parsePolygonCoords(child);
+        if (pts == null) continue;
+        sub++;
+        final subName = '$name ($sub)';
+        polygons.add(TEStyledPolygon(
+          id: subName,
+          name: subName,
+          points: pts,
+          style: style,
+        ));
+      }
+    }
   }
 
   return polygons;

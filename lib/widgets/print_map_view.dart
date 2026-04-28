@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'dart:math' show min, max;
 import 'dart:ui' as ui;
@@ -6,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import '../models/custom_polygon.dart';
 import '../models/job.dart';
+import '../providers/schedule_provider.dart';
 import '../shareable_maps/utils/point_marker_icons.dart';
 import 'package:intl/intl.dart';
 
@@ -39,6 +41,8 @@ class _PrintMapViewState extends State<PrintMapView> {
   final Set<Polygon> _polygons = {};
   final Set<Polyline> _polylines = {};
   final Set<Marker> _customPointMarkers = {};
+  Marker? _dropOffMarker;
+  LatLng? _dropOffPoint;
   LatLng _center = const LatLng(-33.925, 18.425); // Cape Town city center
   bool _isLoading = true;
   bool _isDraggingInfoBox = false; // Track when dragging info box
@@ -84,6 +88,8 @@ class _PrintMapViewState extends State<PrintMapView> {
 
   Future<void> _initializeMap() async {
     try {
+      _dropOffPoint = widget.job.dropOffPoint ??
+          Job.estimateDropOffPointFromWorkMaps(widget.job.workMaps);
       // Initialize map view with all work maps
       _updateMapView();
     } catch (e) {
@@ -109,6 +115,10 @@ class _PrintMapViewState extends State<PrintMapView> {
 
         // Handle point/marker-type elements
         if (workMap.isPoint && workMap.points.isNotEmpty) {
+          if (workMap.pointCategory == PointCategory.dropoff) {
+            _dropOffPoint ??= workMap.points.first;
+            continue;
+          }
           final marker = workMap.toGoogleMapsMarker(
             markerId: 'workmap_marker_$i',
             customIcon: _pointIcons?[workMap.pointCategory],
@@ -175,6 +185,23 @@ class _PrintMapViewState extends State<PrintMapView> {
           ),
         );
       }
+    }
+
+    if (_dropOffPoint != null) {
+      _dropOffMarker = Marker(
+        markerId: const MarkerId('dropoff_point'),
+        position: _dropOffPoint!,
+        draggable: true,
+        infoWindow: const InfoWindow(title: 'Drop-off Point'),
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+        onDragEnd: (position) async {
+          _dropOffPoint = position;
+          setState(() {});
+          await _persistDropOffPoint(position);
+        },
+      );
+    } else {
+      _dropOffMarker = null;
     }
 
     // Center map on all polygons
@@ -385,7 +412,23 @@ class _PrintMapViewState extends State<PrintMapView> {
       color: old.color,
       fillOpacity: old.fillOpacity,
       strokeWidth: old.strokeWidth,
+      isDashed: old.isDashed,
+      type: old.type,
+      pointCategory: old.pointCategory,
+      letterBoxEstimate: old.letterBoxEstimate,
     );
+
+    // Keep drop-off point aligned to updated work areas.
+    if (_dropOffPoint == null ||
+        !Job.isPointInsideAnyWorkArea(_dropOffPoint!, widget.job.workMaps)) {
+      _dropOffPoint = Job.estimateDropOffPointFromWorkMaps(widget.job.workMaps);
+      if (_dropOffPoint != null) {
+        _persistDropOffPoint(_dropOffPoint!);
+      }
+    } else {
+      _persistWorkAreaChanges();
+    }
+
     setState(() {
       _editingPolygonIndex = null;
       _editingPoints = null;
@@ -460,6 +503,38 @@ class _PrintMapViewState extends State<PrintMapView> {
         );
       }
     }
+  }
+
+  Future<void> _persistDropOffPoint(LatLng point) async {
+    final scheduleProvider = ProviderScope.containerOf(context, listen: false)
+        .read(scheduleRiverpod);
+    final freshJob = scheduleProvider.jobs.firstWhere(
+      (j) => j.id == widget.job.id,
+      orElse: () => widget.job,
+    );
+    final updatedJob = freshJob.copyWith(dropOffPoint: point);
+    await scheduleProvider.updateJobWithUndo(
+        freshJob, updatedJob, freshJob.date);
+  }
+
+  Future<void> _persistWorkAreaChanges() async {
+    final scheduleProvider = ProviderScope.containerOf(context, listen: false)
+        .read(scheduleRiverpod);
+    final freshJob = scheduleProvider.jobs.firstWhere(
+      (j) => j.id == widget.job.id,
+      orElse: () => widget.job,
+    );
+    final updatedJob = freshJob.copyWith(
+      workMaps: List<CustomPolygon>.from(widget.job.workMaps),
+      workingAreas: widget.job.workMaps
+          .where((w) => w.isPolygon)
+          .map((w) => w.name)
+          .where((name) => name.isNotEmpty)
+          .toList(),
+      dropOffPoint: _dropOffPoint,
+    );
+    await scheduleProvider.updateJobWithUndo(
+        freshJob, updatedJob, freshJob.date);
   }
 
   void _triggerWebDownload(Uint8List bytes) {
@@ -698,7 +773,11 @@ class _PrintMapViewState extends State<PrintMapView> {
                           CameraPosition(target: _center, zoom: 12),
                       polygons: _polygons,
                       polylines: _polylines,
-                      markers: {..._vertexMarkers, ..._customPointMarkers},
+                      markers: {
+                        ..._vertexMarkers,
+                        ..._customPointMarkers,
+                        if (_dropOffMarker != null) _dropOffMarker!,
+                      },
                       mapType: MapType.normal,
                       cloudMapId: "89c628d2bb3002712797ce42",
                       zoomControlsEnabled: false,

@@ -186,6 +186,133 @@ class CloudFileManagerProvider with ChangeNotifier {
     }
   }
 
+  /// Delete many files. Returns the number successfully deleted.
+  /// Also triggers a compiled-waypoints rebuild per affected folder.
+  Future<int> deleteFiles(Iterable<StorageFileItem> files) async {
+    final affectedFolders = <String>{};
+    int ok = 0;
+    for (final f in files) {
+      try {
+        await _storage.deleteFile(f.fullPath);
+        ok++;
+        final slash = f.fullPath.lastIndexOf('/');
+        if (slash > 0) affectedFolders.add(f.fullPath.substring(0, slash));
+      } catch (e) {
+        debugPrint('deleteFiles: failed ${f.fullPath}: $e');
+      }
+    }
+    await _rebuildCompiledFor(affectedFolders);
+    await loadCurrentFolder();
+    return ok;
+  }
+
+  /// Rename a file inside its current folder. Returns the new full path
+  /// on success or `null` on failure.
+  Future<String?> renameFile(StorageFileItem file, String newName) async {
+    final sanitized = newName.trim();
+    if (sanitized.isEmpty || sanitized == file.name) return null;
+    try {
+      final newPath = await _storage.renameFile(file.fullPath, sanitized);
+      // Rename inside a waypoint folder → the compiled aggregate lists a
+      // `sourceFile`, so regenerate it.
+      final slash = file.fullPath.lastIndexOf('/');
+      if (slash > 0) {
+        await _rebuildCompiledFor({file.fullPath.substring(0, slash)});
+      }
+      await loadCurrentFolder();
+      return newPath;
+    } catch (e) {
+      _error = 'Failed to rename: $e';
+      debugPrint(_error);
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Copy files into [destinationFolder]. Returns how many succeeded.
+  Future<int> copyFiles(
+    Iterable<StorageFileItem> files,
+    String destinationFolder,
+  ) async {
+    int ok = 0;
+    for (final f in files) {
+      final dst = '$destinationFolder/${f.name}';
+      if (dst == f.fullPath) continue; // skip copy to self
+      try {
+        await _storage.copyFile(f.fullPath, dst);
+        ok++;
+      } catch (e) {
+        debugPrint('copyFiles: failed ${f.fullPath} → $dst: $e');
+      }
+    }
+    await _rebuildCompiledFor({destinationFolder});
+    await loadCurrentFolder();
+    return ok;
+  }
+
+  /// Move files into [destinationFolder]. Returns how many succeeded.
+  Future<int> moveFiles(
+    Iterable<StorageFileItem> files,
+    String destinationFolder,
+  ) async {
+    final affectedFolders = <String>{destinationFolder};
+    int ok = 0;
+    for (final f in files) {
+      final dst = '$destinationFolder/${f.name}';
+      if (dst == f.fullPath) continue;
+      try {
+        await _storage.moveFile(f.fullPath, dst);
+        ok++;
+        final slash = f.fullPath.lastIndexOf('/');
+        if (slash > 0) affectedFolders.add(f.fullPath.substring(0, slash));
+      } catch (e) {
+        debugPrint('moveFiles: failed ${f.fullPath} → $dst: $e');
+      }
+    }
+    await _rebuildCompiledFor(affectedFolders);
+    await loadCurrentFolder();
+    return ok;
+  }
+
+  /// List every folder path under the Distribution root. Useful as the data
+  /// source for a move/copy-destination picker.
+  Future<List<String>> listAllFolderPaths() =>
+      _storage.listAllFolderPaths(rootPath: rootPath);
+
+  /// Trigger a compiled-waypoints and compiled-tracks rebuild for each
+  /// folder, skipping any operations that the storage service cannot
+  /// service.
+  Future<void> _rebuildCompiledFor(Iterable<String> folders) async {
+    for (final f in folders) {
+      if (f.isEmpty) continue;
+      try {
+        await _storage.regenerateCompiledWaypoints(f);
+      } catch (e) {
+        debugPrint('_rebuildCompiledFor($f) waypoints: $e');
+      }
+      try {
+        await _storage.regenerateCompiledTracks(f);
+      } catch (e) {
+        debugPrint('_rebuildCompiledFor($f) tracks: $e');
+      }
+    }
+  }
+
+  /// Recursively delete a folder (all files and subfolders) and refresh.
+  /// Returns the number of files removed, or `null` if the operation failed.
+  Future<int?> deleteFolder(StorageFolderItem folder) async {
+    try {
+      final removed = await _storage.deleteFolderRecursive(folder.fullPath);
+      await loadCurrentFolder();
+      return removed;
+    } catch (e) {
+      _error = 'Failed to delete folder: $e';
+      debugPrint(_error);
+      notifyListeners();
+      return null;
+    }
+  }
+
   /// Upload a file to the current folder and refresh.
   Future<String?> uploadFile(
       String fileName, Uint8List bytes, String? contentType) async {

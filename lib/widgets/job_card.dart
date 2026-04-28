@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import '../config/flavor_config.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
@@ -8,6 +9,7 @@ import 'print_map_view.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/scale_provider.dart';
+import '../providers/unfinished_work_areas_provider.dart';
 import '../shareable_maps/providers/shareable_map_provider.dart';
 import '../shareable_maps/adapters/schedule_job_adapter.dart';
 import '../shareable_maps/widgets/shareable_map_editor.dart';
@@ -841,6 +843,11 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                   // Use the ShareableMapEditor with ScheduleJobAdapter
                   final mapProvider = ref.read(shareableMapRiverpod);
                   final scheduleProvider = ref.read(scheduleRiverpod);
+                  // Only inject the unfinished-work-areas layer in schedule
+                  // flavors (not the standalone maps flavor).
+                  final unfinishedProvider = FlavorConfig.instance.isMaps
+                      ? null
+                      : ref.read(unfinishedWorkAreasRiverpod);
 
                   // Resolve distributor name for the map editor title
                   String? distributorName;
@@ -854,6 +861,7 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                   final adapter = ScheduleJobAdapter(
                     job: widget.job,
                     distributorName: distributorName,
+                    unfinishedProvider: unfinishedProvider,
                     onSave: (polygons, workingAreaNames) async {
                       debugPrint(
                           '[JobCard.onSave] Received ${polygons.length} polygons to save');

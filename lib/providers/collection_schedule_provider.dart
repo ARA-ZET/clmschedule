@@ -5,6 +5,7 @@ import '../models/job_list_item.dart';
 import '../models/work_area.dart';
 import '../services/firestore_service.dart';
 import 'job_list_provider.dart';
+import 'job_type_provider.dart';
 
 final collectionScheduleRiverpod =
     riverpod.ChangeNotifierProvider<CollectionScheduleProvider>(
@@ -70,11 +71,11 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
     // Compute fingerprint of collection-relevant items to skip no-op rebuilds
     final items = _jobListProvider.allJobListItems;
+    final jobTypeProvider = JobTypeProvider.instance;
     int fp = items.length;
     for (final item in items) {
-      if (item.jobTypeId == 'junkCollection' ||
-          item.jobTypeId == 'furnitureMove' ||
-          item.jobTypeId == 'trailerTowing') {
+      if (jobTypeProvider?.appearsOnCollectionSchedule(item.jobTypeId) ??
+          false) {
         fp = fp * 31 + item.id.hashCode ^
             item.date.millisecondsSinceEpoch ^
             item.quantity ^
@@ -130,11 +131,11 @@ class CollectionScheduleProvider extends ChangeNotifier {
   // Build collection jobs from job list provider
   void _buildCollectionJobs() {
     final jobListItems = _jobListProvider.allJobListItems;
+    final jobTypeProvider = JobTypeProvider.instance;
     _collectionJobs = jobListItems
         .where((job) =>
-            job.jobTypeId == 'junkCollection' ||
-            job.jobTypeId == 'furnitureMove' ||
-            job.jobTypeId == 'trailerTowing')
+            jobTypeProvider?.appearsOnCollectionSchedule(job.jobTypeId) ??
+            false)
         .map((job) => _jobListItemToCollectionJob(job))
         .toList();
   }
@@ -163,11 +164,10 @@ class CollectionScheduleProvider extends ChangeNotifier {
     }
   }
 
-  // Load work areas (one-time fetch)
+  // Load work areas (one-time fetch, cache-first to avoid billed reads)
   Future<void> _loadWorkAreas() async {
     try {
-      // Get the first emission from the stream for one-time fetch
-      _workAreas = await _firestoreService.streamWorkAreas().first;
+      _workAreas = await _firestoreService.fetchWorkAreasOnce();
     } catch (e) {
       debugPrint('CollectionScheduleProvider: Error loading work areas: $e');
     }
@@ -188,10 +188,11 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   // Convert JobListItem to CollectionJob
   CollectionJob _jobListItemToCollectionJob(JobListItem jobListItem) {
-    // Parse vehicle/trailer from quantity
-    final vehicleTrailerCombo =
-        _getVehicleTrailerComboFromQuantity(jobListItem.quantity);
-    final vehicleTrailer = _parseVehicleTrailerCombo(vehicleTrailerCombo ?? '');
+    // Parse vehicle/trailer from new enum field, with legacy fallback
+    final combo =
+        VehicleTrailerCombo.tryParse(jobListItem.vehicleTrailerCombo) ??
+            VehicleTrailerCombo.fromLegacyQuantity(jobListItem.quantity,
+                jobTypeId: jobListItem.jobTypeId);
 
     // Determine timeSlots from quantityDistributed (default to 1 if not set or invalid)
     final timeSlots = (jobListItem.quantityDistributed > 0)
@@ -214,8 +215,8 @@ class CollectionScheduleProvider extends ChangeNotifier {
       location: jobListItem.collectionAddress.isNotEmpty
           ? jobListItem.collectionAddress
           : jobListItem.area,
-      vehicleType: vehicleTrailer?.vehicleType ?? VehicleType.hyundai,
-      trailerType: vehicleTrailer?.trailerType ?? TrailerType.noTrailer,
+      vehicleType: combo?.vehicleType ?? VehicleType.hyundai,
+      trailerType: combo?.trailerType ?? TrailerType.noTrailer,
       date: effectiveDate,
       timeSlot: timeSlot,
       timeSlots: timeSlots,
@@ -241,74 +242,6 @@ class CollectionScheduleProvider extends ChangeNotifier {
   bool hasJobsInNextMonth(DateTime currentMonth) {
     final nextMonth = DateTime(currentMonth.year, currentMonth.month + 1, 1);
     return _getJobsForMonth(nextMonth).isNotEmpty;
-  }
-
-  // Helper methods for vehicle/trailer parsing (copied from add_edit_job_dialog.dart)
-  String? _getVehicleTrailerComboFromQuantity(int quantity) {
-    final combinations = _getVehicleTrailerCombinations();
-    if (quantity >= 1 && quantity <= combinations.length) {
-      return combinations[quantity - 1];
-    }
-    return null;
-  }
-
-  List<String> _getVehicleTrailerCombinations() {
-    return [
-      'Hyundai - No trailer',
-      'Hyundai - Big trailer',
-      'Hyundai - Small trailer',
-      'Mahindra - No trailer',
-      'Mahindra - Big trailer',
-      'Mahindra - Small trailer',
-      'Nissan - No trailer',
-      'Nissan - Big trailer',
-      'Nissan - Small trailer',
-    ];
-  }
-
-  ({VehicleType vehicleType, TrailerType trailerType})?
-      _parseVehicleTrailerCombo(String combo) {
-    if (combo.isEmpty) return null;
-
-    final parts = combo.split(' - ');
-    if (parts.length != 2) return null;
-
-    final vehicleName = parts[0].trim();
-    final trailerName = parts[1].trim();
-
-    // Map vehicle names to enum values
-    VehicleType vehicleType;
-    switch (vehicleName.toLowerCase()) {
-      case 'hyundai':
-        vehicleType = VehicleType.hyundai;
-        break;
-      case 'mahindra':
-        vehicleType = VehicleType.mahindra;
-        break;
-      case 'nissan':
-        vehicleType = VehicleType.nissan;
-        break;
-      default:
-        return null;
-    }
-
-    // Map trailer names to enum values
-    TrailerType trailerType;
-    switch (trailerName.toLowerCase()) {
-      case 'no trailer':
-        trailerType = TrailerType.noTrailer;
-        break;
-      case 'big trailer':
-        trailerType = TrailerType.bigTrailer;
-        break;
-      case 'small trailer':
-        trailerType = TrailerType.smallTrailer;
-        break;
-      default:
-        return null;
-    }
-
-    return (vehicleType: vehicleType, trailerType: trailerType);
   }
 
   // Month navigation methods

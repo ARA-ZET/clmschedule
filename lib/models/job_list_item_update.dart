@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../providers/job_type_provider.dart';
 
 class JobListItemUpdate {
   final String userId;
@@ -203,14 +204,13 @@ class JobListItemUpdate {
     return '$day $month $year';
   }
 
-  // Helper method to determine if time should be shown for this job type
+  // Helper method to determine if time should be shown for this job type.
+  // Delegates to [JobTypeProvider] for flag-driven behaviour.
   bool _shouldShowTime(String? jobTypeId) {
     if (jobTypeId == null) return false;
-    return jobTypeId == 'junkCollection' ||
-        jobTypeId == 'furnitureMove' ||
-        jobTypeId == 'trailerTowing' ||
-        jobTypeId == 'windowCleaning' ||
-        jobTypeId == 'solarPanelCleaning';
+    final provider = JobTypeProvider.instance;
+    if (provider == null) return false;
+    return provider.needsTimeSlot(jobTypeId);
   }
 
   String _getFieldDisplayName(String fieldName) {

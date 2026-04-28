@@ -45,15 +45,89 @@ class _UnfinishedWorkAreasPanelState
     _areaController.clear();
   }
 
+  /// Show a confirmation dialog before removing an unfinished work area item.
+  Future<void> _confirmDelete(
+    BuildContext context,
+    Job item,
+    UnfinishedWorkAreasProvider provider,
+  ) async {
+    final clientText =
+        item.clients.isNotEmpty ? item.clients.join(', ') : 'No client';
+    final areaText =
+        item.workingAreas.isNotEmpty ? item.workingAreas.join(', ') : 'No area';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete unfinished work area?'),
+        content: Text(
+          'Are you sure you want to delete this item?\n\n'
+          'Client: $clientText\n'
+          'Area: $areaText',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await provider.removeItem(item.id);
+    }
+  }
+
   /// Handle a job dropped from the schedule grid into this panel.
   Future<void> _handleDropFromGrid(Job job) async {
     final unfinishedProvider = ref.read(unfinishedWorkAreasRiverpod);
     final scheduleProvider = ref.read(scheduleRiverpod);
 
-    // Add to unfinished pool
-    await unfinishedProvider.addFromJob(job);
-    // Remove from the schedule
-    await scheduleProvider.deleteJobWithUndo(job, job.date);
+    try {
+      // Step 1: Add to destination first (safe — worst case is a temporary duplicate)
+      await unfinishedProvider.addFromJob(job);
+
+      try {
+        // Step 2: Remove from source only after destination write succeeded
+        await scheduleProvider.deleteJobWithUndo(job, job.date);
+      } catch (deleteError) {
+        // Add succeeded but delete failed — job exists in both places (recoverable duplicate)
+        debugPrint(
+            'Warning: Job ${job.id} added to unfinished but failed to remove from schedule: $deleteError');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                  'Job moved but may still appear on schedule. Please remove it manually if so.'),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 4),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+    } catch (addError) {
+      // Add failed — don't remove from schedule (no data loss)
+      debugPrint('Failed to add job to unfinished pool: $addError');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to move job: $addError'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
+    }
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -215,10 +289,11 @@ class _UnfinishedWorkAreasPanelState
                               padding: const EdgeInsets.all(4),
                               itemCount: items.length,
                               itemBuilder: (context, index) {
+                                final item = items[index];
                                 return _UnfinishedItemCard(
-                                  item: items[index],
+                                  item: item,
                                   onDelete: () =>
-                                      provider.removeItem(items[index].id),
+                                      _confirmDelete(context, item, provider),
                                 );
                               },
                             ),

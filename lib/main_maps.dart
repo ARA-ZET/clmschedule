@@ -8,6 +8,7 @@ import 'shareable_maps/widgets/shareable_map_editor.dart';
 import 'shareable_maps/adapters/firestore_adapter.dart';
 import 'shareable_maps/services/shareable_maps_firestore_service.dart';
 import 'shareable_maps/services/map_link_service.dart';
+import 'shareable_maps/widgets/clm_maps_splash.dart';
 import 'firebase_options.dart';
 
 /// Standalone CLM Maps Entry Point
@@ -125,18 +126,7 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CircularProgressIndicator(),
-              SizedBox(height: 16),
-              Text('Loading shared map...', style: TextStyle(fontSize: 16)),
-            ],
-          ),
-        ),
-      );
+      return const ClmMapsSplash();
     }
 
     return const _InvalidLinkPage();

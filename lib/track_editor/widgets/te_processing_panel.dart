@@ -68,7 +68,26 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
                       : 'Select GPX Files'),
                   onPressed: (proc.loading || proc.openingTabs)
                       ? null
-                      : () => proc.pickFiles(),
+                      : () async {
+                          await proc.pickFiles();
+                          // Auto-open every matched pair as a tab so the
+                          // user doesn't need a second click for files
+                          // that already have a clean Track/Waypoints pair.
+                          if (proc.matchedPairs.isNotEmpty) {
+                            final count = proc.matchedPairs.length;
+                            await proc.openMatchedTabs(
+                                tabsProvider, scheduleProvider);
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                      'Opened $count tab${count == 1 ? '' : 's'} for matched pairs'),
+                                  duration: const Duration(seconds: 2),
+                                ),
+                              );
+                            }
+                          }
+                        },
                   style: FilledButton.styleFrom(
                     backgroundColor: Colors.blueGrey.shade600,
                     padding: const EdgeInsets.symmetric(vertical: 10),
@@ -133,7 +152,7 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
           if (!hasFiles)
             _EmptyHint(
               text:
-                  'Select Track and Waypoints .gpx files.\nMatching pairs will be opened together as one tab.',
+                  'Select Track and Waypoints .gpx files.\nMatching pairs open automatically; unmatched files can be paired or opened as-is.',
             ),
 
           // ── Matched pairs ───────────────────────────────────────────────
@@ -191,6 +210,10 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
                 onManualPair: (track, wpts) async {
                   await proc.addManualPair(
                       track, wpts, tabsProvider, scheduleProvider);
+                },
+                onOpenAsIs: () async {
+                  await proc.addSingleFileAsTab(
+                      f, tabsProvider, scheduleProvider);
                 },
                 onRemove: () => proc.removeFile(f),
               ),
@@ -332,12 +355,14 @@ class _UnmatchedFileTile extends StatelessWidget {
   final List<TEGpxFileEntry> unmatched;
   final Future<void> Function(TEGpxFileEntry track, TEGpxFileEntry wpts)
       onManualPair;
+  final Future<void> Function() onOpenAsIs;
   final VoidCallback onRemove;
 
   const _UnmatchedFileTile({
     required this.entry,
     required this.unmatched,
     required this.onManualPair,
+    required this.onOpenAsIs,
     required this.onRemove,
   });
 
@@ -354,6 +379,13 @@ class _UnmatchedFileTile extends StatelessWidget {
       TEGpxFileType.unknown => Colors.grey,
     };
 
+    // A quick summary of what the file actually contains — useful to
+    // decide whether "Open as is" makes sense (e.g. combined GPX files
+    // that hold both tracks and waypoints).
+    final trkCount = entry.tracks.length;
+    final wptCount = entry.waypoints.length;
+    final hasContent = trkCount > 0 || wptCount > 0;
+
     return Container(
       decoration: BoxDecoration(
         color: Colors.orange.shade50,
@@ -361,48 +393,88 @@ class _UnmatchedFileTile extends StatelessWidget {
         border: Border.all(color: Colors.orange.shade100),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Row(
-        spacing: 8,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // Type chip
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-            decoration: BoxDecoration(
-              color: typeColor.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(4),
+          Row(
+            spacing: 8,
+            children: [
+              // Type chip
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: typeColor.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(typeLabel,
+                    style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        color: typeColor)),
+              ),
+              // Filename
+              Expanded(
+                child: Text(
+                  entry.filename,
+                  style: const TextStyle(fontSize: 12),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              // Open as-is button — always available so combined files or
+              // orphaned singles can go straight to a tab.
+              IconButton(
+                icon: const Icon(Icons.tab, size: 18),
+                tooltip: 'Open as is (no pair)',
+                color: Colors.blueGrey.shade700,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: hasContent ? () => onOpenAsIs() : null,
+              ),
+              // Manual match button
+              IconButton(
+                icon: const Icon(Icons.compare_arrows, size: 18),
+                tooltip: 'Match manually',
+                color: Colors.orange.shade700,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: () => _showManualMatchDialog(context),
+              ),
+              // Remove
+              IconButton(
+                icon: const Icon(Icons.close, size: 16),
+                tooltip: 'Remove file',
+                color: Colors.grey.shade500,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: onRemove,
+              ),
+            ],
+          ),
+          // Content summary — trk/wpt counts so the user can tell at a
+          // glance whether a file is a combined export.
+          if (hasContent)
+            Padding(
+              padding: const EdgeInsets.only(left: 4, top: 4),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 2,
+                children: [
+                  if (trkCount > 0)
+                    _MiniStat(
+                        icon: Icons.timeline,
+                        label:
+                            '$trkCount track${trkCount == 1 ? '' : 's'}',
+                        color: Colors.blue.shade700),
+                  if (wptCount > 0)
+                    _MiniStat(
+                        icon: Icons.place,
+                        label:
+                            '$wptCount waypoint${wptCount == 1 ? '' : 's'}',
+                        color: Colors.teal.shade700),
+                ],
+              ),
             ),
-            child: Text(typeLabel,
-                style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                    color: typeColor)),
-          ),
-          // Filename
-          Expanded(
-            child: Text(
-              entry.filename,
-              style: const TextStyle(fontSize: 12),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          // Manual match button
-          IconButton(
-            icon: const Icon(Icons.compare_arrows, size: 18),
-            tooltip: 'Match manually',
-            color: Colors.orange.shade700,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-            onPressed: () => _showManualMatchDialog(context),
-          ),
-          // Remove
-          IconButton(
-            icon: const Icon(Icons.close, size: 16),
-            tooltip: 'Remove file',
-            color: Colors.grey.shade500,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-            onPressed: onRemove,
-          ),
         ],
       ),
     );
@@ -414,14 +486,43 @@ class _UnmatchedFileTile extends StatelessWidget {
         ? TEGpxFileType.waypoints
         : TEGpxFileType.track;
     final candidates = unmatched.where((f) => f.type == oppositeType).toList();
+    // Also expose every OTHER unmatched file so the user can still pair
+    // with an unknown-type file (e.g. combined GPX or mis-named exports).
+    final otherCandidates = unmatched
+        .where((f) => f != entry && !candidates.contains(f))
+        .toList();
 
     showDialog<void>(
       context: context,
       builder: (_) => _ManualMatchDialog(
         source: entry,
         candidates: candidates,
+        otherCandidates: otherCandidates,
         onMatched: onManualPair,
+        onOpenAsIs: onOpenAsIs,
       ),
+    );
+  }
+}
+
+// ── Small labelled stat ───────────────────────────────────────────────────────
+class _MiniStat extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  const _MiniStat(
+      {required this.icon, required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 11, color: color),
+        const SizedBox(width: 3),
+        Text(label, style: TextStyle(fontSize: 10, color: color)),
+      ],
     );
   }
 }
@@ -430,13 +531,17 @@ class _UnmatchedFileTile extends StatelessWidget {
 class _ManualMatchDialog extends StatefulWidget {
   final TEGpxFileEntry source;
   final List<TEGpxFileEntry> candidates;
+  final List<TEGpxFileEntry> otherCandidates;
   final Future<void> Function(TEGpxFileEntry track, TEGpxFileEntry wpts)
       onMatched;
+  final Future<void> Function() onOpenAsIs;
 
   const _ManualMatchDialog({
     required this.source,
     required this.candidates,
+    required this.otherCandidates,
     required this.onMatched,
+    required this.onOpenAsIs,
   });
 
   @override
@@ -461,50 +566,121 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
       ),
       content: SizedBox(
         width: 480,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          spacing: 12,
-          children: [
-            // Source file
-            _DialogFileRow(
-              label: isTrackSource ? 'Track' : 'Waypoints',
-              filename: widget.source.filename,
-              color: Colors.blueGrey.shade600,
-            ),
-            Row(
-              children: [
-                Expanded(child: Divider(color: Colors.grey.shade300)),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Icon(Icons.arrow_downward,
-                      color: Colors.grey.shade400, size: 16),
-                ),
-                Expanded(child: Divider(color: Colors.grey.shade300)),
-              ],
-            ),
-            // Pick the opposite
-            Text('Pick a $oppositeLabel file to pair with:',
-                style:
-                    const TextStyle(fontWeight: FontWeight.w500, fontSize: 13)),
-            if (widget.candidates.isEmpty)
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            spacing: 12,
+            children: [
+              // Source file
+              _DialogFileRow(
+                label: isTrackSource
+                    ? 'Track'
+                    : widget.source.type == TEGpxFileType.waypoints
+                        ? 'Waypoints'
+                        : 'File',
+                filename: widget.source.filename,
+                color: Colors.blueGrey.shade600,
+              ),
+              Row(
+                children: [
+                  Expanded(child: Divider(color: Colors.grey.shade300)),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Icon(Icons.arrow_downward,
+                        color: Colors.grey.shade400, size: 16),
+                  ),
+                  Expanded(child: Divider(color: Colors.grey.shade300)),
+                ],
+              ),
+              // Pick the opposite
               Text(
-                'No unmatched $oppositeLabel files available.',
-                style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
-              )
-            else
-              ...widget.candidates.map(
-                (c) => RadioListTile<TEGpxFileEntry>(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(c.filename, style: const TextStyle(fontSize: 12)),
-                  value: c,
-                  groupValue: _selected,
-                  onChanged: (v) => setState(() => _selected = v),
-                  activeColor: Colors.blueGrey,
+                widget.source.type == TEGpxFileType.unknown
+                    ? 'Pick a file to pair with:'
+                    : 'Pick a $oppositeLabel file to pair with:',
+                style:
+                    const TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+              ),
+              if (widget.candidates.isEmpty &&
+                  widget.otherCandidates.isEmpty)
+                Text(
+                  'No other unmatched files available.',
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
+                )
+              else ...[
+                ...widget.candidates.map(
+                  (c) => RadioListTile<TEGpxFileEntry>(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title:
+                        Text(c.filename, style: const TextStyle(fontSize: 12)),
+                    subtitle: Text(
+                      _describeContents(c),
+                      style:
+                          TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                    ),
+                    value: c,
+                    groupValue: _selected,
+                    onChanged: (v) => setState(() => _selected = v),
+                    activeColor: Colors.blueGrey,
+                  ),
+                ),
+                if (widget.otherCandidates.isNotEmpty) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      'Other unmatched files:',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade600,
+                          fontStyle: FontStyle.italic),
+                    ),
+                  ),
+                  ...widget.otherCandidates.map(
+                    (c) => RadioListTile<TEGpxFileEntry>(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(c.filename,
+                          style: const TextStyle(fontSize: 12)),
+                      subtitle: Text(
+                        _describeContents(c),
+                        style: TextStyle(
+                            fontSize: 10, color: Colors.grey.shade600),
+                      ),
+                      value: c,
+                      groupValue: _selected,
+                      onChanged: (v) => setState(() => _selected = v),
+                      activeColor: Colors.blueGrey,
+                    ),
+                  ),
+                ],
+              ],
+              // Hint for combined files
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.blueGrey.shade50,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  spacing: 8,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.info_outline,
+                        size: 14, color: Colors.blueGrey.shade700),
+                    Expanded(
+                      child: Text(
+                        'If this file already contains both tracks and '
+                        'waypoints, use "Open as is" instead of pairing.',
+                        style: TextStyle(
+                            fontSize: 11, color: Colors.blueGrey.shade800),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-          ],
+            ],
+          ),
         ),
       ),
       actions: [
@@ -512,22 +688,62 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
+        TextButton.icon(
+          onPressed: () async {
+            Navigator.of(context).pop();
+            await widget.onOpenAsIs();
+          },
+          icon: const Icon(Icons.tab, size: 16),
+          label: const Text('Open as is'),
+          style: TextButton.styleFrom(foregroundColor: Colors.blueGrey.shade700),
+        ),
         FilledButton.icon(
           onPressed: _selected == null
               ? null
               : () async {
                   Navigator.of(context).pop();
-                  final track = isTrackSource ? widget.source : _selected!;
-                  final wpts = isTrackSource ? _selected! : widget.source;
-                  await widget.onMatched(track, wpts);
+                  // Work out which entry is the track side and which is
+                  // the waypoints side. When the source is Unknown we
+                  // decide based on the selected file's type (falling
+                  // back to source=track if both are unknown).
+                  final selected = _selected!;
+                  late TEGpxFileEntry trackSide;
+                  late TEGpxFileEntry wptsSide;
+                  if (widget.source.type == TEGpxFileType.track) {
+                    trackSide = widget.source;
+                    wptsSide = selected;
+                  } else if (widget.source.type == TEGpxFileType.waypoints) {
+                    trackSide = selected;
+                    wptsSide = widget.source;
+                  } else if (selected.type == TEGpxFileType.track) {
+                    trackSide = selected;
+                    wptsSide = widget.source;
+                  } else {
+                    trackSide = widget.source;
+                    wptsSide = selected;
+                  }
+                  await widget.onMatched(trackSide, wptsSide);
                 },
           icon: const Icon(Icons.tab, size: 16),
-          label: const Text('Open as Tab'),
+          label: const Text('Pair & Open'),
           style:
               FilledButton.styleFrom(backgroundColor: Colors.blueGrey.shade600),
         ),
       ],
     );
+  }
+
+  String _describeContents(TEGpxFileEntry e) {
+    final parts = <String>[];
+    if (e.tracks.isNotEmpty) {
+      parts.add('${e.tracks.length} track${e.tracks.length == 1 ? '' : 's'}');
+    }
+    if (e.waypoints.isNotEmpty) {
+      parts.add(
+          '${e.waypoints.length} waypoint${e.waypoints.length == 1 ? '' : 's'}');
+    }
+    if (parts.isEmpty) return 'empty';
+    return parts.join(' · ');
   }
 }
 

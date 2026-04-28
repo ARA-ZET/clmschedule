@@ -26,14 +26,16 @@ class TETabsProvider with ChangeNotifier {
     TEMode.import: _defaultTabs(),
     TEMode.trim: _defaultTabs(),
     TEMode.processing: _defaultTabs(),
+    TEMode.update: _defaultTabs(),
   };
   final Map<TEMode, int> _currentByMode = {
     TEMode.import: 0,
     TEMode.trim: 0,
     TEMode.processing: 0,
+    TEMode.update: 0,
   };
 
-  TEMode _activeMode = TEMode.import;
+  TEMode _activeMode = TEMode.processing;
 
   // ── Active-mode helpers ───────────────────────────────────────────────────
   TEMode get activeMode => _activeMode;
@@ -181,6 +183,20 @@ class TETabsProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Rename a track in the given tab. The `gpx` package's [Trk.name] is a
+  /// mutable field, so we can assign the new value directly. An empty or
+  /// whitespace-only name is stored as `null` so the UI will fall back to
+  /// the default "Track N" label.
+  void renameTrack(int tabIndex, int trackIndex, String newName) {
+    final list = tabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final tracks = list[tabIndex].tracks;
+    if (trackIndex < 0 || trackIndex >= tracks.length) return;
+    final trimmed = newName.trim();
+    tracks[trackIndex].name = trimmed.isEmpty ? null : trimmed;
+    notifyListeners();
+  }
+
   // ── Waypoint operations ───────────────────────────────────────────────────
 
   /// Remove a waypoint by index from the given tab.
@@ -238,9 +254,23 @@ class TETabsProvider with ChangeNotifier {
     final firstHalf = allPts.sublist(0, globalPointIndex + 1);
     final secondHalf = allPts.sublist(globalPointIndex);
 
+    // Derive names: drop the last word of the original name and append
+    // the 1-based track position, zero-padded if < 10 (e.g. "Route 03").
     final baseName = trk.name ?? 'Track';
+    final words = baseName.trim().split(RegExp(r'\s+'));
+    final prefix = words.length > 1
+        ? words.sublist(0, words.length - 1).join(' ')
+        : baseName;
+    // Total tracks after the split: current count + 1 (we replace 1 with 2).
+    final totalAfter = tracks.length + 1;
+    String _padIdx(int oneBasedIdx) => totalAfter < 10 && oneBasedIdx < 10
+        ? oneBasedIdx.toString().padLeft(2, '0')
+        : oneBasedIdx.toString();
+    final nameA = '$prefix ${_padIdx(trackIndex + 1)}';
+    final nameB = '$prefix ${_padIdx(trackIndex + 2)}';
+
     final trkA = Trk(
-      name: '$baseName (1)',
+      name: nameA,
       cmt: trk.cmt,
       desc: trk.desc,
       src: trk.src,
@@ -249,7 +279,7 @@ class TETabsProvider with ChangeNotifier {
       trksegs: [Trkseg(trkpts: firstHalf)],
     );
     final trkB = Trk(
-      name: '$baseName (2)',
+      name: nameB,
       cmt: trk.cmt,
       desc: trk.desc,
       src: trk.src,

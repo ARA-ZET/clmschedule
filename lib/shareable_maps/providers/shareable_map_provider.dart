@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/work_area.dart';
+import '../../config/flavor_config.dart';
 import '../../services/gpx_storage_service.dart';
 import '../../services/kml_parser_service.dart';
 import '../adapters/map_data_adapter.dart';
@@ -164,6 +165,7 @@ enum DrawingMode {
   polyline,
   point,
   edit,
+  lassoSelect,
 }
 
 /// State management for the universal map editor.
@@ -191,6 +193,8 @@ class ShareableMapProvider extends ChangeNotifier {
   bool _isDrawing = false;
   bool _ignoreNextTap = false; // Flag to ignore first tap after mode change
   bool _isDialogOpen = false; // Flag to block drawing while dialog is open
+  bool _drawingToUnfinished =
+      false; // Flag: also save completed polygon to unfinished work areas
 
   // Editing state
   List<LatLng>? _editingPoints;
@@ -221,13 +225,19 @@ class ShareableMapProvider extends ChangeNotifier {
   // UI state
   bool _isSidebarVisible = true;
   bool _isWorkAreaPickerVisible = false;
+  bool _isLassoSelectActive = false;
+  final List<LatLng> _lassoPoints = [];
   GoogleMapController? _mapController;
   bool _pendingFitBounds = false;
 
   // Map type / style state
   MapType _mapType = MapType.normal;
   String? _activeMapStyleJson; // For JSON-based custom styles
-  String _selectedBaseMap = 'roadmap'; // Track selected base map by key
+  String? _activeCloudMapId = FlavorConfig.instance.isMaps
+      ? '89c628d2bb3002712797ce42'
+      : null; // For cloud-based custom styles
+  String _selectedBaseMap =
+      FlavorConfig.instance.isMaps ? 'clm_custom' : 'roadmap';
 
   // Info window / style panel state
   InfoWindowData? _infoWindowData;
@@ -240,11 +250,14 @@ class ShareableMapProvider extends ChangeNotifier {
   DrawingMode get drawingMode => _drawingMode;
   List<LatLng> get drawingPoints => List.unmodifiable(_drawingPoints);
   bool get isDrawing => _isDrawing;
+  bool get isDrawingForUnfinished => _drawingToUnfinished;
   bool get ignoreNextTap => _ignoreNextTap;
   List<LatLng>? get editingPoints => _editingPoints;
   bool get hasUnsavedChanges => _hasUnsavedChanges;
   bool get isSidebarVisible => _isSidebarVisible;
   bool get isWorkAreaPickerVisible => _isWorkAreaPickerVisible;
+  bool get isLassoSelectActive => _isLassoSelectActive;
+  List<LatLng> get lassoPoints => List.unmodifiable(_lassoPoints);
   bool get isEditingVertices => _isEditingVertices;
   bool get isEditingPolygon => _isEditingPolygon;
   String? get editingElementId => _editingElementId;
@@ -252,6 +265,7 @@ class ShareableMapProvider extends ChangeNotifier {
   bool get showStylePanel => _showStylePanel;
   MapType get mapType => _mapType;
   String? get mapStyle => _activeMapStyleJson;
+  String? get cloudMapId => _activeCloudMapId;
   String get selectedBaseMap => _selectedBaseMap;
 
   // Adapter getters
@@ -309,6 +323,13 @@ class ShareableMapProvider extends ChangeNotifier {
           '[loadFromAdapter] cleanup done in ${sw.elapsedMilliseconds}ms');
       _adapter = adapter;
 
+      // Reset cloud overlay state from any previously-loaded map so the
+      // new map starts with a clean slate. Without this, switching maps in
+      // the gallery leaves the previous map's "Movements of the
+      // Distributors" and "Letter Boxes Reached" data on screen because
+      // the *Loaded flags short-circuit the loader for the new folder.
+      _resetCloudOverlayState();
+
       // Load the map data
       final map = await adapter.load();
       debugPrint(
@@ -329,6 +350,18 @@ class ShareableMapProvider extends ChangeNotifier {
     } finally {
       _isLoading = false;
       notifyListeners();
+    }
+
+    // Fit camera to map bounds once layout settles.
+    // If the controller already exists (widget not recreated), fit directly.
+    // Otherwise set the pending flag so setMapController will trigger it.
+    if (_mapController != null) {
+      _pendingFitBounds = false;
+      Future.delayed(const Duration(milliseconds: 300), () {
+        fitMapToBounds();
+      });
+    } else {
+      _pendingFitBounds = true;
     }
 
     // Initialise cloud overlay shells and auto-load tracks (deferred)
@@ -429,6 +462,18 @@ class ShareableMapProvider extends ChangeNotifier {
     _initCloudOverlays();
     _notifyAndSave();
     debugPrint('Linked cloud folder: $folderPath');
+
+    // Kick off cloud data load immediately so the user doesn't have to
+    // reopen or manually refresh the map. Tracks normally auto-load when
+    // the map controller is first set, but if the map is already open we
+    // need to trigger the fetch ourselves. Waypoints are fetched too so
+    // linking a folder gives instant visible feedback.
+    // Fire-and-forget: errors are surfaced through the existing loading
+    // state / debug logs inside each loader.
+    Future.microtask(() async {
+      await loadCloudFolderTracks(force: true);
+      await loadCloudFolderWaypoints(force: true);
+    });
   }
 
   /// Unlink the cloud storage folder and clear cloud overlay layers.
@@ -515,7 +560,7 @@ class ShareableMapProvider extends ChangeNotifier {
               defaultColor: Colors.blue,
             );
         layer = layer.copyWith(
-          polylines: [...layer.polylines, ...polylines],
+          polylines: polylines,
         );
         _cloudTracksLayer = layer;
         _cloudTracksLoaded = true;
@@ -574,11 +619,9 @@ class ShareableMapProvider extends ChangeNotifier {
             defaultColor: Colors.blue,
           );
 
-      for (final polyline in result.polylines) {
-        layer = layer.addPolyline(polyline);
-      }
       layer = layer.copyWith(
-        points: [...layer.points, ...result.points],
+        polylines: result.polylines,
+        points: result.points,
       );
 
       _cloudTracksLayer = layer;
@@ -631,8 +674,7 @@ class ShareableMapProvider extends ChangeNotifier {
               defaultColor: Colors.red,
             );
         layer = layer.copyWith(
-          name: '$waypointsLayerName (${points.length})',
-          points: [...layer.points, ...points],
+          points: points,
         );
         _cloudWaypointsLayer = layer;
         _cloudWaypointsLoaded = true;
@@ -688,8 +730,7 @@ class ShareableMapProvider extends ChangeNotifier {
           );
 
       layer = layer.copyWith(
-        name: '$waypointsLayerName (${result.points.length})',
-        points: [...layer.points, ...result.points],
+        points: result.points,
       );
 
       _cloudWaypointsLayer = layer;
@@ -761,9 +802,10 @@ class ShareableMapProvider extends ChangeNotifier {
       final map = _currentMap!;
       final bounds = map.getBounds();
 
-      // Gather polygon/polyline data with actual colors from visible layers.
+      // Gather polygon data only — tracks/polylines are intentionally skipped
+      // to keep the gallery thumbnail lightweight and the Static Maps URL
+      // well under the ~8K char limit.
       final polygons = <ThumbnailPathData>[];
-      final polylines = <ThumbnailPathData>[];
       for (final layer in map.visibleLayersSorted) {
         for (final polygon in layer.polygons) {
           if (polygon.points.isNotEmpty) {
@@ -774,32 +816,6 @@ class ShareableMapProvider extends ChangeNotifier {
             ));
           }
         }
-        for (final polyline in layer.polylines) {
-          if (polyline.points.isNotEmpty) {
-            polylines.add(ThumbnailPathData(
-              points: polyline.points,
-              color: polyline.color,
-            ));
-          }
-        }
-      }
-
-      // Include visible cloud tracks in the thumbnail.
-      // Limit to avoid exceeding Static Maps API URL length.
-      if (_cloudTracksLayer != null && _cloudTracksLayer!.isVisible) {
-        for (final polyline in _cloudTracksLayer!.polylines) {
-          if (polyline.points.isNotEmpty) {
-            polylines.add(ThumbnailPathData(
-              points: polyline.points,
-              color: polyline.color,
-            ));
-          }
-        }
-      }
-      // Cap total polylines so the Static Maps URL stays under the limit.
-      const maxPolylines = 15;
-      if (polylines.length > maxPolylines) {
-        polylines.removeRange(maxPolylines, polylines.length);
       }
 
       final thumbnailService = MapThumbnailService();
@@ -810,7 +826,6 @@ class ShareableMapProvider extends ChangeNotifier {
         zoom: map.defaultZoom,
         bounds: bounds,
         polygons: polygons.isNotEmpty ? polygons : null,
-        polylines: polylines.isNotEmpty ? polylines : null,
       );
 
       if (url != null && _currentMap != null) {
@@ -995,8 +1010,21 @@ class ShareableMapProvider extends ChangeNotifier {
     _selectedElementId = null;
     _drawingMode = DrawingMode.none;
     _clearDrawingState();
+    _resetCloudOverlayState();
     debugPrint('Cleared map');
     notifyListeners();
+  }
+
+  /// Reset all ephemeral cloud overlay state (layers, loaded flags, in-flight
+  /// loading flags). Used when switching between maps so the previous map's
+  /// track/waypoint data does not leak into the newly-opened map.
+  void _resetCloudOverlayState() {
+    _cloudTracksLayer = null;
+    _cloudWaypointsLayer = null;
+    _cloudTracksLoaded = false;
+    _cloudWaypointsLoaded = false;
+    _isLoadingCloudTracks = false;
+    _isLoadingCloudWaypoints = false;
   }
 
   /// Update map metadata
@@ -1037,7 +1065,8 @@ class ShareableMapProvider extends ChangeNotifier {
     final alreadyExists = layer.polygons.any((p) => p.name == workArea.name);
     if (alreadyExists) return;
 
-    // Convert WorkArea to CustomPolygon and add it
+    // Convert WorkArea to CustomPolygon and add it.
+    // Copy letterBoxEstimate so shared maps carry the same distribution data.
     final polygon = CustomPolygon(
       name: workArea.name,
       description: workArea.description,
@@ -1045,6 +1074,7 @@ class ShareableMapProvider extends ChangeNotifier {
       color: color ?? Colors.orange,
       fillOpacity: 0.25,
       strokeWidth: 2,
+      letterBoxEstimate: workArea.letterBoxEstimate,
     );
 
     final updatedLayer = layer.addPolygon(polygon);
@@ -1231,6 +1261,13 @@ class ShareableMapProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Start polygon drawing mode and flag that the completed polygon should
+  /// also be saved to the unfinished work areas list.
+  void startDrawingForUnfinished() {
+    _drawingToUnfinished = true;
+    setDrawingMode(DrawingMode.polygon);
+  }
+
   /// Check and consume the ignore next tap flag
   bool shouldIgnoreNextTap() {
     if (_ignoreNextTap) {
@@ -1359,6 +1396,7 @@ class ShareableMapProvider extends ChangeNotifier {
     _drawingPoints.clear();
     _ignoreNextTap = false;
     _isDialogOpen = false; // Reset dialog state
+    _drawingToUnfinished = false; // Reset unfinished flag
   }
 
   /// Remove last drawing point (undo last click)
@@ -2151,6 +2189,14 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Available base map options.
   static const List<MapBaseOption> baseMapOptions = [
     MapBaseOption(
+      key: 'clm_custom',
+      label: 'CLM Custom',
+      icon: Icons.palette,
+      mapType: MapType.normal,
+      cloudMapId: '89c628d2bb3002712797ce42',
+      description: 'CLM branded cloud style',
+    ),
+    MapBaseOption(
       key: 'hybrid',
       label: 'Hybrid',
       icon: Icons.layers,
@@ -2198,14 +2244,9 @@ class ShareableMapProvider extends ChangeNotifier {
     );
 
     _selectedBaseMap = key;
-
-    if (option.styleJson != null) {
-      _mapType = option.mapType;
-      _activeMapStyleJson = option.styleJson;
-    } else {
-      _mapType = option.mapType;
-      _activeMapStyleJson = null;
-    }
+    _mapType = option.mapType;
+    _activeMapStyleJson = option.styleJson;
+    _activeCloudMapId = option.cloudMapId;
 
     notifyListeners();
   }
@@ -2230,6 +2271,120 @@ class ShareableMapProvider extends ChangeNotifier {
       _isWorkAreaPickerVisible = false;
       notifyListeners();
     }
+  }
+
+  // === LASSO SELECT FOR WORK AREAS ===
+
+  /// Start lasso selection mode — the user draws a polygon on the map
+  /// and all work areas whose centroid (or any vertex) falls inside it
+  /// will be added to the map.
+  void startLassoSelect() {
+    _isLassoSelectActive = true;
+    _lassoPoints.clear();
+    _drawingMode = DrawingMode.lassoSelect;
+    _isDrawing = true;
+    debugPrint('Started lasso select mode');
+    notifyListeners();
+  }
+
+  /// Add a point to the lasso selection polygon.
+  void addLassoPoint(LatLng point) {
+    if (!_isLassoSelectActive) return;
+    _lassoPoints.add(point);
+    debugPrint('Lasso point added: ${_lassoPoints.length}');
+    notifyListeners();
+  }
+
+  /// Remove last lasso point (undo).
+  void removeLastLassoPoint() {
+    if (_lassoPoints.isNotEmpty) {
+      _lassoPoints.removeLast();
+      notifyListeners();
+    }
+  }
+
+  /// Complete lasso selection and return the list of work areas whose
+  /// centroid falls inside the drawn polygon. Does not auto-add them
+  /// — the caller should present a confirmation and call
+  /// [addWorkAreasToMap] with the selected items.
+  List<WorkArea> completeLassoSelect(List<WorkArea> allWorkAreas) {
+    if (_lassoPoints.length < 3) {
+      cancelLassoSelect();
+      return [];
+    }
+
+    final matched = <WorkArea>[];
+    for (final wa in allWorkAreas) {
+      if (wa.polygonPoints.length < 3) continue;
+      if (isWorkAreaImported(wa.name)) continue;
+      if (_isWorkAreaInsideLasso(wa)) {
+        matched.add(wa);
+      }
+    }
+
+    debugPrint('Lasso select found ${matched.length} work areas');
+    return matched;
+  }
+
+  /// Finish lasso mode and clean up state.
+  void finishLassoSelect() {
+    _isLassoSelectActive = false;
+    _lassoPoints.clear();
+    _drawingMode = DrawingMode.none;
+    _isDrawing = false;
+    notifyListeners();
+  }
+
+  /// Cancel lasso selection.
+  void cancelLassoSelect() {
+    debugPrint('Cancelled lasso select');
+    finishLassoSelect();
+  }
+
+  /// Add multiple work areas to the map at once.
+  void addWorkAreasToMap(List<WorkArea> workAreas) {
+    for (final wa in workAreas) {
+      addWorkAreaToMap(wa);
+    }
+  }
+
+  /// Check if a work area's centroid or any vertex falls inside the lasso.
+  bool _isWorkAreaInsideLasso(WorkArea wa) {
+    if (_lassoPoints.length < 3 || wa.polygonPoints.isEmpty) return false;
+
+    // Check centroid first (fast path)
+    double lat = 0, lng = 0;
+    for (final p in wa.polygonPoints) {
+      lat += p.latitude;
+      lng += p.longitude;
+    }
+    final centroid =
+        LatLng(lat / wa.polygonPoints.length, lng / wa.polygonPoints.length);
+    if (_pointInPolygon(centroid, _lassoPoints)) return true;
+
+    // Fallback: check if any vertex is inside
+    for (final pt in wa.polygonPoints) {
+      if (_pointInPolygon(pt, _lassoPoints)) return true;
+    }
+    return false;
+  }
+
+  /// Ray-casting point-in-polygon test.
+  static bool _pointInPolygon(LatLng point, List<LatLng> polygon) {
+    bool inside = false;
+    int j = polygon.length - 1;
+    for (int i = 0; i < polygon.length; i++) {
+      final xi = polygon[i].latitude;
+      final yi = polygon[i].longitude;
+      final xj = polygon[j].latitude;
+      final yj = polygon[j].longitude;
+      final intersect = ((yi > point.longitude) != (yj > point.longitude)) &&
+          (point.latitude <
+              (xj - xi) * (point.longitude - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+      j = i;
+    }
+    return inside;
   }
 
   // === HELPERS ===
@@ -2357,6 +2512,7 @@ class MapBaseOption {
   final IconData icon;
   final MapType mapType;
   final String? styleJson;
+  final String? cloudMapId;
   final String? description;
 
   const MapBaseOption({
@@ -2365,6 +2521,7 @@ class MapBaseOption {
     required this.icon,
     required this.mapType,
     this.styleJson,
+    this.cloudMapId,
     this.description,
   });
 }

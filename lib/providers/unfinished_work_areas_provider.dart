@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../models/job.dart';
 import '../models/custom_polygon.dart';
 
@@ -59,6 +60,16 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
   /// Create a Job from a Firestore document. Uses a sentinel date and empty
   /// distributorId to indicate "unassigned".
   Job _jobFromDoc(String id, Map<String, dynamic> data) {
+    LatLng? dropOffPoint;
+    final dropMap = data['dropOffPoint'];
+    if (dropMap is Map<String, dynamic>) {
+      final lat = (dropMap['latitude'] as num?)?.toDouble();
+      final lng = (dropMap['longitude'] as num?)?.toDouble();
+      if (lat != null && lng != null) {
+        dropOffPoint = LatLng(lat, lng);
+      }
+    }
+
     return Job(
       id: id,
       clients: (data['clients'] as List<dynamic>?)?.cast<String>() ?? [],
@@ -72,6 +83,7 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
       distributorId: '',
       date: DateTime(1970), // sentinel — not assigned
       statusId: data['statusId'] as String? ?? 'scheduled',
+      dropOffPoint: dropOffPoint,
     );
   }
 
@@ -81,6 +93,7 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
     required List<String> workingAreas,
     List<CustomPolygon> workMaps = const [],
     String statusId = 'scheduled',
+    LatLng? dropOffPoint,
   }) async {
     // Generate a temporary ID for optimistic update
     final tempId = _firestore.collection('dummy').doc().id;
@@ -94,6 +107,7 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
       distributorId: '',
       date: DateTime(1970),
       statusId: statusId,
+      dropOffPoint: dropOffPoint,
     );
     _items = [..._items, optimisticJob];
     notifyListeners();
@@ -104,6 +118,11 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
         'workingAreas': workingAreas,
         'workMaps': workMaps.map((wm) => wm.toMap()).toList(),
         'statusId': statusId,
+        if (dropOffPoint != null)
+          'dropOffPoint': {
+            'latitude': dropOffPoint.latitude,
+            'longitude': dropOffPoint.longitude,
+          },
         'createdAt': FieldValue.serverTimestamp(),
       });
       debugPrint('UnfinishedWorkAreas: added doc ${docRef.id}');
@@ -119,6 +138,7 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
             distributorId: item.distributorId,
             date: item.date,
             statusId: item.statusId,
+            dropOffPoint: item.dropOffPoint,
           );
         }
         return item;
@@ -142,6 +162,7 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
       workingAreas: job.workingAreas,
       workMaps: job.workMaps,
       statusId: job.statusId,
+      dropOffPoint: job.dropOffPoint,
     );
   }
 
@@ -177,6 +198,41 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
     if (statusId != null) updates['statusId'] = statusId;
     if (updates.isNotEmpty) {
       await _collection.doc(id).update(updates);
+    }
+  }
+
+  /// Replace the `workMaps` list for an existing item. Used when the shareable
+  /// map editor edits polygons that originated from an unfinished work area
+  /// so the edits flow back to Firestore.
+  Future<void> updateItemWorkMaps(
+      String id, List<CustomPolygon> workMaps) async {
+    // Optimistic local update so the UI reflects changes immediately.
+    _items = _items.map((item) {
+      if (item.id == id) {
+        return Job(
+          id: item.id,
+          clients: item.clients,
+          workingAreas: item.workingAreas,
+          workMaps: List<CustomPolygon>.from(workMaps),
+          distributorId: item.distributorId,
+          date: item.date,
+          statusId: item.statusId,
+          dropOffPoint: item.dropOffPoint,
+        );
+      }
+      return item;
+    }).toList();
+    notifyListeners();
+
+    try {
+      await _collection.doc(id).update({
+        'workMaps': workMaps.map((wm) => wm.toMap()).toList(),
+      });
+      debugPrint('UnfinishedWorkAreas: updated workMaps for $id '
+          '(${workMaps.length} elements)');
+    } catch (e) {
+      debugPrint('UnfinishedWorkAreas: updateItemWorkMaps failed: $e');
+      rethrow;
     }
   }
 

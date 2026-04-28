@@ -4,15 +4,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/job_list_item.dart';
 import '../models/job_reminder.dart';
+import '../models/collection_job.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/job_list_preferences_provider.dart';
 import '../providers/job_list_status_provider.dart';
 import '../providers/invoice_status_provider.dart';
 import '../providers/scale_provider.dart';
 import '../providers/job_type_provider.dart';
-import '../shareable_maps/providers/shareable_map_provider.dart';
-import '../shareable_maps/adapters/job_list_area_adapter.dart';
-import '../shareable_maps/widgets/shareable_map_editor.dart';
 import 'add_edit_job_dialog.dart';
 import 'editable_table_cell.dart';
 import 'multi_select_status_filter.dart';
@@ -358,7 +356,6 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
   final Function(BuildContext, JobListItem) onShowEditDialog;
   final Function(BuildContext, JobListItem) onShowCopyDialog;
   final Function(BuildContext, JobListItem) onShowDeleteConfirmation;
-  final String? Function(int) getVehicleTypeStringFromQuantity;
   final String? Function(int, String) getVehicleTrailerComboFromQuantity;
 
   const JobListDataCellsBuilder({
@@ -372,7 +369,6 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
     required this.onShowEditDialog,
     required this.onShowCopyDialog,
     required this.onShowDeleteConfirmation,
-    required this.getVehicleTypeStringFromQuantity,
     required this.getVehicleTrailerComboFromQuantity,
   });
 
@@ -728,7 +724,7 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                 child: LinkCell(
                   value: item.area,
                   onSave: (value) => onUpdateField(item, 'area', value),
-                  width: JobListColumnConfig.getWidth('area') - 52,
+                  width: JobListColumnConfig.getWidth('area') - 28,
                   maxLines: 2,
                 ),
               ),
@@ -750,22 +746,6 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                   onPressed: () => _showMapLinkOptions(context, item, ref),
                 ),
               ),
-              SizedBox(
-                width: 24,
-                child: IconButton(
-                  icon: Icon(
-                    Icons.edit_location_alt,
-                    size: 16,
-                    color: item.customPolygons.isNotEmpty
-                        ? Colors.blue
-                        : Colors.grey,
-                  ),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                  tooltip: 'Edit area on map',
-                  onPressed: () => _openJobListAreaEditor(context, item, ref),
-                ),
-              ),
             ],
           ),
         ),
@@ -777,10 +757,14 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
       cells.add(DataCell(
         EditableVehicleComboCell(
           quantity: item.quantity,
+          vehicleTrailerCombo: item.vehicleTrailerCombo,
           jobTypeId: item.jobTypeId,
           width: JobListColumnConfig.getWidth('quantity'),
-          onSave: (quantity) {
-            onUpdateField(item, 'quantity', quantity);
+          onSave: (quantity, vehicleTrailerCombo) {
+            onUpdateField(item, 'vehicleTrailerCombo', {
+              'quantity': quantity,
+              'vehicleTrailerCombo': vehicleTrailerCombo,
+            });
           },
         ),
       ));
@@ -1002,54 +986,6 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
     }
 
     return cells;
-  }
-
-  void _openJobListAreaEditor(
-      BuildContext context, JobListItem item, riverpod.WidgetRef ref) async {
-    try {
-      final mapProvider = ref.read(shareableMapRiverpod);
-
-      final adapter = JobListAreaAdapter(
-        item: item,
-        onSave: (polygons, areaLink) async {
-          final updatedItem = item.copyWith(
-            customPolygons: polygons,
-            area: areaLink ?? item.area,
-          );
-          final jobListProvider = ref.read(jobListRiverpod);
-          final jobListStatusProvider = ref.read(jobListStatusRiverpod);
-          final invoiceStatusProvider = ref.read(invoiceStatusRiverpod);
-          await jobListProvider.updateJobListItemWithTracking(
-            item,
-            updatedItem,
-            resolveJobStatusLabel: (statusId) =>
-                jobListStatusProvider.getStatusById(statusId)?.label,
-            resolveInvoiceStatusLabel: (statusId) =>
-                invoiceStatusProvider.getStatusById(statusId)?.label,
-          );
-        },
-      );
-
-      await mapProvider.loadFromAdapter(adapter);
-
-      if (!context.mounted) return;
-
-      await Navigator.of(context).push(
-        MaterialPageRoute(
-          fullscreenDialog: true,
-          builder: (_) => const ShareableMapEditor(),
-        ),
-      );
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to open map editor: $e'),
-            backgroundColor: Colors.red.shade800,
-          ),
-        );
-      }
-    }
   }
 
   void _showMapLinkOptions(
@@ -1752,8 +1688,11 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
                                                             'quantity':
                                                                 item.quantity,
                                                             'vehicleType':
-                                                                _getVehicleTypeStringFromQuantity(
-                                                                    item.quantity),
+                                                                VehicleTrailerCombo
+                                                                        .tryParse(
+                                                                            item.vehicleTrailerCombo)
+                                                                    ?.vehicleType
+                                                                    .name,
                                                           },
                                                           onSave: (date) =>
                                                               _updateJobField(
@@ -1919,7 +1858,6 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           onShowEditDialog: _showEditJobDialog,
           onShowCopyDialog: _showCopyJobDialog,
           onShowDeleteConfirmation: _showDeleteConfirmation,
-          getVehicleTypeStringFromQuantity: _getVehicleTypeStringFromQuantity,
           getVehicleTrailerComboFromQuantity:
               _getVehicleTrailerComboFromQuantity,
         ).buildCells(context, ref);
@@ -1995,8 +1933,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         case 'quantity':
           final newQuantity = value as int;
           // Validate quantity for vehicle combo job types
-          if ((item.jobTypeId == 'junkCollection' ||
-                  item.jobTypeId == 'furnitureMove') &&
+          if (VehicleTrailerCombo.isVehicleJobType(item.jobTypeId) &&
               (newQuantity < 1 || newQuantity > 9)) {
             // Invalid quantity for vehicle combo, don't update
             ScaffoldMessenger.of(context).showSnackBar(
@@ -2008,6 +1945,13 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             return;
           }
           updatedItem = item.copyWith(quantity: newQuantity);
+          break;
+        case 'vehicleTrailerCombo':
+          final data = value as Map<String, dynamic>;
+          updatedItem = item.copyWith(
+            quantity: data['quantity'] as int,
+            vehicleTrailerCombo: data['vehicleTrailerCombo'] as String,
+          );
           break;
         case 'manDays':
           updatedItem = item.copyWith(manDays: value as double);
@@ -2514,51 +2458,13 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     }
   }
 
-  // Helper method to convert quantity to vehicle type string for time slot conflict detection
-  String? _getVehicleTypeStringFromQuantity(int quantity) {
-    // Mapping based on the vehicle/trailer combinations
-    // 1-3: Hyundai, 4-6: Mahindra, 7-9: Nissan
-    if (quantity >= 1 && quantity <= 3) {
-      return 'hyundai';
-    } else if (quantity >= 4 && quantity <= 6) {
-      return 'mahindra';
-    } else if (quantity >= 7 && quantity <= 9) {
-      return 'nissan';
-    }
-    return null;
-  }
-
-  // Helper method to get vehicle/trailer combination label from quantity
+  // Helper method to get vehicle/trailer combination label from quantity (for tracked changes display)
   String? _getVehicleTrailerComboFromQuantity(int quantity, String jobTypeId) {
-    // Only convert to vehicle combo for applicable job types
-    if (jobTypeId != 'junkCollection' &&
-        jobTypeId != 'furnitureMove' &&
-        jobTypeId != 'trailerTowing') {
-      return quantity
-          .toString(); // Just return quantity as string for other types
+    if (!VehicleTrailerCombo.isVehicleJobType(jobTypeId)) {
+      return quantity.toString();
     }
-
-    final combinations = jobTypeId == 'trailerTowing'
-        ? [
-            'Hyundai - No Trailer',
-            'Mahindra - No Trailer',
-            'Nissan - No Trailer',
-          ]
-        : [
-            'Hyundai - No Trailer',
-            'Hyundai - Big Trailer',
-            'Hyundai - Small Trailer',
-            'Mahindra - No Trailer',
-            'Mahindra - Big Trailer',
-            'Mahindra - Small Trailer',
-            'Nissan - No Trailer',
-            'Nissan - Big Trailer',
-            'Nissan - Small Trailer',
-          ];
-
-    if (quantity >= 1 && quantity <= combinations.length) {
-      return combinations[quantity - 1];
-    }
-    return null;
+    return VehicleTrailerCombo.fromLegacyQuantity(quantity,
+            jobTypeId: jobTypeId)
+        ?.label;
   }
 }

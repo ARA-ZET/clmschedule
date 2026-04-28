@@ -3,6 +3,9 @@ import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_job_list_status.dart';
+import '../services/reference_cache_service.dart';
+
+const String _kCollectionName = 'customJobListStatuses';
 
 final jobListStatusRiverpod =
     riverpod.ChangeNotifierProvider<JobListStatusProvider>(
@@ -29,16 +32,16 @@ class JobListStatusProvider extends ChangeNotifier {
       _error = null;
       notifyListeners();
 
-      final snapshot = await _firestore
-          .collection('customJobListStatuses')
-          .orderBy('label')
-          .get();
-
-      _statuses = snapshot.docs.map((doc) {
-        final data = doc.data();
-        data['id'] = doc.id; // Ensure the document ID is set
-        return CustomJobListStatus.fromMap(data);
-      }).toList();
+      _statuses =
+          await ReferenceCacheService.loadCollection<CustomJobListStatus>(
+        query: _firestore.collection(_kCollectionName).orderBy('label'),
+        collectionName: _kCollectionName,
+        fromDoc: (doc) {
+          final data = Map<String, dynamic>.from(doc.data() as Map);
+          data['id'] = doc.id;
+          return CustomJobListStatus.fromMap(data);
+        },
+      );
     } catch (e) {
       _error = 'Error loading job list statuses: $e';
       if (kDebugMode) {
@@ -56,12 +59,13 @@ class JobListStatusProvider extends ChangeNotifier {
     try {
       _error = null;
 
-      final docRef = await _firestore.collection('customJobListStatuses').add({
+      final docRef = await _firestore.collection(_kCollectionName).add({
         'label': label,
         'color': color.toARGB32(),
         'isDefault': false,
         'hiddenForJobTypes': hiddenForJobTypes,
       });
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
 
       final newStatus = CustomJobListStatus(
         id: docRef.id,
@@ -97,10 +101,8 @@ class JobListStatusProvider extends ChangeNotifier {
         updateData['hiddenForJobTypes'] = hiddenForJobTypes;
       }
 
-      await _firestore
-          .collection('customJobListStatuses')
-          .doc(id)
-          .update(updateData);
+      await _firestore.collection(_kCollectionName).doc(id).update(updateData);
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
 
       final index = _statuses.indexWhere((status) => status.id == id);
       if (index != -1) {
@@ -133,7 +135,8 @@ class JobListStatusProvider extends ChangeNotifier {
         return;
       }
 
-      await _firestore.collection('customJobListStatuses').doc(id).delete();
+      await _firestore.collection(_kCollectionName).doc(id).delete();
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
       _statuses.removeWhere((status) => status.id == id);
       notifyListeners();
     } catch (e) {

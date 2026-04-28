@@ -147,6 +147,32 @@ class TEProcessingProvider extends ChangeNotifier {
     );
   }
 
+  /// Open a single staged file as its own tab, using whatever tracks and
+  /// waypoints are inside the file. Intended for combined GPX files or
+  /// for cases where the user accepts an orphaned Track/Waypoints file
+  /// without pairing it.
+  Future<void> addSingleFileAsTab(
+    TEGpxFileEntry entry,
+    TETabsProvider tabsProvider,
+    ScheduleProvider scheduleProvider,
+  ) async {
+    // Use the same entry on both sides — `_buildTabForPair` reads
+    // `trackFile.tracks` and `waypointsFile.waypoints`, so a combined GPX
+    // (or single-type file) will still surface everything it contains.
+    final key = entry.matchKey.isEmpty
+        ? '_single_${entry.filename}'
+        : entry.matchKey;
+    await _openPairAsTab(
+      TEGpxMatchedPair(
+        trackFile: entry,
+        waypointsFile: entry,
+        matchKey: key,
+      ),
+      tabsProvider,
+      scheduleProvider,
+    );
+  }
+
   /// Open all auto-matched pairs as new tabs.
   Future<void> openMatchedTabs(
     TETabsProvider tabsProvider,
@@ -161,21 +187,29 @@ class TEProcessingProvider extends ChangeNotifier {
     notifyListeners();
 
     final newTabs = <TETabItem>[];
-    for (var i = 0; i < pairs.length; i++) {
-      _openProgress = (i + 1) / pairs.length;
-      _progressMessage = 'Loading ${i + 1} of ${pairs.length}...';
+    try {
+      for (var i = 0; i < pairs.length; i++) {
+        _openProgress = (i + 1) / pairs.length;
+        _progressMessage = 'Loading ${i + 1} of ${pairs.length}...';
+        notifyListeners();
+        try {
+          final tab = await _buildTabForPair(pairs[i], scheduleProvider);
+          newTabs.add(tab);
+        } catch (e) {
+          debugPrint('⚠️ Failed to build tab for "${pairs[i].matchKey}": $e');
+        }
+      }
+
+      if (newTabs.isNotEmpty) {
+        tabsProvider.addTabsBatch(newTabs);
+      }
+    } finally {
+      _openingTabs = false;
+      _openProgress = 0;
+      _progressMessage = '';
+      _tabsOpened = true;
       notifyListeners();
-      final tab = await _buildTabForPair(pairs[i], scheduleProvider);
-      newTabs.add(tab);
     }
-
-    tabsProvider.addTabsBatch(newTabs);
-
-    _openingTabs = false;
-    _openProgress = 0;
-    _progressMessage = '';
-    _tabsOpened = true;
-    notifyListeners();
   }
 
   Future<void> _openPairAsTab(
@@ -214,18 +248,25 @@ class TEProcessingProvider extends ChangeNotifier {
           workMapPolygons.add(_customPolygonToStyled(wm));
         }
       }
-      // Resolve storage folder path from the first matched job's client
+      // Resolve storage folder path from the first matched job's client.
+      // We only set this when the client folder already exists in the cloud
+      // \u2014 we never auto-create Round N folders here. If the folder is
+      // missing, leave `storageFolderPath` null and let the UI prompt the
+      // user to pick or create one via the save panel.
       if (jobs.isNotEmpty && jobs.first.clients.isNotEmpty) {
         try {
           final gpxStorage = GpxStorageService();
           final primaryClient = jobs.first.clients.first;
-          final nextRound =
-              await gpxStorage.nextRoundNumber(trackDate, primaryClient);
-          // Use the latest existing round (or Round 1 if none yet)
-          final round = nextRound > 1 ? nextRound - 1 : 1;
-          storageFolderPath =
-              gpxStorage.roundFolderPath(trackDate, primaryClient, round);
-          debugPrint('☁️ Storage folder: $storageFolderPath');
+          final exists =
+              await gpxStorage.clientFolderExists(trackDate, primaryClient);
+          if (exists) {
+            storageFolderPath =
+                gpxStorage.clientFolderPath(trackDate, primaryClient);
+            debugPrint('☁️ Storage folder: $storageFolderPath');
+          } else {
+            debugPrint(
+                '☁️ No existing cloud folder for "$primaryClient" — user will pick one.');
+          }
         } catch (e) {
           debugPrint('⚠️ Could not resolve storage folder: $e');
         }

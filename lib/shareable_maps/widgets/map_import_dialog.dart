@@ -2,7 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:file_picker/file_picker.dart';
+import '../../models/custom_polygon.dart';
+import '../models/map_point.dart';
+import '../models/map_polyline.dart';
 import '../providers/shareable_map_provider.dart';
+import '../services/map_link_service.dart';
+import '../services/shareable_maps_firestore_service.dart';
 import '../../providers/cloud_file_manager_provider.dart';
 import '../../services/gpx_storage_service.dart';
 import '../../services/kml_parser_service.dart';
@@ -20,11 +25,23 @@ class MapImportDialog extends riverpod.ConsumerStatefulWidget {
 class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
   bool _isLoading = false;
   String? _errorMessage;
-  int _selectedImportType = 0; // 0 = File, 1 = Google My Maps, 2 = Cloud
+  int _selectedImportType = 0; // 0 = File, 1 = URL / Link, 2 = Cloud
+
+  // URL import state
+  final TextEditingController _urlController = TextEditingController();
+  _LinkType? _detectedLinkType;
+  String? _clmMapName;
+  List<_ImportableElement> _clmElements = [];
 
   // Cloud browser state
   final CloudFileManagerProvider _cloudProvider = CloudFileManagerProvider();
   bool _cloudInitialized = false;
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -46,7 +63,7 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
                 ),
                 ButtonSegment(
                   value: 1,
-                  label: Text('Google My Maps'),
+                  label: Text('URL / Link'),
                   icon: Icon(Icons.link),
                 ),
                 ButtonSegment(
@@ -152,17 +169,303 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'Import from Google My Maps URL',
+          'Paste a CLM Maps or Google My Maps link',
           style: TextStyle(fontSize: 14, color: Colors.grey),
         ),
         const SizedBox(height: 16),
-        MyMapsKmlDownloader(
-          onKmlDataRetrieved: (kmlBytes, fileName) {
-            _handleKmlData(kmlBytes, fileName);
-          },
+        // URL input + Load button
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _urlController,
+                decoration: const InputDecoration(
+                  labelText: 'Map link',
+                  hintText:
+                      'https://clm-maps.web.app/map/... or Google My Maps link',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                onSubmitted: (_) => _resolveUrl(),
+              ),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: _isLoading ? null : _resolveUrl,
+              child: _isLoading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Load'),
+            ),
+          ],
         ),
+        // CLM Maps element list with checkboxes
+        if (_detectedLinkType == _LinkType.clmMaps &&
+            _clmElements.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '$_clmMapName — ${_clmElements.length} element(s)',
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              TextButton(
+                onPressed: () {
+                  final allSelected = _clmElements.every((e) => e.selected);
+                  setState(() {
+                    for (final e in _clmElements) {
+                      e.selected = !allSelected;
+                    }
+                  });
+                },
+                child: Text(
+                  _clmElements.every((e) => e.selected)
+                      ? 'Deselect all'
+                      : 'Select all',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+          const Divider(height: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 260),
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: _clmElements.length,
+              itemBuilder: (context, index) {
+                final el = _clmElements[index];
+                return CheckboxListTile(
+                  value: el.selected,
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  secondary: Icon(el.icon, size: 18, color: el.color),
+                  title: Text(el.name, style: const TextStyle(fontSize: 12)),
+                  subtitle: Text('${el.typeLabel} · ${el.layerName}',
+                      style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                  onChanged: (v) {
+                    setState(() => el.selected = v ?? false);
+                  },
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: ElevatedButton(
+              onPressed: _clmElements.any((e) => e.selected)
+                  ? _importSelectedClmElements
+                  : null,
+              child: Text(
+                'Import (${_clmElements.where((e) => e.selected).length})',
+              ),
+            ),
+          ),
+        ],
+        // Google My Maps downloader (shown after detection)
+        if (_detectedLinkType == _LinkType.googleMyMaps) ...[
+          const SizedBox(height: 16),
+          MyMapsKmlDownloader(
+            initialUrl: _urlController.text.trim(),
+            onKmlDataRetrieved: (kmlBytes, fileName) {
+              _handleKmlData(kmlBytes, fileName);
+            },
+          ),
+        ],
       ],
     );
+  }
+
+  /// Detect link type from URL and act accordingly.
+  Future<void> _resolveUrl() async {
+    final url = _urlController.text.trim();
+    if (url.isEmpty) {
+      setState(() => _errorMessage = 'Please enter a link');
+      return;
+    }
+
+    // Check for CLM Maps link
+    String? shareCode = MapLinkService.extractShareCode(url);
+    // Also accept a raw share code (short alphanumeric, no slashes)
+    shareCode ??= (url.length <= 12 && !url.contains('/')) ? url : null;
+
+    if (shareCode != null) {
+      await _loadClmMap(shareCode);
+      return;
+    }
+
+    // Check for Google My Maps link
+    try {
+      final uri = Uri.parse(url);
+      if (uri.host.contains('google.com') || uri.host.contains('google.co')) {
+        setState(() {
+          _detectedLinkType = _LinkType.googleMyMaps;
+          _errorMessage = null;
+          _clmElements = [];
+        });
+        return;
+      }
+    } catch (_) {}
+
+    // Unrecognized
+    setState(() {
+      _errorMessage =
+          'Unrecognized link format. Use a CLM Maps link (clm-maps.web.app/map/...) or a Google My Maps link.';
+      _detectedLinkType = null;
+      _clmElements = [];
+    });
+  }
+
+  /// Resolve a CLM Maps share code → load map → extract elements.
+  Future<void> _loadClmMap(String shareCode) async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+      _detectedLinkType = _LinkType.clmMaps;
+      _clmElements = [];
+      _clmMapName = null;
+    });
+
+    try {
+      final linkData = await MapLinkService().resolveShareCode(shareCode);
+      if (!mounted) return;
+      if (linkData == null) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = 'Share link not found';
+        });
+        return;
+      }
+
+      final map = await ShareableMapsFirestoreService()
+          .getMap(linkData.monthKey, linkData.mapId);
+      if (!mounted) return;
+      if (map == null) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = 'Map not found';
+        });
+        return;
+      }
+
+      final elements = <_ImportableElement>[];
+      for (final layer in map.layers) {
+        for (final poly in layer.polygons) {
+          elements.add(_ImportableElement(
+            layerName: layer.name,
+            name: poly.name.isNotEmpty ? poly.name : 'Unnamed polygon',
+            typeLabel: 'Polygon',
+            icon: Icons.pentagon_outlined,
+            color: poly.color,
+            polygon: poly,
+            polyline: null,
+            point: null,
+          ));
+        }
+        for (final pl in layer.polylines) {
+          elements.add(_ImportableElement(
+            layerName: layer.name,
+            name: pl.name.isNotEmpty ? pl.name : 'Unnamed polyline',
+            typeLabel: 'Polyline',
+            icon: Icons.timeline,
+            color: pl.color,
+            polygon: null,
+            polyline: pl,
+            point: null,
+          ));
+        }
+        for (final pt in layer.points) {
+          elements.add(_ImportableElement(
+            layerName: layer.name,
+            name: pt.name.isNotEmpty ? pt.name : 'Unnamed point',
+            typeLabel: 'Point',
+            icon: Icons.place,
+            color: pt.color,
+            polygon: null,
+            polyline: null,
+            point: pt,
+          ));
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _clmMapName = map.name;
+        _clmElements = elements;
+        if (elements.isEmpty) {
+          _errorMessage = 'Map has no elements to import';
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'Failed to load map: $e';
+      });
+    }
+  }
+
+  /// Import selected CLM elements into the shareable map.
+  void _importSelectedClmElements() {
+    final selected = _clmElements.where((e) => e.selected).toList();
+    if (selected.isEmpty) return;
+
+    final provider = ref.read(shareableMapRiverpod);
+
+    if (provider.currentMap == null) {
+      provider.createNewMap(
+        name: _clmMapName ?? 'Imported Map',
+        description: 'Imported from CLM Maps link',
+      );
+    }
+
+    provider.createLayer(
+      name: 'Imported - ${_clmMapName ?? 'CLM Maps'}',
+      description: 'Imported on ${DateTime.now()}',
+    );
+
+    final layer = provider.selectedLayer;
+    if (layer == null || provider.currentMap == null) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Failed to create import layer';
+        });
+      }
+      return;
+    }
+
+    var updatedLayer = layer;
+    for (final el in selected) {
+      if (el.polygon != null) {
+        updatedLayer = updatedLayer.addPolygon(el.polygon!);
+      } else if (el.polyline != null) {
+        updatedLayer = updatedLayer.addPolyline(el.polyline!);
+      } else if (el.point != null) {
+        updatedLayer = updatedLayer.addPoint(el.point!);
+      }
+    }
+
+    final updatedMap = provider.currentMap!.updateLayer(layer.id, updatedLayer);
+    provider.loadMap(updatedMap);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Imported ${selected.length} element(s) from CLM Maps'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      Navigator.pop(context, true);
+    }
   }
 
   Widget _buildCloudImportSection() {
@@ -206,15 +509,14 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
                               fontWeight: FontWeight.bold,
                               color: Colors.green)),
                       Text(linkedFolder,
-                          style: TextStyle(
-                              fontSize: 11, color: Colors.grey[600]),
+                          style:
+                              TextStyle(fontSize: 11, color: Colors.grey[600]),
                           overflow: TextOverflow.ellipsis),
                     ],
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.link_off,
-                      color: Colors.red, size: 18),
+                  icon: const Icon(Icons.link_off, color: Colors.red, size: 18),
                   tooltip: 'Unlink folder',
                   onPressed: () {
                     provider.unlinkCloudFolder();
@@ -259,10 +561,9 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
                       _cloudProvider.breadcrumbs[i].name,
                       style: TextStyle(
                         fontSize: 12,
-                        fontWeight:
-                            i == _cloudProvider.breadcrumbs.length - 1
-                                ? FontWeight.bold
-                                : FontWeight.normal,
+                        fontWeight: i == _cloudProvider.breadcrumbs.length - 1
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                         color: i == _cloudProvider.breadcrumbs.length - 1
                             ? Colors.blue
                             : Colors.grey[700],
@@ -286,12 +587,12 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
                 style: const TextStyle(fontSize: 13),
               ),
               onPressed: () {
+                final folderName = _cloudProvider.breadcrumbs.last.name;
                 provider.linkCloudFolder(_cloudProvider.currentPath);
-                setState(() {});
+                Navigator.of(context).pop();
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
-                    content: Text(
-                        'Folder linked: ${_cloudProvider.breadcrumbs.last.name}'),
+                    content: Text('Folder linked: $folderName'),
                     backgroundColor: Colors.green,
                   ),
                 );
@@ -680,4 +981,29 @@ class _SummaryChip extends StatelessWidget {
       padding: EdgeInsets.zero,
     );
   }
+}
+
+enum _LinkType { clmMaps, googleMyMaps }
+
+class _ImportableElement {
+  final String layerName;
+  final String name;
+  final String typeLabel;
+  final IconData icon;
+  final Color color;
+  final CustomPolygon? polygon;
+  final MapPolyline? polyline;
+  final MapPoint? point;
+  bool selected = true;
+
+  _ImportableElement({
+    required this.layerName,
+    required this.name,
+    required this.typeLabel,
+    required this.icon,
+    required this.color,
+    required this.polygon,
+    required this.polyline,
+    required this.point,
+  });
 }

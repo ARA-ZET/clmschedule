@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_job_status.dart';
+import '../services/reference_cache_service.dart';
+
+const String _kCollectionName = 'jobStatuses';
 
 final jobStatusRiverpod = riverpod.ChangeNotifierProvider<JobStatusProvider>(
     (ref) => JobStatusProvider());
@@ -25,17 +28,16 @@ class JobStatusProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final QuerySnapshot snapshot =
-          await _firestore.collection('jobStatuses').orderBy('order').get();
+      _statuses = await ReferenceCacheService.loadCollection<CustomJobStatus>(
+        query: _firestore.collection(_kCollectionName).orderBy('order'),
+        collectionName: _kCollectionName,
+        fromDoc: (doc) =>
+            CustomJobStatus.fromMap(doc.data() as Map<String, dynamic>),
+      );
 
-      if (snapshot.docs.isEmpty) {
+      if (_statuses.isEmpty) {
         // Initialize with default statuses if none exist
         await initializeDefaultStatuses();
-      } else {
-        _statuses = snapshot.docs
-            .map((doc) =>
-                CustomJobStatus.fromMap(doc.data() as Map<String, dynamic>))
-            .toList();
       }
     } catch (e) {
       if (kDebugMode) {
@@ -55,11 +57,12 @@ class JobStatusProvider extends ChangeNotifier {
 
     final batch = _firestore.batch();
     for (final status in defaultStatuses) {
-      final docRef = _firestore.collection('jobStatuses').doc(status.id);
+      final docRef = _firestore.collection(_kCollectionName).doc(status.id);
       batch.set(docRef, status.toMap());
     }
 
     await batch.commit();
+    await ReferenceCacheService.bumpVersion(_kCollectionName);
     _statuses = defaultStatuses;
   }
 
@@ -67,9 +70,10 @@ class JobStatusProvider extends ChangeNotifier {
   Future<void> addStatus(CustomJobStatus status) async {
     try {
       await _firestore
-          .collection('jobStatuses')
+          .collection(_kCollectionName)
           .doc(status.id)
           .set(status.toMap());
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
 
       _statuses.add(status);
       _sortStatuses();
@@ -86,9 +90,10 @@ class JobStatusProvider extends ChangeNotifier {
   Future<void> updateStatus(CustomJobStatus status) async {
     try {
       await _firestore
-          .collection('jobStatuses')
+          .collection(_kCollectionName)
           .doc(status.id)
           .update(status.toMap());
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
 
       final index = _statuses.indexWhere((s) => s.id == status.id);
       if (index != -1) {
@@ -112,7 +117,8 @@ class JobStatusProvider extends ChangeNotifier {
     }
 
     try {
-      await _firestore.collection('jobStatuses').doc(statusId).delete();
+      await _firestore.collection(_kCollectionName).doc(statusId).delete();
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
 
       _statuses.removeWhere((s) => s.id == statusId);
       notifyListeners();
@@ -193,11 +199,12 @@ class JobStatusProvider extends ChangeNotifier {
 
       for (int i = 0; i < newOrder.length; i++) {
         final status = newOrder[i].copyWith(order: i);
-        final docRef = _firestore.collection('jobStatuses').doc(status.id);
+        final docRef = _firestore.collection(_kCollectionName).doc(status.id);
         batch.update(docRef, {'order': i});
       }
 
       await batch.commit();
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
 
       _statuses =
           newOrder.map((s) => s.copyWith(order: newOrder.indexOf(s))).toList();

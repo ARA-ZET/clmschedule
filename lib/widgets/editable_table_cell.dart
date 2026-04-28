@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/collection_job.dart';
+import '../providers/job_type_provider.dart';
 import '../providers/scale_provider.dart';
 import '../providers/collection_schedule_provider.dart';
 
@@ -201,11 +202,9 @@ class EditableDateCell extends StatelessWidget {
   });
 
   bool _needsTimeDisplay() {
-    return jobTypeId == 'junkCollection' ||
-        jobTypeId == 'furnitureMove' ||
-        jobTypeId == 'trailerTowing' ||
-        jobTypeId == 'windowCleaning' ||
-        jobTypeId == 'solarPanelCleaning';
+    final provider = JobTypeProvider.instance;
+    if (provider == null || jobTypeId == null) return false;
+    return provider.needsTimeSlot(jobTypeId!);
   }
 
   List<TimeOfDay> _getAvailableTimeSlots() {
@@ -259,9 +258,8 @@ class EditableDateCell extends StatelessWidget {
                         // Get occupied time slots for conflict info
                         final occupiedSlots = <String>[];
                         if (jobData != null &&
-                            (jobTypeId == 'junkCollection' ||
-                                jobTypeId == 'furnitureMove' ||
-                                jobTypeId == 'trailerTowing')) {
+                            jobTypeId != null &&
+                            VehicleTrailerCombo.isVehicleJobType(jobTypeId!)) {
                           VehicleType? vehicleType;
 
                           if (jobData!.containsKey('vehicleType')) {
@@ -289,9 +287,9 @@ class EditableDateCell extends StatelessWidget {
                             children: [
                               Text('Select Time'),
                               if (jobData != null &&
-                                  (jobTypeId == 'junkCollection' ||
-                                      jobTypeId == 'furnitureMove' ||
-                                      jobTypeId == 'trailerTowing')) ...[
+                                  jobTypeId != null &&
+                                  VehicleTrailerCombo.isVehicleJobType(
+                                      jobTypeId!)) ...[
                                 const SizedBox(height: 4),
                                 Text(
                                   '${jobData!['vehicleType']?.toString().toUpperCase() ?? 'VEHICLE'} - ${DateFormat('dd MMM yyyy').format(date)}',
@@ -326,9 +324,9 @@ class EditableDateCell extends StatelessWidget {
                                 String conflictDetails = '';
                                 Color conflictColor = Colors.red;
 
-                                if (jobTypeId == 'junkCollection' ||
-                                    jobTypeId == 'furnitureMove' ||
-                                    jobTypeId == 'trailerTowing') {
+                                if (jobTypeId != null &&
+                                    VehicleTrailerCombo.isVehicleJobType(
+                                        jobTypeId!)) {
                                   // Try to get vehicle type from the job data
                                   if (jobData != null) {
                                     VehicleType? vehicleType;
@@ -841,13 +839,15 @@ class _LinkCellState extends riverpod.ConsumerState<LinkCell> {
 
 class EditableVehicleComboCell extends riverpod.ConsumerStatefulWidget {
   final int quantity;
+  final String vehicleTrailerCombo;
   final String jobTypeId;
-  final Function(int) onSave;
+  final Function(int quantity, String vehicleTrailerCombo) onSave;
   final double? width;
 
   const EditableVehicleComboCell({
     super.key,
     required this.quantity,
+    this.vehicleTrailerCombo = '',
     required this.jobTypeId,
     required this.onSave,
     this.width,
@@ -861,67 +861,30 @@ class EditableVehicleComboCell extends riverpod.ConsumerStatefulWidget {
 class _EditableVehicleComboCellState
     extends riverpod.ConsumerState<EditableVehicleComboCell> {
   bool _isEditing = false;
-  String? _selectedCombo;
+  VehicleTrailerCombo? _selectedCombo;
 
   @override
   void initState() {
     super.initState();
-    _selectedCombo = _getVehicleTrailerComboFromQuantity(widget.quantity);
+    _selectedCombo = VehicleTrailerCombo.tryParse(widget.vehicleTrailerCombo) ??
+        VehicleTrailerCombo.fromLegacyQuantity(widget.quantity,
+            jobTypeId: widget.jobTypeId);
+    // Ensure the combo is valid for this job type
+    final validCombos = VehicleTrailerCombo.forJobType(widget.jobTypeId);
+    if (_selectedCombo != null && !validCombos.contains(_selectedCombo)) {
+      _selectedCombo = null;
+    }
     // If no valid combo found, default to first option
-    if (_selectedCombo == null && _needsVehicleCombo(widget.jobTypeId)) {
-      _selectedCombo = _getVehicleTrailerCombinations().first;
+    if (_selectedCombo == null &&
+        VehicleTrailerCombo.isVehicleJobType(widget.jobTypeId)) {
+      _selectedCombo = validCombos.first;
     }
-  }
-
-  // Helper methods for vehicle/trailer combinations
-  List<String> _getVehicleTrailerCombinations() {
-    // For trailer towing, only show no-trailer combinations
-    if (widget.jobTypeId == 'trailerTowing') {
-      return [
-        'Hyundai - No Trailer',
-        'Mahindra - No Trailer',
-        'Nissan - No Trailer',
-      ];
-    }
-
-    return [
-      'Hyundai - No Trailer',
-      'Hyundai - Big Trailer',
-      'Hyundai - Small Trailer',
-      'Mahindra - No Trailer',
-      'Mahindra - Big Trailer',
-      'Mahindra - Small Trailer',
-      'Nissan - No Trailer',
-      'Nissan - Big Trailer',
-      'Nissan - Small Trailer',
-    ];
-  }
-
-  String? _getVehicleTrailerComboFromQuantity(int quantity) {
-    final combinations = _getVehicleTrailerCombinations();
-    if (quantity >= 1 && quantity <= combinations.length) {
-      return combinations[quantity - 1];
-    }
-    return null;
-  }
-
-  int _getQuantityFromVehicleTrailerCombo(String? combo) {
-    if (combo == null) return 1;
-    final combinations = _getVehicleTrailerCombinations();
-    final index = combinations.indexOf(combo);
-    return index >= 0 ? index + 1 : 1;
-  }
-
-  bool _needsVehicleCombo(String jobTypeId) {
-    return jobTypeId == 'junkCollection' ||
-        jobTypeId == 'furnitureMove' ||
-        jobTypeId == 'trailerTowing';
   }
 
   void _saveChanges() {
     if (_selectedCombo != null) {
-      final newQuantity = _getQuantityFromVehicleTrailerCombo(_selectedCombo);
-      widget.onSave(newQuantity);
+      widget.onSave(_selectedCombo!.legacyQuantity(jobTypeId: widget.jobTypeId),
+          _selectedCombo!.name);
     }
     setState(() {
       _isEditing = false;
@@ -933,7 +896,7 @@ class _EditableVehicleComboCellState
     return riverpod.Consumer(
       builder: (context, ref, child) {
         final scaleProvider = ref.watch(scaleRiverpod);
-        if (!_needsVehicleCombo(widget.jobTypeId)) {
+        if (!VehicleTrailerCombo.isVehicleJobType(widget.jobTypeId)) {
           // For non-vehicle combo job types, show simple quantity
           return SizedBox(
             width: widget.width,
@@ -956,8 +919,8 @@ class _EditableVehicleComboCellState
             width: widget.width,
             child: Container(
               padding: const EdgeInsets.all(2.0),
-              child: DropdownButtonFormField<String>(
-                initialValue: _selectedCombo,
+              child: DropdownButtonFormField<VehicleTrailerCombo>(
+                value: _selectedCombo,
                 decoration: const InputDecoration(
                   isDense: true,
                   contentPadding:
@@ -968,11 +931,12 @@ class _EditableVehicleComboCellState
                     fontSize: scaleProvider.mediumFontSize,
                     fontWeight: FontWeight.bold),
                 isExpanded: true,
-                items: _getVehicleTrailerCombinations().map((combo) {
-                  return DropdownMenuItem<String>(
+                items: VehicleTrailerCombo.forJobType(widget.jobTypeId)
+                    .map((combo) {
+                  return DropdownMenuItem<VehicleTrailerCombo>(
                     value: combo,
                     child: Text(
-                      combo,
+                      combo.label,
                       style: TextStyle(
                           fontSize: scaleProvider.mediumFontSize,
                           fontWeight: FontWeight.bold),
@@ -1014,7 +978,7 @@ class _EditableVehicleComboCellState
                 children: [
                   Expanded(
                     child: Text(
-                      _selectedCombo ?? widget.quantity.toString(),
+                      _selectedCombo?.label ?? widget.quantity.toString(),
                       style: TextStyle(
                           fontSize: scaleProvider.mediumFontSize,
                           fontWeight: FontWeight.bold,

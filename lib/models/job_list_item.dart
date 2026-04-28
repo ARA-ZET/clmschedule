@@ -1,8 +1,10 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../providers/job_type_provider.dart';
 import 'job_list_item_update.dart';
 import 'custom_polygon.dart';
 import 'job_reminder.dart';
 import 'happy_sun_shared.dart';
+import 'collection_job.dart';
 
 // Legacy enum for backwards compatibility during migration
 enum JobListStatus {
@@ -95,6 +97,8 @@ class JobListItem {
       toolsNeeded; // Tools needed for Happy Sun jobs (window/solar cleaning)
   final String shareableMapId; // Link to ShareableMap document
   final String storageFolderPath; // Cloud Storage folder for tracks/waypoints
+  final String
+      vehicleTrailerCombo; // Vehicle+trailer enum name for collection jobs
 
   JobListItem({
     required this.id,
@@ -122,6 +126,8 @@ class JobListItem {
     this.toolsNeeded, // Optional tools for Happy Sun jobs
     this.shareableMapId = '', // Optional link to shareable map
     this.storageFolderPath = '', // Optional cloud storage folder path
+    this.vehicleTrailerCombo =
+        '', // Optional vehicle+trailer combo for collection jobs
   });
 
   // Create from Firestore
@@ -213,7 +219,31 @@ class JobListItem {
           : null,
       shareableMapId: data['shareableMapId'] as String? ?? '',
       storageFolderPath: data['storageFolderPath'] as String? ?? '',
+      vehicleTrailerCombo: _resolveVehicleTrailerCombo(
+        data['vehicleTrailerCombo'] as String?,
+        data['quantity'] as int? ?? 0,
+        data['jobType'] as String? ?? '',
+      ),
     );
+  }
+
+  /// Resolve vehicleTrailerCombo from Firestore data with legacy quantity fallback.
+  static String _resolveVehicleTrailerCombo(
+      String? stored, int quantity, String jobTypeId) {
+    // If new field exists and is valid, use it
+    if (stored != null &&
+        stored.isNotEmpty &&
+        VehicleTrailerCombo.tryParse(stored) != null) {
+      return stored;
+    }
+    // Fall back to converting from legacy quantity for vehicle job types
+    if (VehicleTrailerCombo.isVehicleJobType(jobTypeId) && quantity >= 1) {
+      return VehicleTrailerCombo.fromLegacyQuantity(quantity,
+                  jobTypeId: jobTypeId)
+              ?.name ??
+          '';
+    }
+    return '';
   }
 
   // Convert to Firestore
@@ -244,6 +274,8 @@ class JobListItem {
       if (toolsNeeded != null) 'toolsNeeded': toolsNeeded!.toMap(),
       if (shareableMapId.isNotEmpty) 'shareableMapId': shareableMapId,
       if (storageFolderPath.isNotEmpty) 'storageFolderPath': storageFolderPath,
+      if (vehicleTrailerCombo.isNotEmpty)
+        'vehicleTrailerCombo': vehicleTrailerCombo,
     };
   }
 
@@ -273,6 +305,7 @@ class JobListItem {
     List<JobReminder>? reminders,
     String? shareableMapId,
     String? storageFolderPath,
+    String? vehicleTrailerCombo,
   }) {
     return JobListItem(
       id: id,
@@ -299,6 +332,7 @@ class JobListItem {
       reminders: reminders ?? this.reminders,
       shareableMapId: shareableMapId ?? this.shareableMapId,
       storageFolderPath: storageFolderPath ?? this.storageFolderPath,
+      vehicleTrailerCombo: vehicleTrailerCombo ?? this.vehicleTrailerCombo,
     );
   }
 
@@ -326,6 +360,7 @@ class JobListItem {
     String? collectionJobId,
     List<CustomPolygon>? customPolygons,
     List<JobReminder>? reminders,
+    String? vehicleTrailerCombo,
     // Helper functions to resolve display labels
     String? Function(String statusId)? resolveJobStatusLabel,
     String? Function(String statusId)? resolveInvoiceStatusLabel,
@@ -427,6 +462,22 @@ class JobListItem {
             this.quantity, jobTypeId ?? this.jobTypeId),
         newValueDisplay:
             resolveQuantityLabel?.call(quantity, jobTypeId ?? this.jobTypeId),
+      ));
+    }
+
+    if (vehicleTrailerCombo != null &&
+        vehicleTrailerCombo != this.vehicleTrailerCombo) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'vehicleTrailerCombo',
+        oldValue: this.vehicleTrailerCombo,
+        newValue: vehicleTrailerCombo,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+        oldValueDisplay:
+            VehicleTrailerCombo.tryParse(this.vehicleTrailerCombo)?.label,
+        newValueDisplay:
+            VehicleTrailerCombo.tryParse(vehicleTrailerCombo)?.label,
       ));
     }
 
@@ -566,6 +617,7 @@ class JobListItem {
       updates: newUpdates,
       customPolygons: customPolygons,
       reminders: reminders ?? this.reminders,
+      vehicleTrailerCombo: vehicleTrailerCombo,
     );
   }
 
@@ -590,13 +642,13 @@ class JobListItem {
     return _isSameDay(date1, date2);
   }
 
-  // Helper method to check if job type needs time display
+  // Helper method to check if job type needs time display.
+  // Resolved via the [JobTypeProvider] static instance so we stay fully
+  // data-driven and never hardcode job-type ids here.
   bool _needsTimeDisplay() {
-    return jobTypeId == 'junkCollection' ||
-        jobTypeId == 'furnitureMove' ||
-        jobTypeId == 'trailerTowing' ||
-        jobTypeId == 'windowCleaning' ||
-        jobTypeId == 'solarPanelCleaning';
+    final provider = JobTypeProvider.instance;
+    if (provider == null) return false;
+    return provider.needsTimeSlot(jobTypeId);
   }
 
   // Backwards compatibility getter - converts jobStatusId back to JobListStatus enum

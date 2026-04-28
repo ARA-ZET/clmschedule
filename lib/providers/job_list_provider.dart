@@ -2,19 +2,15 @@ import 'package:flutter/material.dart';
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
-import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
-import 'package:intl/intl.dart';
 import '../models/job_list_item.dart';
 import '../models/job_list_item_update.dart';
 import '../models/job_reminder.dart';
 import '../services/job_list_service.dart';
-import '../services/gpx_storage_service.dart';
-import '../shareable_maps/models/shareable_map.dart';
-import '../shareable_maps/models/map_layer.dart';
 import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 import '../shareable_maps/services/map_link_service.dart';
 import '../config/flavor_config.dart';
 import 'auth_provider.dart';
+import 'job_type_provider.dart';
 
 final jobListRiverpod = riverpod.ChangeNotifierProvider<JobListProvider>(
   (ref) => JobListProvider(
@@ -208,8 +204,8 @@ class JobListProvider extends ChangeNotifier {
     final filtered = source.where((item) {
       // Happy Sun flavor filter
       if (isHappySun &&
-          item.jobTypeId != 'windowCleaning' &&
-          item.jobTypeId != 'solarPanelCleaning') {
+          !(JobTypeProvider.instance?.isHappySunService(item.jobTypeId) ??
+              false)) {
         return false;
       }
 
@@ -327,12 +323,16 @@ class JobListProvider extends ChangeNotifier {
     debugPrint(
         'JobListProvider: Setting up listener for month: ${_jobListService.getMonthlyDocumentId(_currentMonth)}');
 
-    // For Happy Sun flavor, only listen to window cleaning and solar panel jobs
+    // For Happy Sun flavor, only listen to Happy Sun-flagged job types.
     List<String>? jobTypesFilter;
     if (FlavorConfig.instance.isHappySun) {
-      jobTypesFilter = ['windowCleaning', 'solarPanelCleaning'];
+      final ids =
+          JobTypeProvider.instance?.happySunServiceTypeIds ?? const <String>[];
+      // Firestore whereIn requires a non-empty list — fall back to a
+      // sentinel that matches nothing so the query stays valid.
+      jobTypesFilter = ids.isEmpty ? ['__none__'] : ids;
       debugPrint(
-          'JobListProvider: Happy Sun flavor - filtering to window cleaning & solar panel jobs only');
+          'JobListProvider: Happy Sun flavor - filtering to ${jobTypesFilter.length} flagged job types');
     }
 
     _jobListSubscription =
@@ -354,8 +354,8 @@ class JobListProvider extends ChangeNotifier {
           for (final job in jobListItems) {
             if (!previousKnownIds.contains(job.id) &&
                 !_locallyAddedJobIds.contains(job.id) &&
-                (job.jobTypeId == 'windowCleaning' ||
-                    job.jobTypeId == 'solarPanelCleaning')) {
+                (JobTypeProvider.instance?.isHappySunService(job.jobTypeId) ??
+                    false)) {
               // New Happy Sun job detected - trigger sync asynchronously
               debugPrint(
                   '🆕 JobListProvider: New Happy Sun job detected: ${job.id}');
@@ -538,6 +538,7 @@ class JobListProvider extends ChangeNotifier {
         item1.invoiceDetails == item2.invoiceDetails &&
         item1.reportAddresses == item2.reportAddresses &&
         item1.whoToInvoice == item2.whoToInvoice &&
+        item1.vehicleTrailerCombo == item2.vehicleTrailerCombo &&
         _areRemindersEqual(item1.reminders, item2.reminders);
   }
 
@@ -584,13 +585,12 @@ class JobListProvider extends ChangeNotifier {
     return _isSameDay(date1, date2);
   }
 
-  // Helper method to check if job type needs time display
+  // Helper method to check if job type needs time display.
+  // Delegates to [JobTypeProvider] so behaviour is flag-driven.
   bool _needsTimeDisplay(String jobTypeId) {
-    return jobTypeId == 'junkCollection' ||
-        jobTypeId == 'furnitureMove' ||
-        jobTypeId == 'trailerTowing' ||
-        jobTypeId == 'windowCleaning' ||
-        jobTypeId == 'solarPanelCleaning';
+    final provider = JobTypeProvider.instance;
+    if (provider == null) return false;
+    return provider.needsTimeSlot(jobTypeId);
   }
 
   // Process all pending updates as batch to database
@@ -695,11 +695,7 @@ class JobListProvider extends ChangeNotifier {
   // Add job list item
   Future<void> addJobListItem(JobListItem jobListItem) async {
     try {
-      final generatedId =
-          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
-
-      // Auto-create linked shareable map and storage folder
-      _autoCreateMapAndFolder(generatedId, jobListItem);
+      await _jobListService.addJobListItem(jobListItem, jobListItem.date);
 
       // NOTE: Do NOT trigger Happy Sun sync here because we don't have the generated ID yet.
       // The Firestore listener will pick up the new job, and if needed, callers should use
@@ -716,9 +712,6 @@ class JobListProvider extends ChangeNotifier {
     try {
       final generatedId =
           await _jobListService.addJobListItem(jobListItem, jobListItem.date);
-
-      // Auto-create linked shareable map and storage folder
-      final result = await _autoCreateMapAndFolder(generatedId, jobListItem);
 
       final savedJob = JobListItem(
         id: generatedId,
@@ -740,17 +733,15 @@ class JobListProvider extends ChangeNotifier {
         reportAddresses: jobListItem.reportAddresses,
         whoToInvoice: jobListItem.whoToInvoice,
         collectionJobId: jobListItem.collectionJobId,
-        shareableMapId: result.$1,
-        storageFolderPath: result.$2,
       );
 
       // Track this job as locally added to prevent duplicate sync from listener
       _locallyAddedJobIds.add(savedJob.id);
 
-      // Trigger Happy Sun sync if job is window/solar cleaning
+      // Trigger Happy Sun sync if job is a Happy Sun-flagged type
       if (_onJobListItemAdded != null &&
-          (savedJob.jobTypeId == 'windowCleaning' ||
-              savedJob.jobTypeId == 'solarPanelCleaning')) {
+          (JobTypeProvider.instance?.isHappySunService(savedJob.jobTypeId) ??
+              false)) {
         debugPrint(
             '🔄 JobListProvider: Triggering Happy Sun sync for ${savedJob.id}');
         await _onJobListItemAdded!(savedJob);
@@ -769,11 +760,7 @@ class JobListProvider extends ChangeNotifier {
   // Add job list item without allocation (skip schedule assignment)
   Future<void> addJobListItemWithoutAllocation(JobListItem jobListItem) async {
     try {
-      final generatedId =
-          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
-
-      // Auto-create linked shareable map and storage folder
-      _autoCreateMapAndFolder(generatedId, jobListItem);
+      await _jobListService.addJobListItem(jobListItem, jobListItem.date);
 
       // NOTE: Happy Sun sync will be triggered by the Firestore listener when it detects the new job
       // This prevents issues with missing/temporary IDs
@@ -782,122 +769,6 @@ class JobListProvider extends ChangeNotifier {
       notifyListeners();
       rethrow;
     }
-  }
-
-  /// Creates a shareable map and storage folder for a newly created job list item.
-  /// Copies customPolygons into the map, generates share link for area field.
-  /// Returns (shareableMapId, storageFolderPath). Non-fatal on failure.
-  Future<(String, String)> _autoCreateMapAndFolder(
-      String jobId, JobListItem jobListItem) async {
-    String storageFolderPath = '';
-    String shareableMapId = '';
-    try {
-      final gpxStorage = GpxStorageService();
-      final roundNumber = await gpxStorage.nextRoundNumber(
-          jobListItem.date, jobListItem.client);
-      storageFolderPath = gpxStorage.roundFolderPath(
-          jobListItem.date, jobListItem.client, roundNumber);
-
-      // Build map layers — include job's customPolygons if present
-      final now = DateTime.now();
-      final defaultLayer = MapLayer.create(
-        name: jobListItem.area.isNotEmpty ? jobListItem.area : 'Layer 1',
-        description: 'Target areas for ${jobListItem.client}',
-        order: 0,
-      );
-      final layerWithPolygons = jobListItem.customPolygons.isNotEmpty
-          ? MapLayer(
-              id: defaultLayer.id,
-              name: defaultLayer.name,
-              description: defaultLayer.description,
-              order: 0,
-              defaultColor: defaultLayer.defaultColor,
-              polygons: List.from(jobListItem.customPolygons),
-              createdAt: now,
-              updatedAt: now,
-            )
-          : defaultLayer;
-
-      // Compute center from polygons
-      LatLng? center;
-      if (jobListItem.customPolygons.isNotEmpty) {
-        double latSum = 0, lngSum = 0;
-        int count = 0;
-        for (final p in jobListItem.customPolygons) {
-          for (final pt in p.points) {
-            latSum += pt.latitude;
-            lngSum += pt.longitude;
-            count++;
-          }
-        }
-        if (count > 0) center = LatLng(latSum / count, lngSum / count);
-      }
-
-      final shareableMap = ShareableMap(
-        id: 'map_${now.millisecondsSinceEpoch}',
-        name: jobListItem.client,
-        description: '${jobListItem.area} - Round $roundNumber',
-        layers: [layerWithPolygons],
-        defaultCenter: center ?? const LatLng(-33.925, 18.425),
-        defaultZoom: 13.0,
-        createdAt: now,
-        updatedAt: now,
-        jobListItemId: jobId,
-        storageFolderPath: storageFolderPath,
-      );
-
-      // Create map in Firestore
-      final mapService =
-          ShareableMapsFirestoreService(firestore: FirebaseFirestore.instance);
-      final monthKey = DateFormat('MM-yyyy').format(jobListItem.date);
-      shareableMapId =
-          await mapService.createMap(shareableMap, monthKey: monthKey);
-
-      // Generate share link and build URL for area field
-      String areaLink = jobListItem.area;
-      try {
-        final linkService =
-            MapLinkService(firestore: FirebaseFirestore.instance);
-        final shareCode = await linkService.createShareLink(
-          monthKey: monthKey,
-          mapId: shareableMapId,
-          mapName: jobListItem.client,
-        );
-        areaLink = MapLinkService.buildShareUrl(shareCode);
-      } catch (e) {
-        debugPrint('⚠️ Share link creation failed: $e');
-      }
-
-      // Update Firestore job with the links and area URL
-      final jobWithId = JobListItem(
-        id: jobId,
-        invoice: jobListItem.invoice,
-        amount: jobListItem.amount,
-        client: jobListItem.client,
-        jobStatusId: jobListItem.jobStatusId,
-        invoiceStatusId: jobListItem.invoiceStatusId,
-        jobTypeId: jobListItem.jobTypeId,
-        area: areaLink,
-        quantity: jobListItem.quantity,
-        manDays: jobListItem.manDays,
-        date: jobListItem.date,
-        collectionAddress: jobListItem.collectionAddress,
-        collectionDate: jobListItem.collectionDate,
-        specialInstructions: jobListItem.specialInstructions,
-        quantityDistributed: jobListItem.quantityDistributed,
-        invoiceDetails: jobListItem.invoiceDetails,
-        reportAddresses: jobListItem.reportAddresses,
-        whoToInvoice: jobListItem.whoToInvoice,
-        collectionJobId: jobListItem.collectionJobId,
-        shareableMapId: shareableMapId,
-        storageFolderPath: storageFolderPath,
-        customPolygons: jobListItem.customPolygons,
-      );
-      await _jobListService.updateJobListItem(jobWithId, jobWithId.date);
-    } catch (e) {
-      debugPrint('⚠️ Auto-create shareable map failed: $e');
-    }
-    return (shareableMapId, storageFolderPath);
   }
 
   /// Links an existing shareable map to a job list item.
@@ -1096,6 +967,10 @@ class JobListProvider extends ChangeNotifier {
       whoToInvoice: updatedItem.whoToInvoice != originalItem.whoToInvoice
           ? updatedItem.whoToInvoice
           : null,
+      vehicleTrailerCombo:
+          updatedItem.vehicleTrailerCombo != originalItem.vehicleTrailerCombo
+              ? updatedItem.vehicleTrailerCombo
+              : null,
       collectionJobId:
           updatedItem.collectionJobId != originalItem.collectionJobId
               ? updatedItem.collectionJobId
@@ -1112,11 +987,11 @@ class JobListProvider extends ChangeNotifier {
     // Update locally first, then save
     updateJobListItemLocal(trackedItem);
 
-    // Trigger Happy Sun tools update if manDays changed for window/solar cleaning
+    // Trigger Happy Sun tools update if manDays changed for a Happy Sun-flagged type
     if (_onJobListItemUpdated != null &&
         updatedItem.manDays != originalItem.manDays &&
-        (updatedItem.jobTypeId == 'windowCleaning' ||
-            updatedItem.jobTypeId == 'solarPanelCleaning')) {
+        (JobTypeProvider.instance?.isHappySunService(updatedItem.jobTypeId) ??
+            false)) {
       _onJobListItemUpdated!(originalItem, updatedItem);
     }
   }

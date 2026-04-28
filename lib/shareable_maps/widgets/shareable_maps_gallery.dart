@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
+import '../../config/flavor_config.dart';
 import '../../env.dart';
+import '../../providers/unfinished_work_areas_provider.dart';
 import '../models/shareable_map.dart';
 import '../providers/shareable_maps_gallery_provider.dart';
 import '../providers/shareable_map_provider.dart';
@@ -213,10 +215,15 @@ class _ShareableMapsGalleryState
     );
     final monthKey = ShareableMapsFirestoreService.monthKeyFor(DateTime.now());
     final service = ShareableMapsFirestoreService();
+    final UnfinishedWorkAreasProvider? unfinishedProvider =
+        FlavorConfig.instance.isMaps
+            ? null
+            : ref.read(unfinishedWorkAreasRiverpod);
     final adapter = FirestoreMapAdapter.create(
       seed: seed,
       monthKey: monthKey,
       service: service,
+      unfinishedProvider: unfinishedProvider,
     );
 
     final provider = ref.read(shareableMapRiverpod);
@@ -590,10 +597,15 @@ class _MapTile extends riverpod.ConsumerWidget {
     debugPrint('[MapOpen] START opening map ${item.docId}');
 
     final service = ShareableMapsFirestoreService();
+    final UnfinishedWorkAreasProvider? unfinishedProvider =
+        FlavorConfig.instance.isMaps
+            ? null
+            : ref.read(unfinishedWorkAreasRiverpod);
     final adapter = FirestoreMapAdapter.existing(
       docId: item.docId,
       monthKey: item.monthKey,
       service: service,
+      unfinishedProvider: unfinishedProvider,
     );
 
     final provider = ref.read(shareableMapRiverpod);
@@ -883,6 +895,111 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
 
   const _TilePopupMenu({required this.item});
 
+  Future<void> _duplicateMap(BuildContext context, riverpod.WidgetRef ref) async {
+    // Prompt for new map details
+    final nameController = TextEditingController(text: item.name + ' (Copy)');
+    final descController = TextEditingController(text: item.description);
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Duplicate Map'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'Map name',
+                hintText: 'e.g. Deliveries March 2026',
+              ),
+              autofocus: true,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: descController,
+              decoration: const InputDecoration(
+                labelText: 'Description (optional)',
+              ),
+              maxLines: 2,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('CANCEL'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(ctx, {
+                'name': nameController.text.trim(),
+                'description': descController.text.trim(),
+              });
+            },
+            child: const Text('DUPLICATE'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == null || !context.mounted) return;
+
+    final newName = result['name']!.isEmpty ? 'Untitled Map' : result['name']!;
+    final newDescription = result['description'] ?? '';
+
+    // Load the original map from Firestore
+    final service = ShareableMapsFirestoreService();
+    final originalMap = await service.getMap(item.monthKey, item.docId);
+    if (originalMap == null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to load original map.')),
+        );
+      }
+      return;
+    }
+
+    // Copy only local layers (exclude cloud-linked layers and storageFolderPath)
+    final filteredLayers = originalMap.layers.where((layer) {
+      // Exclude layers that are cloud overlays or linked to cloud folders
+      // (Assume cloud layers have a specific flag or name, adjust as needed)
+      // Here, we exclude layers with names containing 'Cloud' or 'cloud', and skip storageFolderPath
+      final lname = layer.name.toLowerCase();
+      return !lname.contains('cloud');
+    }).map((layer) => layer.copyWith()).toList();
+
+    final newMap = ShareableMap.createWithDefaultLayer(
+      name: newName,
+      description: newDescription,
+      defaultCenter: originalMap.defaultCenter,
+    ).copyWith(
+      layers: filteredLayers.isNotEmpty ? filteredLayers : null,
+      storageFolderPath: null,
+    );
+
+    // Save the new map
+    final monthKey = ShareableMapsFirestoreService.monthKeyFor(DateTime.now());
+    final newDocId = await service.createMap(newMap, monthKey: monthKey);
+
+    if (!context.mounted) return;
+
+    // Open the new map in the editor
+    final adapter = FirestoreMapAdapter.existing(
+      docId: newDocId,
+      monthKey: monthKey,
+      service: service,
+      unfinishedProvider: null,
+    );
+    final provider = ref.read(shareableMapRiverpod);
+    await provider.loadFromAdapter(adapter);
+    if (context.mounted) {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const ShareableMapEditor()),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     return PopupMenuButton<String>(
@@ -891,6 +1008,7 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
       constraints: const BoxConstraints(),
       itemBuilder: (_) => [
         const PopupMenuItem(value: 'share', child: Text('Share link')),
+        const PopupMenuItem(value: 'duplicate', child: Text('Duplicate')),
         const PopupMenuItem(value: 'rename', child: Text('Rename')),
         const PopupMenuItem(value: 'delete', child: Text('Delete')),
       ],
@@ -898,6 +1016,9 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
         switch (value) {
           case 'share':
             await _shareMap(context);
+            break;
+          case 'duplicate':
+            await _duplicateMap(context, ref);
             break;
           case 'rename':
             await _renameMap(context);
@@ -980,8 +1101,7 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
 
     try {
       final service = ShareableMapsFirestoreService();
-      await service
-          .updateMapFields(item.monthKey, item.docId, {'name': newName});
+      await service.updateMapFields(item.monthKey, item.docId, {'name': newName});
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1014,9 +1134,7 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
     if (confirm != true || !context.mounted) return;
 
     try {
-      await ref
-          .read(shareableMapsGalleryRiverpod)
-          .deleteMap(item.monthKey, item.docId);
+      await ref.read(shareableMapsGalleryRiverpod).deleteMap(item.monthKey, item.docId);
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

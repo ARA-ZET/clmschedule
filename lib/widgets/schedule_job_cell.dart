@@ -41,6 +41,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
     try {
       final unfinishedProvider = ref.read(unfinishedWorkAreasRiverpod);
 
+      // Step 1: Add to schedule (destination) first
       if (jobs.isNotEmpty) {
         // Cell already has a job — combine the unfinished item into it
         final targetJob = scheduleProvider.jobs.firstWhere(
@@ -48,19 +49,33 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
           orElse: () => jobs.first,
         );
 
-        final combinedClients = <String>{
-          ...targetJob.clients,
-          ...unfinishedItem.clients,
-        }.toList();
+        // Merge clients (case-insensitive dedupe, preserve original casing
+        // of whichever side the value appeared in first).
+        final combinedClients = _mergeStringsPreserveCase(
+          targetJob.clients,
+          unfinishedItem.clients,
+        );
 
-        final combinedWorkingAreas = <String>{
-          ...targetJob.workingAreas,
-          ...unfinishedItem.workingAreas,
-        }.toList();
+        // Merge working-area names the same way so labels aren't lost.
+        final combinedWorkingAreas = _mergeStringsPreserveCase(
+          targetJob.workingAreas,
+          unfinishedItem.workingAreas,
+        );
+
+        // Merge polygons / work maps. Target keeps priority; any polygon
+        // from the unfinished item whose (name, type) isn't already present
+        // is appended so polygons without names still flow through.
+        final combinedWorkMaps = _mergeWorkMaps(
+          targetJob.workMaps,
+          unfinishedItem.workMaps,
+        );
 
         final combinedJob = targetJob.copyWith(
           clients: combinedClients,
           workingAreas: combinedWorkingAreas,
+          workMaps: combinedWorkMaps,
+          // Inherit drop-off from unfinished item only when target lacks one.
+          dropOffPoint: targetJob.dropOffPoint ?? unfinishedItem.dropOffPoint,
         );
 
         await scheduleProvider.updateJobWithUndo(targetJob, combinedJob, date);
@@ -74,12 +89,31 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
           distributorId: distributor.id,
           date: date,
           statusId: unfinishedItem.statusId,
+          dropOffPoint: unfinishedItem.dropOffPoint,
         );
         await scheduleProvider.addJobWithUndo(newJob, date);
       }
 
-      // Remove from unfinished pool
-      await unfinishedProvider.removeItem(unfinishedItem.id);
+      // Step 2: Remove from source only after destination write succeeded
+      try {
+        await unfinishedProvider.removeItem(unfinishedItem.id);
+      } catch (removeError) {
+        // Add succeeded but remove failed — duplicate (recoverable)
+        debugPrint(
+            'Warning: Job assigned to schedule but failed to remove from unfinished: $removeError');
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                  'Job assigned but may still appear in unfinished list. Please remove it manually if so.'),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 4),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -98,6 +132,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
         );
       }
     } catch (e) {
+      // Add to schedule failed — nothing removed, no data loss
       debugPrint('Unfinished drop failed: $e');
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -110,6 +145,76 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
         );
       }
     }
+  }
+
+  /// Merge two lists of string tokens, deduplicating case-insensitively while
+  /// preserving the casing of the first occurrence. Empty / whitespace-only
+  /// entries are dropped.
+  static List<String> _mergeStringsPreserveCase(
+    List<String> a,
+    List<String> b,
+  ) {
+    final seen = <String>{};
+    final out = <String>[];
+    for (final v in [...a, ...b]) {
+      final trimmed = v.trim();
+      if (trimmed.isEmpty) continue;
+      final key = trimmed.toLowerCase();
+      if (seen.add(key)) out.add(trimmed);
+    }
+    return out;
+  }
+
+  /// Merge two polygon/work-map lists. The [target] list keeps priority.
+  ///
+  /// Incoming polygons whose `(type, name)` collides with an entry already
+  /// present get their name suffixed so no data is lost:
+  ///   * first collision  → `"<name> gap"`
+  ///   * further collisions → `"<name> gap1"`, `"<name> gap2"`, … (cumulative)
+  ///
+  /// Unnamed polygons are always appended as-is (no reliable way to
+  /// deduplicate geometry by name).
+  static List<CustomPolygon> _mergeWorkMaps(
+    List<CustomPolygon> target,
+    List<CustomPolygon> incoming,
+  ) {
+    String keyFor(String type, String name) => '$type::${name.trim()}';
+
+    // Seed the "used keys" set with everything already in the target.
+    final used = <String>{};
+    for (final p in target) {
+      final n = p.name.trim();
+      if (n.isNotEmpty) used.add(keyFor(p.type.toString(), n));
+    }
+
+    final merged = <CustomPolygon>[...target];
+    for (final p in incoming) {
+      final originalName = p.name.trim();
+      if (originalName.isEmpty) {
+        merged.add(p); // unnamed: keep, cannot dedupe safely
+        continue;
+      }
+
+      final typeStr = p.type.toString();
+      final originalKey = keyFor(typeStr, originalName);
+      if (used.add(originalKey)) {
+        merged.add(p);
+        continue;
+      }
+
+      // Collision — find next free "<name> gap" / "<name> gapN" suffix.
+      String candidate = '$originalName gap';
+      if (used.contains(keyFor(typeStr, candidate))) {
+        var n = 1;
+        while (used.contains(keyFor(typeStr, '$originalName gap$n'))) {
+          n++;
+        }
+        candidate = '$originalName gap$n';
+      }
+      used.add(keyFor(typeStr, candidate));
+      merged.add(p.copyWith(name: candidate));
+    }
+    return merged;
   }
 
   @override

@@ -13,6 +13,7 @@ import 'package:intl/intl.dart';
 import '../../models/work_area.dart';
 import '../models/styled_polygon.dart';
 import '../providers/te_map_layer_provider.dart';
+import '../providers/te_mode_provider.dart';
 import '../providers/te_tabs_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
@@ -26,6 +27,7 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final provider = ref.watch(teTabsRiverpod);
+    final mode = ref.watch(teModeRiverpod).mode;
     final tabIdx = provider.currentTab;
     final tab = provider.tabs[tabIdx];
 
@@ -55,6 +57,8 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
             waypoints: tab.waypoints,
             polygons: tab.polygons,
             storageFolderPath: tab.storageFolderPath,
+            sourceStoragePath: tab.sourceStoragePath,
+            mode: mode,
           ),
       ],
     );
@@ -629,6 +633,9 @@ class _TracksSection extends riverpod.ConsumerWidget {
                   if (!confirm) return;
                   ref.read(teTabsRiverpod).removeTrack(tabIdx, e.key);
                 },
+                onRename: (newName) {
+                  ref.read(teTabsRiverpod).renameTrack(tabIdx, e.key, newName);
+                },
               );
             },
           ),
@@ -639,17 +646,94 @@ class _TracksSection extends riverpod.ConsumerWidget {
   }
 }
 
-class _TrackCard extends StatelessWidget {
+class _TrackCard extends StatefulWidget {
   final int index;
   final Trk track;
   final VoidCallback? onDelete;
-  const _TrackCard({required this.index, required this.track, this.onDelete});
+  final ValueChanged<String>? onRename;
+  const _TrackCard({
+    required this.index,
+    required this.track,
+    this.onDelete,
+    this.onRename,
+  });
+
+  @override
+  State<_TrackCard> createState() => _TrackCardState();
+}
+
+class _TrackCardState extends State<_TrackCard> {
+  late final TextEditingController _nameCtrl;
+  late final FocusNode _nameFocus;
+  bool _editing = false;
+
+  String get _fallbackName => 'Track ${widget.index + 1}';
+  String get _displayName {
+    final raw = widget.track.name?.trim() ?? '';
+    return raw.isNotEmpty ? raw : _fallbackName;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _nameCtrl = TextEditingController(text: _displayName);
+    _nameFocus = FocusNode();
+    _nameFocus.addListener(() {
+      if (!_nameFocus.hasFocus && _editing) {
+        _commitRename();
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _TrackCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Sync the field when the underlying track was renamed from elsewhere
+    // (e.g. an undo/redo) and we're not mid-edit.
+    if (!_editing && _nameCtrl.text != _displayName) {
+      _nameCtrl.text = _displayName;
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _nameFocus.dispose();
+    super.dispose();
+  }
+
+  void _beginEdit() {
+    if (widget.onRename == null) return;
+    setState(() => _editing = true);
+    _nameCtrl.text = _displayName;
+    // Defer focus to next frame so the field is mounted.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _nameFocus.requestFocus();
+      _nameCtrl.selection =
+          TextSelection(baseOffset: 0, extentOffset: _nameCtrl.text.length);
+    });
+  }
+
+  void _commitRename() {
+    if (!_editing) return;
+    final newName = _nameCtrl.text.trim();
+    final currentRaw = widget.track.name?.trim() ?? '';
+    if (newName != currentRaw) {
+      widget.onRename?.call(newName);
+    }
+    setState(() => _editing = false);
+  }
+
+  void _cancelEdit() {
+    setState(() {
+      _editing = false;
+      _nameCtrl.text = _displayName;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    final stats = TETrackStats.fromTrack(track);
-    final rawName = track.name?.trim() ?? '';
-    final trackName = rawName.isNotEmpty ? rawName : 'Track ${index + 1}';
+    final stats = TETrackStats.fromTrack(widget.track);
 
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
@@ -674,26 +758,85 @@ class _TrackCard extends StatelessWidget {
               spacing: 6,
               children: [
                 const Icon(Icons.route, color: Colors.white, size: 14),
-                Text(
-                  trackName,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13),
-                  overflow: TextOverflow.ellipsis,
+                Expanded(
+                  child: _editing
+                      ? TextField(
+                          controller: _nameCtrl,
+                          focusNode: _nameFocus,
+                          autofocus: true,
+                          textInputAction: TextInputAction.done,
+                          onSubmitted: (_) => _commitRename(),
+                          onEditingComplete: _commitRename,
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13),
+                          cursorColor: Colors.white,
+                          decoration: InputDecoration(
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 4),
+                            filled: true,
+                            fillColor: Colors.white.withValues(alpha: 0.15),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(4),
+                              borderSide: BorderSide.none,
+                            ),
+                            suffixIcon: IconButton(
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(
+                                  minWidth: 24, minHeight: 24),
+                              icon: const Icon(Icons.close,
+                                  color: Colors.white70, size: 14),
+                              tooltip: 'Cancel',
+                              onPressed: _cancelEdit,
+                            ),
+                          ),
+                        )
+                      : InkWell(
+                          onTap: widget.onRename == null ? null : _beginEdit,
+                          borderRadius: BorderRadius.circular(3),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 2, vertical: 2),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    _displayName,
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 13),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                if (widget.onRename != null) ...[
+                                  const SizedBox(width: 4),
+                                  const Icon(Icons.edit,
+                                      size: 11, color: Colors.white54),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ),
                 ),
-                const Spacer(),
                 Text(stats.distanceLabel,
                     style: const TextStyle(
                         color: Colors.white,
                         fontSize: 13,
                         fontWeight: FontWeight.bold)),
-                if (onDelete != null) ...[
+                if (widget.onDelete != null) ...[
                   const SizedBox(width: 6),
-                  GestureDetector(
-                    onTap: onDelete,
-                    child: const Icon(Icons.delete_outline,
-                        color: Colors.white70, size: 16),
+                  InkWell(
+                    onTap: widget.onDelete,
+                    borderRadius: BorderRadius.circular(4),
+                    child: Padding(
+                      padding: const EdgeInsets.all(2),
+                      child: Icon(Icons.delete_outline,
+                          color: Colors.red.shade300, size: 18),
+                    ),
                   ),
                 ],
               ],
@@ -1044,13 +1187,17 @@ class _SaveTrimSection extends StatefulWidget {
   final List<Wpt> waypoints;
   final List<TEStyledPolygon> polygons;
   final String? storageFolderPath;
+  final String? sourceStoragePath;
+  final TEMode mode;
 
   const _SaveTrimSection({
     required this.tabTitle,
     required this.tracks,
     required this.waypoints,
     required this.polygons,
+    required this.mode,
     this.storageFolderPath,
+    this.sourceStoragePath,
   });
 
   @override
@@ -1061,6 +1208,7 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
   bool _saveBusy = false;
   bool _trimBusy = false;
   bool _cloudBusy = false;
+  bool _overwriteBusy = false;
 
   /// Client name derived from the tab title (original filename minus extension).
   String get _clientName {
@@ -1152,14 +1300,19 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       final fileName = _buildFileName('Track', widget.waypoints.length);
       final gpxContent = await fm.toGpxTracksString(widget.tracks);
 
-      String folderPath;
-      if (widget.storageFolderPath != null &&
-          widget.storageFolderPath!.isNotEmpty) {
-        folderPath = widget.storageFolderPath!;
-      } else {
-        final now = DateTime.now();
-        final roundNumber = await gpxStorage.nextRoundNumber(now, _clientName);
-        folderPath = gpxStorage.roundFolderPath(now, _clientName, roundNumber);
+      final folderPath = widget.storageFolderPath;
+      if (folderPath == null || folderPath.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'No cloud folder selected — pick a client folder via the processing panel first.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        if (mounted) setState(() => _cloudBusy = false);
+        return;
       }
 
       await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
@@ -1192,14 +1345,19 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       final fileName = _buildFileName('Waypoints', widget.waypoints.length);
       final gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
 
-      String folderPath;
-      if (widget.storageFolderPath != null &&
-          widget.storageFolderPath!.isNotEmpty) {
-        folderPath = widget.storageFolderPath!;
-      } else {
-        final now = DateTime.now();
-        final roundNumber = await gpxStorage.nextRoundNumber(now, _clientName);
-        folderPath = gpxStorage.roundFolderPath(now, _clientName, roundNumber);
+      final folderPath = widget.storageFolderPath;
+      if (folderPath == null || folderPath.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'No cloud folder selected — pick a client folder via the processing panel first.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        if (mounted) setState(() => _cloudBusy = false);
+        return;
       }
 
       await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
@@ -1221,6 +1379,116 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       }
     }
     if (mounted) setState(() => _cloudBusy = false);
+  }
+
+  /// Overwrite the original cloud file this tab was opened from with the
+  /// current tracks/waypoints, then rebuild the matching
+  /// `_compiled_waypoints.json` / `_compiled_tracks.json` aggregates.
+  Future<void> _onOverwriteSource(BuildContext context) async {
+    final sourcePath = widget.sourceStoragePath;
+    if (sourcePath == null || sourcePath.isEmpty) return;
+
+    final fileName = sourcePath.split('/').last;
+    final folderPath = sourcePath.contains('/')
+        ? sourcePath.substring(0, sourcePath.lastIndexOf('/'))
+        : '';
+
+    // Classify by content first, then fall back to the filename hint.
+    // A tab with only waypoints is unambiguous; same for tracks-only. Mixed
+    // content falls back to the filename to preserve the original role.
+    final bool hasWpts = widget.waypoints.isNotEmpty;
+    final bool hasTrks = widget.tracks.isNotEmpty;
+    final bool nameHintsWaypoints =
+        fileName.toLowerCase().contains('waypoint');
+    final bool writeWaypoints;
+    if (hasWpts && !hasTrks) {
+      writeWaypoints = true;
+    } else if (hasTrks && !hasWpts) {
+      writeWaypoints = false;
+    } else if (hasWpts && hasTrks) {
+      writeWaypoints = nameHintsWaypoints;
+    } else {
+      writeWaypoints = false; // nothing to write
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Overwrite cloud file?'),
+        content: Text(
+          'This will replace "$fileName" in cloud storage with the edits '
+          'from this tab.\n\nThe previous version cannot be recovered.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Overwrite'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _overwriteBusy = true);
+    try {
+      final fm = TEFileManager();
+      final gpxStorage = GpxStorageService();
+
+      final String gpxContent;
+      if (writeWaypoints && hasWpts) {
+        gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
+      } else if (hasTrks) {
+        gpxContent = await fm.toGpxTracksString(widget.tracks);
+      } else if (hasWpts) {
+        gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
+      } else {
+        throw StateError('Nothing to save: no tracks or waypoints.');
+      }
+
+      // Delete old, upload new (same filename).
+      await gpxStorage.deleteFile(sourcePath);
+      await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
+
+      // Rebuild the matching compiled aggregate(s).
+      int? rebuiltWpts;
+      int? rebuiltTrks;
+      if (folderPath.isNotEmpty) {
+        if (writeWaypoints) {
+          rebuiltWpts =
+              await gpxStorage.regenerateCompiledWaypoints(folderPath);
+        } else {
+          rebuiltTrks = await gpxStorage.regenerateCompiledTracks(folderPath);
+        }
+      }
+
+      if (mounted) {
+        final parts = <String>[];
+        if (rebuiltWpts != null) parts.add('waypoints: $rebuiltWpts');
+        if (rebuiltTrks != null) parts.add('tracks: $rebuiltTrks');
+        final suffix = parts.isEmpty ? '' : ' · compiled ${parts.join(', ')}';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Overwrote $fileName$suffix'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Overwrite failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+    if (mounted) setState(() => _overwriteBusy = false);
   }
 
   Future<void> _onTrim(BuildContext context) async {
@@ -1253,35 +1521,30 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       }
 
       // ── Upload to Cloud Storage ──────────────────────────────────────
+      // Only upload when the tab already has an explicit cloud folder.
+      // We never auto-create Round N folders here — that must come from a
+      // deliberate user folder choice in the processing panel.
       int cloudUploaded = 0;
-      try {
-        final gpxStorage = GpxStorageService();
-        String folderPath;
-        if (widget.storageFolderPath != null &&
-            widget.storageFolderPath!.isNotEmpty) {
-          // Use the pre-resolved path from the matched job
-          folderPath = widget.storageFolderPath!;
-        } else {
-          // Fallback: compute a new folder path
-          final now = DateTime.now();
-          final roundNumber =
-              await gpxStorage.nextRoundNumber(now, _clientName);
-          folderPath =
-              gpxStorage.roundFolderPath(now, _clientName, roundNumber);
+      final folderPath = widget.storageFolderPath;
+      if (folderPath != null && folderPath.isNotEmpty) {
+        try {
+          final gpxStorage = GpxStorageService();
+          if (trackFileName != null && trackGpxContent != null) {
+            await gpxStorage.uploadGpxFile(
+                folderPath, trackFileName, trackGpxContent);
+            cloudUploaded++;
+          }
+          if (wptsFileName != null && wptsGpxContent != null) {
+            await gpxStorage.uploadGpxFile(
+                folderPath, wptsFileName, wptsGpxContent);
+            cloudUploaded++;
+          }
+        } catch (e) {
+          debugPrint('⚠️ Cloud upload failed: $e');
         }
-
-        if (trackFileName != null && trackGpxContent != null) {
-          await gpxStorage.uploadGpxFile(
-              folderPath, trackFileName, trackGpxContent);
-          cloudUploaded++;
-        }
-        if (wptsFileName != null && wptsGpxContent != null) {
-          await gpxStorage.uploadGpxFile(
-              folderPath, wptsFileName, wptsGpxContent);
-          cloudUploaded++;
-        }
-      } catch (e) {
-        debugPrint('⚠️ Cloud upload failed: $e');
+      } else {
+        debugPrint(
+            '⚠️ Skipping cloud upload — no storageFolderPath set for this tab.');
       }
 
       final trackPts = trimmedTracks.fold<int>(
@@ -1317,7 +1580,24 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
     final hasTracks = widget.tracks.isNotEmpty;
     final hasWaypoints = widget.waypoints.isNotEmpty;
     final hasPolygons = widget.polygons.isNotEmpty;
-    final busy = _saveBusy || _trimBusy || _cloudBusy;
+    final hasSource = (widget.sourceStoragePath ?? '').isNotEmpty;
+    final busy = _saveBusy || _trimBusy || _cloudBusy || _overwriteBusy;
+
+    // ── Update mode: collapse the whole section into a single "Update File"
+    // call that overwrites the original cloud file the tab was opened from.
+    if (widget.mode == TEMode.update) {
+      return Container(
+        width: 420,
+        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: _buildUpdateFileButton(
+          context: context,
+          hasSource: hasSource,
+          hasTracks: hasTracks,
+          hasWaypoints: hasWaypoints,
+          busy: busy,
+        ),
+      );
+    }
 
     final trimButton = ElevatedButton.icon(
       onPressed: (busy || !hasPolygons) ? null : () => _onTrim(context),
@@ -1455,6 +1735,38 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
             ],
           ),
           const SizedBox(height: 6),
+          // ── Overwrite original cloud file (only when opened from cloud) ──
+          if (hasSource) ...[
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: (busy || (!hasTracks && !hasWaypoints))
+                    ? null
+                    : () => _onOverwriteSource(context),
+                icon: _overwriteBusy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.save_as, size: 16),
+                label: Text(
+                  'Save to ${widget.sourceStoragePath!.split('/').last}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.indigo[700],
+                  foregroundColor: Colors.white,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                  textStyle: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+          ],
           // ── Trim row ───────────────────────────────────────────────
           SizedBox(
             width: double.infinity,
@@ -1467,6 +1779,80 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Update-mode sidebar button. Overwrites the original cloud file the tab
+  /// was opened from, preserving path + filename. Disabled when the tab has
+  /// no source (e.g. a local import) or nothing to save.
+  Widget _buildUpdateFileButton({
+    required BuildContext context,
+    required bool hasSource,
+    required bool hasTracks,
+    required bool hasWaypoints,
+    required bool busy,
+  }) {
+    if (!hasSource) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.orange.shade50,
+          border: Border.all(color: Colors.orange.shade200),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.info_outline, size: 18, color: Colors.orange.shade800),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'This tab was not opened from cloud — nothing to update.',
+                style: TextStyle(fontSize: 12, color: Colors.orange.shade900),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    final fileName = widget.sourceStoragePath!.split('/').last;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Text(
+            'Updating: $fileName',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey.shade700,
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+        ),
+        ElevatedButton.icon(
+          onPressed: (busy || (!hasTracks && !hasWaypoints))
+              ? null
+              : () => _onOverwriteSource(context),
+          icon: _overwriteBusy
+              ? const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white),
+                )
+              : const Icon(Icons.save_as, size: 16),
+          label: const Text('Update File'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.indigo[700],
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+            textStyle:
+                const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
     );
   }
 }

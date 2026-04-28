@@ -18,6 +18,87 @@ import '../services/kml_parser.dart';
 import 'package:gpx/gpx.dart';
 import 'track_editor_page.dart';
 
+/// Strip the file-name segment from a full storage path.
+String? _folderPathOf(String? sourcePath) {
+  if (sourcePath == null || sourcePath.isEmpty) return null;
+  final slash = sourcePath.lastIndexOf('/');
+  if (slash <= 0) return null;
+  return sourcePath.substring(0, slash);
+}
+
+/// Parses [bytes] as GPX or KML/KMZ and pushes it into the Track Editor's
+/// Riverpod state. When a [sourcePath] is supplied the editor switches to
+/// [TEMode.update] so the sidebar shows a single "Update File" action that
+/// overwrites the original cloud file. Call this from any surface (the
+/// track editor itself, the cloud file manager, the shareable map editor)
+/// without needing direct access to a widget `ref`.
+void loadCloudFileIntoTrackEditor({
+  required riverpod.ProviderContainer container,
+  required String fileName,
+  required Uint8List bytes,
+  String? sourcePath,
+}) {
+  final ext = fileName.split('.').last.toLowerCase();
+  final fromCloud = sourcePath != null && sourcePath.isNotEmpty;
+  final folderPath = _folderPathOf(sourcePath);
+
+  if (ext == 'gpx') {
+    try {
+      final xml = String.fromCharCodes(bytes);
+      final gpx = GpxReader().fromString(xml);
+      container.read(teWaypointsRiverpod).addWaypoints(gpx.wpts);
+      container.read(teTracksRiverpod).addTracks(gpx.trks);
+      container.read(teFilesRiverpod).addFileNames([fileName]);
+      final tab = TETabItem(
+        title: fileName,
+        polygons: [],
+        tracks: gpx.trks,
+        waypoints: gpx.wpts,
+        targetPolygons: [],
+        sourceStoragePath: sourcePath,
+        storageFolderPath: folderPath,
+      );
+      if (fromCloud) {
+        container.read(teModeRiverpod).setMode(TEMode.update);
+        container.read(teTabsRiverpod).setActiveMode(TEMode.update);
+        container.read(teTabsRiverpod).addTabsBatch([tab]);
+      } else {
+        container.read(teTabsRiverpod).addData(tab);
+      }
+    } catch (e) {
+      debugPrint('❌ Error parsing GPX $fileName: $e');
+    }
+    return;
+  }
+
+  if (ext == 'kml' || ext == 'kmz') {
+    try {
+      final polygons = parseKmlWithStyles(bytes);
+      if (polygons.isEmpty) return;
+      container.read(teFilesRiverpod).addFileNames([fileName]);
+      final tab = TETabItem(
+        polygons: polygons,
+        tracks: [],
+        waypoints: [],
+        title: fileName,
+        targetPolygons: [],
+        sourceStoragePath: sourcePath,
+        storageFolderPath: folderPath,
+      );
+      if (fromCloud) {
+        container.read(teModeRiverpod).setMode(TEMode.update);
+        container.read(teTabsRiverpod).setActiveMode(TEMode.update);
+        container.read(teTabsRiverpod).addTabsBatch([tab]);
+      } else {
+        container.read(teTabsRiverpod).addData(tab);
+        container.read(teModeRiverpod).setMode(TEMode.import);
+      }
+    } catch (e) {
+      debugPrint('❌ Error parsing KML $fileName: $e');
+    }
+  }
+}
+
 class TrackEditorScreen extends riverpod.ConsumerStatefulWidget {
   const TrackEditorScreen({super.key});
 
@@ -32,68 +113,23 @@ class _TrackEditorScreenState
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => CloudFileManagerScreen(
-          onOpenInTrackEditor: (fileName, bytes) {
+          onOpenInTrackEditor: (fileName, bytes, sourcePath) {
             Navigator.of(context).pop(); // Close file manager
-            _loadFileIntoEditor(fileName, bytes);
+            _loadFileIntoEditor(fileName, bytes, sourcePath);
           },
         ),
       ),
     );
   }
 
-  void _loadFileIntoEditor(String fileName, Uint8List bytes) {
-    final ext = fileName.split('.').last.toLowerCase();
-    if (ext == 'gpx') {
-      _loadGpxFile(fileName, bytes);
-    } else if (ext == 'kml' || ext == 'kmz') {
-      _loadKmlFile(fileName, bytes);
-    }
-  }
-
-  void _loadGpxFile(String fileName, Uint8List bytes) {
-    try {
-      final xml = String.fromCharCodes(bytes);
-      final gpx = GpxReader().fromString(xml);
-      ref.read(teWaypointsRiverpod).addWaypoints(gpx.wpts);
-      ref.read(teTracksRiverpod).addTracks(gpx.trks);
-      ref.read(teFilesRiverpod).addFileNames([fileName]);
-      ref.read(teTabsRiverpod).addData(
-            TETabItem(
-              title: fileName,
-              polygons: [],
-              tracks: gpx.trks,
-              waypoints: gpx.wpts,
-              targetPolygons: [],
-            ),
-          );
-      ref.read(teModeRiverpod).setMode(TEMode.import);
-      debugPrint(
-          '✅ Cloud: ${gpx.wpts.length} waypoints, ${gpx.trks.length} tracks from $fileName');
-    } catch (e) {
-      debugPrint('❌ Error parsing GPX $fileName: $e');
-    }
-  }
-
-  void _loadKmlFile(String fileName, Uint8List bytes) {
-    try {
-      final polygons = parseKmlWithStyles(bytes);
-      if (polygons.isNotEmpty) {
-        ref.read(teFilesRiverpod).addFileNames([fileName]);
-        ref.read(teTabsRiverpod).addData(
-              TETabItem(
-                polygons: polygons,
-                tracks: [],
-                waypoints: [],
-                title: fileName,
-                targetPolygons: [],
-              ),
-            );
-        ref.read(teModeRiverpod).setMode(TEMode.import);
-        debugPrint('✅ Cloud: ${polygons.length} polygons from $fileName');
-      }
-    } catch (e) {
-      debugPrint('❌ Error parsing KML $fileName: $e');
-    }
+  void _loadFileIntoEditor(
+      String fileName, Uint8List bytes, String? sourcePath) {
+    loadCloudFileIntoTrackEditor(
+      container: riverpod.ProviderScope.containerOf(context),
+      fileName: fileName,
+      bytes: bytes,
+      sourcePath: sourcePath,
+    );
   }
 
   @override
@@ -111,6 +147,13 @@ class _TrackEditorScreenState
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         actions: [
+          // ── Processing ───────────────────────────────────────────
+          _ModeButton(
+            icon: Icons.settings_suggest,
+            label: 'Processing',
+            selected: mode == TEMode.processing,
+            onTap: () => modeProvider.setMode(TEMode.processing),
+          ),
           // ── Import ───────────────────────────────────────────────
           _ModeButton(
             icon: Icons.upload_file,
@@ -125,12 +168,12 @@ class _TrackEditorScreenState
             selected: mode == TEMode.trim,
             onTap: () => modeProvider.setMode(TEMode.trim),
           ),
-          // ── Processing ───────────────────────────────────────────
+          // ── Update ───────────────────────────────────────────────
           _ModeButton(
-            icon: Icons.settings_suggest,
-            label: 'Processing',
-            selected: mode == TEMode.processing,
-            onTap: () => modeProvider.setMode(TEMode.processing),
+            icon: Icons.save_as,
+            label: 'Update',
+            selected: mode == TEMode.update,
+            onTap: () => modeProvider.setMode(TEMode.update),
           ),
           const SizedBox(width: 8),
           // ── Cloud Files ──────────────────────────────────────────

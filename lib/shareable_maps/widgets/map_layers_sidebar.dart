@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
 import '../providers/shareable_map_provider.dart';
+import '../adapters/firestore_adapter.dart';
+import '../services/map_link_service.dart';
 import '../models/map_layer.dart';
 import '../../models/custom_polygon.dart';
 import '../models/map_point.dart';
@@ -119,13 +122,13 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
             context,
             icon: Icons.share_outlined,
             label: 'Share',
-            onPressed: () => _showShareDialog(context),
+            onPressed: () => _copyShareLink(context, provider),
           ),
           const SizedBox(width: 8),
           _buildActionButton(
             context,
             icon: Icons.preview_outlined,
-            label: 'Preview',
+            label: 'Center',
             onPressed: () => provider.fitMapToBounds(),
           ),
         ],
@@ -239,6 +242,17 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
+                    if (isWaypointLayer) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '${layer.points.length}',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF5F6368),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -732,21 +746,53 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
     );
   }
 
-  void _showShareDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Share Map'),
-        content:
-            const Text('Sharing functionality will be available in Phase 2.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
+  Future<void> _copyShareLink(
+      BuildContext context, ShareableMapProvider provider) async {
+    try {
+      final adapter = provider.adapter;
+      if (adapter is! FirestoreMapAdapter) return;
+
+      final docId = adapter.docId;
+      final monthKey = adapter.monthKey;
+      if (docId == null) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Save the map first before sharing')),
+          );
+        }
+        return;
+      }
+
+      final linkService = MapLinkService();
+      final code = await linkService.createShareLink(
+        monthKey: monthKey,
+        mapId: docId,
+        mapName: provider.currentMap?.name ?? '',
+      );
+      final url = MapLinkService.buildShareUrl(code);
+
+      await Clipboard.setData(ClipboardData(text: url));
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check, color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Link copied: $url')),
+              ],
+            ),
+            duration: const Duration(seconds: 4),
           ),
-        ],
-      ),
-    );
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to create share link: $e')),
+        );
+      }
+    }
   }
 
   void _showImportDialog(BuildContext context) {

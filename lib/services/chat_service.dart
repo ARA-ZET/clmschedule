@@ -467,32 +467,28 @@ class ChatService {
   // Search users for mentions
   Future<List<Map<String, String>>> searchUsers(String query) async {
     try {
-      print('ChatService: Searching users with query: "$query"');
-
-      // First try to get any users from the collection (without isActive filter)
-      final allUsersSnapshot =
-          await _firestore.collection('users').limit(20).get();
-
-      print(
-          'ChatService: Found ${allUsersSnapshot.docs.length} total users in collection');
-
-      // Search only active users first
-      Query usersQuery = _firestore
+      // First try active users only (1 read)
+      final usersSnapshot = await _firestore
           .collection('users')
           .where('isActive', isEqualTo: true)
           .orderBy('name')
-          .limit(20);
-
-      final usersSnapshot = await usersQuery.get();
-      print('ChatService: Found ${usersSnapshot.docs.length} active users');
+          .limit(20)
+          .get();
 
       List<Map<String, String>> users = [];
 
-      for (var doc in usersSnapshot.docs) {
-        final data = doc.data() as Map<String, dynamic>;
+      var docsToSearch = usersSnapshot.docs;
+
+      // If no active users found, fall back to all users (1 read, only when needed)
+      if (docsToSearch.isEmpty) {
+        final allUsersSnapshot =
+            await _firestore.collection('users').limit(20).get();
+        docsToSearch = allUsersSnapshot.docs;
+      }
+
+      for (var doc in docsToSearch) {
+        final data = doc.data();
         final displayName = data['name'] ?? data['email'] ?? 'User';
-        print(
-            'ChatService: User ${doc.id}: $displayName (isActive: ${data['isActive']})');
 
         // Filter by query if provided
         if (query.isEmpty ||
@@ -502,33 +498,9 @@ class ChatService {
             'displayName': displayName,
             'photoUrl': data['photoUrl'] ?? '',
           });
-          print('ChatService: Added user to suggestions: $displayName');
         }
       }
 
-      // If no active users found, try getting any users (even inactive ones)
-      if (users.isEmpty && allUsersSnapshot.docs.isNotEmpty) {
-        print('ChatService: No active users found, trying all users');
-        for (var doc in allUsersSnapshot.docs) {
-          final data = doc.data();
-          final displayName = data['name'] ?? data['email'] ?? 'User';
-          print(
-              'ChatService: All users - ${doc.id}: $displayName (isActive: ${data['isActive'] ?? 'null'})');
-
-          // Filter by query if provided
-          if (query.isEmpty ||
-              displayName.toLowerCase().contains(query.toLowerCase())) {
-            users.add({
-              'id': doc.id,
-              'displayName': displayName,
-              'photoUrl': data['photoUrl'] ?? '',
-            });
-            print('ChatService: Added any user to suggestions: $displayName');
-          }
-        }
-      }
-
-      print('ChatService: Returning ${users.length} users for mentions');
       return users;
     } catch (e) {
       print('ChatService: Error searching users: $e');

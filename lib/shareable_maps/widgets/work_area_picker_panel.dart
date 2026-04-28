@@ -7,6 +7,9 @@ import '../providers/shareable_map_provider.dart';
 /// A floating panel that lists all work areas from Firestore and lets
 /// the user toggle them on/off.  Selected work areas are added as
 /// polygons to a dedicated "Work Areas" layer on the map.
+///
+/// Also provides a **Lasso Select** button that lets the user draw a
+/// polygon on the map and bulk-add every work area within it.
 class WorkAreaPickerPanel extends riverpod.ConsumerStatefulWidget {
   /// Called when the user taps the close button.
   final VoidCallback onClose;
@@ -121,7 +124,7 @@ class _WorkAreaPickerPanelState
               ),
             ),
 
-            // ── Select All / Deselect All ──
+            // ── Select All / Deselect All / Lasso Select ──
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Row(
@@ -146,6 +149,19 @@ class _WorkAreaPickerPanelState
                         if (mapProvider.isWorkAreaImported(wa.name)) {
                           mapProvider.removeWorkAreaFromMap(wa.name);
                         }
+                      }
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                  _ActionChip(
+                    label: 'Lasso',
+                    icon: Icons.gesture,
+                    isActive: mapProvider.isLassoSelectActive,
+                    onTap: () {
+                      if (mapProvider.isLassoSelectActive) {
+                        mapProvider.cancelLassoSelect();
+                      } else {
+                        mapProvider.startLassoSelect();
                       }
                     },
                   ),
@@ -286,34 +302,42 @@ class _ActionChip extends StatelessWidget {
   final String label;
   final IconData icon;
   final VoidCallback onTap;
+  final bool isActive;
 
   const _ActionChip({
     required this.label,
     required this.icon,
     required this.onTap,
+    this.isActive = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final color = isActive ? const Color(0xFF1967D2) : const Color(0xFF5F6368);
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(16),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-          border: Border.all(color: const Color(0xFFDADCE0)),
+          color:
+              isActive ? const Color(0xFF1967D2).withValues(alpha: 0.1) : null,
+          border: Border.all(
+            color: isActive ? const Color(0xFF1967D2) : const Color(0xFFDADCE0),
+          ),
           borderRadius: BorderRadius.circular(16),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 14, color: const Color(0xFF5F6368)),
+            Icon(icon, size: 14, color: color),
             const SizedBox(width: 4),
             Text(
               label,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 12,
-                color: Color(0xFF5F6368),
+                color: color,
+                fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
               ),
             ),
           ],

@@ -11,8 +11,12 @@ import '../providers/te_map_layer_provider.dart';
 import '../providers/te_mode_provider.dart';
 import '../providers/te_tools_provider.dart';
 import '../models/styled_polygon.dart';
+import '../services/point_in_polygon.dart';
 import '../utils/te_track_stats.dart';
 import '../../providers/schedule_provider.dart';
+import '../../providers/unfinished_work_areas_provider.dart';
+import '../../models/custom_polygon.dart';
+import '../../shareable_maps/providers/map_gesture_provider.dart';
 
 class TEMap extends riverpod.ConsumerStatefulWidget {
   const TEMap({super.key});
@@ -27,7 +31,12 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
 
   BitmapDescriptor? _waypointIcon;
   BitmapDescriptor? _selectedWptIcon;
+  BitmapDescriptor? _outsideWptIcon;
   BitmapDescriptor? _vertexIcon;
+
+  // ── Scissors point icons ──────────────────────────────────────────────────
+  BitmapDescriptor? _scissorsPointIcon;
+  BitmapDescriptor? _scissorsSelectedIcon;
 
   // ── Track info overlay state ──────────────────────────────────────────────
   LatLng? _infoAnchor;
@@ -55,8 +64,9 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
   // ── Selected track state ──────────────────────────────────────────────────
   int? _selectedTrackIndex;
 
-  // ── Scissors cursor state ──────────────────────────────────────────────────
-  Offset? _mousePosition;
+  // ── Scissors split-point selection state ──────────────────────────────────
+  int? _scissorsTrackIdx; // track whose points are shown
+  int? _scissorsSelectedIdx; // global point index the user picked
 
   // ── Shift + drag rectangle selection state ──────────────────────────────────
   bool _isShiftHeld = false;
@@ -68,6 +78,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
   final List<LatLng> _drawingPoints = [];
   BitmapDescriptor? _drawingVertexIcon;
   BitmapDescriptor? _drawingFirstVertexIcon;
+  bool _isDialogOpen = false;
 
   // Live camera position – updated on every onCameraMove for smooth reprojection.
   CameraPosition _currentCamera = _defaultPosition;
@@ -82,9 +93,11 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     super.initState();
     _loadWaypointIcon();
     _loadSelectedWptIcon();
+    _loadOutsideWptIcon();
     _loadVertexIcon();
     _loadMultiSelectWptIcon();
     _loadDrawingVertexIcons();
+    _loadScissorsIcons();
     HardwareKeyboard.instance.addHandler(_handleKeyEvent);
   }
 
@@ -98,8 +111,169 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     final shiftNow = HardwareKeyboard.instance.isShiftPressed;
     if (shiftNow != _isShiftHeld) {
       setState(() => _isShiftHeld = shiftNow);
+      // Suppress Google Maps web gestures while shift is held — otherwise
+      // shift+drag pans the map instead of drawing the selection rectangle.
+      final gestures = ref.read(mapGestureRiverpod);
+      if (shiftNow) {
+        gestures.disableMapGestures();
+      } else if (_selectStart == null) {
+        gestures.enableMapGestures();
+      }
     }
+
+    // 'b' key = split (break) at the selected scissors point.
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.keyB &&
+        _scissorsSelectedIdx != null) {
+      _executeScissorsSplit();
+      return true;
+    }
+
+    // Escape clears the scissors selection.
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape &&
+        _scissorsTrackIdx != null) {
+      setState(() {
+        _scissorsTrackIdx = null;
+        _scissorsSelectedIdx = null;
+      });
+      return true;
+    }
+
+    // Delete / Backspace removes whatever is currently selected on the map
+    // (waypoint, polygon, or track) after a confirmation so a stray keypress
+    // never silently drops data.
+    if (event is KeyDownEvent &&
+        (event.logicalKey == LogicalKeyboardKey.delete ||
+            event.logicalKey == LogicalKeyboardKey.backspace)) {
+      final tabsProvider = ref.read(teTabsRiverpod);
+      final currentTab = tabsProvider.currentTab;
+      final tabData = tabsProvider.tabs[currentTab];
+
+      // Priority: waypoint > polygon > track. Only one overlay is open at a
+      // time, so at most one of these is non-null in practice.
+      if (_wptIndex != null) {
+        final wi = _wptIndex!;
+        if (wi >= 0 && wi < tabData.waypoints.length) {
+          final name = _wptName?.trim().isNotEmpty == true
+              ? _wptName!
+              : 'Waypoint ${wi + 1}';
+          _confirmAndDeleteWaypoint(currentTab, wi, name);
+        }
+        return true;
+      }
+      if (_polyIndex != null) {
+        final pi = _polyIndex!;
+        if (pi >= 0 && pi < tabData.polygons.length) {
+          final name = _polyName?.trim().isNotEmpty == true
+              ? _polyName!
+              : 'Polygon ${pi + 1}';
+          _confirmAndDeletePolygon(currentTab, pi, name);
+        }
+        return true;
+      }
+      if (_selectedTrackIndex != null) {
+        final trackIndex = _selectedTrackIndex!;
+        final tracks = tabData.tracks;
+        if (trackIndex >= 0 && trackIndex < tracks.length) {
+          final rawName = tracks[trackIndex].name?.trim() ?? '';
+          final trackName =
+              rawName.isNotEmpty ? rawName : 'Track ${trackIndex + 1}';
+          _confirmAndDeleteTrack(currentTab, trackIndex, trackName);
+        }
+        return true;
+      }
+    }
+
     return false; // don't consume the event
+  }
+
+  /// Show a confirmation dialog, then delete the track from the provider
+  /// if the user confirms. Keeps the selection state in sync.
+  Future<void> _confirmAndDeleteTrack(
+    int tabIndex,
+    int trackIndex,
+    String trackName,
+  ) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete track?', style: TextStyle(fontSize: 15)),
+        content: Text('Are you sure you want to delete "$trackName"?',
+            style: const TextStyle(fontSize: 13)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    final tabsProvider = ref.read(teTabsRiverpod);
+    if (tabIndex < 0 || tabIndex >= tabsProvider.tabs.length) return;
+    final tracks = tabsProvider.tabs[tabIndex].tracks;
+    if (trackIndex < 0 || trackIndex >= tracks.length) return;
+
+    tabsProvider.removeTrack(tabIndex, trackIndex);
+    if (mounted) {
+      setState(() {
+        if (_scissorsTrackIdx == trackIndex) {
+          _scissorsTrackIdx = null;
+          _scissorsSelectedIdx = null;
+        }
+        if (_selectedTrackIndex == trackIndex) {
+          _selectedTrackIndex = null;
+        }
+        // Also close the track info overlay if it's still showing.
+        _infoAnchor = null;
+        _infoName = null;
+        _infoStats = null;
+      });
+    }
+  }
+
+  /// Confirm + delete a waypoint from the currently-active tab.
+  Future<void> _confirmAndDeleteWaypoint(
+    int tabIndex,
+    int waypointIndex,
+    String name,
+  ) async {
+    final confirm = await _confirmDelete(context, 'waypoint', name);
+    if (!confirm || !mounted) return;
+
+    final tabsProvider = ref.read(teTabsRiverpod);
+    if (tabIndex < 0 || tabIndex >= tabsProvider.tabs.length) return;
+    final waypoints = tabsProvider.tabs[tabIndex].waypoints;
+    if (waypointIndex < 0 || waypointIndex >= waypoints.length) return;
+
+    _closeWptInfoWindow();
+    tabsProvider.removeWaypoint(tabIndex, waypointIndex);
+    ref.read(teMapLayerRiverpod).selectWaypoint(tabIndex, null);
+  }
+
+  /// Confirm + delete a polygon from the currently-active tab.
+  Future<void> _confirmAndDeletePolygon(
+    int tabIndex,
+    int polyIndex,
+    String name,
+  ) async {
+    final confirm = await _confirmDelete(context, 'area', name);
+    if (!confirm || !mounted) return;
+
+    final tabsProvider = ref.read(teTabsRiverpod);
+    if (tabIndex < 0 || tabIndex >= tabsProvider.tabs.length) return;
+    final polys = tabsProvider.tabs[tabIndex].polygons;
+    if (polyIndex < 0 || polyIndex >= polys.length) return;
+
+    _closePolyInfoWindow();
+    tabsProvider.removePolygon(tabIndex, polyIndex);
   }
 
   Future<void> _loadWaypointIcon() async {
@@ -133,6 +307,46 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     if (mounted && data != null) {
       setState(() {
         _selectedWptIcon = BitmapDescriptor.bytes(data.buffer.asUint8List());
+      });
+    }
+  }
+
+  Future<void> _loadOutsideWptIcon() async {
+    // Red circle with letterbox.png inside
+    const double size = 28.0;
+    const double circleRadius = size / 2;
+    const int iconSize = 16;
+
+    // 1) Load and decode letterbox.png
+    final ByteData imgData = await rootBundle.load('assets/letterbox.png');
+    final ui.Codec codec = await ui.instantiateImageCodec(
+      imgData.buffer.asUint8List(),
+      targetWidth: iconSize,
+    );
+    final ui.FrameInfo fi = await codec.getNextFrame();
+    final letterboxImage = fi.image;
+
+    // 2) Draw red circle + letterbox image centered inside
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final center = Offset(size / 2, size / 2);
+    // White border
+    canvas.drawCircle(center, circleRadius, Paint()..color = Colors.white);
+    // Red circle
+    canvas.drawCircle(center, circleRadius - 2, Paint()..color = Colors.red);
+    // Letterbox image centered
+    final imgOffset = Offset(
+      (size - letterboxImage.width) / 2,
+      (size - letterboxImage.height) / 2,
+    );
+    canvas.drawImage(letterboxImage, imgOffset, Paint());
+
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(size.toInt(), size.toInt());
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (mounted && data != null) {
+      setState(() {
+        _outsideWptIcon = BitmapDescriptor.bytes(data.buffer.asUint8List());
       });
     }
   }
@@ -192,6 +406,43 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     }
   }
 
+  Future<void> _loadScissorsIcons() async {
+    const double size = 18.0;
+    const double radius = 7.0;
+
+    // Blue circle for unselected scissors points
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final center = Offset(size / 2, size / 2);
+    canvas.drawCircle(center, radius + 1.5, Paint()..color = Colors.white);
+    canvas.drawCircle(center, radius, Paint()..color = Colors.blue);
+    canvas.drawCircle(center, 2.5, Paint()..color = Colors.white);
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(size.toInt(), size.toInt());
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (mounted && data != null) {
+      setState(() {
+        _scissorsPointIcon = BitmapDescriptor.bytes(data.buffer.asUint8List());
+      });
+    }
+
+    // Red circle for the selected scissors point
+    final recorder2 = ui.PictureRecorder();
+    final canvas2 = Canvas(recorder2);
+    canvas2.drawCircle(center, radius + 1.5, Paint()..color = Colors.white);
+    canvas2.drawCircle(center, radius, Paint()..color = Colors.red);
+    canvas2.drawCircle(center, 2.5, Paint()..color = Colors.white);
+    final picture2 = recorder2.endRecording();
+    final image2 = await picture2.toImage(size.toInt(), size.toInt());
+    final data2 = await image2.toByteData(format: ui.ImageByteFormat.png);
+    if (mounted && data2 != null) {
+      setState(() {
+        _scissorsSelectedIcon =
+            BitmapDescriptor.bytes(data2.buffer.asUint8List());
+      });
+    }
+  }
+
   // ── Drawing mode handlers ─────────────────────────────────────────────────
 
   void _handleDrawingTap(LatLng latLng, int currentTab) {
@@ -233,6 +484,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     if (_drawingPoints.isEmpty) return {};
     final markers = <Marker>{};
     for (int i = 0; i < _drawingPoints.length; i++) {
+      final idx = i; // capture for closure
       final isFirst = i == 0;
       final canClose = isFirst && _drawingPoints.length >= 3;
       markers.add(Marker(
@@ -247,6 +499,10 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                 BitmapDescriptor.defaultMarkerWithHue(
                     BitmapDescriptor.hueBlue)),
         zIndex: 20,
+        draggable: true,
+        consumeTapEvents: true,
+        onDrag: (newPos) => setState(() => _drawingPoints[idx] = newPos),
+        onDragEnd: (newPos) => setState(() => _drawingPoints[idx] = newPos),
         onTap: canClose
             ? () => _showPolygonNameClientDialog(
                 context, ref.read(teTabsRiverpod).currentTab)
@@ -254,19 +510,6 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       ));
     }
     return markers;
-  }
-
-  Set<Polygon> _buildDrawingPreviewPolygon() {
-    if (_drawingPoints.length < 2) return {};
-    return {
-      Polygon(
-        polygonId: const PolygonId('drawing_preview'),
-        points: _drawingPoints,
-        strokeColor: Colors.blue,
-        strokeWidth: 2,
-        fillColor: Colors.blue.withAlpha(30),
-      ),
-    };
   }
 
   Set<Polyline> _buildDrawingPreviewPolyline() {
@@ -323,7 +566,17 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     }
     final sortedClients = clientSuggestions.toList()..sort();
 
+    // Get work area names for polygon name suggestions
+    final workAreaNames = workAreas
+        .map((wa) => wa.name)
+        .where((n) => n.isNotEmpty)
+        .toList()
+      ..sort();
+
     if (!context.mounted) return;
+
+    _isDialogOpen = true;
+    ref.read(mapGestureRiverpod).disableMapGestures();
 
     final result = await showDialog<Map<String, String>>(
       context: context,
@@ -336,15 +589,37 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                TextField(
-                  controller: nameCtrl,
-                  autofocus: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Polygon Name',
-                    hintText: 'e.g. Block A, Zone 3',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
+                Autocomplete<String>(
+                  optionsBuilder: (textEditingValue) {
+                    if (textEditingValue.text.isEmpty) return workAreaNames;
+                    final q = textEditingValue.text.toLowerCase();
+                    return workAreaNames
+                        .where((n) => n.toLowerCase().contains(q));
+                  },
+                  fieldViewBuilder: (ctx, controller, focusNode, onSubmitted) {
+                    controller.addListener(() {
+                      if (nameCtrl.text != controller.text) {
+                        nameCtrl.text = controller.text;
+                      }
+                    });
+                    nameCtrl.addListener(() {
+                      if (controller.text != nameCtrl.text) {
+                        controller.text = nameCtrl.text;
+                      }
+                    });
+                    return TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Polygon Name',
+                        hintText: 'e.g. Block A, Zone 3',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    );
+                  },
+                  onSelected: (val) => nameCtrl.text = val,
                 ),
                 const SizedBox(height: 12),
                 Autocomplete<String>(
@@ -485,6 +760,9 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     nameCtrl.dispose();
     clientCtrl.dispose();
 
+    _isDialogOpen = false;
+    ref.read(mapGestureRiverpod).enableMapGestures();
+
     if (result != null && _drawingPoints.isNotEmpty) {
       final polygon = TEStyledPolygon(
         id: 'drawn_${DateTime.now().millisecondsSinceEpoch}',
@@ -500,6 +778,20 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
         ),
       );
       ref.read(teTabsRiverpod).addPolygonsToCurrentTab([polygon]);
+
+      // Always save to Firestore unfinished work areas.
+      final customPoly = CustomPolygon(
+        name: result['name']!,
+        description: '',
+        points: List<LatLng>.from(_drawingPoints),
+        color: Colors.blue.shade700,
+      );
+      final client = result['client'] ?? '';
+      ref.read(unfinishedWorkAreasRiverpod).addItem(
+        clients: client.isNotEmpty ? [client] : [],
+        workingAreas: [result['name']!],
+        workMaps: [customPoly],
+      );
     }
     // Always clear drawing state (like shareable maps completeDrawing /
     // cancelDrawing) — dialog Cancel exits draw mode too.
@@ -510,6 +802,10 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
   Future<void> _showPointNameDialog(
       BuildContext context, LatLng position, int currentTab) async {
     final nameCtrl = TextEditingController();
+
+    _isDialogOpen = true;
+    ref.read(mapGestureRiverpod).disableMapGestures();
+
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -537,6 +833,10 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       ),
     );
     nameCtrl.dispose();
+
+    _isDialogOpen = false;
+    ref.read(mapGestureRiverpod).enableMapGestures();
+
     if (result != null && result.isNotEmpty) {
       // Add as a single-point polygon (point marker)
       final point = TEStyledPolygon(
@@ -600,6 +900,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     _selectStart = null;
     _selectEnd = null;
     _drawingPoints.clear();
+    _scissorsTrackIdx = null;
+    _scissorsSelectedIdx = null;
   }
 
   Future<void> _fitTabBounds(TETabsProvider tabsProvider) async {
@@ -647,6 +949,10 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
 
   void _openInfoWindow(
       LatLng anchor, String name, TETrackStats stats, int trackIndex) {
+    // Clear any highlighted waypoint from the map-layer provider so its
+    // selected-bitmap doesn't stick around when switching to a track.
+    final currentTab = ref.read(teTabsRiverpod).currentTab;
+    ref.read(teMapLayerRiverpod).selectWaypoint(currentTab, null);
     setState(() {
       _infoAnchor = anchor;
       _infoName = name;
@@ -679,10 +985,11 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       _wptName = name;
       _wptCoords = coords;
       _wptIndex = wptIdx;
-      // close other overlays
+      // close other overlays (including the track selection outline)
       _infoAnchor = null;
       _infoName = null;
       _infoStats = null;
+      _selectedTrackIndex = null;
       _polyAnchor = null;
       _polyName = null;
       _polyColor = null;
@@ -691,6 +998,10 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
   }
 
   void _closeWptInfoWindow() {
+    // Also drop the map-layer provider's selected-waypoint state so the
+    // marker reverts to its default bitmap.
+    final currentTab = ref.read(teTabsRiverpod).currentTab;
+    ref.read(teMapLayerRiverpod).selectWaypoint(currentTab, null);
     setState(() {
       _wptAnchor = null;
       _wptName = null;
@@ -701,6 +1012,9 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
 
   void _openPolyInfoWindow(
       LatLng anchor, String name, Color color, int polyIdx) {
+    // Clear highlighted waypoint + track when switching to a polygon.
+    final currentTab = ref.read(teTabsRiverpod).currentTab;
+    ref.read(teMapLayerRiverpod).selectWaypoint(currentTab, null);
     setState(() {
       _polyAnchor = anchor;
       _polyName = name;
@@ -710,9 +1024,11 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       _infoAnchor = null;
       _infoName = null;
       _infoStats = null;
+      _selectedTrackIndex = null;
       _wptAnchor = null;
       _wptName = null;
       _wptCoords = null;
+      _wptIndex = null;
     });
   }
 
@@ -820,52 +1136,79 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
 
   // ── Scissors mode ─────────────────────────────────────────────────────────
 
-  /// Handle a map tap in scissors mode: find the nearest track point and split.
-  void _handleScissorsTap(LatLng tapPos, int currentTab) {
+  /// When user taps a track in scissors mode, show all its points as markers.
+  void _handleScissorsSelectTrack(int trackIdx) {
+    setState(() {
+      _scissorsTrackIdx = trackIdx;
+      _scissorsSelectedIdx = null;
+      _selectedTrackIndex = trackIdx;
+    });
+  }
+
+  /// Execute the split at the currently selected scissors point.
+  void _executeScissorsSplit() {
+    if (_scissorsTrackIdx == null || _scissorsSelectedIdx == null) return;
+    final currentTab = ref.read(teTabsRiverpod).currentTab;
     final tabsProvider = ref.read(teTabsRiverpod);
-    final tracks = tabsProvider.tabs[currentTab].tracks;
-    if (tracks.isEmpty) return;
 
-    int? bestTrackIdx;
-    int? bestGlobalIdx;
-    double bestDist = double.infinity;
-
-    for (int ti = 0; ti < tracks.length; ti++) {
-      final trk = tracks[ti];
-      int globalIdx = 0;
-      for (final seg in trk.trksegs) {
-        for (final pt in seg.trkpts) {
-          if (pt.lat == null || pt.lon == null) {
-            globalIdx++;
-            continue;
-          }
-          final d = _haversineDistance(
-              tapPos.latitude, tapPos.longitude, pt.lat!, pt.lon!);
-          if (d < bestDist) {
-            bestDist = d;
-            bestTrackIdx = ti;
-            bestGlobalIdx = globalIdx;
-          }
-          globalIdx++;
-        }
-      }
-    }
-
-    if (bestTrackIdx == null || bestGlobalIdx == null) return;
-
-    // Only split if within ~200m of the track — prevents accidental splits.
-    if (bestDist > 0.2) return;
-
+    final splitIdx = _scissorsTrackIdx!;
     final success =
-        tabsProvider.splitTrack(currentTab, bestTrackIdx, bestGlobalIdx);
+        tabsProvider.splitTrack(currentTab, splitIdx, _scissorsSelectedIdx!);
     if (success) {
-      // Exit scissors mode and select the first of the two resulting tracks.
-      ref.read(teToolsRiverpod).disableScissors();
       setState(() {
-        _mousePosition = null;
-        _selectedTrackIndex = bestTrackIdx;
+        // Select the second half of the split to give visual feedback.
+        _selectedTrackIndex = splitIdx + 1;
+        // Reset scissors selection so user can pick another track.
+        _scissorsTrackIdx = null;
+        _scissorsSelectedIdx = null;
       });
     }
+  }
+
+  /// Build markers for all points of the scissors-selected track.
+  /// The user picks a point from these; the selected one is highlighted.
+  Set<Marker> _buildScissorsPointMarkers(int currentTab) {
+    if (_scissorsTrackIdx == null) return {};
+    final tabsProvider = ref.read(teTabsRiverpod);
+    final tracks = tabsProvider.tabs[currentTab].tracks;
+    if (_scissorsTrackIdx! >= tracks.length) return {};
+
+    final trk = tracks[_scissorsTrackIdx!];
+    final markers = <Marker>{};
+    int globalIdx = 0;
+    for (final seg in trk.trksegs) {
+      for (final pt in seg.trkpts) {
+        if (pt.lat == null || pt.lon == null) {
+          globalIdx++;
+          continue;
+        }
+        final idx = globalIdx;
+        final isSelected = idx == _scissorsSelectedIdx;
+        markers.add(Marker(
+          markerId: MarkerId('scissors_pt_$idx'),
+          position: LatLng(pt.lat!, pt.lon!),
+          anchor: const Offset(0.5, 0.5),
+          zIndex: isSelected ? 12 : 8,
+          icon: isSelected
+              ? (_scissorsSelectedIcon ??
+                  BitmapDescriptor.defaultMarkerWithHue(
+                      BitmapDescriptor.hueRed))
+              : (_scissorsPointIcon ??
+                  BitmapDescriptor.defaultMarkerWithHue(
+                      BitmapDescriptor.hueBlue)),
+          infoWindow: isSelected
+              ? const InfoWindow(title: 'Press B to split here')
+              : InfoWindow.noText,
+          onTap: () {
+            setState(() {
+              _scissorsSelectedIdx = idx;
+            });
+          },
+        ));
+        globalIdx++;
+      }
+    }
+    return markers;
   }
 
   /// Haversine distance in km between two lat/lon points.
@@ -991,6 +1334,11 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       _selectStart = null;
       _selectEnd = null;
     });
+    // If shift has already been released (e.g. user let go of shift before
+    // the mouse), re-enable map gestures now that the selection is done.
+    if (!_isShiftHeld) {
+      ref.read(mapGestureRiverpod).enableMapGestures();
+    }
   }
 
   @override
@@ -1109,6 +1457,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
           'Lat: ${wpt.lat?.toStringAsFixed(5)},  Lon: ${wpt.lon?.toStringAsFixed(5)}';
       final isSelected = idx == selectedWptIdx;
       final isMultiSelected = multiSelectedWpts.contains(idx);
+      final isOutside = tabData.polygons.isNotEmpty &&
+          !wptInAnyPolygon(wpt, tabData.polygons);
       return Marker(
         markerId: MarkerId('wpt_${currentTab}_$idx'),
         position: LatLng(wpt.lat!, wpt.lon!),
@@ -1121,7 +1471,11 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                 ? (_selectedWptIcon ??
                     BitmapDescriptor.defaultMarkerWithHue(
                         BitmapDescriptor.hueOrange))
-                : (_waypointIcon ?? BitmapDescriptor.defaultMarker),
+                : isOutside
+                    ? (_outsideWptIcon ??
+                        BitmapDescriptor.defaultMarkerWithHue(
+                            BitmapDescriptor.hueOrange))
+                    : (_waypointIcon ?? BitmapDescriptor.defaultMarker),
         infoWindow: InfoWindow.noText,
         onTap: () {
           ref.read(teMapLayerRiverpod).selectWaypoint(currentTab, idx);
@@ -1147,24 +1501,27 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
           .toList();
       final midPt = allPts.isNotEmpty ? allPts[allPts.length ~/ 2] : null;
       final isSelected = _selectedTrackIndex == idx;
+      final isScissorsTarget = scissorsMode && _scissorsTrackIdx == idx;
       return Polyline(
         polylineId: PolylineId('track_${currentTab}_$idx'),
         points: allPts.map((p) => LatLng(p.lat!, p.lon!)).toList(),
-        color: scissorsMode
+        color: isScissorsTarget
             ? Colors.orange
             : isSelected
                 ? Colors.red
                 : Colors.blue,
-        width: isSelected ? 7 : 5,
-        consumeTapEvents: !scissorsMode && !isDrawing,
-        onTap: scissorsMode || isDrawing
+        width: isScissorsTarget || isSelected ? 7 : 5,
+        consumeTapEvents: true,
+        onTap: isDrawing
             ? null
-            : () {
-                if (midPt != null) {
-                  _openInfoWindow(
-                      LatLng(midPt.lat!, midPt.lon!), trackName, stats, idx);
-                }
-              },
+            : scissorsMode
+                ? () => _handleScissorsSelectTrack(idx)
+                : () {
+                    if (midPt != null) {
+                      _openInfoWindow(LatLng(midPt.lat!, midPt.lon!), trackName,
+                          stats, idx);
+                    }
+                  },
       );
     }).toSet();
 
@@ -1180,19 +1537,14 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
             children: [
               MouseRegion(
                   cursor: scissorsMode
-                      ? SystemMouseCursors.none
+                      ? SystemMouseCursors.precise
                       : isDrawing
                           ? SystemMouseCursors.precise
                           : MouseCursor.defer,
-                  onHover: scissorsMode
-                      ? (event) =>
-                          setState(() => _mousePosition = event.localPosition)
-                      : null,
-                  onExit: scissorsMode
-                      ? (_) => setState(() => _mousePosition = null)
-                      : null,
                   child: GoogleMap(
                     initialCameraPosition: _defaultPosition,
+                    webGestureHandling:
+                        ref.watch(mapGestureRiverpod).gestureHandling,
                     scrollGesturesEnabled:
                         !_isShiftHeld && _selectStart == null,
                     zoomGesturesEnabled: !_isShiftHeld && _selectStart == null,
@@ -1209,11 +1561,17 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                       }
                     },
                     onTap: (latLng) {
+                      if (_isDialogOpen) return;
                       if (isDrawing) {
                         _handleDrawingTap(latLng, currentTab);
                       } else if (scissorsMode) {
-                        _handleScissorsTap(latLng, currentTab);
+                        // Tapping the map background clears scissors selection.
+                        setState(() {
+                          _scissorsTrackIdx = null;
+                          _scissorsSelectedIdx = null;
+                        });
                       } else {
+                        // Tapping the map background deselects everything.
                         _closeInfoWindow();
                         _closeWptInfoWindow();
                         _closePolyInfoWindow();
@@ -1222,12 +1580,12 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                     onCameraMove: (pos) => setState(() => _currentCamera = pos),
                     polygons: {
                       ...mapPolygons,
-                      ..._buildDrawingPreviewPolygon()
                     },
                     markers: {
                       ...mapMarkers,
                       ...vertexMarkers,
-                      ..._buildDrawingMarkers()
+                      ..._buildDrawingMarkers(),
+                      ..._buildScissorsPointMarkers(currentTab),
                     },
                     polylines: {
                       ...polylines,
@@ -1398,26 +1756,6 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                     ),
                   ),
                 ),
-              // ── Scissors floating cursor icon ────────────────────────────
-              if (scissorsMode && _mousePosition != null)
-                Positioned(
-                  left: _mousePosition!.dx + 6,
-                  top: _mousePosition!.dy + 6,
-                  child: const IgnorePointer(
-                    child: Icon(
-                      Icons.content_cut,
-                      size: 26,
-                      color: Colors.orange,
-                      shadows: [
-                        Shadow(
-                          color: Colors.black54,
-                          blurRadius: 4,
-                          offset: Offset(1, 1),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
               // ── Scissors mode hint banner ───────────────────────────────
               if (scissorsMode)
                 Positioned(
@@ -1477,145 +1815,154 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                   left: 0,
                   right: 0,
                   child: Center(
-                    child: Material(
-                      elevation: 8,
-                      borderRadius: BorderRadius.circular(8),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 12),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: const Color(0xFFDADCE0)),
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // Status row
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  drawingMode == TEDrawingMode.polygon
-                                      ? Icons.pentagon_outlined
-                                      : Icons.place_outlined,
-                                  size: 20,
-                                  color: const Color(0xFF1967D2),
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  drawingMode == TEDrawingMode.polygon
-                                      ? 'Drawing Polygon'
-                                      : 'Placing Point',
-                                  style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w500,
-                                    color: Color(0xFF202124),
-                                  ),
-                                ),
-                                if (_drawingPoints.isNotEmpty) ...[
-                                  const SizedBox(width: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFE8F0FE),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Text(
-                                      '${_drawingPoints.length} ${_drawingPoints.length == 1 ? 'point' : 'points'}',
-                                      style: const TextStyle(
-                                        fontSize: 12,
-                                        color: Color(0xFF1967D2),
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                            if (drawingMode == TEDrawingMode.polygon) ...[
-                              const SizedBox(height: 12),
-                              // Action buttons
+                    child: MouseRegion(
+                      onEnter: (_) =>
+                          ref.read(mapGestureRiverpod).disableMapGestures(),
+                      onExit: (_) =>
+                          ref.read(mapGestureRiverpod).enableMapGestures(),
+                      child: Material(
+                        elevation: 8,
+                        borderRadius: BorderRadius.circular(8),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 12),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFFDADCE0)),
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // Status row
                               Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  OutlinedButton.icon(
-                                    onPressed: _drawingPoints.isNotEmpty
-                                        ? _undoLastDrawingPoint
-                                        : null,
-                                    icon: const Icon(Icons.undo, size: 18),
-                                    label: const Text('Undo'),
-                                    style: OutlinedButton.styleFrom(
-                                      foregroundColor: const Color(0xFF5F6368),
-                                      side: const BorderSide(
-                                          color: Color(0xFFDADCE0)),
-                                    ),
+                                  Icon(
+                                    drawingMode == TEDrawingMode.polygon
+                                        ? Icons.pentagon_outlined
+                                        : Icons.place_outlined,
+                                    size: 20,
+                                    color: const Color(0xFF1967D2),
                                   ),
                                   const SizedBox(width: 8),
-                                  OutlinedButton.icon(
-                                    onPressed: _cancelDrawing,
-                                    icon: const Icon(Icons.close, size: 18),
-                                    label: const Text('Cancel'),
-                                    style: OutlinedButton.styleFrom(
-                                      foregroundColor: const Color(0xFFD93025),
-                                      side: const BorderSide(
-                                          color: Color(0xFFDADCE0)),
+                                  Text(
+                                    drawingMode == TEDrawingMode.polygon
+                                        ? 'Drawing Polygon'
+                                        : 'Placing Point',
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w500,
+                                      color: Color(0xFF202124),
                                     ),
                                   ),
-                                  const SizedBox(width: 8),
-                                  ElevatedButton.icon(
-                                    onPressed: _drawingPoints.length >= 3
-                                        ? () => _showPolygonNameClientDialog(
-                                            context, currentTab)
-                                        : null,
-                                    icon: const Icon(Icons.check, size: 18),
-                                    label: const Text('Complete'),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: const Color(0xFF1967D2),
-                                      foregroundColor: Colors.white,
-                                      disabledBackgroundColor:
-                                          const Color(0xFFE8EAED),
-                                      disabledForegroundColor:
-                                          const Color(0xFF80868B),
+                                  if (_drawingPoints.isNotEmpty) ...[
+                                    const SizedBox(width: 8),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFE8F0FE),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: Text(
+                                        '${_drawingPoints.length} ${_drawingPoints.length == 1 ? 'point' : 'points'}',
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Color(0xFF1967D2),
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
                                     ),
-                                  ),
+                                  ],
                                 ],
                               ),
-                              if (_drawingPoints.length < 3)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 8),
-                                  child: Text(
-                                    'Tap map to add vertices (${3 - _drawingPoints.length} more needed)',
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      color: Color(0xFF5F6368),
+                              if (drawingMode == TEDrawingMode.polygon) ...[
+                                const SizedBox(height: 12),
+                                // Action buttons
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    OutlinedButton.icon(
+                                      onPressed: _drawingPoints.isNotEmpty
+                                          ? _undoLastDrawingPoint
+                                          : null,
+                                      icon: const Icon(Icons.undo, size: 18),
+                                      label: const Text('Undo'),
+                                      style: OutlinedButton.styleFrom(
+                                        foregroundColor:
+                                            const Color(0xFF5F6368),
+                                        side: const BorderSide(
+                                            color: Color(0xFFDADCE0)),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    OutlinedButton.icon(
+                                      onPressed: _cancelDrawing,
+                                      icon: const Icon(Icons.close, size: 18),
+                                      label: const Text('Cancel'),
+                                      style: OutlinedButton.styleFrom(
+                                        foregroundColor:
+                                            const Color(0xFFD93025),
+                                        side: const BorderSide(
+                                            color: Color(0xFFDADCE0)),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    ElevatedButton.icon(
+                                      onPressed: _drawingPoints.length >= 3
+                                          ? () => _showPolygonNameClientDialog(
+                                              context, currentTab)
+                                          : null,
+                                      icon: const Icon(Icons.check, size: 18),
+                                      label: const Text('Complete'),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor:
+                                            const Color(0xFF1967D2),
+                                        foregroundColor: Colors.white,
+                                        disabledBackgroundColor:
+                                            const Color(0xFFE8EAED),
+                                        disabledForegroundColor:
+                                            const Color(0xFF80868B),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                if (_drawingPoints.length < 3)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 8),
+                                    child: Text(
+                                      'Tap map to add vertices (${3 - _drawingPoints.length} more needed)',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Color(0xFF5F6368),
+                                      ),
                                     ),
                                   ),
+                              ] else ...[
+                                // Point mode — just show cancel
+                                const SizedBox(height: 8),
+                                Text(
+                                  'Tap map to place a point',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF5F6368),
+                                  ),
                                 ),
-                            ] else ...[
-                              // Point mode — just show cancel
-                              const SizedBox(height: 8),
-                              Text(
-                                'Tap map to place a point',
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  color: Color(0xFF5F6368),
+                                const SizedBox(height: 8),
+                                OutlinedButton.icon(
+                                  onPressed: _cancelDrawing,
+                                  icon: const Icon(Icons.close, size: 18),
+                                  label: const Text('Done'),
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: const Color(0xFF5F6368),
+                                    side: const BorderSide(
+                                        color: Color(0xFFDADCE0)),
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 8),
-                              OutlinedButton.icon(
-                                onPressed: _cancelDrawing,
-                                icon: const Icon(Icons.close, size: 18),
-                                label: const Text('Done'),
-                                style: OutlinedButton.styleFrom(
-                                  foregroundColor: const Color(0xFF5F6368),
-                                  side: const BorderSide(
-                                      color: Color(0xFFDADCE0)),
-                                ),
-                              ),
+                              ],
                             ],
-                          ],
+                          ),
                         ),
                       ),
                     ),
@@ -1630,10 +1977,11 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                   onClose: _closeInfoWindow,
                   onDelete: _selectedTrackIndex != null
                       ? () async {
-                          final confirm = await _confirmDelete(
-                              context, 'track', _infoName ?? 'this track');
-                          if (!confirm) return;
                           final ti = _selectedTrackIndex!;
+                          final name = _infoName ?? 'this track';
+                          final confirm =
+                              await _confirmDelete(context, 'track', name);
+                          if (!confirm || !mounted) return;
                           _closeInfoWindow();
                           ref.read(teTabsRiverpod).removeTrack(currentTab, ti);
                         }
@@ -1648,10 +1996,11 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                   onClose: _closeWptInfoWindow,
                   onDelete: _wptIndex != null
                       ? () async {
-                          final confirm = await _confirmDelete(
-                              context, 'waypoint', _wptName ?? 'this waypoint');
-                          if (!confirm) return;
                           final wi = _wptIndex!;
+                          final name = _wptName ?? 'this waypoint';
+                          final confirm =
+                              await _confirmDelete(context, 'waypoint', name);
+                          if (!confirm || !mounted) return;
                           _closeWptInfoWindow();
                           ref
                               .read(teTabsRiverpod)

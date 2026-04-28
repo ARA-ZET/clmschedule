@@ -1,6 +1,4 @@
-<!DOCTYPE html>
-<html>
-<head>
+<!DOCTYPE html><html><head>
   <!--
     If you are serving your web app in a path other than the root, change the
     href value below to reflect the base path you are serving from.
@@ -20,6 +18,16 @@
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="CLM Schedule - Enterprise scheduling application">
 
+  <!-- Open Graph / link preview tags (patched per-flavor at deploy time) -->
+  <meta property="og:title" content="CLM Schedule">
+  <meta property="og:description" content="CLM Schedule - Enterprise scheduling application">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="icons/Icon-512.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="CLM Schedule">
+  <meta name="twitter:description" content="CLM Schedule - Enterprise scheduling application">
+  <meta name="twitter:image" content="icons/Icon-512.png">
+
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -28,71 +36,150 @@
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
   <!-- Favicon -->
-  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png"/>
-  <link rel="shortcut icon" type="image/png" href="favicon.png"/>
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
+  <link rel="shortcut icon" type="image/png" href="favicon.png">
 
   <title>CLM Schedule</title>
   <link rel="manifest" href="manifest.json">
   
-  <!-- Splash Screen Styles -->
+  <!-- Splash Screen Styles (matches ClmMapsSplash widget) -->
   <style>
     body {
       margin: 0;
       padding: 0;
+      background-color: #0A2E6E;
     }
-    
+
     #splash-screen {
       position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: linear-gradient(135deg, #0175C2 0%, #0a9fdb 100%);
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background-color: #0A2E6E;
       display: flex;
-      flex-direction: column;
       align-items: center;
       justify-content: center;
       z-index: 9999;
-      transition: opacity 0.5s ease-out;
+      transition: opacity 0.4s ease-out;
+      overflow: hidden;
     }
-    
+
     #splash-screen.fade-out {
       opacity: 0;
       pointer-events: none;
     }
-    
-    .splash-logo {
-      width: 150px;
-      height: 150px;
-      margin-bottom: 30px;
-      animation: pulse 2s ease-in-out infinite;
-    }
-    
-    .splash-title {
-      color: white;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      font-size: 32px;
-      font-weight: 600;
-      margin-bottom: 20px;
-      letter-spacing: 1px;
-    }
-    
-    .splash-loading {
-      width: 50px;
-      height: 50px;
-      border: 4px solid rgba(255, 255, 255, 0.3);
-      border-top-color: white;
+
+    /* Decorative circles */
+    .splash-circle {
+      position: absolute;
       border-radius: 50%;
-      animation: spin 1s linear infinite;
     }
-    
-    @keyframes spin {
-      to { transform: rotate(360deg); }
+    .splash-circle-1 { top: -60px; right: -40px; width: 200px; height: 200px; background: rgba(255,255,255,0.06); }
+    .splash-circle-2 { bottom: -80px; left: -50px; width: 260px; height: 260px; background: rgba(255,255,255,0.04); }
+    .splash-circle-3 { top: 120px; left: -30px; width: 100px; height: 100px; background: rgba(212,160,23,0.12); }
+    .splash-circle-4 { bottom: 60px; right: -20px; width: 140px; height: 140px; background: rgba(212,160,23,0.08); }
+    .splash-circle-5 { top: 40px; left: 80px; width: 50px; height: 50px; background: rgba(255,255,255,0.05); }
+
+    .splash-card {
+      position: relative;
+      z-index: 1;
+      width: 275px;
+      height: 350px;
+      background: #fff;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+      display: flex;
+      flex-direction: column;
     }
-    
-    @keyframes pulse {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.05); }
+
+    .splash-card-image {
+      position: relative;
+      height: 220px;
+      overflow: hidden;
+      padding: 5px;
+    }
+
+    .splash-card-image img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      border-radius: 14px;
+    }
+
+    .splash-chip {
+      position: absolute;
+      top: 10px; left: 10px;
+      background: #fff;
+      border-radius: 12px;
+      padding: 5px 12px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 10px;
+      font-weight: 700;
+      color: #2C4A6E;
+      letter-spacing: 1.2px;
+    }
+
+    .splash-card-body {
+      flex: 1;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .splash-card-body h2 {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 16px;
+      font-weight: 700;
+      color: #202124;
+    }
+
+    .splash-card-body p {
+      margin: 4px 0 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 11px;
+      color: #5F6368;
+      line-height: 1.4;
+    }
+
+    .splash-status {
+      margin-top: auto;
+    }
+
+    .splash-status-text {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 12px;
+      font-weight: 600;
+      color: #202124;
+    }
+
+    .splash-dots {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 12px;
+      font-weight: 600;
+      color: #D4A017;
+    }
+
+    .splash-progress {
+      margin-top: 6px;
+      height: 3px;
+      border-radius: 2px;
+      background: #e0e0e0;
+      overflow: hidden;
+    }
+
+    .splash-progress-bar {
+      height: 100%;
+      background: #2C4A6E;
+      animation: indeterminate 1.8s infinite ease-in-out;
+      width: 40%;
+      border-radius: 2px;
+    }
+
+    @keyframes indeterminate {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
     }
   </style>
   
@@ -120,37 +207,79 @@
     };
     document.head.appendChild(script);
   </script>
-  <script src="places_helper.js" defer></script>
+  <script src="places_helper.js" defer=""></script>
+  <script>
+    function removeSplashFromWeb() {
+      const splash = document.getElementById("splash-screen");
+      if (splash) {
+        splash.classList.add('fade-out');
+        setTimeout(() => splash.remove(), 400);
+      }
+      document.body.style.background = "transparent";
+    }
+  </script>
+  <meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" name="viewport">
 </head>
 <body>
-  <!-- Splash Screen -->
+  <!-- Splash screen (matches ClmMapsSplash Flutter widget) -->
   <div id="splash-screen">
-    <img src="icons/Icon-512.png" alt="CLM Schedule" class="splash-logo">
-    <div class="splash-title">CLM Schedule</div>
-    <div class="splash-loading"></div>
+    <div class="splash-circle splash-circle-1"></div>
+    <div class="splash-circle splash-circle-2"></div>
+    <div class="splash-circle splash-circle-3"></div>
+    <div class="splash-circle splash-circle-4"></div>
+    <div class="splash-circle splash-circle-5"></div>
+    <div class="splash-card">
+      <div class="splash-card-image">
+        <img src="splash/img/map.jpg" alt="">
+        <div class="splash-chip">LOADING</div>
+      </div>
+      <div class="splash-card-body">
+        <h2>Reliable Flyer Distribution</h2>
+        <p>#1 GPS-tracked flyer distribution in Cape Town</p>
+        <div class="splash-status">
+          <span class="splash-status-text">Loading tracks</span>
+          <span class="splash-dots">...</span>
+          <div class="splash-progress"><div class="splash-progress-bar"></div></div>
+        </div>
+      </div>
+    </div>
   </div>
  
-  <script src="flutter_bootstrap.js" async></script>
+  <script src="flutter_bootstrap.js" async=""></script>
   
   <!-- Remove splash screen when Flutter is ready -->
   <script>
+    // Cycle loading text to match Flutter widget behavior
+    (function() {
+      const steps = ['Loading tracks', 'Loading waypoints', 'Updating map'];
+      let idx = 0;
+      const el = document.querySelector('.splash-status-text');
+      if (el) {
+        setInterval(function() {
+          idx = (idx + 1) % steps.length;
+          el.textContent = steps[idx];
+        }, 2000);
+      }
+    })();
+
     window.addEventListener('flutter-first-frame', function() {
       const splash = document.getElementById('splash-screen');
       if (splash) {
         splash.classList.add('fade-out');
-        setTimeout(() => splash.remove(), 500);
+        setTimeout(() => splash.remove(), 400);
       }
     });
     
-    // Fallback: remove splash after 3 seconds if Flutter event doesn't fire
+    // Fallback: remove splash after 5 seconds
     setTimeout(function() {
       const splash = document.getElementById('splash-screen');
       if (splash) {
         splash.classList.add('fade-out');
-        setTimeout(() => splash.remove(), 500);
+        setTimeout(() => splash.remove(), 400);
       }
-    }, 3000);
+    }, 5000);
   </script>
   
-</body>
-</html>
+
+
+</body></html>

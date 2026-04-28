@@ -44,8 +44,8 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
 
   @override
   Future<ShareableMap> load() async {
-    // Read all work areas from Firestore (one-time read via stream.first)
-    _loadedWorkAreas = await _firestoreService.streamWorkAreas().first;
+    // Read all work areas from Firestore (cache-first one-shot fetch).
+    _loadedWorkAreas = await _firestoreService.fetchWorkAreasOnce();
 
     // Convert each WorkArea to a CustomPolygon
     final polygons =
@@ -155,7 +155,7 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
     }
 
     // Refresh the loaded state so subsequent saves diff correctly
-    _loadedWorkAreas = await _firestoreService.streamWorkAreas().first;
+    _loadedWorkAreas = await _firestoreService.fetchWorkAreasOnce();
   }
 
   // ── Conversion helpers ──────────────────────────────────────────────

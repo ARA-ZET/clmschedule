@@ -1,8 +1,159 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../providers/job_type_provider.dart';
 
-enum VehicleType { hyundai, mahindra, nissan }
+enum VehicleType {
+  hyundai,
+  mahindra,
+  nissan;
 
-enum TrailerType { bigTrailer, smallTrailer, noTrailer }
+  String get displayName {
+    switch (this) {
+      case hyundai:
+        return 'Hyundai';
+      case mahindra:
+        return 'Mahindra';
+      case nissan:
+        return 'Nissan';
+    }
+  }
+}
+
+enum TrailerType {
+  bigTrailer,
+  smallTrailer,
+  noTrailer;
+
+  String get displayName {
+    switch (this) {
+      case bigTrailer:
+        return 'Big Trailer';
+      case smallTrailer:
+        return 'Small Trailer';
+      case noTrailer:
+        return 'No Trailer';
+    }
+  }
+}
+
+/// Unified enum for vehicle + trailer combinations.
+/// Stored as its `.name` in Firestore (e.g. 'hyundaiNoTrailer').
+/// Replaces the old quantity-as-index encoding (1-9).
+enum VehicleTrailerCombo {
+  hyundaiNoTrailer,
+  hyundaiBigTrailer,
+  hyundaiSmallTrailer,
+  mahindraNoTrailer,
+  mahindraBigTrailer,
+  mahindraSmallTrailer,
+  nissanNoTrailer,
+  nissanBigTrailer,
+  nissanSmallTrailer;
+
+  VehicleType get vehicleType {
+    switch (this) {
+      case hyundaiNoTrailer:
+      case hyundaiBigTrailer:
+      case hyundaiSmallTrailer:
+        return VehicleType.hyundai;
+      case mahindraNoTrailer:
+      case mahindraBigTrailer:
+      case mahindraSmallTrailer:
+        return VehicleType.mahindra;
+      case nissanNoTrailer:
+      case nissanBigTrailer:
+      case nissanSmallTrailer:
+        return VehicleType.nissan;
+    }
+  }
+
+  TrailerType get trailerType {
+    switch (this) {
+      case hyundaiNoTrailer:
+      case mahindraNoTrailer:
+      case nissanNoTrailer:
+        return TrailerType.noTrailer;
+      case hyundaiBigTrailer:
+      case mahindraBigTrailer:
+      case nissanBigTrailer:
+        return TrailerType.bigTrailer;
+      case hyundaiSmallTrailer:
+      case mahindraSmallTrailer:
+      case nissanSmallTrailer:
+        return TrailerType.smallTrailer;
+    }
+  }
+
+  /// Human-readable label for dropdowns (e.g. "Mahindra - Big Trailer").
+  String get label {
+    final vehicle = vehicleType.displayName;
+    final trailer = trailerType.displayName;
+    return '$vehicle - $trailer';
+  }
+
+  /// Only combos with no trailer (used for trailerTowing job type).
+  static List<VehicleTrailerCombo> get noTrailerOnly => [
+        hyundaiNoTrailer,
+        mahindraNoTrailer,
+        nissanNoTrailer,
+      ];
+
+  /// All combos (used for junkCollection / furnitureMove).
+  static List<VehicleTrailerCombo> get allCombos => values.toList();
+
+  /// Get the right combo list based on job type.
+  static List<VehicleTrailerCombo> forJobType(String jobTypeId) {
+    if (jobTypeId == 'trailerTowing') return noTrailerOnly;
+    return allCombos;
+  }
+
+  /// Whether the given job type uses vehicle/trailer selection.
+  ///
+  /// Resolved via the [JobTypeProvider] static instance so that any job type
+  /// flagged as "appears on Collection Schedule" (e.g. a user-added gutter or
+  /// pavement cleaning service) automatically picks up the vehicle/trailer UI.
+  static bool isVehicleJobType(String jobTypeId) {
+    final provider = JobTypeProvider.instance;
+    if (provider == null) return false;
+    return provider.appearsOnCollectionSchedule(jobTypeId);
+  }
+
+  /// Parse from Firestore string (the enum `.name`). Returns null if not found.
+  static VehicleTrailerCombo? tryParse(String? value) {
+    if (value == null || value.isEmpty) return null;
+    try {
+      return VehicleTrailerCombo.values.firstWhere((e) => e.name == value);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Convert legacy quantity to the new enum.
+  /// [jobTypeId] is needed because trailerTowing used a shorter list
+  /// (1=Hyundai-No, 2=Mahindra-No, 3=Nissan-No) while other types used
+  /// the full 1-9 list.
+  static VehicleTrailerCombo? fromLegacyQuantity(int quantity,
+      {String jobTypeId = ''}) {
+    if (quantity < 1) return null;
+    if (jobTypeId == 'trailerTowing') {
+      // Old trailerTowing list only had 3 no-trailer combos
+      final trailerTowingList = noTrailerOnly;
+      if (quantity > trailerTowingList.length) return null;
+      return trailerTowingList[quantity - 1];
+    }
+    if (quantity > values.length) return null;
+    return values[quantity - 1];
+  }
+
+  /// Convert to legacy quantity integer (1-based index).
+  /// For trailerTowing, uses the short list index.
+  int legacyQuantity({String jobTypeId = ''}) {
+    if (jobTypeId == 'trailerTowing') {
+      final idx = noTrailerOnly.indexOf(this);
+      return idx >= 0 ? idx + 1 : 1;
+    }
+    return index + 1;
+  }
+}
 
 class CollectionJob {
   final String id;
@@ -129,27 +280,9 @@ class CollectionJob {
   }
 
   // Helper getters
-  String get vehicleDisplayName {
-    switch (vehicleType) {
-      case VehicleType.hyundai:
-        return 'Hyundai';
-      case VehicleType.mahindra:
-        return 'Mahindra';
-      case VehicleType.nissan:
-        return 'Nissan';
-    }
-  }
+  String get vehicleDisplayName => vehicleType.displayName;
 
-  String get trailerDisplayName {
-    switch (trailerType) {
-      case TrailerType.bigTrailer:
-        return 'Big Trailer';
-      case TrailerType.smallTrailer:
-        return 'Small Trailer';
-      case TrailerType.noTrailer:
-        return 'No Trailer';
-    }
-  }
+  String get trailerDisplayName => trailerType.displayName;
 
   String get timeSlotDisplay {
     return timeSlot;

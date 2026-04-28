@@ -49,6 +49,37 @@ class ScheduleProvider extends ChangeNotifier {
   bool _isSameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
 
+  /// Ensures a job has a valid drop-off point when it has work areas.
+  ///
+  /// If [preferExisting] is true, an existing point is kept when still inside
+  /// a polygon work area. Otherwise a new default point is estimated.
+  ///
+  /// An explicit dropoff-category point element in [Job.workMaps] always
+  /// wins — it represents the latest user edit from the map editor.
+  Job _normalizeDropOffPoint(Job job, {bool preferExisting = true}) {
+    if (job.workMaps.isEmpty) return job.copyWith(dropOffPoint: null);
+
+    // Priority 1: explicit dropoff-category point in workMaps (set by editor).
+    for (final wm in job.workMaps) {
+      if (wm.isPoint &&
+          wm.pointCategory == PointCategory.dropoff &&
+          wm.points.isNotEmpty) {
+        return job.copyWith(dropOffPoint: wm.points.first);
+      }
+    }
+
+    final estimated = Job.estimateDropOffPointFromWorkMaps(job.workMaps);
+    if (estimated == null) return job;
+
+    final existing = job.dropOffPoint;
+    if (!preferExisting || existing == null) {
+      return job.copyWith(dropOffPoint: estimated);
+    }
+
+    final keepExisting = Job.isPointInsideAnyWorkArea(existing, job.workMaps);
+    return keepExisting ? job : job.copyWith(dropOffPoint: estimated);
+  }
+
   /// Replace a job in the local lists by id, then notify listeners instantly.
   void _optimisticUpdateJob(Job newJob) {
     for (int i = 0; i < _currentMonthJobs.length; i++) {
@@ -143,17 +174,17 @@ class ScheduleProvider extends ChangeNotifier {
   /// on-demand via [fetchJobsForDistributorAndDate].
   Future<void> initForTrackEditor() async {
     try {
-      _distributors = await _firestoreService.streamDistributors().first;
+      _distributors = await _firestoreService.fetchDistributorsOnce();
       notifyListeners();
     } catch (e) {
       debugPrint('ScheduleProvider.initForTrackEditor: $e');
     }
   }
 
-  /// One-time read of all work areas from Firestore.
+  /// One-time read of all work areas from Firestore (cache-first).
   Future<List<WorkArea>> fetchWorkAreas() async {
     try {
-      return await _firestoreService.streamWorkAreas().first;
+      return await _firestoreService.fetchWorkAreasOnce();
     } catch (e) {
       debugPrint('ScheduleProvider.fetchWorkAreas: $e');
       return [];
@@ -195,12 +226,17 @@ class ScheduleProvider extends ChangeNotifier {
     );
   }
 
-  // Load job streams for a specific month (and next month)
+  // Tracks the month the next-month subscription is currently attached to.
+  // Null when no next-month listener is active.
+  DateTime? _nextMonthSubscribedFor;
+
+  // Load job streams for a specific month (and next month when it has data)
   // Only tears down and recreates the two job subscriptions.
   void _loadJobStreamsForMonth(DateTime month) {
     // Cancel ONLY job subscriptions (not global distributors/workAreas)
     _currentMonthJobsSubscription?.cancel();
     _nextMonthJobsSubscription?.cancel();
+    _nextMonthSubscribedFor = null;
 
     // Clear stale data from previous month so the lookup map
     // doesn't contain old-month entries while new streams start.
@@ -210,11 +246,8 @@ class ScheduleProvider extends ChangeNotifier {
     // Invalidate all derived caches
     _invalidateCaches();
 
-    // Calculate next month
-    final nextMonth = DateTime(month.year, month.month + 1);
-
     debugPrint(
-        'ScheduleProvider: Starting job streams for current month: ${_firestoreService.getMonthlyDocumentId(month)} and next month: ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
+        'ScheduleProvider: Starting job stream for current month: ${_firestoreService.getMonthlyDocumentId(month)}');
 
     // Listen to jobs stream for the current month — set up synchronously
     _currentMonthJobsSubscription = _firestoreService.streamJobs(month).listen(
@@ -230,13 +263,55 @@ class ScheduleProvider extends ChangeNotifier {
       },
     );
 
-    // Listen to jobs stream for the next month
+    // Next month is attached lazily: only when the monthly index document
+    // exists (i.e. the month has real data). This avoids an empty collection
+    // listener for every session on months that haven't been populated.
+    unawaited(_maybeAttachNextMonthStream(month));
+  }
+
+  /// Attach the next-month jobs stream only if that month has any data.
+  /// Uses a cache-first existence probe on the monthly index doc.
+  Future<void> _maybeAttachNextMonthStream(DateTime currentMonth) async {
+    final nextMonth = DateTime(currentMonth.year, currentMonth.month + 1);
+
+    // Skip if another month change already happened.
+    if (_currentMonth != currentMonth) return;
+
+    final hasData = await _firestoreService.hasScheduleDataForMonth(nextMonth);
+
+    // Re-check after the async gap — the user may have navigated away.
+    if (_currentMonth != currentMonth) return;
+    if (!hasData) {
+      debugPrint(
+          'ScheduleProvider: Skipping next-month stream (no data) for ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
+      return;
+    }
+
+    _nextMonthSubscribedFor = nextMonth;
     _nextMonthJobsSubscription = _firestoreService.streamJobs(nextMonth).listen(
       (jobs) {
         _nextMonthJobs = jobs;
         _invalidateCaches();
         debugPrint(
             'ScheduleProvider: Received ${jobs.length} jobs for next month ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
+        notifyListeners();
+      },
+      onError: (error) {
+        debugPrint('ScheduleProvider: Next month jobs stream error: $error');
+      },
+    );
+  }
+
+  /// Public hook for callers (e.g. cross-date drag) that know they need
+  /// next-month data even if the existence probe missed it.
+  Future<void> ensureNextMonthLoaded() async {
+    if (_nextMonthSubscribedFor != null) return;
+    final nextMonth = DateTime(_currentMonth.year, _currentMonth.month + 1);
+    _nextMonthSubscribedFor = nextMonth;
+    _nextMonthJobsSubscription = _firestoreService.streamJobs(nextMonth).listen(
+      (jobs) {
+        _nextMonthJobs = jobs;
+        _invalidateCaches();
         notifyListeners();
       },
       onError: (error) {
@@ -381,7 +456,8 @@ class ScheduleProvider extends ChangeNotifier {
 
   Future<void> addJob(Job job) async {
     try {
-      await _firestoreService.addJob(job, job.date);
+      final normalized = _normalizeDropOffPoint(job, preferExisting: false);
+      await _firestoreService.addJob(normalized, normalized.date);
       debugPrint('Successfully added job for ${job.date}');
     } catch (e) {
       debugPrint('Error adding job: $e');
@@ -391,8 +467,9 @@ class ScheduleProvider extends ChangeNotifier {
 
   Future<void> updateJob(Job job) async {
     try {
+      final normalized = _normalizeDropOffPoint(job);
       // Update Firestore directly - stream will handle local state update
-      await _firestoreService.updateJob(job, job.date);
+      await _firestoreService.updateJob(normalized, normalized.date);
       debugPrint('Successfully updated job ${job.id}');
     } catch (e) {
       debugPrint('Error updating job: $e');
@@ -462,19 +539,20 @@ class ScheduleProvider extends ChangeNotifier {
   // Direct operations without command pattern to avoid state corruption
   Future<void> addJobWithUndo(Job job, DateTime targetDate) async {
     // Bypass command pattern - add job directly
-    await addJob(job);
+    await addJob(_normalizeDropOffPoint(job, preferExisting: false));
   }
 
   Future<void> updateJobWithUndo(
       Job originalJob, Job modifiedJob, DateTime targetDate) async {
+    final normalized = _normalizeDropOffPoint(modifiedJob);
     // Optimistic UI update — show change instantly before Firestore write
-    _optimisticUpdateJob(modifiedJob);
+    _optimisticUpdateJob(normalized);
 
     // Check if we're moving the job to a different date
-    if (!_isSameDay(originalJob.date, modifiedJob.date)) {
-      await moveJobBetweenDates(originalJob, modifiedJob);
+    if (!_isSameDay(originalJob.date, normalized.date)) {
+      await moveJobBetweenDates(originalJob, normalized);
     } else {
-      await updateJob(modifiedJob);
+      await updateJob(normalized);
     }
   }
 

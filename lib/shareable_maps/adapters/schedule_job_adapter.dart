@@ -3,6 +3,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../models/custom_polygon.dart';
 import '../../models/job.dart';
+import '../../providers/unfinished_work_areas_provider.dart';
 import '../models/map_layer.dart';
 import '../models/map_point.dart';
 import '../models/map_polyline.dart';
@@ -16,25 +17,42 @@ typedef ScheduleJobSaveCallback = Future<void> Function(
   List<String> workingAreaNames,
 );
 
+/// Fixed layer id for polygons injected from matching unfinished work areas.
+/// Polygons in this layer sync back to [UnfinishedWorkAreasProvider] on save
+/// instead of being persisted on the job itself.
+const String kUnfinishedAreasLayerId = 'unfinished_work_areas_layer';
+
 /// Adapter that bridges the ShareableMapEditor to a single schedule [Job]'s
 /// `workMaps` field.
 ///
 /// **Load**: Converts `Job.workMaps` (`List<CustomPolygon>`) into a single-layer
-/// [ShareableMap]. Also uses `Job.workingAreas` for context.
+/// [ShareableMap]. Also uses `Job.workingAreas` for context. When an
+/// [UnfinishedWorkAreasProvider] is provided, any unfinished items whose
+/// `clients` overlap with the current job's clients are added as a second
+/// read-visible layer (`kUnfinishedAreasLayerId`).
 ///
-/// **Save**: Extracts all polygons from the map, derives area names from
-/// polygon names, and calls the provided [onSave] callback.
+/// **Save**: Extracts polygons from the job layer(s) and calls the provided
+/// [onSave] callback. Polygons in the unfinished-areas layer are NOT sent to
+/// the job; instead their updated points are written back to the matching
+/// unfinished items via [UnfinishedWorkAreasProvider.updateItemWorkMaps].
 class ScheduleJobAdapter extends MapDataAdapter {
   final Job _job;
   final ScheduleJobSaveCallback _onSave;
   final String? distributorName;
+  final UnfinishedWorkAreasProvider? _unfinishedProvider;
+
+  /// Maps polygon name → source unfinished item id. Populated during [load]
+  /// so we can route edits back to the right Firestore doc on [save].
+  final Map<String, String> _polygonNameToUnfinishedId = {};
 
   ScheduleJobAdapter({
     required Job job,
     required ScheduleJobSaveCallback onSave,
     this.distributorName,
+    UnfinishedWorkAreasProvider? unfinishedProvider,
   })  : _job = job,
-        _onSave = onSave;
+        _onSave = onSave,
+        _unfinishedProvider = unfinishedProvider;
 
   @override
   String get adapterId => 'schedule_job';
@@ -99,6 +117,10 @@ class ScheduleJobAdapter extends MapDataAdapter {
     final polygonWorkMaps = _job.workMaps.where((p) => p.isPolygon).toList();
     final polylineWorkMaps = _job.workMaps.where((p) => p.isPolyline).toList();
     final pointWorkMaps = _job.workMaps.where((p) => p.isPoint).toList();
+    final hasDropoffPoint = pointWorkMaps.any(
+        (p) => p.pointCategory == PointCategory.dropoff && p.points.isNotEmpty);
+    final inferredDropOff = _job.dropOffPoint ??
+        Job.estimateDropOffPointFromWorkMaps(_job.workMaps);
     debugPrint(
         '[ScheduleJobAdapter.load] Split: ${polygonWorkMaps.length} polygons, '
         '${polylineWorkMaps.length} polylines, ${pointWorkMaps.length} points');
@@ -140,6 +162,19 @@ class ScheduleJobAdapter extends MapDataAdapter {
                 color: p.color,
                 pointCategory: p.pointCategory,
               ))
+          .followedBy(
+            !hasDropoffPoint && inferredDropOff != null
+                ? [
+                    MapPoint.create(
+                      name: 'Drop-off Point',
+                      description: 'Auto-generated drop-off point',
+                      position: inferredDropOff,
+                      color: Colors.blue,
+                      pointCategory: PointCategory.dropoff,
+                    ),
+                  ]
+                : const <MapPoint>[],
+          )
           .toList(),
       createdAt: now,
       updatedAt: now,
@@ -166,7 +201,7 @@ class ScheduleJobAdapter extends MapDataAdapter {
       id: 'job_${_job.id}',
       name: displayName,
       description: 'Work areas: ${_job.workingAreasDisplay}',
-      layers: [layer],
+      layers: [layer, ..._buildUnfinishedLayers(now)],
       defaultCenter: center,
       defaultZoom: 13.0,
       createdAt: now,
@@ -174,13 +209,124 @@ class ScheduleJobAdapter extends MapDataAdapter {
     );
   }
 
+  /// Build a list containing at most one layer of polygons sourced from
+  /// unfinished work area items whose clients overlap with this job.
+  ///
+  /// Also populates [_polygonNameToUnfinishedId] so [save] can route edits
+  /// back to the originating Firestore document.
+  List<MapLayer> _buildUnfinishedLayers(DateTime now) {
+    final provider = _unfinishedProvider;
+    if (provider == null) {
+      debugPrint('[UnfinishedLayer] skipped: provider is null');
+      return const [];
+    }
+    if (_job.clients.isEmpty) {
+      debugPrint(
+          '[UnfinishedLayer] skipped: job "${_job.id}" has no clients');
+      return const [];
+    }
+
+    final jobClients = _job.clients.map((c) => c.trim().toLowerCase()).toSet();
+    debugPrint(
+        '[UnfinishedLayer] job "${_job.id}" clients (raw): ${_job.clients}');
+    debugPrint(
+        '[UnfinishedLayer] job clients (normalised): $jobClients');
+    debugPrint(
+        '[UnfinishedLayer] scanning ${provider.items.length} unfinished item(s)');
+
+    final matchedPolygons = <CustomPolygon>[];
+    _polygonNameToUnfinishedId.clear();
+
+    for (final item in provider.items) {
+      final itemClientsNorm =
+          item.clients.map((c) => c.trim().toLowerCase()).toList();
+      final overlap = itemClientsNorm
+          .where((c) => jobClients.contains(c))
+          .toList();
+      final hasMatch = overlap.isNotEmpty;
+      debugPrint(
+          '[UnfinishedLayer]  item "${item.id}" clients=${item.clients} '
+          '(norm=$itemClientsNorm) polygons=${item.workMaps.where((p) => p.isPolygon).length} '
+          'match=$hasMatch overlap=$overlap');
+      if (!hasMatch) continue;
+
+      for (final wm in item.workMaps.where((p) => p.isPolygon)) {
+        if (wm.name.isEmpty) {
+          debugPrint(
+              '[UnfinishedLayer]    skipping unnamed polygon in item "${item.id}"');
+          continue;
+        }
+        debugPrint(
+            '[UnfinishedLayer]    adding polygon "${wm.name}" (${wm.points.length} pts) from item "${item.id}"');
+        matchedPolygons.add(CustomPolygon(
+          name: wm.name,
+          description: wm.description,
+          points: List<LatLng>.from(wm.points),
+          color: wm.color,
+          fillOpacity: wm.fillOpacity,
+          strokeWidth: wm.strokeWidth,
+          type: wm.type,
+        ));
+        _polygonNameToUnfinishedId[wm.name] = item.id;
+      }
+    }
+
+    debugPrint(
+        '[UnfinishedLayer] total matched polygons: ${matchedPolygons.length}');
+    if (matchedPolygons.isEmpty) return const [];
+
+    return [
+      MapLayer(
+        id: kUnfinishedAreasLayerId,
+        name: 'Unfinished Areas',
+        description: 'Matched from unfinished work areas by client name',
+        order: 1,
+        defaultColor: Colors.indigo.shade600,
+        polygons: matchedPolygons,
+        polylines: const [],
+        points: const [],
+        createdAt: now,
+        updatedAt: now,
+      ),
+    ];
+  }
+
   @override
   Future<void> save(ShareableMap map) async {
-    // Collect all polygons from all layers
-    final polygons = map.layers.expand((l) => l.polygons).toList();
+    // Separate layers: unfinished-areas layer syncs back to the unfinished
+    // provider; all other layers are persisted on the job itself.
+    final jobLayers =
+        map.layers.where((l) => l.id != kUnfinishedAreasLayerId).toList();
+    final unfinishedLayers =
+        map.layers.where((l) => l.id == kUnfinishedAreasLayerId).toList();
+
+    // --- Route unfinished polygon edits back to UnfinishedWorkAreasProvider.
+    if (_unfinishedProvider != null && unfinishedLayers.isNotEmpty) {
+      final polysByItemId = <String, List<CustomPolygon>>{};
+      for (final layer in unfinishedLayers) {
+        for (final p in layer.polygons) {
+          // Match by polygon name. If the user renamed a polygon while editing
+          // it becomes orphaned and is skipped (the job layer's own save still
+          // runs, so no data is lost overall).
+          final itemId = _polygonNameToUnfinishedId[p.name];
+          if (itemId == null) continue;
+          polysByItemId.putIfAbsent(itemId, () => []).add(p);
+        }
+      }
+      for (final entry in polysByItemId.entries) {
+        try {
+          await _unfinishedProvider.updateItemWorkMaps(entry.key, entry.value);
+        } catch (e) {
+          debugPrint('[ScheduleJobAdapter.save] Failed to sync unfinished $e');
+        }
+      }
+    }
+
+    // --- Collect elements from job-owned layers for the Job.workMaps write.
+    final polygons = jobLayers.expand((l) => l.polygons).toList();
 
     // Collect all polylines and convert to CustomPolygon with polyline type
-    final polylineElements = map.layers
+    final polylineElements = jobLayers
         .expand((l) => l.polylines)
         .map((p) => CustomPolygon(
               name: p.name,
@@ -194,7 +340,7 @@ class ScheduleJobAdapter extends MapDataAdapter {
         .toList();
 
     // Collect all points/markers and convert to CustomPolygon with point type
-    final pointElements = map.layers
+    final pointElements = jobLayers
         .expand((l) => l.points)
         .map((p) => CustomPolygon(
               name: p.name,
@@ -218,8 +364,9 @@ class ScheduleJobAdapter extends MapDataAdapter {
           'pointCategory=${wm.pointCategory.id}');
     }
 
-    // Derive working area names from all element names
+    // Derive working area names from polygon elements only
     final workingAreaNames = allWorkMaps
+        .where((e) => e.isPolygon)
         .map((p) => p.name)
         .where((name) => name.isNotEmpty)
         .toSet()

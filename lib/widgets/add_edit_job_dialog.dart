@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -5,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/job_list_item.dart';
 import '../models/job_list_item_update.dart';
 import '../models/collection_job.dart';
+import '../models/custom_job_list_status.dart';
+import '../models/custom_job_type.dart';
 import '../models/happy_sun_shared.dart';
 import '../providers/auth_provider.dart';
 import '../providers/job_list_provider.dart';
@@ -15,6 +18,7 @@ import '../providers/inventory_provider.dart';
 import '../providers/tool_settings_provider.dart';
 import '../providers/job_type_provider.dart';
 import '../services/job_assignment_service.dart';
+import '../shareable_maps/services/map_link_service.dart';
 import 'job_assignment_preview_dialog.dart';
 import 'happy_sun_tools_dialog.dart';
 
@@ -35,6 +39,9 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   // Loading state
   bool _isProcessing = false;
 
+  // Shareable map suggestions for the Area field (name → share URL)
+  List<_MapSuggestion> _mapSuggestions = [];
+
   // Controllers for text fields
   late final TextEditingController _invoiceController;
   late final TextEditingController _amountController;
@@ -52,7 +59,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   // Dropdown values
   late String _selectedJobStatusId; // Now stores custom status ID
   late String _selectedJobType;
-  String? _selectedVehicleTrailerCombo;
+  VehicleTrailerCombo? _selectedVehicleTrailerCombo;
 
   // Date values
   DateTime? _selectedDate;
@@ -101,17 +108,18 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     _selectedJobStatusId = job?.jobStatusId ?? 'standby';
     _selectedJobType = job?.jobTypeId ?? 'flyersPrintingOnly';
 
-    // Initialize vehicle/trailer combo based on existing quantity for junk collection
-    if ((_selectedJobType == 'junkCollection') && job != null) {
+    // Initialize vehicle/trailer combo from existing job
+    if (VehicleTrailerCombo.isVehicleJobType(_selectedJobType) && job != null) {
       _selectedVehicleTrailerCombo =
-          _getVehicleTrailerComboFromQuantity(job.quantity);
-    }
-    // Initialize vehicle/trailer combo based on existing quantity for junk collection
-    if ((_selectedJobType == 'furnitureMove' ||
-            _selectedJobType == 'trailerTowing') &&
-        job != null) {
-      _selectedVehicleTrailerCombo =
-          _getVehicleTrailerComboFromQuantity(job.quantity);
+          VehicleTrailerCombo.tryParse(job.vehicleTrailerCombo) ??
+              VehicleTrailerCombo.fromLegacyQuantity(job.quantity,
+                  jobTypeId: _selectedJobType);
+      // Ensure the combo is valid for this job type
+      final validCombos = VehicleTrailerCombo.forJobType(_selectedJobType);
+      if (_selectedVehicleTrailerCombo != null &&
+          !validCombos.contains(_selectedVehicleTrailerCombo)) {
+        _selectedVehicleTrailerCombo = null;
+      }
     }
 
     // Initialize dates - null for new jobs, existing values for editing
@@ -120,6 +128,355 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
 
     // Initialize tools needed for Happy Sun jobs
     _toolsNeeded = job?.toolsNeeded;
+
+    // Fetch shareable map names for area field suggestions
+    _loadMapNames();
+  }
+
+  Future<void> _loadMapNames() async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('mapLinks')
+          .orderBy('createdAt', descending: true)
+          .get();
+      final suggestions = <_MapSuggestion>[];
+      final seen = <String>{};
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final name = data['mapName'] as String? ?? '';
+        if (name.isEmpty) continue;
+        final code = doc.id;
+        final url = MapLinkService.buildShareUrl(code);
+        // Deduplicate by name
+        if (seen.add(name.toLowerCase())) {
+          suggestions.add(_MapSuggestion(name: name, url: url));
+        }
+      }
+      suggestions
+          .sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      if (mounted) {
+        setState(() => _mapSuggestions = suggestions);
+      }
+    } catch (e) {
+      debugPrint('Failed to load map suggestions: $e');
+    }
+  }
+
+  /// Handles a job type selection change. Extracted so both the compact
+  /// and expanded form layouts stay in sync and behave identically.
+  void _onJobTypeChanged(String newId) {
+    setState(() {
+      _selectedJobType = newId;
+      // Reset vehicle/trailer combo whenever the type changes. If the new
+      // type participates in the Collection Schedule, also reset the
+      // quantity placeholder to "1".
+      _selectedVehicleTrailerCombo = null;
+      if (VehicleTrailerCombo.isVehicleJobType(newId)) {
+        _quantityController.text = '1';
+      }
+    });
+  }
+
+  /// Resolves a Material [IconData] for the [CustomJobType.iconName] string.
+  /// Kept in sync with the 12-option picker in `JobTypeManagementDialog`.
+  IconData _iconDataForJobType(String? name) {
+    switch (name) {
+      case 'work_outline':
+        return Icons.work_outline;
+      case 'local_shipping':
+        return Icons.local_shipping;
+      case 'home_repair_service':
+        return Icons.home_repair_service;
+      case 'cleaning_services':
+        return Icons.cleaning_services;
+      case 'solar_power':
+        return Icons.solar_power;
+      case 'delete_outline':
+        return Icons.delete_outline;
+      case 'move_to_inbox':
+        return Icons.move_to_inbox;
+      case 'description':
+        return Icons.description;
+      case 'article':
+        return Icons.article;
+      case 'calendar_month':
+        return Icons.calendar_month;
+      case 'handyman':
+        return Icons.handyman;
+      case 'build':
+        return Icons.build;
+      default:
+        return Icons.work_outline;
+    }
+  }
+
+  /// Modern tap-to-open job-type selector. Renders the selected type's
+  /// colored avatar + label + chevron in an outlined field; tapping opens
+  /// an anchored dropdown menu positioned directly below the field.
+  Widget _buildJobTypeField() {
+    final provider = ref.watch(jobTypeRiverpod);
+    final selected = provider.getJobTypeById(_selectedJobType);
+    final accent = selected?.colorValue != null
+        ? Color(selected!.colorValue!)
+        : Theme.of(context).colorScheme.primary;
+    final iconColor =
+        accent.computeLuminance() > 0.6 ? Colors.black87 : Colors.white;
+
+    return _PickerFieldShell(
+      label: 'Job Type *',
+      accent: accent,
+      leading: Icon(
+        _iconDataForJobType(selected?.iconName),
+        size: 14,
+        color: iconColor,
+      ),
+      text: selected?.label ?? 'Select job type',
+      isPlaceholder: selected == null,
+      onTap: (ctx) => _showJobTypePicker(ctx, provider.jobTypes),
+    );
+  }
+
+  /// Builds the Job Status picker field matching [_buildJobTypeField]'s style.
+  Widget _buildJobStatusField() {
+    final statusProvider = ref.watch(jobListStatusRiverpod);
+    var statuses = statusProvider.getStatusesForJobType(_selectedJobType);
+    // Keep current selection valid even if the status would normally be
+    // hidden for the selected job type.
+    if (!statuses.any((s) => s.id == _selectedJobStatusId)) {
+      final current = statusProvider.getStatusById(_selectedJobStatusId);
+      if (current != null) {
+        statuses = [current, ...statuses];
+      }
+    }
+    final current = statusProvider.getStatusById(_selectedJobStatusId);
+    final accent = current?.color ?? Theme.of(context).colorScheme.primary;
+
+    return _PickerFieldShell(
+      label: 'Job Status *',
+      accent: accent,
+      text: current?.label ?? 'Select status',
+      isPlaceholder: current == null,
+      onTap: (ctx) => _showJobStatusPicker(ctx, statuses),
+    );
+  }
+
+  /// Builds the Vehicle & Trailer picker field matching the unified style.
+  Widget _buildVehicleTrailerField() {
+    final combos = VehicleTrailerCombo.forJobType(_selectedJobType);
+    final selected = _selectedVehicleTrailerCombo;
+    final accent = Theme.of(context).colorScheme.primary;
+
+    return _PickerFieldShell(
+      label: 'Vehicle & Trailer *',
+      accent: accent,
+      leading: const Icon(Icons.local_shipping, size: 14, color: Colors.white),
+      text: selected?.label ?? 'Select vehicle & trailer',
+      isPlaceholder: selected == null,
+      onTap: (ctx) => _showVehicleTrailerPicker(ctx, combos),
+    );
+  }
+
+  /// Opens an anchored dropdown menu beneath the tapped field and returns
+  /// the selected job type id. Uses [showMenu] for native anchoring.
+  Future<void> _showJobTypePicker(
+    BuildContext anchorContext,
+    List<CustomJobType> jobTypes,
+  ) async {
+    final picked = await _showAnchoredMenu<String>(
+      anchorContext: anchorContext,
+      items: jobTypes.map((t) {
+        return PopupMenuItem<String>(
+          value: t.id,
+          padding: EdgeInsets.zero,
+          height: 0,
+          child: _JobTypeRow(
+            type: t,
+            icon: _iconDataForJobType(t.iconName),
+            selected: t.id == _selectedJobType,
+          ),
+        );
+      }).toList(),
+    );
+    if (picked != null && picked != _selectedJobType) {
+      _onJobTypeChanged(picked);
+    }
+  }
+
+  Future<void> _showJobStatusPicker(
+    BuildContext anchorContext,
+    List<CustomJobListStatus> statuses,
+  ) async {
+    final picked = await _showAnchoredMenu<String>(
+      anchorContext: anchorContext,
+      items: statuses.map((s) {
+        return PopupMenuItem<String>(
+          value: s.id,
+          padding: EdgeInsets.zero,
+          height: 0,
+          child: _SimplePickerRow(
+            color: s.color,
+            label: s.label,
+            selected: s.id == _selectedJobStatusId,
+          ),
+        );
+      }).toList(),
+    );
+    if (picked != null && picked != _selectedJobStatusId) {
+      setState(() => _selectedJobStatusId = picked);
+    }
+  }
+
+  Future<void> _showVehicleTrailerPicker(
+    BuildContext anchorContext,
+    List<VehicleTrailerCombo> combos,
+  ) async {
+    final accent = Theme.of(context).colorScheme.primary;
+    final picked = await _showAnchoredMenu<VehicleTrailerCombo>(
+      anchorContext: anchorContext,
+      items: combos.map((c) {
+        return PopupMenuItem<VehicleTrailerCombo>(
+          value: c,
+          padding: EdgeInsets.zero,
+          height: 0,
+          child: _SimplePickerRow(
+            color: accent,
+            icon: Icons.local_shipping,
+            label: c.label,
+            selected: c == _selectedVehicleTrailerCombo,
+          ),
+        );
+      }).toList(),
+    );
+    if (picked != null && picked != _selectedVehicleTrailerCombo) {
+      setState(() {
+        _selectedVehicleTrailerCombo = picked;
+        _quantityController.text =
+            (picked.legacyQuantity(jobTypeId: _selectedJobType)).toString();
+      });
+    }
+  }
+
+  /// Generic anchored menu helper. Computes the field's global rect and
+  /// opens [showMenu] just below it, constrained to the field width.
+  Future<T?> _showAnchoredMenu<T>({
+    required BuildContext anchorContext,
+    required List<PopupMenuEntry<T>> items,
+    double extraWidth = 40,
+    double maxHeight = 420,
+  }) async {
+    final button = anchorContext.findRenderObject() as RenderBox?;
+    final overlay = Navigator.of(anchorContext)
+        .overlay
+        ?.context
+        .findRenderObject() as RenderBox?;
+    if (button == null || overlay == null) return null;
+    final topLeft = button.localToGlobal(
+      Offset(0, button.size.height + 4),
+      ancestor: overlay,
+    );
+    final bottomRight = button.localToGlobal(
+      button.size.bottomRight(Offset.zero),
+      ancestor: overlay,
+    );
+    final position = RelativeRect.fromLTRB(
+      topLeft.dx,
+      topLeft.dy,
+      overlay.size.width - bottomRight.dx,
+      overlay.size.height - topLeft.dy,
+    );
+    return showMenu<T>(
+      context: anchorContext,
+      position: position,
+      constraints: BoxConstraints(
+        minWidth: button.size.width,
+        maxWidth: button.size.width + extraWidth,
+        maxHeight: maxHeight,
+      ),
+      elevation: 8,
+      color: Theme.of(context).colorScheme.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(
+          color: Theme.of(context).dividerColor.withValues(alpha: 0.5),
+        ),
+      ),
+      items: items,
+    );
+  }
+
+  /// Builds an Autocomplete widget for the Area field that suggests
+  /// shareable map names as the user types. Selecting a suggestion
+  /// inserts the shareable map link URL into the field.
+  Widget _buildAreaAutocomplete() {
+    return Autocomplete<_MapSuggestion>(
+      initialValue: TextEditingValue(text: _areaController.text),
+      optionsBuilder: (TextEditingValue textEditingValue) {
+        if (textEditingValue.text.isEmpty) {
+          return const Iterable<_MapSuggestion>.empty();
+        }
+        final query = textEditingValue.text.toLowerCase();
+        return _mapSuggestions
+            .where((s) => s.name.toLowerCase().contains(query))
+            .take(5);
+      },
+      displayStringForOption: (_MapSuggestion s) => s.url,
+      onSelected: (_MapSuggestion selected) {
+        _areaController.text = selected.url;
+      },
+      fieldViewBuilder: (context, textController, focusNode, onFieldSubmitted) {
+        // Sync the autocomplete controller with our _areaController
+        // so the form reads the correct value on save.
+        textController.addListener(() {
+          if (_areaController.text != textController.text) {
+            _areaController.text = textController.text;
+          }
+        });
+        return TextFormField(
+          controller: textController,
+          focusNode: focusNode,
+          decoration: const InputDecoration(
+            labelText: 'Area',
+            border: OutlineInputBorder(),
+          ),
+          onFieldSubmitted: (_) => onFieldSubmitted(),
+        );
+      },
+      optionsViewBuilder: (context, onSelected, options) {
+        return Align(
+          alignment: Alignment.topLeft,
+          child: Material(
+            elevation: 4,
+            borderRadius: BorderRadius.circular(8),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 220, maxWidth: 350),
+              child: ListView.builder(
+                padding: EdgeInsets.zero,
+                shrinkWrap: true,
+                itemCount: options.length,
+                itemBuilder: (context, index) {
+                  final option = options.elementAt(index);
+                  return ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.map_outlined,
+                        size: 18, color: Color(0xFF1967D2)),
+                    title:
+                        Text(option.name, style: const TextStyle(fontSize: 13)),
+                    subtitle: Text(
+                      option.url,
+                      style: const TextStyle(
+                          fontSize: 11, color: Color(0xFF5F6368)),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () => onSelected(option),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -327,219 +684,27 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                               isMobile
                                   ? Column(
                                       children: [
-                                        TextFormField(
-                                          controller: _areaController,
-                                          decoration: const InputDecoration(
-                                            labelText: 'Area',
-                                            border: OutlineInputBorder(),
-                                          ),
-                                        ),
+                                        _buildAreaAutocomplete(),
                                         const SizedBox(height: 12),
-                                        Builder(
-                                          builder: (context) {
-                                            final statusProvider = ref
-                                                .watch(jobListStatusRiverpod);
-                                            var statuses = statusProvider
-                                                .getStatusesForJobType(
-                                                    _selectedJobType);
-                                            // Ensure current selection stays valid
-                                            if (!statuses.any((s) =>
-                                                s.id == _selectedJobStatusId)) {
-                                              final current =
-                                                  statusProvider.getStatusById(
-                                                      _selectedJobStatusId);
-                                              if (current != null) {
-                                                statuses = [
-                                                  current,
-                                                  ...statuses
-                                                ];
-                                              }
-                                            }
-                                            return DropdownButtonFormField<
-                                                String>(
-                                              initialValue:
-                                                  _selectedJobStatusId,
-                                              decoration: const InputDecoration(
-                                                labelText: 'Job Status *',
-                                                border: OutlineInputBorder(),
-                                              ),
-                                              items: statuses.map((status) {
-                                                return DropdownMenuItem<String>(
-                                                  value: status.id,
-                                                  child: Text(
-                                                    status.label,
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                  ),
-                                                );
-                                              }).toList(),
-                                              onChanged: (value) {
-                                                if (value != null) {
-                                                  setState(() {
-                                                    _selectedJobStatusId =
-                                                        value;
-                                                  });
-                                                }
-                                              },
-                                            );
-                                          },
-                                        ),
+                                        _buildJobStatusField(),
                                         const SizedBox(height: 12),
-                                        DropdownButtonFormField<String>(
-                                          initialValue: _selectedJobType,
-                                          decoration: const InputDecoration(
-                                            labelText: 'Job Type *',
-                                            border: OutlineInputBorder(),
-                                          ),
-                                          items: ref
-                                              .read(jobTypeRiverpod)
-                                              .jobTypes
-                                              .map((type) {
-                                            return DropdownMenuItem<String>(
-                                              value: type.id,
-                                              child: Text(
-                                                type.label,
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                            );
-                                          }).toList(),
-                                          onChanged: (value) {
-                                            if (value != null) {
-                                              setState(() {
-                                                _selectedJobType = value;
-                                                // Reset vehicle/trailer combo when job type changes
-                                                if (value == 'junkCollection' ||
-                                                    value == 'furnitureMove' ||
-                                                    value == 'trailerTowing') {
-                                                  _selectedVehicleTrailerCombo =
-                                                      null;
-                                                  _quantityController.text =
-                                                      '1';
-                                                } else {
-                                                  _selectedVehicleTrailerCombo =
-                                                      null;
-                                                }
-                                              });
-                                            }
-                                          },
-                                        ),
+                                        _buildJobTypeField(),
                                       ],
                                     )
                                   : Row(
                                       children: [
                                         Flexible(
-                                          child: TextFormField(
-                                            controller: _areaController,
-                                            decoration: const InputDecoration(
-                                              labelText: 'Area',
-                                              border: OutlineInputBorder(),
-                                            ),
-                                          ),
+                                          child: _buildAreaAutocomplete(),
                                         ),
                                         const SizedBox(width: 12),
                                         Flexible(
                                           flex: 2,
-                                          child: Builder(
-                                            builder: (context) {
-                                              final statusProvider = ref
-                                                  .watch(jobListStatusRiverpod);
-                                              var statuses = statusProvider
-                                                  .getStatusesForJobType(
-                                                      _selectedJobType);
-                                              // Ensure current selection stays valid
-                                              if (!statuses.any((s) =>
-                                                  s.id ==
-                                                  _selectedJobStatusId)) {
-                                                final current = statusProvider
-                                                    .getStatusById(
-                                                        _selectedJobStatusId);
-                                                if (current != null) {
-                                                  statuses = [
-                                                    current,
-                                                    ...statuses
-                                                  ];
-                                                }
-                                              }
-                                              return DropdownButtonFormField<
-                                                  String>(
-                                                initialValue:
-                                                    _selectedJobStatusId,
-                                                decoration:
-                                                    const InputDecoration(
-                                                  labelText: 'Job Status *',
-                                                  border: OutlineInputBorder(),
-                                                ),
-                                                items: statuses.map((status) {
-                                                  return DropdownMenuItem<
-                                                      String>(
-                                                    value: status.id,
-                                                    child: Text(
-                                                      status.label,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                    ),
-                                                  );
-                                                }).toList(),
-                                                onChanged: (value) {
-                                                  if (value != null) {
-                                                    setState(() {
-                                                      _selectedJobStatusId =
-                                                          value;
-                                                    });
-                                                  }
-                                                },
-                                              );
-                                            },
-                                          ),
+                                          child: _buildJobStatusField(),
                                         ),
                                         const SizedBox(width: 12),
                                         Flexible(
                                           flex: 2,
-                                          child:
-                                              DropdownButtonFormField<String>(
-                                            initialValue: _selectedJobType,
-                                            decoration: const InputDecoration(
-                                              labelText: 'Job Type *',
-                                              border: OutlineInputBorder(),
-                                            ),
-                                            items: ref
-                                                .read(jobTypeRiverpod)
-                                                .jobTypes
-                                                .map((type) {
-                                              return DropdownMenuItem<String>(
-                                                value: type.id,
-                                                child: Text(
-                                                  type.label,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                ),
-                                              );
-                                            }).toList(),
-                                            onChanged: (value) {
-                                              if (value != null) {
-                                                setState(() {
-                                                  _selectedJobType = value;
-                                                  // Reset vehicle/trailer combo when job type changes
-                                                  if (value ==
-                                                          'junkCollection' ||
-                                                      value ==
-                                                          'furnitureMove' ||
-                                                      value ==
-                                                          'trailerTowing') {
-                                                    _selectedVehicleTrailerCombo =
-                                                        null;
-                                                    _quantityController.text =
-                                                        '1';
-                                                  } else {
-                                                    _selectedVehicleTrailerCombo =
-                                                        null;
-                                                  }
-                                                });
-                                              }
-                                            },
-                                          ),
+                                          child: _buildJobTypeField(),
                                         ),
                                       ],
                                     ),
@@ -550,50 +715,9 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                 children: [
                                   Expanded(
                                     flex: 2,
-                                    child: (_selectedJobType ==
-                                                'junkCollection' ||
-                                            _selectedJobType ==
-                                                'furnitureMove' ||
-                                            _selectedJobType == 'trailerTowing')
-                                        ? DropdownButtonFormField<String>(
-                                            initialValue:
-                                                _selectedVehicleTrailerCombo,
-                                            decoration: const InputDecoration(
-                                              labelText: 'Vehicle & Trailer',
-                                              border: OutlineInputBorder(),
-                                            ),
-                                            items:
-                                                _getVehicleTrailerCombinations()
-                                                    .map((combo) {
-                                              return DropdownMenuItem<String>(
-                                                value: combo,
-                                                child: Text(combo),
-                                              );
-                                            }).toList(),
-                                            onChanged: (value) {
-                                              setState(() {
-                                                _selectedVehicleTrailerCombo =
-                                                    value;
-                                                // Update quantity controller to reflect the selection
-                                                _quantityController.text =
-                                                    _getQuantityFromVehicleTrailerCombo(
-                                                            value)
-                                                        .toString();
-                                              });
-                                            },
-                                            validator: (value) {
-                                              if ((_selectedJobType ==
-                                                          'junkCollection' ||
-                                                      _selectedJobType ==
-                                                          'furnitureMove' ||
-                                                      _selectedJobType ==
-                                                          'trailerTowing') &&
-                                                  value == null) {
-                                                return 'Please select vehicle & trailer';
-                                              }
-                                              return null;
-                                            },
-                                          )
+                                    child: (VehicleTrailerCombo
+                                            .isVehicleJobType(_selectedJobType))
+                                        ? _buildVehicleTrailerField()
                                         : TextFormField(
                                             controller: _quantityController,
                                             decoration: const InputDecoration(
@@ -655,37 +779,28 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                         if (_selectedDate != null &&
                                             _selectedVehicleTrailerCombo !=
                                                 null &&
-                                            (_selectedJobType ==
-                                                    'junkCollection' ||
-                                                _selectedJobType ==
-                                                    'furnitureMove' ||
-                                                _selectedJobType ==
-                                                    'trailerTowing')) {
-                                          final quantity =
-                                              _getQuantityFromVehicleTrailerCombo(
-                                                  _selectedVehicleTrailerCombo);
+                                            VehicleTrailerCombo
+                                                .isVehicleJobType(
+                                                    _selectedJobType)) {
                                           final vehicleType =
-                                              _getVehicleTypeFromQuantity(
-                                                  quantity);
+                                              _selectedVehicleTrailerCombo!
+                                                  .vehicleType;
 
-                                          if (vehicleType != null) {
-                                            final occupiedSlots =
-                                                collectionProvider
-                                                    .getOccupiedTimeSlots(
-                                                        vehicleType,
-                                                        _selectedDate!,
-                                                        excludeJobId: widget
-                                                            .jobToEdit?.id);
-                                            if (occupiedSlots.isNotEmpty) {
-                                              hasConflicts = true;
-                                              final vehicleName = vehicleType
-                                                  .name
-                                                  .toUpperCase();
-                                              final slotCount =
-                                                  occupiedSlots.length;
-                                              conflictMessage =
-                                                  '⚠️ $vehicleName has $slotCount time conflict${slotCount > 1 ? 's' : ''} - can still be booked';
-                                            }
+                                          final occupiedSlots =
+                                              collectionProvider
+                                                  .getOccupiedTimeSlots(
+                                                      vehicleType,
+                                                      _selectedDate!,
+                                                      excludeJobId:
+                                                          widget.jobToEdit?.id);
+                                          if (occupiedSlots.isNotEmpty) {
+                                            hasConflicts = true;
+                                            final vehicleName =
+                                                vehicleType.name.toUpperCase();
+                                            final slotCount =
+                                                occupiedSlots.length;
+                                            conflictMessage =
+                                                '⚠️ $vehicleName has $slotCount time conflict${slotCount > 1 ? 's' : ''} - can still be booked';
                                           }
                                         }
 
@@ -737,26 +852,20 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
 
                                                           if (_selectedVehicleTrailerCombo !=
                                                               null) {
-                                                            final quantity =
-                                                                _getQuantityFromVehicleTrailerCombo(
-                                                                    _selectedVehicleTrailerCombo);
                                                             vehicleType =
-                                                                _getVehicleTypeFromQuantity(
-                                                                    quantity);
+                                                                _selectedVehicleTrailerCombo!
+                                                                    .vehicleType;
 
-                                                            if (vehicleType !=
-                                                                null) {
-                                                              occupiedSlots =
-                                                                  collectionProvider
-                                                                      .getOccupiedTimeSlots(
-                                                                vehicleType,
-                                                                date,
-                                                                excludeJobId:
-                                                                    widget
-                                                                        .jobToEdit
-                                                                        ?.id,
-                                                              );
-                                                            }
+                                                            occupiedSlots =
+                                                                collectionProvider
+                                                                    .getOccupiedTimeSlots(
+                                                              vehicleType,
+                                                              date,
+                                                              excludeJobId:
+                                                                  widget
+                                                                      .jobToEdit
+                                                                      ?.id,
+                                                            );
                                                           }
 
                                                           return AlertDialog(
@@ -830,62 +939,60 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                                                       Colors
                                                                           .red;
 
-                                                                  if (_selectedJobType == 'junkCollection' ||
-                                                                      _selectedJobType ==
-                                                                          'furnitureMove' ||
-                                                                      _selectedJobType ==
-                                                                          'trailerTowing') {
+                                                                  if (VehicleTrailerCombo
+                                                                      .isVehicleJobType(
+                                                                          _selectedJobType)) {
                                                                     // Get vehicle type from quantity
                                                                     if (_selectedVehicleTrailerCombo !=
                                                                         null) {
-                                                                      final quantity =
-                                                                          _getQuantityFromVehicleTrailerCombo(
-                                                                              _selectedVehicleTrailerCombo);
                                                                       final vehicleType =
-                                                                          _getVehicleTypeFromQuantity(
-                                                                              quantity);
+                                                                          _selectedVehicleTrailerCombo!
+                                                                              .vehicleType;
 
-                                                                      if (vehicleType !=
-                                                                          null) {
-                                                                        final occupiedSlots = collectionProvider.getOccupiedTimeSlots(
-                                                                            vehicleType,
-                                                                            date, // Use the newly selected date, not _selectedDate
-                                                                            excludeJobId:
-                                                                                widget.jobToEdit?.id);
-                                                                        isOccupied =
-                                                                            occupiedSlots.contains(timeString);
+                                                                      final occupiedSlots = collectionProvider.getOccupiedTimeSlots(
+                                                                          vehicleType,
+                                                                          date, // Use the newly selected date, not _selectedDate
+                                                                          excludeJobId: widget
+                                                                              .jobToEdit
+                                                                              ?.id);
+                                                                      isOccupied =
+                                                                          occupiedSlots
+                                                                              .contains(timeString);
 
-                                                                        // Get details about the conflicting job
-                                                                        if (isOccupied) {
-                                                                          final conflictingJobs = collectionProvider
-                                                                              .getJobsForDate(date)
-                                                                              .where((job) => job.vehicleType == vehicleType && _jobOccupiesTimeSlot(job, timeString))
-                                                                              .toList();
+                                                                      // Get details about the conflicting job
+                                                                      if (isOccupied) {
+                                                                        final conflictingJobs = collectionProvider
+                                                                            .getJobsForDate(
+                                                                                date)
+                                                                            .where((job) =>
+                                                                                job.vehicleType == vehicleType &&
+                                                                                _jobOccupiesTimeSlot(job, timeString))
+                                                                            .toList();
 
-                                                                          if (conflictingJobs
-                                                                              .isNotEmpty) {
-                                                                            final job =
-                                                                                conflictingJobs.first;
-                                                                            final clientName = job.clients.isNotEmpty
-                                                                                ? job.clients.first
-                                                                                : 'Unknown Client';
-                                                                            conflictDetails =
-                                                                                'Booked by $clientName';
+                                                                        if (conflictingJobs
+                                                                            .isNotEmpty) {
+                                                                          final job =
+                                                                              conflictingJobs.first;
+                                                                          final clientName = job.clients.isNotEmpty
+                                                                              ? job.clients.first
+                                                                              : 'Unknown Client';
+                                                                          conflictDetails =
+                                                                              'Booked by $clientName';
 
-                                                                            // Different colors for different job types
-                                                                            switch (job.jobType) {
-                                                                              case 'junk collection':
-                                                                                conflictColor = Colors.red;
-                                                                                break;
-                                                                              case 'furniture move':
-                                                                                conflictColor = Colors.orange;
-                                                                                break;
-                                                                              case 'trailer towing':
-                                                                                conflictColor = Colors.purple;
-                                                                                break;
-                                                                              default:
-                                                                                conflictColor = Colors.red;
-                                                                            }
+                                                                          // Different colors for different job types
+                                                                          switch (
+                                                                              job.jobType) {
+                                                                            case 'junk collection':
+                                                                              conflictColor = Colors.red;
+                                                                              break;
+                                                                            case 'furniture move':
+                                                                              conflictColor = Colors.orange;
+                                                                              break;
+                                                                            case 'trailer towing':
+                                                                              conflictColor = Colors.purple;
+                                                                              break;
+                                                                            default:
+                                                                              conflictColor = Colors.red;
                                                                           }
                                                                         }
                                                                       }
@@ -1134,34 +1241,42 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                               ]),
                               const SizedBox(height: 16),
 
-                              // Conditionally show fields based on job type
-                              if (_selectedJobType != 'windowCleaning' &&
-                                  _selectedJobType != 'solarPanelCleaning') ...[
-                                // Row 7: Quantity Distributed & Invoice Details
+                              // Conditionally show fields based on job type flags.
+                              // Non-Happy-Sun jobs get Quantity/Invoice/Report rows;
+                              // Happy Sun jobs get the Tools Needed panel further down.
+                              if (!(JobTypeProvider.instance
+                                      ?.isHappySunService(_selectedJobType) ??
+                                  false)) ...[
+                                // Row 7: Quantity Distributed & Invoice Details.
+                                // The quantity field is only shown when the
+                                // selected job type tracks a quantity, and its
+                                // label comes from the type's `quantityLabel`.
                                 Row(
                                   children: [
-                                    Expanded(
-                                      child: TextFormField(
-                                        controller:
-                                            _quantityDistributedController,
-                                        decoration: InputDecoration(
-                                          labelText: (_selectedJobType ==
-                                                      'junkCollection' ||
-                                                  _selectedJobType ==
-                                                      'furnitureMove' ||
-                                                  _selectedJobType ==
-                                                      'trailerTowing')
-                                              ? "Time Slot"
-                                              : 'Quantity Distributed',
-                                          border: const OutlineInputBorder(),
+                                    if (JobTypeProvider.instance
+                                            ?.tracksQuantity(
+                                                _selectedJobType) ??
+                                        true) ...[
+                                      Expanded(
+                                        child: TextFormField(
+                                          controller:
+                                              _quantityDistributedController,
+                                          decoration: InputDecoration(
+                                            labelText: JobTypeProvider.instance
+                                                    ?.quantityLabel(
+                                                        _selectedJobType) ??
+                                                'Quantity',
+                                            border: const OutlineInputBorder(),
+                                          ),
+                                          keyboardType: TextInputType.number,
+                                          inputFormatters: [
+                                            FilteringTextInputFormatter
+                                                .digitsOnly
+                                          ],
                                         ),
-                                        keyboardType: TextInputType.number,
-                                        inputFormatters: [
-                                          FilteringTextInputFormatter.digitsOnly
-                                        ],
                                       ),
-                                    ),
-                                    const SizedBox(width: 16),
+                                      const SizedBox(width: 16),
+                                    ],
                                     Expanded(
                                       child: TextFormField(
                                         controller: _invoiceDetailsController,
@@ -1203,9 +1318,10 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                 ),
                               ],
 
-                              // Tools Needed button for window/solar cleaning
-                              if (_selectedJobType == 'windowCleaning' ||
-                                  _selectedJobType == 'solarPanelCleaning') ...[
+                              // Tools Needed button for Happy Sun-flagged types.
+                              if (JobTypeProvider.instance
+                                      ?.isHappySunService(_selectedJobType) ??
+                                  false) ...[
                                 const SizedBox(height: 16),
                                 OutlinedButton.icon(
                                   onPressed: _showToolsDialog,
@@ -1457,6 +1573,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       customPolygons: widget.jobToEdit?.customPolygons ?? const [],
       reminders: widget.jobToEdit?.reminders ?? const [],
       collectionJobId: widget.jobToEdit?.collectionJobId ?? '',
+      vehicleTrailerCombo: _selectedVehicleTrailerCombo?.name ?? '',
     );
   }
 
@@ -1486,9 +1603,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
           debugPrint(
               '   No direct DB write from dialog - JobList/JobListGrid handles update');
           // Check if this is a collection job and if time/date changed
-          if ((_selectedJobType == 'junkCollection' ||
-                  _selectedJobType == 'furnitureMove' ||
-                  _selectedJobType == 'trailerTowing') &&
+          if (VehicleTrailerCombo.isVehicleJobType(_selectedJobType) &&
               widget.jobToEdit!.collectionJobId.isNotEmpty) {
             // Update the linked collection job if date/time changed
             // Collection job updates are now automatic via JobListProvider stream
@@ -1498,9 +1613,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         }
 
         // For new jobs, check if this is a collection job type
-        if (_selectedJobType == 'junkCollection' ||
-            _selectedJobType == 'furnitureMove' ||
-            _selectedJobType == 'trailerTowing') {
+        if (VehicleTrailerCombo.isVehicleJobType(_selectedJobType)) {
           debugPrint('   🚚 Collection job type - returning to caller');
           debugPrint(
               '   No direct DB write - JobList/JobListGrid handles creation');
@@ -1687,65 +1800,11 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     }
   }
 
-  // Helper methods for vehicle/trailer combinations
-  List<String> _getVehicleTrailerCombinations() {
-    // For trailer towing, only show no-trailer combinations
-    if (_selectedJobType == 'trailerTowing') {
-      return [
-        'Hyundai - No Trailer',
-        'Mahindra - No Trailer',
-        'Nissan - No Trailer',
-      ];
-    }
-
-    return [
-      'Hyundai - No Trailer',
-      'Hyundai - Big Trailer',
-      'Hyundai - Small Trailer',
-      'Mahindra - No Trailer',
-      'Mahindra - Big Trailer',
-      'Mahindra - Small Trailer',
-      'Nissan - No Trailer',
-      'Nissan - Big Trailer',
-      'Nissan - Small Trailer',
-    ];
-  }
-
-  String? _getVehicleTrailerComboFromQuantity(int quantity) {
-    final combinations = _getVehicleTrailerCombinations();
-    if (quantity >= 1 && quantity <= combinations.length) {
-      return combinations[quantity - 1];
-    }
-    return null;
-  }
-
-  int _getQuantityFromVehicleTrailerCombo(String? combo) {
-    if (combo == null) return 1;
-    final combinations = _getVehicleTrailerCombinations();
-    final index = combinations.indexOf(combo);
-    return index >= 0 ? index + 1 : 1;
-  }
-
-  VehicleType? _getVehicleTypeFromQuantity(int quantity) {
-    // Mapping based on the vehicle/trailer combinations
-    // 1-3: Hyundai, 4-6: Mahindra, 7-9: Nissan
-    if (quantity >= 1 && quantity <= 3) {
-      return VehicleType.hyundai;
-    } else if (quantity >= 4 && quantity <= 6) {
-      return VehicleType.mahindra;
-    } else if (quantity >= 7 && quantity <= 9) {
-      return VehicleType.nissan;
-    }
-    return null;
-  }
-
   // Helper methods for time selection
   bool _needsTimeSelection(String jobTypeId) {
-    return jobTypeId == 'junkCollection' ||
-        jobTypeId == 'furnitureMove' ||
-        jobTypeId == 'trailerTowing' ||
-        jobTypeId == 'windowCleaning' ||
-        jobTypeId == 'solarPanelCleaning';
+    final provider = JobTypeProvider.instance;
+    if (provider == null) return false;
+    return provider.needsTimeSlot(jobTypeId);
   }
 
   List<TimeOfDay> _getAvailableTimeSlots() {
@@ -1894,5 +1953,301 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     } else {
       debugPrint('   ❌ Tools dialog cancelled');
     }
+  }
+}
+
+/// Simple data class for map name + share URL pairs used in autocomplete.
+class _MapSuggestion {
+  final String name;
+  final String url;
+  const _MapSuggestion({required this.name, required this.url});
+}
+
+/// Outlined tap-to-open field used for all picker dropdowns in the dialog.
+/// Provides a unified visual: colored accent dot, label text, and chevron.
+class _PickerFieldShell extends StatelessWidget {
+  final String label;
+  final Color accent;
+  final Widget? leading;
+  final String text;
+  final bool isPlaceholder;
+  final void Function(BuildContext anchorContext) onTap;
+
+  const _PickerFieldShell({
+    required this.label,
+    required this.accent,
+    required this.text,
+    required this.onTap,
+    this.leading,
+    this.isPlaceholder = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Builder(
+      builder: (ctx) => InkWell(
+        onTap: () => onTap(ctx),
+        borderRadius: BorderRadius.circular(6),
+        child: InputDecorator(
+          decoration: InputDecoration(
+            labelText: label,
+            border: const OutlineInputBorder(),
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 22,
+                height: 22,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      accent,
+                      Color.lerp(accent, Colors.black, 0.2) ?? accent,
+                    ],
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: accent.withValues(alpha: 0.25),
+                      blurRadius: 3,
+                      offset: const Offset(0, 1),
+                    ),
+                  ],
+                ),
+                child: leading == null ? null : Center(child: leading!),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  text,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: isPlaceholder ? theme.hintColor : null,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Icon(Icons.keyboard_arrow_down, size: 22, color: theme.hintColor),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact single-line picker row used by the status and vehicle-trailer
+/// menus (color dot + optional icon + label + check when selected).
+class _SimplePickerRow extends StatelessWidget {
+  final Color color;
+  final String label;
+  final bool selected;
+  final IconData? icon;
+
+  const _SimplePickerRow({
+    required this.color,
+    required this.label,
+    required this.selected,
+    this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final iconColor =
+        color.computeLuminance() > 0.6 ? Colors.black87 : Colors.white;
+    final bg = selected ? color.withValues(alpha: 0.14) : Colors.transparent;
+
+    return Container(
+      color: bg,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: Row(
+        children: [
+          Container(
+            width: 22,
+            height: 22,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: color,
+            ),
+            child: icon == null ? null : Icon(icon, size: 13, color: iconColor),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (selected)
+            Icon(Icons.check, size: 18, color: color)
+          else
+            const SizedBox(width: 18),
+        ],
+      ),
+    );
+  }
+}
+
+/// Narrow job-type menu row: left accent stripe, gradient avatar, label,
+/// and a small wrap of behaviour-flag chips underneath.
+class _JobTypeRow extends StatelessWidget {
+  final CustomJobType type;
+  final IconData icon;
+  final bool selected;
+
+  const _JobTypeRow({
+    required this.type,
+    required this.icon,
+    required this.selected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final accent = type.colorValue != null
+        ? Color(type.colorValue!)
+        : theme.colorScheme.primary;
+    final iconColor =
+        accent.computeLuminance() > 0.6 ? Colors.black87 : Colors.white;
+
+    final chips = <Widget>[];
+    if (type.needsTimeSlot) {
+      chips.add(const _FlagChip(
+          icon: Icons.schedule, label: 'Time', color: Colors.indigo));
+    }
+    if (type.appearsOnCollectionSchedule) {
+      chips.add(const _FlagChip(
+          icon: Icons.local_shipping, label: 'Collection', color: Colors.teal));
+    }
+    if (type.isHappySunService) {
+      chips.add(const _FlagChip(
+          icon: Icons.wb_sunny_outlined,
+          label: 'Happy Sun',
+          color: Colors.orange));
+    }
+    if (type.tracksQuantity) {
+      chips.add(_FlagChip(
+          icon: Icons.numbers,
+          label: type.quantityLabel,
+          color: Colors.blueGrey));
+    }
+
+    final bg = selected ? accent.withValues(alpha: 0.12) : Colors.transparent;
+
+    return IntrinsicHeight(
+      child: Container(
+        color: bg,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Left accent stripe
+            Container(width: 4, color: accent),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            accent,
+                            Color.lerp(accent, Colors.black, 0.2) ?? accent,
+                          ],
+                        ),
+                      ),
+                      child: Icon(icon, size: 16, color: iconColor),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            type.label,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (chips.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Wrap(
+                              spacing: 4,
+                              runSpacing: 3,
+                              children: chips,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    if (selected)
+                      Icon(Icons.check_circle, size: 18, color: accent),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FlagChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  const _FlagChip({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.35), width: 0.8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

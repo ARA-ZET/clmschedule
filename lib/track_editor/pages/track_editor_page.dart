@@ -2,8 +2,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/tab_item.dart';
+import '../providers/te_files_provider.dart';
+import '../providers/te_map_layer_provider.dart';
 import '../providers/te_mode_provider.dart';
 import '../providers/te_tabs_provider.dart';
+import '../providers/te_tracks_provider.dart';
+import '../providers/te_waypoints_provider.dart';
 import '../services/kml_parser.dart';
 import '../widgets/drag_and_drop.dart';
 import '../widgets/processing.dart';
@@ -24,17 +28,17 @@ class TrackEditorPage extends riverpod.ConsumerStatefulWidget {
 
 class _TrackEditorPageState extends riverpod.ConsumerState<TrackEditorPage> {
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    // Sync tabs provider mode after the current frame to avoid
-    // notifyListeners during build.
-    final mode = ref.watch(teModeRiverpod).mode;
-    final tabsProvider = ref.read(teTabsRiverpod);
-    if (tabsProvider.activeMode != mode) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) tabsProvider.setActiveMode(mode);
-      });
-    }
+  void initState() {
+    super.initState();
+    // Listen for mode changes and sync all per-mode providers.
+    ref.listenManual(teModeRiverpod, (previous, next) {
+      final mode = next.mode;
+      ref.read(teTabsRiverpod).setActiveMode(mode);
+      ref.read(teFilesRiverpod).setActiveMode(mode);
+      ref.read(teMapLayerRiverpod).setActiveMode(mode);
+      ref.read(teTracksRiverpod).setActiveMode(mode);
+      ref.read(teWaypointsRiverpod).setActiveMode(mode);
+    });
   }
 
   @override
@@ -104,6 +108,8 @@ class _TrackEditorPageState extends riverpod.ConsumerState<TrackEditorPage> {
                             ] else if (mode == TEMode.processing) ...[
                               const TEProcessingPanel(),
                               const TECloudSavePanel(),
+                              const TETabDetailsPanel(),
+                            ] else if (mode == TEMode.update) ...[
                               const TETabDetailsPanel(),
                             ],
                           ],

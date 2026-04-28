@@ -7,10 +7,12 @@ import 'package:http/http.dart' as http;
 class MyMapsKmlDownloader extends StatefulWidget {
   // Define a callback that takes the KML bytes and filename
   final void Function(Uint8List kmlBytes, String fileName)? onKmlDataRetrieved;
+  final String? initialUrl;
 
   const MyMapsKmlDownloader({
     super.key,
     this.onKmlDataRetrieved, // Add callback to constructor
+    this.initialUrl,
   });
 
   @override
@@ -21,6 +23,14 @@ class _MyMapsKmlDownloaderState extends State<MyMapsKmlDownloader> {
   final TextEditingController _controller = TextEditingController();
   String? _errorMessage;
   bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialUrl != null && widget.initialUrl!.isNotEmpty) {
+      _controller.text = widget.initialUrl!;
+    }
+  }
 
   String? _extractMapId(String url) {
     if (url.isEmpty) return null;

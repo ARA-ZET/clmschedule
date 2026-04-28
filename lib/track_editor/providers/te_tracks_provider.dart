@@ -2,26 +2,47 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:gpx/gpx.dart';
+import 'te_mode_provider.dart';
 
 final teTracksRiverpod = riverpod.ChangeNotifierProvider<TETracksProvider>(
     (ref) => TETracksProvider());
 
 class TETracksProvider with ChangeNotifier {
-  final List<Trk> _tracks = [];
-  List<Trk> get tracks => _tracks;
+  final Map<TEMode, List<Trk>> _tracksByMode = {
+    TEMode.import: [],
+    TEMode.trim: [],
+    TEMode.processing: [],
+    TEMode.update: [],
+  };
+  TEMode _activeMode = TEMode.processing;
+
+  List<Trk> get tracks => _tracksByMode[_activeMode]!;
+
+  void setActiveMode(TEMode mode) {
+    if (_activeMode == mode) return;
+    _activeMode = mode;
+    notifyListeners();
+  }
 
   void addTrack(Trk track) {
-    _tracks.add(track);
+    _tracksByMode[_activeMode]!.add(track);
     notifyListeners();
   }
 
   void addTracks(List<Trk> tracks) {
-    _tracks.addAll(tracks);
+    _tracksByMode[_activeMode]!.addAll(tracks);
     notifyListeners();
   }
 
   void clearTracks() {
-    _tracks.clear();
+    _tracksByMode[_activeMode]!.clear();
+    notifyListeners();
+  }
+
+  void clearAll() {
+    for (final mode in TEMode.values) {
+      _tracksByMode[mode]!.clear();
+    }
     notifyListeners();
   }
 }

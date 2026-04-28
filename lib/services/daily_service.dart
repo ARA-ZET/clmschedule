@@ -10,13 +10,14 @@ class DailyService {
   final Set<String> _knownCollectionScheduleDocIds = {};
 
   // Cache for available months lists (avoids full collection reads on every picker open)
-  static const _monthsCacheTtl = Duration(minutes: 10);
-  List<String>? _cachedScheduleMonths;
-  List<String>? _cachedJobListMonths;
-  List<String>? _cachedCollectionScheduleMonths;
-  DateTime? _scheduleMonthsCacheTime;
-  DateTime? _jobListMonthsCacheTime;
-  DateTime? _collectionScheduleMonthsCacheTime;
+  // Static so all DailyService instances share the same cache
+  static const _monthsCacheTtl = Duration(minutes: 60);
+  static List<String>? _cachedScheduleMonths;
+  static List<String>? _cachedJobListMonths;
+  static List<String>? _cachedCollectionScheduleMonths;
+  static DateTime? _scheduleMonthsCacheTime;
+  static DateTime? _jobListMonthsCacheTime;
+  static DateTime? _collectionScheduleMonthsCacheTime;
 
   DailyService(this._firestore);
 
@@ -156,6 +157,7 @@ class DailyService {
 
   /// Ensure daily document exists for schedules (creates if not present)
   /// Uses in-memory cache to avoid redundant Firestore reads.
+  /// Tries cache first to avoid unnecessary server round-trips.
   Future<void> ensureScheduleDailyDocExists(DateTime date) async {
     final dateKey = getDailyDocumentId(date);
 
@@ -163,6 +165,19 @@ class DailyService {
     if (_knownScheduleDocIds.contains(dateKey)) return;
 
     final doc = getScheduleDailyDoc(date);
+
+    // Try cache first — only trust positive existence (avoids server read)
+    try {
+      final cached = await doc.get(const GetOptions(source: Source.cache));
+      if (cached.exists) {
+        _knownScheduleDocIds.add(dateKey);
+        return;
+      }
+    } catch (_) {
+      // Cache miss — fall through to server
+    }
+
+    // Cache didn't confirm existence — must verify with server
     final docSnapshot = await doc.get();
 
     if (!docSnapshot.exists) {
@@ -175,6 +190,10 @@ class DailyService {
 
       // Also ensure monthly index exists
       await _ensureScheduleMonthlyIndexExists(date);
+
+      // Invalidate months cache since a new month may now exist
+      _cachedScheduleMonths = null;
+      _scheduleMonthsCacheTime = null;
     } else {
       // Ensure jobs field exists for existing documents
       final data = docSnapshot.data() as Map<String, dynamic>?;
@@ -189,6 +208,7 @@ class DailyService {
 
   /// Ensure daily document exists for job lists (creates if not present)
   /// Uses in-memory cache to avoid redundant Firestore reads.
+  /// Tries cache first to avoid unnecessary server round-trips.
   Future<void> ensureJobListDailyDocExists(DateTime date) async {
     final dateKey = getDailyDocumentId(date);
 
@@ -196,6 +216,19 @@ class DailyService {
     if (_knownJobListDocIds.contains(dateKey)) return;
 
     final doc = getJobListDailyDoc(date);
+
+    // Try cache first — only trust positive existence (avoids server read)
+    try {
+      final cached = await doc.get(const GetOptions(source: Source.cache));
+      if (cached.exists) {
+        _knownJobListDocIds.add(dateKey);
+        return;
+      }
+    } catch (_) {
+      // Cache miss — fall through to server
+    }
+
+    // Cache didn't confirm existence — must verify with server
     final docSnapshot = await doc.get();
 
     if (!docSnapshot.exists) {
@@ -208,6 +241,10 @@ class DailyService {
 
       // Also ensure monthly index exists
       await _ensureJobListMonthlyIndexExists(date);
+
+      // Invalidate months cache since a new month may now exist
+      _cachedJobListMonths = null;
+      _jobListMonthsCacheTime = null;
     } else {
       // Ensure items field exists for existing documents
       final data = docSnapshot.data() as Map<String, dynamic>?;
@@ -222,6 +259,7 @@ class DailyService {
 
   /// Ensure daily document exists for collection schedules (creates if not present)
   /// Uses in-memory cache to avoid redundant Firestore reads.
+  /// Tries cache first to avoid unnecessary server round-trips.
   Future<void> ensureCollectionScheduleDailyDocExists(DateTime date) async {
     final dateKey = getDailyDocumentId(date);
 
@@ -229,6 +267,19 @@ class DailyService {
     if (_knownCollectionScheduleDocIds.contains(dateKey)) return;
 
     final doc = getCollectionScheduleDailyDoc(date);
+
+    // Try cache first — only trust positive existence (avoids server read)
+    try {
+      final cached = await doc.get(const GetOptions(source: Source.cache));
+      if (cached.exists) {
+        _knownCollectionScheduleDocIds.add(dateKey);
+        return;
+      }
+    } catch (_) {
+      // Cache miss — fall through to server
+    }
+
+    // Cache didn't confirm existence — must verify with server
     final docSnapshot = await doc.get();
 
     if (!docSnapshot.exists) {
@@ -241,6 +292,10 @@ class DailyService {
 
       // Also ensure monthly index exists
       await _ensureCollectionScheduleMonthlyIndexExists(date);
+
+      // Invalidate months cache since a new month may now exist
+      _cachedCollectionScheduleMonths = null;
+      _collectionScheduleMonthsCacheTime = null;
     } else {
       // Ensure collectionJobs field exists for existing documents
       final data = docSnapshot.data() as Map<String, dynamic>?;
@@ -328,7 +383,7 @@ class DailyService {
       ..sort(); // Sort chronologically
   }
 
-  /// Get all available monthly documents for schedules (cached for 10 min)
+  /// Get all available monthly documents for schedules (cached for 60 min)
   Future<List<String>> getAvailableScheduleMonths() async {
     final now = DateTime.now();
     if (_cachedScheduleMonths != null &&
@@ -336,7 +391,17 @@ class DailyService {
         now.difference(_scheduleMonthsCacheTime!) < _monthsCacheTtl) {
       return _cachedScheduleMonths!;
     }
-    final snapshot = await _firestore.collection('schedules').get();
+
+    // Try Firestore cache first to avoid a billed server read
+    var snapshot = await _firestore
+        .collection('schedules')
+        .get(const GetOptions(source: Source.cache));
+
+    // Fall back to server if cache is empty
+    if (snapshot.docs.isEmpty) {
+      snapshot = await _firestore.collection('schedules').get();
+    }
+
     _cachedScheduleMonths = snapshot.docs
         .where((doc) => doc.id.contains(' ')) // Filter out non-monthly docs
         .map((doc) => doc.id)
@@ -354,7 +419,7 @@ class DailyService {
       ..sort(); // Sort chronologically
   }
 
-  /// Get all available monthly documents for job lists (cached for 10 min)
+  /// Get all available monthly documents for job lists (cached for 60 min)
   Future<List<String>> getAvailableJobListMonths() async {
     final now = DateTime.now();
     if (_cachedJobListMonths != null &&
@@ -362,7 +427,17 @@ class DailyService {
         now.difference(_jobListMonthsCacheTime!) < _monthsCacheTtl) {
       return _cachedJobListMonths!;
     }
-    final snapshot = await _firestore.collection('jobLists').get();
+
+    // Try Firestore cache first to avoid a billed server read
+    var snapshot = await _firestore
+        .collection('jobLists')
+        .get(const GetOptions(source: Source.cache));
+
+    // Fall back to server if cache is empty
+    if (snapshot.docs.isEmpty) {
+      snapshot = await _firestore.collection('jobLists').get();
+    }
+
     _cachedJobListMonths = snapshot.docs
         .where((doc) => doc.id.contains(' ')) // Filter out non-monthly docs
         .map((doc) => doc.id)
@@ -381,7 +456,7 @@ class DailyService {
       ..sort(); // Sort chronologically
   }
 
-  /// Get all available monthly documents for collection schedules (cached for 10 min)
+  /// Get all available monthly documents for collection schedules (cached for 60 min)
   Future<List<String>> getAvailableCollectionScheduleMonths() async {
     final now = DateTime.now();
     if (_cachedCollectionScheduleMonths != null &&
@@ -389,7 +464,17 @@ class DailyService {
         now.difference(_collectionScheduleMonthsCacheTime!) < _monthsCacheTtl) {
       return _cachedCollectionScheduleMonths!;
     }
-    final snapshot = await _firestore.collection('collectionSchedules').get();
+
+    // Try Firestore cache first to avoid a billed server read
+    var snapshot = await _firestore
+        .collection('collectionSchedules')
+        .get(const GetOptions(source: Source.cache));
+
+    // Fall back to server if cache is empty
+    if (snapshot.docs.isEmpty) {
+      snapshot = await _firestore.collection('collectionSchedules').get();
+    }
+
     _cachedCollectionScheduleMonths = snapshot.docs
         .where((doc) => doc.id.contains(' ')) // Filter out non-monthly docs
         .map((doc) => doc.id)
@@ -443,6 +528,17 @@ class DailyService {
     _knownScheduleDocIds.clear();
     _knownJobListDocIds.clear();
     _knownCollectionScheduleDocIds.clear();
+  }
+
+  /// Invalidate the available months cache so next call re-fetches from Firestore.
+  /// Call when a new monthly document is created.
+  static void invalidateMonthsCache() {
+    _cachedScheduleMonths = null;
+    _scheduleMonthsCacheTime = null;
+    _cachedJobListMonths = null;
+    _jobListMonthsCacheTime = null;
+    _cachedCollectionScheduleMonths = null;
+    _collectionScheduleMonthsCacheTime = null;
   }
 
   /// Get date range for a monthly document

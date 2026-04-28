@@ -17,6 +17,33 @@ class FirestoreService {
       _firestore.collection('distributors');
   CollectionReference get _workAreas => _firestore.collection('workAreas');
 
+  /// Lightweight existence check: does the month have any schedule data?
+  ///
+  /// Probes the monthly index document (created by the first write that
+  /// touches the month). Tries Firestore cache first to avoid a billed read,
+  /// then falls back to server. Returns true on ambiguous errors so the
+  /// caller can fall back to its default behaviour (safe-by-default).
+  Future<bool> hasScheduleDataForMonth(DateTime month) async {
+    final indexDoc = _dailyService.getScheduleMonthlyIndexDoc(month);
+    try {
+      final cached = await indexDoc.get(
+        const GetOptions(source: Source.cache),
+      );
+      if (cached.exists) return true;
+    } catch (_) {
+      // Cache miss or unavailable — fall through to server.
+    }
+    try {
+      final server = await indexDoc.get(
+        const GetOptions(source: Source.server),
+      );
+      return server.exists;
+    } catch (_) {
+      // On any server error, assume data may exist to preserve existing UX.
+      return true;
+    }
+  }
+
   // DISTRIBUTOR OPERATIONS
 
   // Stream of all distributors (from root collection)
@@ -27,6 +54,25 @@ class FirestoreService {
         return Distributor.fromMap(doc.id, doc.data() as Map<String, dynamic>);
       }).toList();
     });
+  }
+
+  /// One-shot fetch of distributors (cache-first). Use when a consumer
+  /// only needs a snapshot rather than a live subscription.
+  Future<List<Distributor>> fetchDistributorsOnce() async {
+    QuerySnapshot snapshot;
+    try {
+      snapshot = await _distributors
+          .orderBy('index')
+          .get(const GetOptions(source: Source.cache));
+      if (snapshot.docs.isEmpty) {
+        snapshot = await _distributors.orderBy('index').get();
+      }
+    } catch (_) {
+      snapshot = await _distributors.orderBy('index').get();
+    }
+    return snapshot.docs.map((doc) {
+      return Distributor.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+    }).toList();
   }
 
   // Add a new distributor (to root collection)
@@ -328,6 +374,7 @@ class FirestoreService {
       distributorId: job.distributorId,
       date: job.date,
       statusId: job.statusId,
+      dropOffPoint: job.dropOffPoint,
     );
 
     // Add job to the jobs array in the daily document
@@ -616,6 +663,26 @@ class FirestoreService {
         return WorkArea.fromMap(data);
       }).toList();
     });
+  }
+
+  /// One-shot fetch of work areas. Tries Firestore cache first to avoid a
+  /// billed read, falls back to server on cache miss. Use when a consumer
+  /// needs a snapshot of work areas without subscribing to live updates.
+  Future<List<WorkArea>> fetchWorkAreasOnce() async {
+    QuerySnapshot snapshot;
+    try {
+      snapshot = await _workAreas.get(const GetOptions(source: Source.cache));
+      if (snapshot.docs.isEmpty) {
+        snapshot = await _workAreas.get();
+      }
+    } catch (_) {
+      snapshot = await _workAreas.get();
+    }
+    return snapshot.docs.map((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      data['id'] = doc.id;
+      return WorkArea.fromMap(data);
+    }).toList();
   }
 
   // Update a work area (in root collection)

@@ -82,7 +82,7 @@ class WorkAreaService {
             }
             continue;
           }
-          final name = nameElement.text.trim();
+          final name = nameElement.innerText.trim();
           if (name.isEmpty) {
             if (kDebugMode) {
               print('Skipping placemark: empty name');
@@ -95,7 +95,8 @@ class WorkAreaService {
 
           // Extract description if available
           final description =
-              placemark.findElements('description').firstOrNull?.text ?? '';
+              placemark.findElements('description').firstOrNull?.innerText ??
+                  '';
 
           // Find coordinates
           String? coordinates;
@@ -260,7 +261,7 @@ class WorkAreaService {
         return null;
       }
 
-      final coordinates = coordinatesElement.text.trim();
+      final coordinates = coordinatesElement.innerText.trim();
       if (coordinates.isEmpty) {
         if (kDebugMode) {
           print('Coordinates element is empty');

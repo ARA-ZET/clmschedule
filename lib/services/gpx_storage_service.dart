@@ -2,8 +2,12 @@
 //
 // Manages GPX track/waypoint files in Firebase Cloud Storage.
 // Folder structure: Distribution/{year}/{MMM YYYY}/{clientName}/Round {N}/
+import 'dart:convert';
+import 'dart:math' as math;
+
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
+import 'package:gpx/gpx.dart';
 import 'package:intl/intl.dart';
 
 class GpxStorageService {
@@ -56,6 +60,28 @@ class GpxStorageService {
       // Folder doesn't exist yet → first round
       debugPrint('nextRoundNumber: $e');
       return 1;
+    }
+  }
+
+  /// Returns `true` if a client folder already exists under the month folder
+  /// for [date] with a case-insensitive name match on [clientName]. Used to
+  /// decide whether to default save operations into the existing client
+  /// folder or to force the user to pick a folder instead.
+  Future<bool> clientFolderExists(DateTime date, String clientName) async {
+    final year = date.year.toString();
+    final monthLabel = DateFormat('MMM yyyy').format(date);
+    final monthPath = '$_root/$year/$monthLabel';
+    final needle = _sanitize(clientName).toLowerCase();
+    if (needle.isEmpty) return false;
+    try {
+      final result = await _storage.ref(monthPath).listAll();
+      for (final p in result.prefixes) {
+        if (p.name.toLowerCase() == needle) return true;
+      }
+      return false;
+    } catch (e) {
+      debugPrint('clientFolderExists($clientName): $e');
+      return false;
     }
   }
 
@@ -125,6 +151,7 @@ class GpxStorageService {
               name: item.name,
               fullPath: item.fullPath,
               lastModified: meta.updated ?? meta.timeCreated,
+              sizeBytes: meta.size,
             );
           } catch (_) {
             return StorageFileItem(
@@ -235,6 +262,316 @@ class GpxStorageService {
     await _storage.ref(fullPath).delete();
   }
 
+  // ── Rename / Copy / Move ──────────────────────────────────────────────────
+
+  /// Copy a file to another location by streaming its bytes.
+  /// Returns the full path of the new file.
+  /// Preserves content type when available. If a file already exists at the
+  /// destination it will be overwritten.
+  ///
+  /// Uses a 100 MB ceiling for [getData] so large tracking GPX files (which
+  /// can easily exceed the default 10 MB limit on web) can be renamed/moved.
+  Future<String> copyFile(String fromFullPath, String toFullPath) async {
+    final srcRef = _storage.ref(fromFullPath);
+    final bytes = await srcRef.getData(100 * 1024 * 1024);
+    if (bytes == null) {
+      throw StateError('copyFile: source returned no data ($fromFullPath)');
+    }
+    String? contentType;
+    try {
+      final meta = await srcRef.getMetadata();
+      contentType = meta.contentType;
+    } catch (_) {
+      // Metadata read is best-effort.
+    }
+    final dstRef = _storage.ref(toFullPath);
+    await dstRef.putData(
+      bytes,
+      SettableMetadata(contentType: contentType),
+    );
+    return toFullPath;
+  }
+
+  /// Move a file by copying then deleting the source. A failed delete leaves
+  /// a duplicate at the destination, so surface that as an error instead of
+  /// silently succeeding (callers can then keep the old name and retry).
+  Future<String> moveFile(String fromFullPath, String toFullPath) async {
+    if (fromFullPath == toFullPath) return toFullPath;
+    await copyFile(fromFullPath, toFullPath);
+    try {
+      await _storage.ref(fromFullPath).delete();
+    } catch (e) {
+      debugPrint('moveFile: source delete failed ($fromFullPath): $e');
+      // Roll back: try to remove the copy so the user doesn't see duplicates.
+      try {
+        await _storage.ref(toFullPath).delete();
+      } catch (_) {}
+      throw StateError(
+        'Could not remove original file ($fromFullPath): $e',
+      );
+    }
+    return toFullPath;
+  }
+
+  /// Rename a file within the same folder.
+  Future<String> renameFile(String fullPath, String newName) async {
+    final slash = fullPath.lastIndexOf('/');
+    final folder = slash > 0 ? fullPath.substring(0, slash) : '';
+    final newPath = folder.isEmpty ? newName : '$folder/$newName';
+    if (newPath == fullPath) return fullPath;
+    return moveFile(fullPath, newPath);
+  }
+
+  /// List every folder path that exists anywhere under [rootPath] (depth-first).
+  /// The returned list is sorted alphabetically and includes [rootPath] itself.
+  /// Useful as the source set for a "move/copy to folder" picker.
+  Future<List<String>> listAllFolderPaths({String? rootPath}) async {
+    final root = rootPath ?? _root;
+    final out = <String>{root};
+    Future<void> walk(String path) async {
+      try {
+        final result = await _storage.ref(path).listAll();
+        for (final p in result.prefixes) {
+          out.add(p.fullPath);
+          await walk(p.fullPath);
+        }
+      } catch (e) {
+        debugPrint('listAllFolderPaths walk error ($path): $e');
+      }
+    }
+
+    await walk(root);
+    final list = out.toList()..sort();
+    return list;
+  }
+
+  /// Recursively delete a folder and everything inside it. Firebase Storage
+  /// has no real folders, so we walk [listAll] and delete every file found,
+  /// descending into sub-prefixes. Safe to call on folders that only exist
+  /// because of a `.folder` placeholder — that placeholder is simply deleted.
+  ///
+  /// Returns the total number of files removed.
+  Future<int> deleteFolderRecursive(String folderPath) async {
+    int removed = 0;
+    try {
+      final result = await _storage.ref(folderPath).listAll();
+
+      // Delete files in this folder in parallel.
+      if (result.items.isNotEmpty) {
+        await Future.wait(result.items.map((item) async {
+          try {
+            await item.delete();
+            removed++;
+          } catch (e) {
+            debugPrint('deleteFolderRecursive: failed to delete '
+                '${item.fullPath}: $e');
+          }
+        }));
+      }
+
+      // Recurse into each subfolder.
+      for (final prefix in result.prefixes) {
+        removed += await deleteFolderRecursive(prefix.fullPath);
+      }
+    } catch (e) {
+      debugPrint('deleteFolderRecursive error ($folderPath): $e');
+      rethrow;
+    }
+    return removed;
+  }
+
+  // ── Compiled waypoints ────────────────────────────────────────────────────
+
+  /// Rebuild `_compiled_waypoints.json` for [folderPath] by re-reading every
+  /// waypoint GPX file in that folder and aggregating the waypoints. A file
+  /// is treated as a waypoint source when its name contains "waypoint"
+  /// (case-insensitive) OR when it exposes any `<wpt>` elements.
+  ///
+  /// The produced JSON has shape:
+  /// ```json
+  /// { "waypointCount": N,
+  ///   "waypoints": [ { "lat":..., "lon":..., "name":..., "desc":...,
+  ///                    "sourceFile":... }, ... ] }
+  /// ```
+  /// Returns the waypoint count on success, or `null` on failure.
+  Future<int?> regenerateCompiledWaypoints(String folderPath) async {
+    try {
+      final result = await _storage.ref(folderPath).listAll();
+      final gpxItems = result.items
+          .where((i) => i.name.toLowerCase().endsWith('.gpx'))
+          .toList();
+
+      final aggregated = <Map<String, dynamic>>[];
+      for (final item in gpxItems) {
+        try {
+          final bytes = await item.getData();
+          if (bytes == null) continue;
+          final xml = String.fromCharCodes(bytes);
+          final gpx = GpxReader().fromString(xml);
+          if (gpx.wpts.isEmpty) continue;
+          for (final w in gpx.wpts) {
+            if (w.lat == null || w.lon == null) continue;
+            aggregated.add({
+              'lat': w.lat,
+              'lon': w.lon,
+              if (w.name != null) 'name': w.name,
+              if (w.desc != null) 'desc': w.desc,
+              'sourceFile': item.name,
+            });
+          }
+        } catch (e) {
+          debugPrint('regenerateCompiledWaypoints: '
+              'failed to parse ${item.fullPath}: $e');
+        }
+      }
+
+      final compiledPath = '$folderPath/_compiled_waypoints.json';
+      final compiledRef = _storage.ref(compiledPath);
+
+      if (aggregated.isEmpty) {
+        // No waypoints left — remove any stale compiled file if it exists.
+        try {
+          await compiledRef.delete();
+        } catch (_) {
+          // Ignore "object-not-found" errors.
+        }
+        return 0;
+      }
+
+      final payload = jsonEncode({
+        'waypointCount': aggregated.length,
+        'waypoints': aggregated,
+      });
+      await compiledRef.putData(
+        Uint8List.fromList(utf8.encode(payload)),
+        SettableMetadata(contentType: 'application/json'),
+      );
+      return aggregated.length;
+    } catch (e) {
+      debugPrint('regenerateCompiledWaypoints error ($folderPath): $e');
+      return null;
+    }
+  }
+
+  // ── Compiled tracks ───────────────────────────────────────────────────────
+
+  /// Rebuild `_compiled_tracks.json` for [folderPath] by re-reading every
+  /// track GPX file in that folder and aggregating each `<trk>` into one
+  /// entry. Mirrors the schema produced by the Cloud Function and consumed
+  /// by [ShareableMapProvider]:
+  /// ```json
+  /// { "trackCount": N,
+  ///   "tracks": [ { "name":..., "desc":..., "points":[[lat,lon],...],
+  ///                 "distanceMeters":..., "startTime":ms, "endTime":ms,
+  ///                 "durationMs":..., "sourceFile":... }, ... ] }
+  /// ```
+  /// Returns the track count on success, or `null` on failure.
+  Future<int?> regenerateCompiledTracks(String folderPath) async {
+    try {
+      final result = await _storage.ref(folderPath).listAll();
+      final gpxItems = result.items
+          .where((i) => i.name.toLowerCase().endsWith('.gpx'))
+          .toList();
+
+      final aggregated = <Map<String, dynamic>>[];
+      for (final item in gpxItems) {
+        try {
+          final bytes = await item.getData();
+          if (bytes == null) continue;
+          final xml = String.fromCharCodes(bytes);
+          final gpx = GpxReader().fromString(xml);
+          if (gpx.trks.isEmpty) continue;
+
+          for (final trk in gpx.trks) {
+            // Flatten all track segments into a single point sequence.
+            final points = <List<double>>[];
+            DateTime? firstTime;
+            DateTime? lastTime;
+            for (final seg in trk.trksegs) {
+              for (final p in seg.trkpts) {
+                if (p.lat == null || p.lon == null) continue;
+                points.add([p.lat!, p.lon!]);
+                if (p.time != null) {
+                  firstTime ??= p.time;
+                  lastTime = p.time;
+                }
+              }
+            }
+            if (points.length < 2) continue;
+
+            // Haversine length.
+            double distMeters = 0;
+            for (int i = 1; i < points.length; i++) {
+              distMeters += _haversineMeters(
+                points[i - 1][0], points[i - 1][1],
+                points[i][0], points[i][1],
+              );
+            }
+
+            final entry = <String, dynamic>{
+              'name': trk.name ?? item.name.replaceAll('.gpx', ''),
+              if (trk.desc != null) 'desc': trk.desc,
+              'points': points,
+              'distanceMeters': distMeters,
+              'sourceFile': item.name,
+            };
+            if (firstTime != null && lastTime != null) {
+              entry['startTime'] = firstTime.millisecondsSinceEpoch;
+              entry['endTime'] = lastTime.millisecondsSinceEpoch;
+              entry['durationMs'] =
+                  lastTime.difference(firstTime).inMilliseconds;
+            }
+            aggregated.add(entry);
+          }
+        } catch (e) {
+          debugPrint('regenerateCompiledTracks: '
+              'failed to parse ${item.fullPath}: $e');
+        }
+      }
+
+      final compiledPath = '$folderPath/_compiled_tracks.json';
+      final compiledRef = _storage.ref(compiledPath);
+
+      if (aggregated.isEmpty) {
+        // No tracks left — remove any stale compiled file if it exists.
+        try {
+          await compiledRef.delete();
+        } catch (_) {
+          // Ignore "object-not-found" errors.
+        }
+        return 0;
+      }
+
+      final payload = jsonEncode({
+        'trackCount': aggregated.length,
+        'tracks': aggregated,
+      });
+      await compiledRef.putData(
+        Uint8List.fromList(utf8.encode(payload)),
+        SettableMetadata(contentType: 'application/json'),
+      );
+      return aggregated.length;
+    } catch (e) {
+      debugPrint('regenerateCompiledTracks error ($folderPath): $e');
+      return null;
+    }
+  }
+
+  /// Great-circle distance between two WGS84 points in meters.
+  static double _haversineMeters(
+      double lat1, double lon1, double lat2, double lon2) {
+    const r = 6371000.0; // earth radius in meters
+    final dLat = (lat2 - lat1) * math.pi / 180;
+    final dLon = (lon2 - lon1) * math.pi / 180;
+    final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(lat1 * math.pi / 180) *
+            math.cos(lat2 * math.pi / 180) *
+            math.sin(dLon / 2) *
+            math.sin(dLon / 2);
+    final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    return r * c;
+  }
+
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   /// Sanitize a name for use in a storage path.
@@ -265,15 +602,29 @@ class StorageFileItem {
   final String name;
   final String fullPath;
   final DateTime? lastModified;
+  final int? sizeBytes;
 
   const StorageFileItem({
     required this.name,
     required this.fullPath,
     this.lastModified,
+    this.sizeBytes,
   });
 
   String get extension =>
       name.contains('.') ? name.split('.').last.toLowerCase() : '';
+
+  /// Human-readable file size (e.g. "1.2 MB", "340 KB").
+  String? get sizeLabel {
+    final s = sizeBytes;
+    if (s == null) return null;
+    if (s < 1024) return '$s B';
+    if (s < 1024 * 1024) return '${(s / 1024).toStringAsFixed(1)} KB';
+    if (s < 1024 * 1024 * 1024) {
+      return '${(s / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(s / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
 }
 
 /// Represents a folder in Cloud Storage.

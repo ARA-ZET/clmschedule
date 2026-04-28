@@ -7,6 +7,8 @@ import '../providers/te_map_layer_provider.dart';
 import '../providers/te_processing_provider.dart';
 import '../providers/te_tabs_provider.dart';
 import '../providers/te_tools_provider.dart';
+import '../providers/te_tracks_provider.dart';
+import '../providers/te_waypoints_provider.dart';
 
 class TETopTabBar extends riverpod.ConsumerWidget {
   const TETopTabBar({super.key});
@@ -151,7 +153,9 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                             onPressed: () {
                               ref.read(teTabsRiverpod).clearAllTabs();
                               ref.read(teMapLayerRiverpod).clearAll();
-                              ref.read(teFilesRiverpod).clearFileNames();
+                              ref.read(teFilesRiverpod).clearAll();
+                              ref.read(teTracksRiverpod).clearAll();
+                              ref.read(teWaypointsRiverpod).clearAll();
                               ref.read(teProcessingRiverpod).clearFiles();
                             },
                             style: TextButton.styleFrom(

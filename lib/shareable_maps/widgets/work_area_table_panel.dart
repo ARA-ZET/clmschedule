@@ -20,6 +20,16 @@ class WorkAreaTablePanel extends riverpod.ConsumerStatefulWidget {
 
 class _WorkAreaTablePanelState
     extends riverpod.ConsumerState<WorkAreaTablePanel> {
+  final TextEditingController _searchCtrl = TextEditingController();
+  String _searchQuery = '';
+  bool _ascending = true;
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final provider = ref.watch(shareableMapRiverpod);
@@ -34,11 +44,27 @@ class _WorkAreaTablePanelState
       }
     }
 
-    // Compute total estimate.
+    // Compute total estimate across ALL entries (pre-filter) so the footer
+    // still shows the grand total regardless of search.
     int totalEstimate = 0;
     for (final e in entries) {
       totalEstimate += e.poly.letterBoxEstimate;
     }
+
+    // Filter by search query (case-insensitive substring match on name).
+    final query = _searchQuery.trim().toLowerCase();
+    final filtered = query.isEmpty
+        ? List<_PolyEntry>.from(entries)
+        : entries
+            .where((e) => e.poly.name.toLowerCase().contains(query))
+            .toList();
+
+    // Sort alphabetically A–Z or Z–A.
+    filtered.sort((a, b) {
+      final cmp =
+          a.poly.name.toLowerCase().compareTo(b.poly.name.toLowerCase());
+      return _ascending ? cmp : -cmp;
+    });
 
     return Column(
       children: [
@@ -58,9 +84,87 @@ class _WorkAreaTablePanelState
                     style:
                         TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
               ),
-              Text('${entries.length}',
+              Text(
+                  query.isEmpty
+                      ? '${entries.length}'
+                      : '${filtered.length}/${entries.length}',
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
             ],
+          ),
+        ),
+
+        // ── Search + sort toggle ──────────────────────────────────────
+        Container(
+          padding: const EdgeInsets.fromLTRB(8, 6, 4, 6),
+          color: Colors.white,
+          child: MouseRegion(
+            onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+            onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _searchCtrl,
+                    onChanged: (v) => setState(() => _searchQuery = v),
+                    style: const TextStyle(fontSize: 12),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      hintText: 'Search name...',
+                      hintStyle: const TextStyle(fontSize: 12),
+                      prefixIcon:
+                          const Icon(Icons.search, size: 16, color: Colors.grey),
+                      prefixIconConstraints: const BoxConstraints(
+                          minWidth: 28, minHeight: 28),
+                      suffixIcon: _searchQuery.isEmpty
+                          ? null
+                          : IconButton(
+                              icon: const Icon(Icons.clear, size: 14),
+                              padding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints.tightFor(
+                                  width: 28, height: 28),
+                              onPressed: () {
+                                _searchCtrl.clear();
+                                setState(() => _searchQuery = '');
+                              },
+                            ),
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 6),
+                      border: OutlineInputBorder(
+                        borderSide: BorderSide(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderSide: BorderSide(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: _ascending ? 'Sort Z–A' : 'Sort A–Z',
+                  icon: Icon(
+                    _ascending
+                        ? Icons.arrow_downward
+                        : Icons.arrow_upward,
+                    size: 16,
+                  ),
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                  constraints:
+                      const BoxConstraints.tightFor(width: 32, height: 32),
+                  onPressed: () => setState(() => _ascending = !_ascending),
+                ),
+                SizedBox(
+                  width: 22,
+                  child: Text(
+                    _ascending ? 'A–Z' : 'Z–A',
+                    style: const TextStyle(
+                        fontSize: 10, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
 
@@ -90,19 +194,23 @@ class _WorkAreaTablePanelState
 
         // ── Polygon rows ──────────────────────────────────────────────
         Expanded(
-          child: entries.isEmpty
+          child: filtered.isEmpty
               ? Center(
-                  child: Text('No work areas',
+                  child: Text(
+                      query.isEmpty
+                          ? 'No work areas'
+                          : 'No matches for "$query"',
                       style:
                           TextStyle(fontSize: 13, color: Colors.grey.shade500)),
                 )
               : ListView.separated(
                   padding: const EdgeInsets.symmetric(vertical: 2),
-                  itemCount: entries.length,
+                  itemCount: filtered.length,
                   separatorBuilder: (_, __) => const Divider(height: 1),
                   itemBuilder: (_, i) => _PolyRow(
-                    key: ValueKey('${entries[i].layerId}_${entries[i].index}'),
-                    entry: entries[i],
+                    key: ValueKey(
+                        '${filtered[i].layerId}_${filtered[i].index}'),
+                    entry: filtered[i],
                   ),
                 ),
         ),

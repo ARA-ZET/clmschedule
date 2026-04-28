@@ -3,6 +3,9 @@ import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_invoice_status.dart';
+import '../services/reference_cache_service.dart';
+
+const String _kCollectionName = 'customInvoiceStatuses';
 
 final invoiceStatusRiverpod =
     riverpod.ChangeNotifierProvider<InvoiceStatusProvider>(
@@ -29,16 +32,16 @@ class InvoiceStatusProvider extends ChangeNotifier {
       _error = null;
       notifyListeners();
 
-      final snapshot = await _firestore
-          .collection('customInvoiceStatuses')
-          .orderBy('label')
-          .get();
-
-      _statuses = snapshot.docs.map((doc) {
-        final data = doc.data();
-        data['id'] = doc.id; // Ensure the document ID is set
-        return CustomInvoiceStatus.fromMap(data);
-      }).toList();
+      _statuses =
+          await ReferenceCacheService.loadCollection<CustomInvoiceStatus>(
+        query: _firestore.collection(_kCollectionName).orderBy('label'),
+        collectionName: _kCollectionName,
+        fromDoc: (doc) {
+          final data = Map<String, dynamic>.from(doc.data() as Map);
+          data['id'] = doc.id;
+          return CustomInvoiceStatus.fromMap(data);
+        },
+      );
     } catch (e) {
       _error = 'Error loading invoice statuses: $e';
       if (kDebugMode) {
@@ -55,11 +58,12 @@ class InvoiceStatusProvider extends ChangeNotifier {
     try {
       _error = null;
 
-      final docRef = await _firestore.collection('customInvoiceStatuses').add({
+      final docRef = await _firestore.collection(_kCollectionName).add({
         'label': label,
         'color': color.toARGB32(),
         'isDefault': false,
       });
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
 
       final newStatus = CustomInvoiceStatus(
         id: docRef.id,
@@ -85,10 +89,11 @@ class InvoiceStatusProvider extends ChangeNotifier {
     try {
       _error = null;
 
-      await _firestore.collection('customInvoiceStatuses').doc(id).update({
+      await _firestore.collection(_kCollectionName).doc(id).update({
         'label': label,
         'color': color.toARGB32(),
       });
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
 
       final index = _statuses.indexWhere((status) => status.id == id);
       if (index != -1) {
@@ -120,7 +125,8 @@ class InvoiceStatusProvider extends ChangeNotifier {
         return;
       }
 
-      await _firestore.collection('customInvoiceStatuses').doc(id).delete();
+      await _firestore.collection(_kCollectionName).doc(id).delete();
+      await ReferenceCacheService.bumpVersion(_kCollectionName);
       _statuses.removeWhere((status) => status.id == id);
       notifyListeners();
     } catch (e) {
