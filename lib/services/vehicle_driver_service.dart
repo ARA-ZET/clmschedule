@@ -126,7 +126,7 @@ class VehicleDriverService {
           .get();
 
       if (snapshot.exists) {
-        final data = snapshot.data() as Map<String, dynamic>;
+        final data = Map<String, dynamic>.from(snapshot.data() as Map);
         return Map<String, String>.from(data['assignments'] ?? {});
       }
       return {};

@@ -32,6 +32,15 @@ class CloudFileManagerProvider with ChangeNotifier {
   bool _isLoading = false;
   String? _error;
 
+  // Bulk-task progress state. While [_taskTotal] > 0 a long-running
+  // batch operation (upload/copy/move/delete) is in progress and the UI
+  // can show a progress dialog driven by these fields.
+  String _taskLabel = '';
+  int _taskTotal = 0;
+  int _taskCompleted = 0;
+  String _taskCurrentItem = '';
+  String _taskDetail = '';
+
   // Getters
   List<({String path, String name})> get breadcrumbs =>
       List.unmodifiable(_breadcrumbs);
@@ -43,6 +52,74 @@ class CloudFileManagerProvider with ChangeNotifier {
   String? get error => _error;
   bool get isAtRoot => _breadcrumbs.length <= 1;
   int get depth => _breadcrumbs.length;
+
+  // Bulk-task progress getters.
+  bool get isTaskRunning => _taskTotal > 0;
+  String get taskLabel => _taskLabel;
+  int get taskTotal => _taskTotal;
+  int get taskCompleted => _taskCompleted;
+  String get taskCurrentItem => _taskCurrentItem;
+  String get taskDetail => _taskDetail;
+  double get taskProgress =>
+      _taskTotal == 0 ? 0.0 : (_taskCompleted / _taskTotal).clamp(0.0, 1.0);
+
+  void _beginTask(String label, int total) {
+    _taskLabel = label;
+    _taskTotal = total;
+    _taskCompleted = 0;
+    _taskCurrentItem = '';
+    _taskDetail = '';
+    notifyListeners();
+  }
+
+  void _updateTask({String? currentItem, String? detail, int? completed}) {
+    if (currentItem != null) _taskCurrentItem = currentItem;
+    if (detail != null) _taskDetail = detail;
+    if (completed != null) _taskCompleted = completed;
+    notifyListeners();
+  }
+
+  void _endTask() {
+    _taskLabel = '';
+    _taskTotal = 0;
+    _taskCompleted = 0;
+    _taskCurrentItem = '';
+    _taskDetail = '';
+    notifyListeners();
+  }
+
+  /// Run [task] over [items] with at most [concurrency] in flight.
+  /// Increments task progress as each item completes.
+  Future<List<R>> _runWithLimit<T, R>(
+    List<T> items,
+    int concurrency,
+    Future<R> Function(T item) task,
+  ) async {
+    final results = List<R?>.filled(items.length, null);
+    int next = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        final idx = next++;
+        if (idx >= items.length) return;
+        try {
+          results[idx] = await task(items[idx]);
+        } catch (e) {
+          debugPrint('_runWithLimit task failed: $e');
+        } finally {
+          _taskCompleted++;
+          notifyListeners();
+        }
+      }
+    }
+
+    final workers = List.generate(
+      concurrency.clamp(1, items.isEmpty ? 1 : items.length),
+      (_) => worker(),
+    );
+    await Future.wait(workers);
+    return results.whereType<R>().toList();
+  }
 
   /// Current folder level in the hierarchy.
   FolderLevel get currentLevel {
@@ -186,22 +263,31 @@ class CloudFileManagerProvider with ChangeNotifier {
     }
   }
 
-  /// Delete many files. Returns the number successfully deleted.
-  /// Also triggers a compiled-waypoints rebuild per affected folder.
+  /// Delete many files in parallel. Returns the number successfully deleted.
+  /// The Storage Cloud Function recompiles `_compiled_*.json` automatically
+  /// when GPX files are deleted, so we no longer wait on a client-side
+  /// rebuild here (that would re-download every remaining GPX in the
+  /// folder and made deletes feel slow).
   Future<int> deleteFiles(Iterable<StorageFileItem> files) async {
-    final affectedFolders = <String>{};
+    final list = files.toList();
+    if (list.isEmpty) return 0;
+    _beginTask('Deleting files', list.length);
     int ok = 0;
-    for (final f in files) {
-      try {
-        await _storage.deleteFile(f.fullPath);
-        ok++;
-        final slash = f.fullPath.lastIndexOf('/');
-        if (slash > 0) affectedFolders.add(f.fullPath.substring(0, slash));
-      } catch (e) {
-        debugPrint('deleteFiles: failed ${f.fullPath}: $e');
-      }
+    try {
+      await _runWithLimit<StorageFileItem, bool>(list, 6, (f) async {
+        _updateTask(currentItem: f.name);
+        try {
+          await _storage.deleteFile(f.fullPath);
+          ok++;
+          return true;
+        } catch (e) {
+          debugPrint('deleteFiles: failed ${f.fullPath}: $e');
+          return false;
+        }
+      });
+    } finally {
+      _endTask();
     }
-    await _rebuildCompiledFor(affectedFolders);
     await loadCurrentFolder();
     return ok;
   }
@@ -229,49 +315,75 @@ class CloudFileManagerProvider with ChangeNotifier {
     }
   }
 
-  /// Copy files into [destinationFolder]. Returns how many succeeded.
+  /// Copy files into [destinationFolder] in parallel.
+  /// Returns how many succeeded.
+  /// The Cloud Function compiles `_compiled_*.json` in the destination
+  /// folder automatically as the new GPX files land there.
   Future<int> copyFiles(
     Iterable<StorageFileItem> files,
     String destinationFolder,
   ) async {
+    final list = files.toList();
+    if (list.isEmpty) return 0;
+    _beginTask('Copying to ${_shortFolder(destinationFolder)}', list.length);
     int ok = 0;
-    for (final f in files) {
-      final dst = '$destinationFolder/${f.name}';
-      if (dst == f.fullPath) continue; // skip copy to self
-      try {
-        await _storage.copyFile(f.fullPath, dst);
-        ok++;
-      } catch (e) {
-        debugPrint('copyFiles: failed ${f.fullPath} → $dst: $e');
-      }
+    try {
+      await _runWithLimit<StorageFileItem, bool>(list, 4, (f) async {
+        final dst = '$destinationFolder/${f.name}';
+        if (dst == f.fullPath) return false; // skip copy to self
+        _updateTask(currentItem: f.name);
+        try {
+          await _storage.copyFile(f.fullPath, dst);
+          ok++;
+          return true;
+        } catch (e) {
+          debugPrint('copyFiles: failed ${f.fullPath} \u2192 $dst: $e');
+          return false;
+        }
+      });
+    } finally {
+      _endTask();
     }
-    await _rebuildCompiledFor({destinationFolder});
     await loadCurrentFolder();
     return ok;
   }
 
-  /// Move files into [destinationFolder]. Returns how many succeeded.
+  /// Move files into [destinationFolder] in parallel.
+  /// Returns how many succeeded. The Cloud Function rebuilds compiled JSON
+  /// in both the source and destination folders automatically.
   Future<int> moveFiles(
     Iterable<StorageFileItem> files,
     String destinationFolder,
   ) async {
-    final affectedFolders = <String>{destinationFolder};
+    final list = files.toList();
+    if (list.isEmpty) return 0;
+    _beginTask('Moving to ${_shortFolder(destinationFolder)}', list.length);
     int ok = 0;
-    for (final f in files) {
-      final dst = '$destinationFolder/${f.name}';
-      if (dst == f.fullPath) continue;
-      try {
-        await _storage.moveFile(f.fullPath, dst);
-        ok++;
-        final slash = f.fullPath.lastIndexOf('/');
-        if (slash > 0) affectedFolders.add(f.fullPath.substring(0, slash));
-      } catch (e) {
-        debugPrint('moveFiles: failed ${f.fullPath} → $dst: $e');
-      }
+    try {
+      await _runWithLimit<StorageFileItem, bool>(list, 4, (f) async {
+        final dst = '$destinationFolder/${f.name}';
+        if (dst == f.fullPath) return false;
+        _updateTask(currentItem: f.name);
+        try {
+          await _storage.moveFile(f.fullPath, dst);
+          ok++;
+          return true;
+        } catch (e) {
+          debugPrint('moveFiles: failed ${f.fullPath} \u2192 $dst: $e');
+          return false;
+        }
+      });
+    } finally {
+      _endTask();
     }
-    await _rebuildCompiledFor(affectedFolders);
     await loadCurrentFolder();
     return ok;
+  }
+
+  /// Last segment of a folder path, for display in progress labels.
+  String _shortFolder(String path) {
+    final slash = path.lastIndexOf('/');
+    return slash >= 0 ? path.substring(slash + 1) : path;
   }
 
   /// List every folder path under the Distribution root. Useful as the data
@@ -279,13 +391,21 @@ class CloudFileManagerProvider with ChangeNotifier {
   Future<List<String>> listAllFolderPaths() =>
       _storage.listAllFolderPaths(rootPath: rootPath);
 
-  /// Trigger a compiled-waypoints rebuild for each folder, skipping any
-  /// operations that the storage service cannot service.
+  /// List the immediate subfolders of [folderPath]. Used by the navigator
+  /// destination-folder picker so each level is loaded on demand instead of
+  /// fetching the entire tree at once.
+  Future<List<StorageFolderItem>> listSubfolders(String folderPath) =>
+      _storage.listSubfolders(folderPath);
+
+  /// Trigger a compiled-tracks + compiled-waypoints rebuild for each folder.
+  /// Used by callers (e.g. the track editor) that want an immediate local
+  /// rebuild without waiting for the Storage Cloud Function. Skipped on
+  /// failure rather than failing the surrounding operation.
   Future<void> _rebuildCompiledFor(Iterable<String> folders) async {
     for (final f in folders) {
       if (f.isEmpty) continue;
       try {
-        await _storage.regenerateCompiledWaypoints(f);
+        await _storage.regenerateCompiledFiles(f);
       } catch (e) {
         debugPrint('_rebuildCompiledFor($f): $e');
       }
@@ -321,6 +441,39 @@ class CloudFileManagerProvider with ChangeNotifier {
       notifyListeners();
       return null;
     }
+  }
+
+  /// Upload many files to the current folder in parallel with progress.
+  /// The Cloud Function compiles `_compiled_tracks.json` and
+  /// `_compiled_waypoints.json` automatically once the new GPX files land,
+  /// so multi-file uploads always end up with up-to-date compiled aggregates.
+  /// Returns the number of files that uploaded successfully.
+  Future<int> uploadFiles(
+    List<({String name, Uint8List bytes, String? contentType})> entries,
+  ) async {
+    if (entries.isEmpty) return 0;
+    _beginTask('Uploading files', entries.length);
+    int ok = 0;
+    final folder = currentPath;
+    try {
+      await _runWithLimit<({String name, Uint8List bytes, String? contentType}),
+          bool>(entries, 4, (e) async {
+        _updateTask(currentItem: e.name);
+        try {
+          await _storage.uploadFileBytes(folder, e.name, e.bytes,
+              contentType: e.contentType);
+          ok++;
+          return true;
+        } catch (err) {
+          debugPrint('uploadFiles: failed ${e.name}: $err');
+          return false;
+        }
+      });
+    } finally {
+      _endTask();
+    }
+    await loadCurrentFolder();
+    return ok;
   }
 
   /// Create a new subfolder in the current directory and refresh.

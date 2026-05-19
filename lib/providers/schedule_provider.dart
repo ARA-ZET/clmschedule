@@ -54,18 +54,36 @@ class ScheduleProvider extends ChangeNotifier {
   /// If [preferExisting] is true, an existing point is kept when still inside
   /// a polygon work area. Otherwise a new default point is estimated.
   ///
-  /// An explicit dropoff-category point element in [Job.workMaps] always
-  /// wins — it represents the latest user edit from the map editor.
+  /// Two-way sync with a dropoff-category point in [Job.workMaps]:
+  /// - If only the workMap point is set (e.g. fresh edit from the map
+  ///   editor), `dropOffPoint` is updated to match.
+  /// - If `dropOffPoint` has been changed (e.g. marker drag from the day
+  ///   planner) and disagrees with the workMap dropoff point, the workMap
+  ///   point is updated to match the new `dropOffPoint`. Without this the
+  ///   dragged marker would snap back to the stale workMap location on the
+  ///   next read.
   Job _normalizeDropOffPoint(Job job, {bool preferExisting = true}) {
     if (job.workMaps.isEmpty) return job.copyWith(dropOffPoint: null);
 
-    // Priority 1: explicit dropoff-category point in workMaps (set by editor).
-    for (final wm in job.workMaps) {
-      if (wm.isPoint &&
+    // Priority 1: explicit dropoff-category point in workMaps.
+    for (int i = 0; i < job.workMaps.length; i++) {
+      final wm = job.workMaps[i];
+      if (!(wm.isPoint &&
           wm.pointCategory == PointCategory.dropoff &&
-          wm.points.isNotEmpty) {
-        return job.copyWith(dropOffPoint: wm.points.first);
+          wm.points.isNotEmpty)) {
+        continue;
       }
+      final wmPoint = wm.points.first;
+      final dop = job.dropOffPoint;
+      if (dop != null && !_sameLatLng(dop, wmPoint)) {
+        // Caller-supplied dropOffPoint wins — propagate it back into the
+        // workMap so all readers (map editor, day planner, dropsheet) see
+        // a single authoritative position.
+        final updatedMaps = List<CustomPolygon>.from(job.workMaps);
+        updatedMaps[i] = wm.copyWith(points: [dop]);
+        return job.copyWith(workMaps: updatedMaps);
+      }
+      return job.copyWith(dropOffPoint: wmPoint);
     }
 
     final estimated = Job.estimateDropOffPointFromWorkMaps(job.workMaps);
@@ -78,6 +96,15 @@ class ScheduleProvider extends ChangeNotifier {
 
     final keepExisting = Job.isPointInsideAnyWorkArea(existing, job.workMaps);
     return keepExisting ? job : job.copyWith(dropOffPoint: estimated);
+  }
+
+  /// LatLng comparison with a small epsilon so floating-point rounding
+  /// from Firestore round-trips doesn't trigger spurious workMap rewrites.
+  static bool _sameLatLng(dynamic a, dynamic b) {
+    if (a == null || b == null) return a == b;
+    const eps = 1e-7;
+    return (a.latitude - b.latitude).abs() < eps &&
+        (a.longitude - b.longitude).abs() < eps;
   }
 
   /// Replace a job in the local lists by id, then notify listeners instantly.

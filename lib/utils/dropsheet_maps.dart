@@ -36,10 +36,14 @@ class DropsheetMaps {
                 ? task.typeData['workArea'] as String
                 : (task.typeData['distributorName'] as String? ?? '');
         if (lat != null && lng != null) {
-          return [DropsheetMapLink(label: name, url: pinUrlFromLatLng(lat, lng))];
+          return [
+            DropsheetMapLink(label: name, url: pinUrlFromLatLng(lat, lng))
+          ];
         }
         return const [];
       case DropsheetTaskType.collection:
+      case DropsheetTaskType.jobReturn:
+      case DropsheetTaskType.pickFlyers:
         final addr = (task.typeData['address'] as String?)?.trim() ?? '';
         if (addr.isEmpty) return const [];
         return [DropsheetMapLink(label: addr, url: pinUrlFromAddress(addr))];
@@ -51,19 +55,20 @@ class DropsheetMaps {
         final out = <DropsheetMapLink>[];
         if (loading.isNotEmpty) {
           out.add(DropsheetMapLink(
-              label: 'Load: $loading',
-              url: pinUrlFromAddress(loading)));
+              label: 'Loading: $loading', url: pinUrlFromAddress(loading)));
         }
         if (offload.isNotEmpty) {
           out.add(DropsheetMapLink(
-              label: 'Offload: $offload',
-              url: pinUrlFromAddress(offload)));
+              label: 'Offloading: $offload', url: pinUrlFromAddress(offload)));
         }
         return out;
+      case DropsheetTaskType.custom:
+        final addr = (task.typeData['address'] as String?)?.trim() ?? '';
+        if (addr.isEmpty) return const [];
+        return [DropsheetMapLink(label: addr, url: pinUrlFromAddress(addr))];
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
-      case DropsheetTaskType.custom:
         return const [];
     }
   }
@@ -79,18 +84,24 @@ class DropsheetMaps {
         if (wa != null && wa.isNotEmpty) return wa;
         return (task.typeData['distributorName'] as String?) ?? task.location;
       case DropsheetTaskType.collection:
+      case DropsheetTaskType.jobReturn:
+      case DropsheetTaskType.pickFlyers:
         return (task.typeData['address'] as String?) ?? task.location;
       case DropsheetTaskType.furnitureMove:
         final l = (task.typeData['loadingAddress'] as String?) ?? '';
         final o = (task.typeData['offloadAddress'] as String?) ?? '';
         if (l.isEmpty && o.isEmpty) return task.location;
-        if (l.isEmpty) return '→ $o';
-        if (o.isEmpty) return l;
-        return '$l → $o';
+        if (l.isEmpty) return 'Offloading: $o';
+        if (o.isEmpty) return 'Loading: $l';
+        return 'Loading: $l · Offloading: $o';
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
       case DropsheetTaskType.custom:
+        final addr = (task.typeData['address'] as String?)?.trim() ?? '';
+        if (addr.isNotEmpty) {
+          return task.location.isNotEmpty ? task.location : addr;
+        }
         return task.location;
     }
   }

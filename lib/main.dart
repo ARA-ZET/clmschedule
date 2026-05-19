@@ -69,6 +69,7 @@ import 'services/version_service.dart';
 // import 'providers/ai_chat_provider.dart'; // Migrated to Riverpod
 import 'widgets/ai_chat_dialog.dart';
 import 'widgets/dropsheet/dropsheet_tab.dart';
+import 'widgets/cloud_file_manager_screen.dart';
 import 'services/inventory_service.dart';
 import 'services/connectivity_service.dart';
 import 'services/happy_sun_local_storage.dart';
@@ -728,6 +729,86 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
     }
   }
 
+  // ── Tab helpers ────────────────────────────────────────────────────────────
+
+  static const _tabConfigs = [
+    (label: 'Schedule', icon: Icons.calendar_month, color: Color(0xFF1565C0)),
+    (label: 'Job List', icon: Icons.list_alt, color: Color(0xFF2E7D32)),
+    (label: 'Collection', icon: Icons.local_shipping, color: Color(0xFFE65100)),
+    (
+      label: 'Dropsheet',
+      icon: Icons.assignment,
+      color: Color.fromARGB(255, 0, 178, 197)
+    ),
+    (
+      label: 'Happy Sun',
+      icon: Icons.wb_sunny,
+      color: Color.fromARGB(255, 231, 223, 0)
+    ),
+  ];
+
+  Widget _buildTab(int index) {
+    final cfg = _tabConfigs[index];
+    final isSelected = _tabController.index == index;
+    final color = isSelected ? cfg.color : Colors.black;
+    return Tab(
+      height: 48,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(cfg.icon, size: 18, color: color),
+          const SizedBox(height: 2),
+          Text(
+            cfg.label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Action button helper ───────────────────────────────────────────────────
+
+  Widget _actionBtn({
+    required IconData icon,
+    required String label,
+    required VoidCallback onPressed,
+    Color? color,
+  }) {
+    final fg = color ?? Colors.black;
+    return Tooltip(
+      message: label,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 20, color: fg),
+              const SizedBox(height: 1),
+              Text(
+                label,
+                style: TextStyle(
+                    fontSize: 9,
+                    color: fg,
+                    height: 1.1,
+                    fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _tabController.removeListener(_handleTabChange);
@@ -763,35 +844,63 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                 leadingWidth: isSmallScreen ? 0 : 200,
                 automaticallyImplyLeading: false,
                 backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-                title: TabBar(
-                  controller: _tabController,
-                  isScrollable: isSmallScreen, // Scrollable on mobile
-                  labelColor: Colors.black,
-                  unselectedLabelColor: Colors.black54,
-                  indicatorColor: Colors.black,
-                  dividerColor: Colors.transparent,
-                  splashFactory: NoSplash.splashFactory,
-                  overlayColor: WidgetStateProperty.all(Colors.transparent),
-                  tabAlignment:
-                      isSmallScreen ? TabAlignment.start : TabAlignment.fill,
-                  labelPadding: EdgeInsets.symmetric(
-                    horizontal: isSmallScreen ? 12 : 16,
+                title: ListenableBuilder(
+                  listenable: _tabController,
+                  builder: (context, _) => TabBar(
+                    controller: _tabController,
+                    isScrollable: isSmallScreen, // Scrollable on mobile
+                    labelColor: Colors.black,
+                    unselectedLabelColor: Colors.black,
+                    indicatorColor: _tabConfigs[_tabController.index].color,
+                    indicatorWeight: 3,
+                    dividerColor: Colors.transparent,
+                    splashFactory: NoSplash.splashFactory,
+                    overlayColor: WidgetStateProperty.all(Colors.transparent),
+                    tabAlignment:
+                        isSmallScreen ? TabAlignment.start : TabAlignment.fill,
+                    labelPadding: EdgeInsets.symmetric(
+                      horizontal: isSmallScreen ? 8 : 12,
+                    ),
+                    tabs: List.generate(_tabCount, _buildTab),
                   ),
-                  tabs: [
-                    Tab(text: isSmallScreen ? 'Schedule' : 'Schedule'),
-                    Tab(text: isSmallScreen ? 'Jobs' : 'Job List'),
-                    Tab(
-                        text: isSmallScreen
-                            ? 'Collection'
-                            : 'Collection Schedule'),
-                    Tab(text: isSmallScreen ? 'Drop' : 'Dropsheet'),
-                    Tab(text: isSmallScreen ? 'Solar' : 'Happy Sun'),
-                  ],
                 ),
                 actions: [
+                  // Cloud Files
+                  _actionBtn(
+                    icon: Icons.cloud,
+                    label: 'Files',
+                    onPressed: () {
+                      final container =
+                          riverpod.ProviderScope.containerOf(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => CloudFileManagerScreen(
+                            onOpenInTrackEditor: (fileName, bytes, sourcePath) {
+                              // Load file into update mode providers first
+                              // (providers are root-scoped and always alive).
+                              loadCloudFileIntoTrackEditor(
+                                container: container,
+                                fileName: fileName,
+                                bytes: bytes,
+                                sourcePath: sourcePath,
+                              );
+                              // Close file manager then open Track Editor.
+                              Navigator.of(context)
+                                ..pop()
+                                ..push(MaterialPageRoute(
+                                  builder: (_) => const TrackEditorScreen(),
+                                ));
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                   // Track Editor
-                  IconButton(
-                    icon: const Icon(Icons.route),
+                  _actionBtn(
+                    icon: Icons.route,
+                    label: 'Editor',
                     onPressed: () {
                       Navigator.push(
                         context,
@@ -800,11 +909,11 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         ),
                       );
                     },
-                    tooltip: 'Track Editor',
                   ),
                   // Shareable Maps - open gallery / dashboard
-                  IconButton(
-                    icon: const Icon(Icons.map_outlined),
+                  _actionBtn(
+                    icon: Icons.map_outlined,
+                    label: 'My Maps',
                     onPressed: () {
                       Navigator.push(
                         context,
@@ -813,11 +922,11 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         ),
                       );
                     },
-                    tooltip: 'My Maps',
                   ),
                   // Work Areas - open map editor with all work area polygons
-                  IconButton(
-                    icon: const Icon(Icons.layers),
+                  _actionBtn(
+                    icon: Icons.layers,
+                    label: 'Work Areas',
                     onPressed: () async {
                       final provider =
                           riverpod.ProviderScope.containerOf(context)
@@ -844,25 +953,13 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         }
                       }
                     },
-                    tooltip: 'Edit Work Areas',
                   ),
-                  // Geocoding tool
-                  IconButton(
-                    icon: const Icon(Icons.location_searching),
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const SuburbListScreen(),
-                        ),
-                      );
-                    },
-                    tooltip: 'Geocoding Tool',
-                  ),
+
                   // Distributor management - always visible
                   if (!isMediumScreen)
-                    IconButton(
-                      icon: const Icon(Icons.people),
+                    _actionBtn(
+                      icon: Icons.people,
+                      label: 'Staff',
                       onPressed: () {
                         showDialog(
                           context: context,
@@ -870,18 +967,61 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                               const DistributorManagementDialog(),
                         );
                       },
-                      tooltip: 'Manage Distributors',
                     ),
-                  IconButton(
-                    icon: const Icon(Icons.location_city),
-                    onPressed: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => const ErfPropertyScreen(),
-                        ),
-                      );
+
+                  // Apps menu — less-frequently-used tools
+                  PopupMenuButton<String>(
+                    tooltip: 'Apps',
+                    offset: const Offset(0, 48),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 4),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: const [
+                          Icon(Icons.apps, size: 20, color: Color(0xFF202124)),
+                          SizedBox(height: 1),
+                          Text('Apps',
+                              style: TextStyle(
+                                  fontSize: 9,
+                                  color: Color(0xFF202124),
+                                  height: 1.1)),
+                        ],
+                      ),
+                    ),
+                    onSelected: (String value) {
+                      if (value == 'geocode') {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const SuburbListScreen()),
+                        );
+                      } else if (value == 'erf') {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                              builder: (_) => const ErfPropertyScreen()),
+                        );
+                      }
                     },
-                    tooltip: 'ERF Property Viewer',
+                    itemBuilder: (BuildContext context) => [
+                      const PopupMenuItem<String>(
+                        value: 'geocode',
+                        child: ListTile(
+                          leading: Icon(Icons.location_searching),
+                          title: Text('Geocoding Tool'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem<String>(
+                        value: 'erf',
+                        child: ListTile(
+                          leading: Icon(Icons.location_city),
+                          title: Text('ERF Property Viewer'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                    ],
                   ),
                   // Settings menu - always visible
                   PopupMenuButton<String>(

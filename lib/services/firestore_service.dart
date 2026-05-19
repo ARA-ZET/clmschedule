@@ -51,7 +51,7 @@ class FirestoreService {
     // Date parameter is ignored for distributors since they're in root collection
     return _distributors.orderBy('index').snapshots().map((snapshot) {
       return snapshot.docs.map((doc) {
-        return Distributor.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+        return Distributor.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList();
     });
   }
@@ -71,7 +71,7 @@ class FirestoreService {
       snapshot = await _distributors.orderBy('index').get();
     }
     return snapshot.docs.map((doc) {
-      return Distributor.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+      return Distributor.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
     }).toList();
   }
 
@@ -109,7 +109,7 @@ class FirestoreService {
     // Get all distributors to manage indices
     final snapshot = await _distributors.orderBy('index').get();
     final distributors = snapshot.docs.map((doc) {
-      return Distributor.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+      return Distributor.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
     }).toList();
 
     final newIndex = updatedDistributor.index;
@@ -169,7 +169,7 @@ class FirestoreService {
         return <Job>[];
       }
 
-      final data = snapshot.data() as Map<String, dynamic>;
+      final data = Map<String, dynamic>.from(snapshot.data() as Map);
       final jobsArray = data['jobs'] as List<dynamic>?;
 
       if (jobsArray == null || jobsArray.isEmpty) {
@@ -177,7 +177,7 @@ class FirestoreService {
       }
 
       return jobsArray.map((jobData) {
-        final jobMap = jobData as Map<String, dynamic>;
+        final jobMap = Map<String, dynamic>.from(jobData as Map);
         return Job.fromArrayElement(jobMap);
       }).toList();
     });
@@ -246,7 +246,7 @@ class FirestoreService {
         final jobsArray = data['jobs'] as List<dynamic>?;
         if (jobsArray != null) {
           for (final jobData in jobsArray) {
-            allJobs.add(Job.fromArrayElement(jobData as Map<String, dynamic>));
+            allJobs.add(Job.fromArrayElement(Map<String, dynamic>.from(jobData as Map)));
           }
         }
       }
@@ -314,7 +314,7 @@ class FirestoreService {
         return <Job>[];
       }
 
-      final data = snapshot.data() as Map<String, dynamic>;
+      final data = Map<String, dynamic>.from(snapshot.data() as Map);
       final jobsArray = data['jobs'] as List<dynamic>?;
 
       if (jobsArray == null || jobsArray.isEmpty) {
@@ -322,7 +322,7 @@ class FirestoreService {
       }
 
       return jobsArray.map((jobData) {
-        final jobMap = jobData as Map<String, dynamic>;
+        final jobMap = Map<String, dynamic>.from(jobData as Map);
         return Job.fromArrayElement(jobMap);
       }).toList();
     } catch (e) {
@@ -398,7 +398,7 @@ class FirestoreService {
     final snapshot = await dailyDoc.get();
     if (!snapshot.exists) return;
 
-    final data = snapshot.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(snapshot.data() as Map);
     final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
 
     // Find and update the job in the array
@@ -459,13 +459,13 @@ class FirestoreService {
     final destSnapshot = await destDoc.get();
 
     // Build updated source array (remove the job)
-    final sourceData = sourceSnapshot.data() as Map<String, dynamic>? ?? {};
+    final sourceData = Map<String, dynamic>.from((sourceSnapshot.data() as Map?) ?? <String, dynamic>{});
     final sourceJobs =
         List<Map<String, dynamic>>.from(sourceData['jobs'] ?? []);
     sourceJobs.removeWhere((j) => j['id'] == originalJob.id);
 
     // Build updated destination array (add the job)
-    final destData = destSnapshot.data() as Map<String, dynamic>? ?? {};
+    final destData = Map<String, dynamic>.from((destSnapshot.data() as Map?) ?? <String, dynamic>{});
     final destJobs = List<Map<String, dynamic>>.from(destData['jobs'] ?? []);
     destJobs.add(updatedJob.toMap());
 
@@ -486,7 +486,7 @@ class FirestoreService {
     final snapshot = await doc.get();
     if (!snapshot.exists) return;
 
-    final data = snapshot.data() as Map<String, dynamic>? ?? {};
+    final data = Map<String, dynamic>.from((snapshot.data() as Map?) ?? <String, dynamic>{});
     final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
 
     for (int i = 0; i < jobsArray.length; i++) {
@@ -513,10 +513,10 @@ class FirestoreService {
     final snapshotA = await docA.get();
     final snapshotB = await docB.get();
 
-    final dataA = snapshotA.data() as Map<String, dynamic>? ?? {};
+    final dataA = Map<String, dynamic>.from((snapshotA.data() as Map?) ?? <String, dynamic>{});
     final jobsA = List<Map<String, dynamic>>.from(dataA['jobs'] ?? []);
 
-    final dataB = snapshotB.data() as Map<String, dynamic>? ?? {};
+    final dataB = Map<String, dynamic>.from((snapshotB.data() as Map?) ?? <String, dynamic>{});
     final jobsB = List<Map<String, dynamic>>.from(dataB['jobs'] ?? []);
 
     // Remove Job A from dateA, add modified Job B to dateA
@@ -543,7 +543,7 @@ class FirestoreService {
     final snapshot = await doc.get();
     if (!snapshot.exists) return;
 
-    final data = snapshot.data() as Map<String, dynamic>? ?? {};
+    final data = Map<String, dynamic>.from((snapshot.data() as Map?) ?? <String, dynamic>{});
     final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
 
     // Remove the dragged job
@@ -572,13 +572,13 @@ class FirestoreService {
     final targetSnapshot = await targetDoc.get();
 
     // Remove from source
-    final sourceData = sourceSnapshot.data() as Map<String, dynamic>? ?? {};
+    final sourceData = Map<String, dynamic>.from((sourceSnapshot.data() as Map?) ?? <String, dynamic>{});
     final sourceJobs =
         List<Map<String, dynamic>>.from(sourceData['jobs'] ?? []);
     sourceJobs.removeWhere((j) => j['id'] == removeJobId);
 
     // Update in target
-    final targetData = targetSnapshot.data() as Map<String, dynamic>? ?? {};
+    final targetData = Map<String, dynamic>.from((targetSnapshot.data() as Map?) ?? <String, dynamic>{});
     final targetJobs =
         List<Map<String, dynamic>>.from(targetData['jobs'] ?? []);
     final idx = targetJobs.indexWhere((j) => j['id'] == combinedJob.id);
@@ -605,7 +605,7 @@ class FirestoreService {
     final snapshot = await dailyDoc.get();
     if (!snapshot.exists) return;
 
-    final data = snapshot.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(snapshot.data() as Map);
     final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
 
     // Remove the job from the array
@@ -658,7 +658,7 @@ class FirestoreService {
     // Date parameter is ignored for work areas since they're in root collection
     return _workAreas.snapshots().map((snapshot) {
       return snapshot.docs.map((doc) {
-        final data = doc.data() as Map<String, dynamic>;
+        final data = Map<String, dynamic>.from(doc.data() as Map);
         data['id'] = doc.id; // Add the document ID to the data
         return WorkArea.fromMap(data);
       }).toList();
@@ -679,7 +679,7 @@ class FirestoreService {
       snapshot = await _workAreas.get();
     }
     return snapshot.docs.map((doc) {
-      final data = doc.data() as Map<String, dynamic>;
+      final data = Map<String, dynamic>.from(doc.data() as Map);
       data['id'] = doc.id;
       return WorkArea.fromMap(data);
     }).toList();
@@ -740,7 +740,7 @@ class FirestoreService {
     return dailyDoc.snapshots().map((snapshot) {
       if (!snapshot.exists) return <CollectionJob>[];
 
-      final data = snapshot.data() as Map<String, dynamic>;
+      final data = Map<String, dynamic>.from(snapshot.data() as Map);
       final jobsArray =
           List<Map<String, dynamic>>.from(data['collectionJobs'] ?? []);
 
@@ -782,7 +782,7 @@ class FirestoreService {
 
     if (!snapshot.exists) return <CollectionJob>[];
 
-    final data = snapshot.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(snapshot.data() as Map);
     final jobsArray =
         List<Map<String, dynamic>>.from(data['collectionJobs'] ?? []);
 
@@ -845,7 +845,7 @@ class FirestoreService {
     final snapshot = await dailyDoc.get();
     if (!snapshot.exists) return;
 
-    final data = snapshot.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(snapshot.data() as Map);
     final jobsArray =
         List<Map<String, dynamic>>.from(data['collectionJobs'] ?? []);
 
@@ -872,7 +872,7 @@ class FirestoreService {
     final snapshot = await dailyDoc.get();
     if (!snapshot.exists) return;
 
-    final data = snapshot.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(snapshot.data() as Map);
     final jobsArray =
         List<Map<String, dynamic>>.from(data['collectionJobs'] ?? []);
 

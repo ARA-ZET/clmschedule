@@ -45,7 +45,7 @@ class JobTypeProvider extends ChangeNotifier {
         query: _firestore.collection(_kCollectionName).orderBy('order'),
         collectionName: _kCollectionName,
         fromDoc: (doc) =>
-            CustomJobType.fromMap(doc.data() as Map<String, dynamic>),
+            CustomJobType.fromMap(Map<String, dynamic>.from(doc.data() as Map)),
       );
 
       if (loaded.isEmpty && _isLoading) {
@@ -185,6 +185,7 @@ class JobTypeProvider extends ChangeNotifier {
     bool? appearsOnCollectionSchedule,
     bool? tracksQuantity,
     String? quantityLabel,
+    bool? createsCloudFolder,
     String? iconName,
     int? colorValue,
     List<String>? defaultTools,
@@ -201,6 +202,7 @@ class JobTypeProvider extends ChangeNotifier {
       appearsOnCollectionSchedule: appearsOnCollectionSchedule,
       tracksQuantity: tracksQuantity,
       quantityLabel: quantityLabel,
+      createsCloudFolder: createsCloudFolder,
       iconName: iconName,
       colorValue: colorValue,
       defaultTools: defaultTools,

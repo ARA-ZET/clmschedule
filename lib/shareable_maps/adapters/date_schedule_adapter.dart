@@ -67,7 +67,8 @@ class DateScheduleAdapter extends MapDataAdapter {
           .firstOrNull;
       // Collect non-empty client names
       final clientNames = job.clients.where((c) => c.isNotEmpty).toList();
-      for (final p in job.workMaps) {
+      for (var mapIndex = 0; mapIndex < job.workMaps.length; mapIndex++) {
+        final p = job.workMaps[mapIndex];
         final parts = <String>[
           if (distName != null) distName,
           if (clientNames.isNotEmpty) clientNames.join(', '),
@@ -76,12 +77,15 @@ class DateScheduleAdapter extends MapDataAdapter {
         final desc = parts.join(' — ');
 
         if (p.isPoint && p.points.isNotEmpty) {
-          allPoints.add(MapPoint.create(
+          allPoints.add(MapPoint(
+            id: 'date_${job.id}_point_$mapIndex',
             name: p.name,
             description: desc,
             position: p.points.first,
             color: p.color,
             pointCategory: p.pointCategory,
+            createdAt: now,
+            updatedAt: now,
           ));
         } else if (p.isPolyline) {
           allPolylines.add(MapPolyline.create(
@@ -93,15 +97,12 @@ class DateScheduleAdapter extends MapDataAdapter {
             isDashed: p.isDashed,
           ));
         } else {
-          allPolygons.add(CustomPolygon(
-            name: p.name,
-            description: desc,
-            points: List<LatLng>.from(p.points),
-            color: p.color,
-            fillOpacity: p.fillOpacity,
-            strokeWidth: p.strokeWidth,
-            type: p.type,
-          ));
+          allPolygons.add(
+            p.copyWith(
+              description: desc,
+              points: List<LatLng>.from(p.points),
+            ),
+          );
         }
       }
     }

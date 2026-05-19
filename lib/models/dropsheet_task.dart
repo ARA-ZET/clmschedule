@@ -29,6 +29,12 @@ enum DropsheetTaskType {
   /// Furniture move: separate loading + offload addresses.
   furnitureMove,
 
+  /// Return items to a client. Picks a JobListItem and uses its address.
+  jobReturn,
+
+  /// Collect flyers from a client. Picks a JobListItem and uses its address.
+  pickFlyers,
+
   /// Anything else — totally free-form (existing behaviour).
   custom;
 
@@ -50,6 +56,10 @@ enum DropsheetTaskType {
         return 'Collection';
       case DropsheetTaskType.furnitureMove:
         return 'Furniture move';
+      case DropsheetTaskType.jobReturn:
+        return 'Return';
+      case DropsheetTaskType.pickFlyers:
+        return 'Pick flyers';
       case DropsheetTaskType.custom:
         return 'Custom';
     }
@@ -81,8 +91,8 @@ class DropsheetTask {
   final String tel;
 
   /// True for the 3 mandatory leading tasks (Inspect / Pack / Leave).
-  /// Mandatory tasks cannot be deleted but every field is editable
-  /// and they may still be reordered (per requirements).
+  /// Mandatory tasks cannot be deleted. They are always pinned to the top
+  /// of each driver section in Inspect / Pack / Leave order.
   final bool isMandatory;
 
   /// Type-specific structured data. Schema varies by [type]:
@@ -96,6 +106,11 @@ class DropsheetTask {
   /// Optional link back to a JobListItem.id when auto-populated.
   final String? sourceJobListItemId;
 
+  /// Per-task override for the minutes spent at this stop (used by route
+  /// optimisation). When null, the type-level default from
+  /// `DropsheetTaskTypeConfig` / `DynamicTaskTypeDef` is used.
+  final int? serviceTimeMinutes;
+
   const DropsheetTask({
     required this.id,
     this.type = DropsheetTaskType.custom,
@@ -108,6 +123,7 @@ class DropsheetTask {
     this.isMandatory = false,
     this.typeData = const {},
     this.sourceJobListItemId,
+    this.serviceTimeMinutes,
   });
 
   factory DropsheetTask.fromMap(Map<String, dynamic> data) {
@@ -130,6 +146,10 @@ class DropsheetTask {
       }
     }
 
+    final isLeadingType = inferredType == DropsheetTaskType.inspect ||
+        inferredType == DropsheetTaskType.pack ||
+        inferredType == DropsheetTaskType.leave;
+
     return DropsheetTask(
       id: data['id'] as String,
       type: inferredType,
@@ -139,9 +159,10 @@ class DropsheetTask {
       location: data['location'] as String? ?? '',
       contact: data['contact'] as String? ?? '',
       tel: data['tel'] as String? ?? '',
-      isMandatory: data['isMandatory'] as bool? ?? false,
-      typeData: (data['typeData'] as Map<String, dynamic>?) ?? const {},
+      isMandatory: (data['isMandatory'] as bool?) == true || isLeadingType,
+      typeData: ((data['typeData'] == null ? null : Map<String, dynamic>.from(data['typeData'] as Map))) ?? const {},
       sourceJobListItemId: data['sourceJobListItemId'] as String?,
+      serviceTimeMinutes: (data['serviceTimeMinutes'] as num?)?.toInt(),
     );
   }
 
@@ -158,6 +179,8 @@ class DropsheetTask {
         if (typeData.isNotEmpty) 'typeData': typeData,
         if (sourceJobListItemId != null)
           'sourceJobListItemId': sourceJobListItemId,
+        if (serviceTimeMinutes != null)
+          'serviceTimeMinutes': serviceTimeMinutes,
       };
 
   DropsheetTask copyWith({
@@ -171,6 +194,8 @@ class DropsheetTask {
     bool? isMandatory,
     Map<String, dynamic>? typeData,
     String? sourceJobListItemId,
+    int? serviceTimeMinutes,
+    bool clearServiceTimeMinutes = false,
   }) =>
       DropsheetTask(
         id: id,
@@ -184,6 +209,9 @@ class DropsheetTask {
         isMandatory: isMandatory ?? this.isMandatory,
         typeData: typeData ?? this.typeData,
         sourceJobListItemId: sourceJobListItemId ?? this.sourceJobListItemId,
+        serviceTimeMinutes: clearServiceTimeMinutes
+            ? null
+            : (serviceTimeMinutes ?? this.serviceTimeMinutes),
       );
 
   /// The 3 mandatory templates that lead every driver's dropsheet.
@@ -205,8 +233,7 @@ class DropsheetTask {
           details: vehicleLabel ?? '',
           startTime: '07:00',
           isMandatory: true,
-          typeData:
-              vehicleKey != null ? {'vehicle': vehicleKey} : const {},
+          typeData: vehicleKey != null ? {'vehicle': vehicleKey} : const {},
         ),
         DropsheetTask(
           id: '${idPrefix}_m2',

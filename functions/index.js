@@ -2952,3 +2952,656 @@ exports.compileGpxFolder = onCall(
     return { success: true };
   }
 );
+
+// =============================================================================
+// JOB LIST CLOUD FOLDERS
+// =============================================================================
+// When a job-list item is created/updated for a job type that has
+// `createsCloudFolder: true`, this trigger:
+//   1. Creates a Cloud Storage folder at
+//      `Distribution/{year}/{MMM yyyy}/{client}` (sanitised).
+//   2. If the target client folder already exists when an item moves into
+//      it (cross-month or cross-client move), allocates the next free
+//      `Round N` sub-folder inside that existing client folder.
+//   3. Stores the resolved path on the item as `storageFolderPath`.
+//   4. Mirrors that path onto the linked ShareableMap (if the item has
+//      `shareableMapId`) so the map's cloud-files view loads from the
+//      right folder.
+//   5. On subsequent updates, when the client name or distribution month
+//      changes, moves all files from the old folder to a new one and
+//      re-points both the item and the linked map.
+//
+// A separate callable (`duplicateMapForJobCopy`) supports the Job-List
+// "copy" action: it creates a brand-new ShareableMap whose layers
+// (polygons, markers, polylines) are cloned from the source map. The
+// caller then stores `shareableMapId = <new map id>` on the duplicated
+// item, and the trigger above takes care of creating the new folder and
+// linking it.
+// =============================================================================
+
+const MONTH_LABELS_SHORT = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/** Strip filesystem-unsafe characters and collapse whitespace. */
+function sanitiseClientName(name) {
+  if (!name || typeof name !== "string") return "Unknown";
+  const trimmed = name
+    .replace(/[\/\\:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return trimmed.length === 0 ? "Unknown" : trimmed;
+}
+
+/** Coerce a Firestore Timestamp / number / ISO string into a JS Date. */
+function coerceDate(value) {
+  if (!value) return null;
+  if (typeof value === "number") return new Date(value);
+  if (typeof value === "string") {
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof value.toDate === "function") return value.toDate();
+  if (typeof value._seconds === "number") {
+    return new Date(value._seconds * 1000 + (value._nanoseconds || 0) / 1e6);
+  }
+  return null;
+}
+
+/** Build the canonical folder path for a job-list item. */
+function expectedClientFolder(item) {
+  const d = coerceDate(item && item.date);
+  if (!d) return null;
+  const year = d.getFullYear();
+  const monthLabel = `${MONTH_LABELS_SHORT[d.getMonth()]} ${year}`;
+  return `Distribution/${year}/${monthLabel}/${sanitiseClientName(item.client)}`;
+}
+
+/** Returns true if the storage folder has any files (excluding our own marker). */
+async function folderHasContent(folderPath) {
+  const bucket = getBucket();
+  const [files] = await bucket.getFiles({ prefix: `${folderPath}/`, maxResults: 5 });
+  // Treat an existing `.keep` marker as "empty" so that the canonical folder
+  // can be reused once it has been pre-created.
+  const realFiles = files.filter((f) => !f.name.endsWith("/.keep"));
+  console.log(
+    `[jobListFolders] folderHasContent("${folderPath}") → ${realFiles.length} real file(s) ` +
+      `(${files.length} total incl. markers)`
+  );
+  return realFiles.length > 0;
+}
+
+/** Pick the next free "Round N" sub-folder under `clientFolder`. */
+async function nextRoundFolder(clientFolder) {
+  const bucket = getBucket();
+  const [files] = await bucket.getFiles({ prefix: `${clientFolder}/Round ` });
+  const escaped = clientFolder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const roundRe = new RegExp(`^${escaped}/Round (\\d+)/`);
+  let max = 0;
+  for (const f of files) {
+    const m = f.name.match(roundRe);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  }
+  // We always produce *at least* Round 2 — Round 1 is implied by the
+  // existing flat content in `clientFolder`.
+  const next = Math.max(max + 1, 2);
+  const folder = `${clientFolder}/Round ${next}`;
+  console.log(`[jobListFolders] nextRoundFolder("${clientFolder}") → "${folder}"`);
+  return folder;
+}
+
+/** Write a hidden placeholder so an empty folder shows up in Storage views. */
+async function ensureFolderMarker(folderPath) {
+  const bucket = getBucket();
+  const file = bucket.file(`${folderPath}/.keep`);
+  const [exists] = await file.exists();
+  if (exists) {
+    console.log(`[jobListFolders] ensureFolderMarker: "${folderPath}/.keep" already exists`);
+    return;
+  }
+  await file.save("", {
+    resumable: false,
+    contentType: "text/plain",
+    metadata: { metadata: { autoCreated: "true" } },
+  });
+  console.log(`[jobListFolders] ensureFolderMarker: created "${folderPath}/.keep"`);
+}
+
+/** Copy every object under `from/` to `to/` and delete the originals. */
+async function moveFolder(from, to) {
+  if (!from || !to || from === to) return;
+  const bucket = getBucket();
+  const [files] = await bucket.getFiles({ prefix: `${from}/` });
+  console.log(`[jobListFolders] moveFolder("${from}" → "${to}"): ${files.length} object(s)`);
+  if (files.length === 0) {
+    // Nothing to move — make sure the destination exists so the link is real.
+    await ensureFolderMarker(to);
+    return;
+  }
+  let moved = 0;
+  for (const f of files) {
+    const rel = f.name.substring(from.length + 1); // strip "from/"
+    const dest = `${to}/${rel}`;
+    try {
+      await f.copy(bucket.file(dest));
+      await f.delete();
+      moved++;
+    } catch (err) {
+      console.warn(`[jobListFolders] move ${f.name} → ${dest} failed: ${err.message}`);
+    }
+  }
+  console.log(`[jobListFolders] moveFolder done: ${moved}/${files.length} object(s) moved`);
+}
+
+/**
+ * Mirror a folder path onto every ShareableMap document linked to the
+ * given job-list item. Updates the cached `storageFolderPath` field so
+ * the map's cloud-files panel listens to the new folder.
+ */
+async function syncMapFolderForJobItem(jobItemId, folderPath) {
+  if (!jobItemId) return;
+  try {
+    const snap = await db
+      .collectionGroup("maps")
+      .where("jobListItemId", "==", jobItemId)
+      .get();
+    console.log(
+      `[jobListFolders] syncMapFolderForJobItem(${jobItemId}, "${folderPath}") found ${snap.size} linked map(s)`
+    );
+    if (snap.empty) return;
+    const batch = db.batch();
+    let updateCount = 0;
+    for (const doc of snap.docs) {
+      // Skip docs already in sync to avoid unnecessary writes that trigger
+      // Flutter streams and cause flooding log output.
+      if ((doc.data().storageFolderPath || "") === folderPath) continue;
+      batch.update(doc.ref, {
+        storageFolderPath: folderPath,
+        updatedAt: Date.now(),
+      });
+      updateCount++;
+    }
+    if (updateCount === 0) {
+      console.log(
+        `[jobListFolders] syncMapFolderForJobItem(${jobItemId}): all maps already in sync`
+      );
+      return;
+    }
+    await batch.commit();
+    console.log(
+      `[jobListFolders] ✓ Synced storageFolderPath="${folderPath}" to ${updateCount} map(s) for job ${jobItemId}`
+    );
+  } catch (err) {
+    console.warn(`[jobListFolders] syncMapFolderForJobItem(${jobItemId}) failed: ${err.message}`);
+  }
+}
+
+/** True when a doc-write event reflects only our own write-back fields. */
+function isReentrantUpdate(beforeData, afterData) {
+  if (!beforeData || !afterData) return false;
+
+  // Compare only the identity fields that a real user edit would change.
+  // This is more reliable than full-object JSON.stringify (which can be
+  // unstable for Firestore Timestamp objects across SDK versions).
+  const IDENTITY_KEYS = [
+    "client", "date", "distributionDate", "jobTypeId", "jobType",
+    "area", "quantity", "shareableMapId", "notes",
+  ];
+
+  function timestampSeconds(v) {
+    if (!v || typeof v !== "object") return null;
+    // Admin SDK Timestamp exposes both _seconds (internal) and seconds (public).
+    return v._seconds ?? v.seconds ?? null;
+  }
+
+  function valEqual(a, b) {
+    if (a === b) return true;
+    if (a == null || b == null) return a === b;
+    // Stable Timestamp comparison: compare seconds only (nanoseconds precision
+    // is irrelevant for change detection here).
+    const aS = timestampSeconds(a);
+    const bS = timestampSeconds(b);
+    if (aS !== null || bS !== null) return aS === bS;
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+
+  for (const key of IDENTITY_KEYS) {
+    if (!valEqual(beforeData[key], afterData[key])) return false;
+  }
+  return true; // only non-identity fields changed → our own write-back
+}
+
+exports.onJobListItemWritten = onDocumentWritten(
+  {
+    document: "jobLists/{monthId}/items/{itemId}",
+    region: "us-central1",
+  },
+  async (event) => {
+    const itemId = event.params.itemId;
+    const monthId = event.params.monthId;
+    const after = event.data && event.data.after && event.data.after.exists
+      ? event.data.after.data()
+      : null;
+    const before = event.data && event.data.before && event.data.before.exists
+      ? event.data.before.data()
+      : null;
+
+    const eventKind = !before && after ? "CREATE" : (before && !after ? "DELETE" : "UPDATE");
+    console.log(
+      `[jobListFolders] ▶ ${eventKind} ${monthId}/${itemId} ` +
+        `client="${(after && after.client) || (before && before.client) || ""}" ` +
+        `jobType="${(after && (after.jobTypeId || after.jobType)) || ""}" ` +
+        `currentFolder="${(after && after.storageFolderPath) || ""}"`
+    );
+
+    // Deletion: nothing to do here. Cross-month moves are detected on the
+    // destination's create event below.
+    if (!after) {
+      console.log(`[jobListFolders] ${itemId}: deletion event — no action`);
+      return;
+    }
+
+    // Skip our own write-backs to avoid infinite loops.
+    if (before && isReentrantUpdate(before, after)) {
+      console.log(`[jobListFolders] ${itemId}: reentrant write-back — skipping`);
+      return;
+    }
+
+    // Firestore stores the job type under the "jobType" key (legacy);
+    // some newer code paths also write "jobTypeId". Accept either.
+    const jobTypeId = after.jobTypeId || after.jobType;
+    if (!jobTypeId) {
+      console.log(`[jobListFolders] ${itemId}: no jobType field — skipping`);
+      return;
+    }
+
+    // Look up the job type to see whether it opts in to cloud folders.
+    let jobTypeDoc;
+    try {
+      jobTypeDoc = await db.collection("customJobTypes").doc(jobTypeId).get();
+    } catch (err) {
+      console.warn(`[jobListFolders] ${itemId}: job type lookup failed: ${err.message}`);
+      return;
+    }
+    if (!jobTypeDoc.exists) {
+      console.log(
+        `[jobListFolders] ${itemId}: customJobTypes/${jobTypeId} does not exist — skipping`
+      );
+      return;
+    }
+    const createsCloudFolder = jobTypeDoc.data().createsCloudFolder === true;
+    console.log(
+      `[jobListFolders] ${itemId}: jobType="${jobTypeId}" createsCloudFolder=${createsCloudFolder}`
+    );
+    if (!createsCloudFolder) return;
+
+    const expected = expectedClientFolder(after);
+    if (!expected) {
+      console.warn(
+        `[jobListFolders] ${itemId}: missing usable date (date=${JSON.stringify(after.date)}) — skipping`
+      );
+      return;
+    }
+    console.log(`[jobListFolders] ${itemId}: expected folder = "${expected}"`);
+
+    const current = (after.storageFolderPath || "").trim();
+    const itemRef = event.data.after.ref;
+
+    let resolvedPath = current;
+
+    if (!current) {
+      // No folder yet → create the canonical folder, falling back to a
+      // Round N sub-folder if the client folder is already in use by a
+      // sibling job for the same month.
+      console.log(`[jobListFolders] ${itemId}: no folder yet — creating`);
+      let target = expected;
+      if (await folderHasContent(expected)) {
+        target = await nextRoundFolder(expected);
+        console.log(
+          `[jobListFolders] ${itemId}: "${expected}" already in use → using "${target}"`
+        );
+      }
+      await ensureFolderMarker(target);
+      resolvedPath = target;
+      console.log(
+        `[jobListFolders] ✓ Created folder "${target}" for new item ${itemId}`
+      );
+    } else if (current !== expected && !current.startsWith(`${expected}/Round `)) {
+      // Client name and/or distribution month changed → move folder.
+      // (If the new path is already a Round-N sub-folder of the expected
+      // client folder, leave it alone — it's still under the right client.)
+      console.log(
+        `[jobListFolders] ${itemId}: folder moved from "${current}" → towards "${expected}"`
+      );
+      let target = expected;
+      if (await folderHasContent(expected)) {
+        target = await nextRoundFolder(expected);
+      }
+      await moveFolder(current, target);
+      resolvedPath = target;
+      console.log(
+        `[jobListFolders] ✓ Moved folder "${current}" → "${target}" for item ${itemId}`
+      );
+    } else {
+      // Path already correct — only sync the map when shareableMapId was
+      // just attached or changed (avoids unnecessary map-doc writes on every
+      // trivial job edit, which would flood Flutter streams).
+      const mapIdBefore = ((before && before.shareableMapId) || "").trim();
+      const mapIdAfter = (after.shareableMapId || "").trim();
+      console.log(
+        `[jobListFolders] ${itemId}: folder already correct ("${current}"); ` +
+          `mapIdBefore="${mapIdBefore}" mapIdAfter="${mapIdAfter}"`
+      );
+      if (mapIdAfter && mapIdAfter !== mapIdBefore) {
+        console.log(`[jobListFolders] ${itemId}: shareableMapId changed → syncing map`);
+        await syncMapFolderForJobItem(itemId, current);
+      }
+      return;
+    }
+
+    // Persist the resolved path and mirror to any linked map.
+    try {
+      await itemRef.update({ storageFolderPath: resolvedPath });
+      console.log(
+        `[jobListFolders] ${itemId}: wrote back storageFolderPath="${resolvedPath}"`
+      );
+    } catch (err) {
+      console.warn(
+        `[jobListFolders] ${itemId}: failed to write back folder path: ${err.message}`
+      );
+    }
+    await syncMapFolderForJobItem(itemId, resolvedPath);
+  }
+);
+
+/**
+ * Callable: clone a job-list item's linked ShareableMap into a brand-new
+ * map document for the Job-List "copy" action. Layers (polygons, markers,
+ * polylines) are cloned, but cloud-linked layers and `storageFolderPath`
+ * are intentionally cleared so the new map starts with empty cloud files.
+ *
+ * Input:  {
+ *   sourceJobMonthId: "MMM YYYY",   // e.g. "Apr 2026"
+ *   sourceJobItemId:  "<docId>",
+ *   newJobMonthId:    "MMM YYYY",
+ *   newJobItemId:     "<docId>",
+ *   newName?:         "..."         // optional override for new map name
+ * }
+ * Output: { newMapId, newMapMonthKey } | { skipped: true, reason: "..." }
+ *
+ * After this returns, the caller may rely on `onJobListItemWritten` to
+ * create the Cloud Storage folder for the new job and mirror it onto the
+ * fresh map document.
+ */
+exports.duplicateMapForJobCopy = onCall(
+  { region: "us-central1" },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Must be signed in.");
+    }
+    const {
+      sourceJobMonthId,
+      sourceJobItemId,
+      newJobMonthId,
+      newJobItemId,
+      newName,
+    } = request.data || {};
+    console.log(
+      `[duplicateMapForJobCopy] ▶ invoked by uid=${request.auth.uid} ` +
+        `source=${sourceJobMonthId}/${sourceJobItemId} new=${newJobMonthId}/${newJobItemId}`
+    );
+    if (!sourceJobMonthId || !sourceJobItemId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "sourceJobMonthId and sourceJobItemId are required"
+      );
+    }
+    if (!newJobMonthId || !newJobItemId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "newJobMonthId and newJobItemId are required"
+      );
+    }
+
+    // 1. Load the source job-list item.
+    const sourceJobRef = db
+      .collection("jobLists")
+      .doc(sourceJobMonthId)
+      .collection("items")
+      .doc(sourceJobItemId);
+    const sourceJobSnap = await sourceJobRef.get();
+    if (!sourceJobSnap.exists) {
+      console.warn(
+        `[duplicateMapForJobCopy] source job ${sourceJobMonthId}/${sourceJobItemId} not found`
+      );
+      throw new HttpsError(
+        "not-found",
+        `Source job ${sourceJobMonthId}/${sourceJobItemId} not found`
+      );
+    }
+    const sourceJob = sourceJobSnap.data();
+    const sourceMapId = (sourceJob.shareableMapId || "").trim();
+    console.log(
+      `[duplicateMapForJobCopy] source job loaded; shareableMapId="${sourceMapId}"`
+    );
+    if (!sourceMapId) {
+      console.log(
+        `[duplicateMapForJobCopy] source job has no linked map — nothing to clone`
+      );
+      return { skipped: true, reason: "source job has no linked map" };
+    }
+
+    // 2. Locate the source map. We rely on the bidirectional invariant
+    //    maintained by `linkExistingMapToJob` and the trigger above:
+    //    every linked map has `jobListItemId === <sourceJobItemId>`.
+    let sourceMapDoc = null;
+    let sourceMapMonthKey = null;
+    try {
+      const byJobLink = await db
+        .collectionGroup("maps")
+        .where("jobListItemId", "==", sourceJobItemId)
+        .limit(5)
+        .get();
+      const match = byJobLink.docs.find((d) => d.id === sourceMapId);
+      if (match) {
+        sourceMapDoc = match;
+      } else if (!byJobLink.empty) {
+        // Fallback: take the first jobListItemId match even if id differs.
+        sourceMapDoc = byJobLink.docs[0];
+      }
+    } catch (err) {
+      console.warn(`[duplicateMapForJobCopy] collectionGroup lookup failed: ${err.message}`);
+    }
+
+    if (!sourceMapDoc) {
+      // Final fallback: scan every month doc looking for `maps/<sourceMapId>`.
+      const monthsSnap = await db.collection("shareableMaps").get();
+      for (const monthDoc of monthsSnap.docs) {
+        const candidate = await monthDoc.ref
+          .collection("maps")
+          .doc(sourceMapId)
+          .get();
+        if (candidate.exists) {
+          sourceMapDoc = candidate;
+          sourceMapMonthKey = monthDoc.id;
+          break;
+        }
+      }
+    } else {
+      // path looks like  shareableMaps/<MM-YYYY>/maps/<id>
+      const segs = sourceMapDoc.ref.path.split("/");
+      sourceMapMonthKey = segs.length >= 4 ? segs[1] : null;
+    }
+
+    if (!sourceMapDoc || !sourceMapMonthKey) {
+      console.warn(
+        `[duplicateMapForJobCopy] source map ${sourceMapId} could not be located in any month`
+      );
+      throw new HttpsError(
+        "not-found",
+        `Source map ${sourceMapId} could not be located`
+      );
+    }
+
+    const source = sourceMapDoc.data();
+    console.log(
+      `[duplicateMapForJobCopy] located source map at shareableMaps/${sourceMapMonthKey}/maps/${sourceMapDoc.id} ` +
+        `name="${source.name || ""}" layers=${(source.layers || []).length}`
+    );
+
+    // 3. Filter cloud-linked layers, matching the maps-gallery duplicate.
+    const layers = Array.isArray(source.layers) ? source.layers : [];
+    const filteredLayers = layers.filter((layer) => {
+      const lname = String((layer && layer.name) || "").toLowerCase();
+      return !lname.includes("cloud");
+    });
+    console.log(
+      `[duplicateMapForJobCopy] filtered ${layers.length} → ${filteredLayers.length} layers (dropped cloud-linked)`
+    );
+
+    // 4. Compute the storage folder for the NEW job up-front so the new
+    //    map and new job both carry `storageFolderPath` on their first
+    //    write (no async window where the field is null).
+    //
+    //    We need the new job's client + date for `expectedClientFolder`.
+    //    Read the freshly-saved duplicate from Firestore.
+    let resolvedFolder = null;
+    try {
+      const newJobSnap = await db
+        .collection("jobLists")
+        .doc(newJobMonthId)
+        .collection("items")
+        .doc(newJobItemId)
+        .get();
+      if (newJobSnap.exists) {
+        const newJob = newJobSnap.data();
+        const newJobTypeId = newJob.jobTypeId || newJob.jobType;
+        let createsCloudFolder = false;
+        if (newJobTypeId) {
+          const jt = await db.collection("customJobTypes").doc(newJobTypeId).get();
+          createsCloudFolder = jt.exists && jt.data().createsCloudFolder === true;
+        }
+        const expected = expectedClientFolder(newJob);
+        console.log(
+          `[duplicateMapForJobCopy] new job folder calc: jobType="${newJobTypeId}" ` +
+            `createsCloudFolder=${createsCloudFolder} expected="${expected}"`
+        );
+        if (createsCloudFolder && expected) {
+          // Same month as a sibling job → bump to Round N.
+          let target = expected;
+          if (await folderHasContent(expected)) {
+            target = await nextRoundFolder(expected);
+            console.log(
+              `[duplicateMapForJobCopy] "${expected}" already in use → using "${target}"`
+            );
+          }
+          await ensureFolderMarker(target);
+          resolvedFolder = target;
+          console.log(
+            `[duplicateMapForJobCopy] ✓ Pre-created folder "${target}" for new job`
+          );
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[duplicateMapForJobCopy] folder pre-creation failed: ${err.message} — falling back to trigger-driven creation`
+      );
+    }
+
+    // 5. Build the new map document. New maps live in the current month.
+    const now = Date.now();
+    const d = new Date(now);
+    const newMapMonthKey = `${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`;
+
+    const newMapData = {
+      name: (newName && typeof newName === "string" && newName.trim().length > 0)
+        ? newName.trim()
+        : `${source.name || "Map"} (Copy)`,
+      description: source.description || "",
+      layers: filteredLayers,
+      defaultCenterLat: source.defaultCenterLat ?? -33.925,
+      defaultCenterLng: source.defaultCenterLng ?? 18.425,
+      defaultZoom: source.defaultZoom ?? 12.0,
+      createdAt: now,
+      updatedAt: now,
+      monthKey: newMapMonthKey,
+      jobListItemId: newJobItemId,
+      ...(resolvedFolder ? { storageFolderPath: resolvedFolder } : {}),
+    };
+
+    await db.collection("shareableMaps").doc(newMapMonthKey).set(
+      { monthKey: newMapMonthKey, updatedAt: now },
+      { merge: true }
+    );
+
+    const newMapRef = await db
+      .collection("shareableMaps")
+      .doc(newMapMonthKey)
+      .collection("maps")
+      .add(newMapData);
+    console.log(
+      `[duplicateMapForJobCopy] created new map shareableMaps/${newMapMonthKey}/maps/${newMapRef.id} ` +
+        `storageFolderPath="${resolvedFolder || ""}"`
+    );
+
+    // 6. Bi-link the new job item. We write `shareableMapId` AND
+    //    `storageFolderPath` together so the field is never null after
+    //    this point. The `onJobListItemWritten` trigger will see the
+    //    folder already correct and skip the create branch.
+    try {
+      await db
+        .collection("jobLists")
+        .doc(newJobMonthId)
+        .collection("items")
+        .doc(newJobItemId)
+        .update({
+          shareableMapId: newMapRef.id,
+          ...(resolvedFolder ? { storageFolderPath: resolvedFolder } : {}),
+        });
+      console.log(
+        `[duplicateMapForJobCopy] linked new map to jobLists/${newJobMonthId}/items/${newJobItemId} ` +
+          `with storageFolderPath="${resolvedFolder || ""}"`
+      );
+    } catch (err) {
+      console.warn(`[duplicateMapForJobCopy] failed to link new job ${newJobMonthId}/${newJobItemId}: ${err.message}`);
+    }
+
+    console.log(
+      `[duplicateMapForJobCopy] ✓ Cloned ${sourceMapMonthKey}/${sourceMapId} → ${newMapMonthKey}/${newMapRef.id} (linked to job ${newJobMonthId}/${newJobItemId})`
+    );
+
+    return {
+      newMapId: newMapRef.id,
+      newMapMonthKey,
+      newMapName: newMapData.name,
+      storageFolderPath: resolvedFolder || null,
+    };
+  }
+);
+
+// ============================================================
+// Day Planner / Dropsheet performance offload (separate modules)
+// ============================================================
+//
+// These functions move heavy / network-bound work off the client and
+// share results across the org via Firestore caches:
+//
+//   getRouteSegment            – shared Distance Matrix cache
+//   optimizeDropsheetRoute     – server-side route optimisation
+//   syncDropsheetFromSchedule  – callable dropsheet sync
+//   onScheduleDayChanged       – auto-sync trigger on schedule writes
+//
+// API key is supplied by the GOOGLE_MAPS_API_KEY secret. Set it once via
+//   firebase functions:secrets:set GOOGLE_MAPS_API_KEY
+const distanceMatrixCache = require("./lib/distance_matrix_cache");
+const routeOptimizer = require("./lib/route_optimizer");
+const dropsheetSync = require("./lib/dropsheet_sync");
+
+exports.getRouteSegment = distanceMatrixCache.getRouteSegment;
+exports.optimizeDropsheetRoute = routeOptimizer.optimizeDropsheetRoute;
+exports.syncDropsheetFromSchedule = dropsheetSync.syncDropsheetFromSchedule;
+exports.onScheduleDayChanged = dropsheetSync.onScheduleDayChanged;

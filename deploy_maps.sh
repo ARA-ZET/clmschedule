@@ -17,7 +17,7 @@ echo -e "${BLUE}Target: https://clm-maps.web.app${NC}"
 echo -e "\n${BLUE}Step 1: Building maps flavor...${NC}"
 flutter pub get
 dart run tools/replace_maps_key.dart
-flutter build web --release --target lib/main_maps.dart --dart-define=FLAVOR=maps
+flutter build web --wasm --release --target lib/main_maps.dart --dart-define=FLAVOR=maps
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Build successful${NC}"

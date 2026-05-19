@@ -82,7 +82,7 @@ class HappySunProjectService {
 
         if (projectDoc.exists && projectDoc.data() != null) {
           return HappySunProject.fromMap(
-              projectId, projectDoc.data() as Map<String, dynamic>);
+              projectId, Map<String, dynamic>.from(projectDoc.data() as Map));
         }
       }
       return null;
@@ -104,7 +104,7 @@ class HappySunProjectService {
       return snapshot.docs.map((doc) {
         debugPrint('      - Document ID: ${doc.id}');
         return HappySunProject.fromMap(
-            doc.id, doc.data() as Map<String, dynamic>);
+            doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList()
         ..sort((a, b) => b.scheduledDate.compareTo(a.scheduledDate));
     });

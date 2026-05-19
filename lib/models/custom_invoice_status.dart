@@ -18,7 +18,7 @@ class CustomInvoiceStatus {
     return CustomInvoiceStatus(
       id: map['id'] as String,
       label: map['label'] as String,
-      color: Color(map['color'] as int),
+      color: Color((map['color'] as num).toInt()),
       isDefault: map['isDefault'] as bool? ?? false,
     );
   }

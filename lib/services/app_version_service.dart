@@ -3,11 +3,12 @@ import '../models/app_version.dart';
 
 class AppVersionService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  static const String _versionDocId = 'current_version';
+  static const String _collectionName = 'appConfig';
+  static const String _versionDocId = 'version';
 
   // Get the version document reference
   DocumentReference<Map<String, dynamic>> get _versionDoc =>
-      _firestore.collection('app_config').doc(_versionDocId);
+      _firestore.collection(_collectionName).doc(_versionDocId);
 
   // Stream the current app version from Firestore
   Stream<AppVersion> streamAppVersion() {

@@ -2,6 +2,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'custom_polygon.dart';
 
+const Object _dropOffPointUnchanged = Object();
+const Object _pickUpPointUnchanged = Object();
+
 // Keep enum for backwards compatibility during migration
 enum JobStatus { standby, scheduled, done, urgent }
 
@@ -15,6 +18,7 @@ class Job {
   final DateTime date;
   final String statusId; // Changed from JobStatus enum to String
   final LatLng? dropOffPoint;
+  final LatLng? pickUpPoint;
 
   Job({
     required this.id,
@@ -25,6 +29,7 @@ class Job {
     required this.date,
     required this.statusId,
     this.dropOffPoint,
+    this.pickUpPoint,
   });
 
   // Create from Firestore
@@ -42,7 +47,7 @@ class Job {
 
     LatLng? dropOffPoint;
     final dropMap = data['dropOffPoint'];
-    if (dropMap is Map<String, dynamic>) {
+    if (dropMap is Map) {
       final lat = (dropMap['latitude'] as num?)?.toDouble();
       final lng = (dropMap['longitude'] as num?)?.toDouble();
       if (lat != null && lng != null) {
@@ -57,6 +62,16 @@ class Job {
       }
     }
 
+    LatLng? pickUpPoint;
+    final puMap = data['pickUpPoint'];
+    if (puMap is Map) {
+      final lat = (puMap['latitude'] as num?)?.toDouble();
+      final lng = (puMap['longitude'] as num?)?.toDouble();
+      if (lat != null && lng != null) {
+        pickUpPoint = LatLng(lat, lng);
+      }
+    }
+
     return Job(
       id: id,
       clients: (data['clients'] as List<dynamic>?)?.cast<String>() ??
@@ -68,8 +83,8 @@ class Job {
               ? [data['workingArea'] as String]
               : ['']), // Backwards compatibility
       workMaps: (data['workMaps'] as List<dynamic>?)
-              ?.map((mapData) =>
-                  CustomPolygon.fromMap(mapData as Map<String, dynamic>))
+              ?.map((mapData) => CustomPolygon.fromMap(
+                  Map<String, dynamic>.from(mapData as Map)))
               .toList() ??
           [],
       distributorId: data['distributorId'] as String? ?? '',
@@ -78,6 +93,7 @@ class Job {
           : DateTime.now(),
       statusId: statusId,
       dropOffPoint: dropOffPoint,
+      pickUpPoint: pickUpPoint,
     );
   }
 
@@ -100,6 +116,11 @@ class Job {
           'latitude': dropOffPoint!.latitude,
           'longitude': dropOffPoint!.longitude,
         },
+      if (pickUpPoint != null)
+        'pickUpPoint': {
+          'latitude': pickUpPoint!.latitude,
+          'longitude': pickUpPoint!.longitude,
+        },
     };
 
     return map;
@@ -120,8 +141,15 @@ class Job {
     String? distributorId,
     DateTime? date,
     String? statusId,
-    LatLng? dropOffPoint,
+    Object? dropOffPoint = _dropOffPointUnchanged,
+    Object? pickUpPoint = _pickUpPointUnchanged,
   }) {
+    List<CustomPolygon> cloneWorkMaps(List<CustomPolygon> maps) {
+      return maps
+          .map((wm) => wm.copyWith(points: List<LatLng>.from(wm.points)))
+          .toList();
+    }
+
     return Job(
       id: id,
       clients: clients != null
@@ -130,38 +158,16 @@ class Job {
       workingAreas: workingAreas != null
           ? List<String>.from(workingAreas)
           : List<String>.from(this.workingAreas),
-      workMaps: workMaps != null
-          ? workMaps
-              .map((wm) => CustomPolygon(
-                    name: wm.name,
-                    description: wm.description,
-                    points: List.from(wm.points),
-                    color: wm.color,
-                    fillOpacity: wm.fillOpacity,
-                    strokeWidth: wm.strokeWidth,
-                    isDashed: wm.isDashed,
-                    type: wm.type,
-                    pointCategory: wm.pointCategory,
-                  ))
-              .toList()
-          : this
-              .workMaps
-              .map((wm) => CustomPolygon(
-                    name: wm.name,
-                    description: wm.description,
-                    points: List.from(wm.points),
-                    color: wm.color,
-                    fillOpacity: wm.fillOpacity,
-                    strokeWidth: wm.strokeWidth,
-                    isDashed: wm.isDashed,
-                    type: wm.type,
-                    pointCategory: wm.pointCategory,
-                  ))
-              .toList(),
+      workMaps: cloneWorkMaps(workMaps ?? this.workMaps),
       distributorId: distributorId ?? this.distributorId,
       date: date ?? this.date,
       statusId: statusId ?? this.statusId,
-      dropOffPoint: dropOffPoint ?? this.dropOffPoint,
+      dropOffPoint: identical(dropOffPoint, _dropOffPointUnchanged)
+          ? this.dropOffPoint
+          : dropOffPoint as LatLng?,
+      pickUpPoint: identical(pickUpPoint, _pickUpPointUnchanged)
+          ? this.pickUpPoint
+          : pickUpPoint as LatLng?,
     );
   }
 

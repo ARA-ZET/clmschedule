@@ -62,36 +62,36 @@ class MapLayer {
       name: data['name'] as String? ?? '',
       description: data['description'] as String? ?? '',
       isVisible: data['isVisible'] as bool? ?? true,
-      order: data['order'] as int? ?? 0,
+      order: (data['order'] as num?)?.toInt() ?? 0,
       defaultColor:
-          Color(data['defaultColor'] as int? ?? Colors.blue.toARGB32()),
+          Color((data['defaultColor'] as num?)?.toInt() ?? Colors.blue.toARGB32()),
       polygons: (data['polygons'] as List<dynamic>?)
               ?.asMap()
               .entries
               .map(
-                  (e) => CustomPolygon.fromMap(e.value as Map<String, dynamic>))
+                  (e) => CustomPolygon.fromMap(Map<String, dynamic>.from(e.value as Map)))
               .toList() ??
           [],
       polylines:
           (data['polylines'] as List<dynamic>?)?.asMap().entries.map((e) {
-                final polylineData = e.value as Map<String, dynamic>;
+                final polylineData = Map<String, dynamic>.from(e.value as Map);
                 final polylineId =
                     polylineData['id'] as String? ?? 'polyline_${e.key}';
                 return MapPolyline.fromMap(polylineId, polylineData);
               }).toList() ??
               [],
       points: (data['points'] as List<dynamic>?)?.asMap().entries.map((e) {
-            final pointData = e.value as Map<String, dynamic>;
+            final pointData = Map<String, dynamic>.from(e.value as Map);
             final pointId = pointData['id'] as String? ?? 'point_${e.key}';
             return MapPoint.fromMap(pointId, pointData);
           }).toList() ??
           [],
       isExpanded: data['isExpanded'] as bool? ?? true,
       createdAt: data['createdAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch(data['createdAt'] as int)
+          ? DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as num).toInt())
           : DateTime.now(),
       updatedAt: data['updatedAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch(data['updatedAt'] as int)
+          ? DateTime.fromMillisecondsSinceEpoch((data['updatedAt'] as num).toInt())
           : DateTime.now(),
     );
   }
@@ -207,6 +207,12 @@ class MapLayer {
   /// If [pointIcons] is provided, uses custom bitmap icons per category.
   /// If [visibleBounds] is provided, only points within those bounds are
   /// returned (viewport culling for large point sets).
+  ///
+  /// When [markerVisible] is false the markers are still constructed and
+  /// returned (with `visible: false`) so callers can keep large layers
+  /// loaded on the JS side and toggle visibility natively without paying
+  /// the cost of removing + re-adding thousands of markers across the
+  /// platform-view bridge. Defaults to [isVisible] when not specified.
   List<Marker> getGoogleMapsMarkers({
     String? selectedElementId,
     Function(String pointId)? onTap,
@@ -214,8 +220,9 @@ class MapLayer {
     Function(String pointId, LatLng newPosition)? onDragEnd,
     Map<PointCategory, BitmapDescriptor>? pointIcons,
     LatLngBounds? visibleBounds,
+    bool? markerVisible,
   }) {
-    if (!isVisible) return [];
+    final visible = markerVisible ?? isVisible;
 
     final result = <Marker>[];
 
@@ -233,6 +240,7 @@ class MapLayer {
             ? (pos) => onDragEnd(point.id, pos)
             : null,
         customIcon: pointIcons?[point.pointCategory],
+        visible: visible,
       ));
     }
 
@@ -250,6 +258,7 @@ class MapLayer {
             ? (pos) => onDragEnd(markerId, pos)
             : null,
         customIcon: pointIcons?[cp.pointCategory],
+        visible: visible,
       );
       if (marker != null) result.add(marker);
     }

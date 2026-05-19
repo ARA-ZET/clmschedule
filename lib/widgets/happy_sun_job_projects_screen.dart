@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -14,6 +15,7 @@ import '../providers/job_list_provider.dart';
 import '../providers/inventory_provider.dart';
 import '../providers/auth_provider.dart';
 import '../config/flavor_config.dart';
+import '../services/storage_upload.dart';
 import 'happy_sun_checkout_screen.dart';
 import 'happy_sun_checklist_screen.dart';
 import 'happy_sun_checkin_screen.dart';
@@ -235,7 +237,7 @@ class _HappySunJobProjectsScreenState
     if (syncStatus == null) return const SizedBox.shrink();
 
     final isOnline = syncStatus['isOnline'] as bool;
-    final pendingChanges = syncStatus['pendingChanges'] as int;
+    final pendingChanges = (syncStatus['pendingChanges'] as num).toInt();
 
     // Show offline indicator with pending changes count
     if (!isOnline && pendingChanges > 0) {
@@ -2568,19 +2570,32 @@ class _ImageViewerScreenState
           _uploadStatus = 'Uploading ${i + 1}/${pickedFiles.length}...';
         });
 
-        // Upload with progress tracking
-        final uploadTask = ref.putData(bytes, metadata);
-
-        uploadTask.snapshotEvents.listen((TaskSnapshot snapshot) {
-          final progress = snapshot.bytesTransferred / snapshot.totalBytes;
+        if (kIsWeb) {
+          // dart2wasm: the SDK's putData(Uint8List) bridge throws a
+          // JSValue cast error. Use the WASM-safe REST upload path.
+          // We don't get incremental progress events, so just bump the
+          // bar to 100% for this file once it lands.
+          await StorageUpload.safePutData(ref, bytes, metadata: metadata);
           if (mounted) {
             setState(() {
-              _uploadProgress = progress;
+              _uploadProgress = 1.0;
             });
           }
-        });
+        } else {
+          // Upload with progress tracking
+          final uploadTask = ref.putData(bytes, metadata);
 
-        await uploadTask;
+          uploadTask.snapshotEvents.listen((TaskSnapshot snapshot) {
+            final progress = snapshot.bytesTransferred / snapshot.totalBytes;
+            if (mounted) {
+              setState(() {
+                _uploadProgress = progress;
+              });
+            }
+          });
+
+          await uploadTask;
+        }
         final url = await ref.getDownloadURL();
         uploadedUrls.add(url);
       }

@@ -63,8 +63,12 @@ class MarkerClusterer {
 
     if (visible.isEmpty) return [];
 
-    // 2 – Few enough or zoomed in enough → individual markers
-    if (visible.length <= _clusterThreshold || zoom >= 5) {
+    // Few enough visible points → render individually.
+    // From zoom ≥ 12 onwards (suburb / street level) always render every
+    // visible point individually so the user sees real letterboxes rather
+    // than clusters. Below zoom 12 (city / region overview) cluster to
+    // keep the marker count manageable for large layers (e.g. 12k+ points).
+    if (visible.length <= _clusterThreshold || zoom >= 14) {
       return _buildIndividual(
         visible,
         selectedElementId: selectedElementId,
@@ -76,7 +80,8 @@ class MarkerClusterer {
       );
     }
 
-    // 3 – Grid-based clustering
+    // Grid-based clustering for low zoom (< 12). Cell size in degrees
+    // shrinks with zoom so the cluster grid tightens as the user zooms in.
     final cellSize = 180.0 / math.pow(2, zoom);
 
     final Map<int, _Cluster> grid = {};

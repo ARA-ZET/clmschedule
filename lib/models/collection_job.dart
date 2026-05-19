@@ -210,13 +210,12 @@ class CollectionJob {
           ? (data['date'] as Timestamp).toDate()
           : DateTime.now(),
       timeSlot: data['timeSlot'] is int
-          ? '${(data['timeSlot'] as int).toString().padLeft(2, '0')}:00'
+          ? '${((data['timeSlot'] as num).toInt()).toString().padLeft(2, '0')}:00'
           : data['timeSlot'] as String? ?? '08:00',
-      timeSlots: data['timeSlots']
-          as int?, // Will default to 1 in constructor if null or < 1
+      timeSlots: (data['timeSlots'] as num?)?.toInt(), // Will default to 1 in constructor if null or < 1
       assignedStaff:
           (data['assignedStaff'] as List<dynamic>?)?.cast<String>() ?? [],
-      staffCount: data['staffCount'] as int? ?? 1,
+      staffCount: (data['staffCount'] as num?)?.toInt() ?? 1,
       jobType: data['jobType'] as String? ?? 'junk collection',
       statusId: data['statusId'] as String? ?? 'scheduled',
       clients: (data['clients'] as List<dynamic>?)?.cast<String>() ?? [],

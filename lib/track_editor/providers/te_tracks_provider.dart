@@ -1,4 +1,6 @@
 // track_editor/providers/te_tracks_provider.dart
+import 'dart:collection';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:gpx/gpx.dart';
@@ -16,7 +18,8 @@ class TETracksProvider with ChangeNotifier {
   };
   TEMode _activeMode = TEMode.processing;
 
-  List<Trk> get tracks => _tracksByMode[_activeMode]!;
+  /// Read-only view; mutations must go through provider methods.
+  List<Trk> get tracks => UnmodifiableListView(_tracksByMode[_activeMode]!);
 
   void setActiveMode(TEMode mode) {
     if (_activeMode == mode) return;

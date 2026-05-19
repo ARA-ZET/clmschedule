@@ -6,6 +6,11 @@ class RouteSegmentData {
   final String toAddressId;
   final double distanceMeters;
   final int durationSeconds;
+
+  /// Traffic-aware duration in seconds at the queried departure time.
+  /// Falls back to [durationSeconds] when no `departure_time` was passed
+  /// to the Directions API or when traffic data is unavailable.
+  final int durationInTrafficSeconds;
   final List<LatLng> polylinePoints;
 
   RouteSegmentData({
@@ -14,7 +19,8 @@ class RouteSegmentData {
     required this.distanceMeters,
     required this.durationSeconds,
     required this.polylinePoints,
-  });
+    int? durationInTrafficSeconds,
+  }) : durationInTrafficSeconds = durationInTrafficSeconds ?? durationSeconds;
 
   /// Get distance in kilometers
   double get distanceKm => distanceMeters / 1000;
@@ -44,7 +50,9 @@ class RouteSegmentData {
       fromAddressId: data['fromAddressId'] ?? '',
       toAddressId: data['toAddressId'] ?? '',
       distanceMeters: (data['distanceMeters'] as num?)?.toDouble() ?? 0.0,
-      durationSeconds: data['durationSeconds'] ?? 0,
+      durationSeconds: (data['durationSeconds'] as num?)?.toInt() ?? 0,
+      durationInTrafficSeconds:
+          (data['durationInTrafficSeconds'] as num?)?.toInt(),
       polylinePoints: polylinePoints,
     );
   }
@@ -56,6 +64,7 @@ class RouteSegmentData {
       'toAddressId': toAddressId,
       'distanceMeters': distanceMeters,
       'durationSeconds': durationSeconds,
+      'durationInTrafficSeconds': durationInTrafficSeconds,
       'polylinePoints': polylinePoints
           .map((point) => {
                 'lat': point.latitude,
@@ -102,7 +111,7 @@ class SuburbRouteData {
   factory SuburbRouteData.fromMap(Map<String, dynamic> data) {
     final segmentsData = data['segments'] as List<dynamic>? ?? [];
     final segments = segmentsData
-        .map((seg) => RouteSegmentData.fromMap(seg as Map<String, dynamic>))
+        .map((seg) => RouteSegmentData.fromMap(Map<String, dynamic>.from(seg as Map)))
         .toList();
 
     return SuburbRouteData(
@@ -114,7 +123,7 @@ class SuburbRouteData {
       segments: segments,
       totalDistanceMeters:
           (data['totalDistanceMeters'] as num?)?.toDouble() ?? 0.0,
-      totalDurationSeconds: data['totalDurationSeconds'] ?? 0,
+      totalDurationSeconds: (data['totalDurationSeconds'] as num?)?.toInt() ?? 0,
     );
   }
 

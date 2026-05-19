@@ -13,6 +13,8 @@
 // identity, same way [TETabsProvider] holds its per-tab data), so
 // flipping between paired tabs shows each tab's own client list,
 // folder picks and save status — without cross-contamination.
+import 'dart:collection';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/styled_polygon.dart';
@@ -94,8 +96,11 @@ class TECloudSaveStateProvider extends ChangeNotifier {
   bool isResolved(TETabItem tab) => _byTab[tab]?.resolved ?? false;
   bool isLoading(TETabItem tab) => _byTab[tab]?.loading ?? false;
   String? errorFor(TETabItem tab) => _byTab[tab]?.error;
-  List<TECloudSaveClientEntry> clientsFor(TETabItem tab) =>
-      _byTab[tab]?.clients ?? const <TECloudSaveClientEntry>[];
+  List<TECloudSaveClientEntry> clientsFor(TETabItem tab) {
+    final list = _byTab[tab]?.clients;
+    if (list == null) return const <TECloudSaveClientEntry>[];
+    return UnmodifiableListView(list);
+  }
 
   // ── Resolver lifecycle ──────────────────────────────────────────────
 

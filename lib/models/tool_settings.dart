@@ -18,12 +18,12 @@ class ToolSettings {
     return ToolSettings(
       teamTools: (data['teamTools'] as List<dynamic>?)
               ?.map((item) =>
-                  ToolRequirement.fromMap(item as Map<String, dynamic>))
+                  ToolRequirement.fromMap(Map<String, dynamic>.from(item as Map)))
               .toList() ??
           [],
       individualTools: (data['individualTools'] as List<dynamic>?)
               ?.map((item) =>
-                  ToolRequirement.fromMap(item as Map<String, dynamic>))
+                  ToolRequirement.fromMap(Map<String, dynamic>.from(item as Map)))
               .toList() ??
           [],
     );
@@ -75,7 +75,7 @@ class ToolRequirement {
     return ToolRequirement(
       baseName: baseName,
       category: data['category'] as String? ?? '',
-      quantity: data['quantity'] as int? ?? 1,
+      quantity: (data['quantity'] as num?)?.toInt() ?? 1,
     );
   }
 

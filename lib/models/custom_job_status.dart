@@ -21,9 +21,9 @@ class CustomJobStatus {
     return CustomJobStatus(
       id: data['id'] as String,
       label: data['label'] as String,
-      color: Color(data['color'] as int),
+      color: Color((data['color'] as num).toInt()),
       isDefault: data['isDefault'] as bool? ?? false,
-      order: data['order'] as int? ?? 0,
+      order: (data['order'] as num?)?.toInt() ?? 0,
     );
   }
 

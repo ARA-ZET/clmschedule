@@ -162,7 +162,7 @@ class JobListItem {
       final updatesData = data['updates'] as List<dynamic>;
       updates = updatesData
           .map((updateData) =>
-              JobListItemUpdate.fromMap(updateData as Map<String, dynamic>))
+              JobListItemUpdate.fromMap(Map<String, dynamic>.from(updateData as Map)))
           .toList();
     }
 
@@ -172,7 +172,7 @@ class JobListItem {
       final polygonsData = data['customPolygons'] as List<dynamic>;
       customPolygons = polygonsData
           .map((polygonData) =>
-              CustomPolygon.fromMap(polygonData as Map<String, dynamic>))
+              CustomPolygon.fromMap(Map<String, dynamic>.from(polygonData as Map)))
           .toList();
     }
 
@@ -182,7 +182,7 @@ class JobListItem {
       final remindersData = data['reminders'] as List<dynamic>;
       reminders = remindersData
           .map((reminderData) =>
-              JobReminder.fromMap(reminderData as Map<String, dynamic>))
+              JobReminder.fromMap(Map<String, dynamic>.from(reminderData as Map)))
           .toList();
     }
 
@@ -195,7 +195,7 @@ class JobListItem {
       invoiceStatusId: invoiceStatusId,
       jobTypeId: data['jobType'] as String? ?? 'flyersPrintingOnly',
       area: data['area'] as String? ?? '',
-      quantity: data['quantity'] as int? ?? 0,
+      quantity: (data['quantity'] as num?)?.toInt() ?? 0,
       manDays: (data['manDays'] as num?)?.toDouble() ?? 0.0,
       date: data['date'] != null
           ? (data['date'] as Timestamp).toDate()
@@ -205,7 +205,7 @@ class JobListItem {
           ? (data['collectionDate'] as Timestamp).toDate()
           : DateTime.now(),
       specialInstructions: data['specialInstructions'] as String? ?? '',
-      quantityDistributed: data['quantityDistributed'] as int? ?? 0,
+      quantityDistributed: (data['quantityDistributed'] as num?)?.toInt() ?? 0,
       invoiceDetails: data['invoiceDetails'] as String? ?? '',
       reportAddresses: data['reportAddresses'] as String? ?? '',
       whoToInvoice: data['whoToInvoice'] as String? ?? '',
@@ -215,13 +215,13 @@ class JobListItem {
       reminders: reminders,
       toolsNeeded: data['toolsNeeded'] != null
           ? CategorizedTools.fromMap(
-              data['toolsNeeded'] as Map<String, dynamic>)
+              Map<String, dynamic>.from(data['toolsNeeded'] as Map))
           : null,
       shareableMapId: data['shareableMapId'] as String? ?? '',
       storageFolderPath: data['storageFolderPath'] as String? ?? '',
       vehicleTrailerCombo: _resolveVehicleTrailerCombo(
         data['vehicleTrailerCombo'] as String?,
-        data['quantity'] as int? ?? 0,
+        (data['quantity'] as num?)?.toInt() ?? 0,
         data['jobType'] as String? ?? '',
       ),
     );

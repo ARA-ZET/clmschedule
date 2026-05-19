@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import '../models/inventory_tool.dart';
+import 'storage_upload.dart';
 
 final inventoryServiceRiverpod = riverpod.Provider<InventoryService>(
   (ref) => InventoryService(FirebaseFirestore.instance),
@@ -229,12 +230,12 @@ class InventoryService {
 
       if (kIsWeb) {
         final bytes = await imageFile.readAsBytes();
-        final uploadTask = storageRef.putData(
+        await StorageUpload.safePutData(
+          storageRef,
           bytes,
-          SettableMetadata(contentType: 'image/png'),
+          metadata: SettableMetadata(contentType: 'image/png'),
         );
-        final snapshot = await uploadTask;
-        final downloadUrl = await snapshot.ref.getDownloadURL();
+        final downloadUrl = await storageRef.getDownloadURL();
         return downloadUrl;
       } else {
         final file = File(imageFile.path);

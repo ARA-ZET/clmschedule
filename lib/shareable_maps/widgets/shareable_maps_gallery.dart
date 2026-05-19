@@ -31,14 +31,31 @@ class _ShareableMapsGalleryState
   @override
   void initState() {
     super.initState();
+    // Keep the gallery filter in sync with the controller text. When the
+    // controller is cleared (manually, programmatically, or after returning
+    // from the editor), the filter resets too.
+    _searchController.addListener(_onSearchChanged);
     // Start listening for maps as soon as the gallery opens.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(shareableMapsGalleryRiverpod).startListening();
+      // If the user navigates back into the gallery, ensure the filter
+      // matches the (possibly empty) controller text.
+      ref
+          .read(shareableMapsGalleryRiverpod)
+          .setSearchQuery(_searchController.text);
     });
+  }
+
+  void _onSearchChanged() {
+    ref
+        .read(shareableMapsGalleryRiverpod)
+        .setSearchQuery(_searchController.text);
+    if (mounted) setState(() {}); // refresh suffix icon visibility
   }
 
   @override
   void dispose() {
+    _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
     super.dispose();
   }
@@ -105,10 +122,8 @@ class _ShareableMapsGalleryState
                       ? IconButton(
                           icon: const Icon(Icons.clear, size: 18),
                           onPressed: () {
+                            // Listener will reset the filter automatically.
                             _searchController.clear();
-                            ref
-                                .read(shareableMapsGalleryRiverpod)
-                                .setSearchQuery('');
                           },
                         )
                       : null,
@@ -121,10 +136,9 @@ class _ShareableMapsGalleryState
                   contentPadding:
                       const EdgeInsets.symmetric(vertical: 0, horizontal: 12),
                 ),
-                onChanged: (value) {
-                  ref.read(shareableMapsGalleryRiverpod).setSearchQuery(value);
-                  setState(() {}); // Refresh suffix icon visibility
-                },
+                // onChanged not needed: controller listener keeps the
+                // filter and suffix icon in sync.
+                onChanged: (_) {},
               ),
             ),
           ),
@@ -475,26 +489,19 @@ class _MapGrid extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Calculate number of columns based on available width.
+        // Use a max extent so tiles stay roughly the same compact size on
+        // every screen and we fit many more on a wide display.
         final width = constraints.maxWidth;
-        int crossAxisCount;
-        if (width > 1200) {
-          crossAxisCount = 6;
-        } else if (width > 900) {
-          crossAxisCount = 4;
-        } else if (width > 600) {
-          crossAxisCount = 3;
-        } else {
-          crossAxisCount = 2;
-        }
+        // Target tile width ~180px on small screens, ~200px on larger ones.
+        final maxExtent = width < 600 ? 170.0 : 200.0;
 
         return GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: crossAxisCount,
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
+          gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: maxExtent,
+            crossAxisSpacing: 10,
+            mainAxisSpacing: 10,
             childAspectRatio: 0.85,
           ),
           itemCount: items.length,
@@ -518,78 +525,76 @@ class _MapTile extends riverpod.ConsumerWidget {
 
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      child: InkWell(
-        onTap: () => _openMap(context, ref),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Thumbnail area  — static map preview placeholder
-            Expanded(
-              flex: 4,
-              child: _MapThumbnail(item: item),
-            ),
-            // Info area
-            Expanded(
-              flex: 2,
-              child: Padding(
-                padding: const EdgeInsets.all(10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            item.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13,
-                            ),
-                          ),
+    return LayoutBuilder(builder: (context, constraints) {
+      // Scale typography & spacing with the tile width so smaller tiles
+      // remain readable and larger tiles look proportional.
+      final w = constraints.maxWidth;
+      // Reference tile width = 200; clamp scale so very small/large tiles
+      // don't end up unreadable.
+      final scale = (w / 200.0).clamp(0.75, 1.25);
+      final nameSize = 13.0 * scale;
+      final dateSize = 10.5 * scale;
+      final pad = 8.0 * scale;
+      final iconBtnSize = 16.0 * scale;
+
+      return Card(
+        clipBehavior: Clip.antiAlias,
+        elevation: 2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        child: InkWell(
+          onTap: () => _openMap(context, ref),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Thumbnail area  — static map preview placeholder
+              Expanded(
+                flex: 4,
+                child: _MapThumbnail(item: item),
+              ),
+              // Info area
+              Expanded(
+                flex: 2,
+                child: Padding(
+                  padding: EdgeInsets.all(pad),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        item.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: nameSize,
                         ),
-                        const SizedBox(width: 4),
-                        Text(
-                          DateFormat('d MMM yyyy  HH:mm')
-                              .format(item.createdAt),
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: const Color.fromARGB(255, 63, 63, 63),
-                            fontWeight: FontWeight.bold,
-                          ),
+                      ),
+                      Text(
+                        DateFormat('d MMM yyyy  HH:mm').format(item.updatedAt),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: dateSize,
+                          color: const Color.fromARGB(255, 63, 63, 63),
+                          fontWeight: FontWeight.bold,
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        Text(
-                          DateFormat('d MMM yyyy  HH:mm')
-                              .format(item.updatedAt),
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: const Color.fromARGB(255, 63, 63, 63),
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const Spacer(),
-                        _CopyLinkButton(item: item),
-                        _TilePopupMenu(item: item),
-                      ],
-                    ),
-                  ],
+                      ),
+                      Row(
+                        children: [
+                          const Spacer(),
+                          _CopyLinkButton(item: item, iconSize: iconBtnSize),
+                          _TilePopupMenu(item: item, iconSize: iconBtnSize),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
-    );
+      );
+    });
   }
 
   Future<void> _openMap(BuildContext context, riverpod.WidgetRef ref) async {
@@ -732,8 +737,8 @@ class _MapThumbnail extends StatelessWidget {
           },
         ),
 
-        // Element count badge
-        if (item.elementCount > 0)
+        // Waypoint (letterbox/flyer) count badge
+        if (item.waypointCount > 0)
           Positioned(
             top: 8,
             right: 8,
@@ -743,13 +748,20 @@ class _MapThumbnail extends StatelessWidget {
                 color: Colors.black54,
                 borderRadius: BorderRadius.circular(12),
               ),
-              child: Text(
-                '${item.elementCount} element${item.elementCount == 1 ? '' : 's'}',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w500,
-                ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.place, size: 12, color: Colors.white),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${item.waypointCount}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -837,13 +849,14 @@ class _GradientPlaceholder extends StatelessWidget {
 
 class _CopyLinkButton extends StatelessWidget {
   final MapGalleryItem item;
+  final double iconSize;
 
-  const _CopyLinkButton({required this.item});
+  const _CopyLinkButton({required this.item, this.iconSize = 18});
 
   @override
   Widget build(BuildContext context) {
     return IconButton(
-      icon: Icon(Icons.link, size: 18, color: Colors.grey.shade600),
+      icon: Icon(Icons.link, size: iconSize, color: Colors.grey.shade600),
       padding: EdgeInsets.zero,
       constraints: const BoxConstraints(),
       tooltip: 'Copy shareable link',
@@ -892,13 +905,14 @@ class _CopyLinkButton extends StatelessWidget {
 
 class _TilePopupMenu extends riverpod.ConsumerWidget {
   final MapGalleryItem item;
+  final double iconSize;
 
-  const _TilePopupMenu({required this.item});
+  const _TilePopupMenu({required this.item, this.iconSize = 18});
 
   Future<void> _duplicateMap(
       BuildContext context, riverpod.WidgetRef ref) async {
     // Prompt for new map details
-    final nameController = TextEditingController(text: item.name + ' (Copy)');
+    final nameController = TextEditingController(text: '${item.name} (Copy)');
     final descController = TextEditingController(text: item.description);
     final result = await showDialog<Map<String, String>>(
       context: context,
@@ -979,6 +993,9 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
     ).copyWith(
       layers: filteredLayers.isNotEmpty ? filteredLayers : null,
       storageFolderPath: null,
+      clearStorageFolderPath: true,
+      cloudFolderPaths: const [],
+      cloudTrackColors: const {},
     );
 
     // Save the new map
@@ -1007,7 +1024,7 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     return PopupMenuButton<String>(
-      icon: Icon(Icons.more_vert, size: 18, color: Colors.grey.shade600),
+      icon: Icon(Icons.more_vert, size: iconSize, color: Colors.grey.shade600),
       padding: EdgeInsets.zero,
       constraints: const BoxConstraints(),
       itemBuilder: (_) => [

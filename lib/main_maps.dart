@@ -8,24 +8,39 @@ import 'shareable_maps/widgets/shareable_map_editor.dart';
 import 'shareable_maps/adapters/firestore_adapter.dart';
 import 'shareable_maps/services/shareable_maps_firestore_service.dart';
 import 'shareable_maps/services/map_link_service.dart';
+import 'shareable_maps/widgets/clm_advert_page.dart';
+import 'shareable_maps/widgets/clm_maps_admin_login_page.dart';
 import 'shareable_maps/widgets/clm_maps_splash.dart';
+import 'shareable_maps/widgets/shareable_maps_gallery.dart';
+import 'providers/auth_provider.dart';
 import 'firebase_options.dart';
 
 /// Standalone CLM Maps Entry Point
 ///
 /// A fully independent maps app deployed at https://clm-maps.web.app
-/// - No authentication required
-/// - Gallery view as home screen
+/// - No client sign-in UI exposed
 /// - Deep link support for shared maps (/map/{shareCode})
+/// - Website advert fallback at /, with invalid-link messaging for bad links
+/// - Direct-only admin login routes (/login, /admin, /admin/login)
 /// - Real-time sync across all viewers
 /// - Same Firestore backend as CLM Schedule (shareableMaps + mapLinks)
+/// - Any valid signed-in Firebase Auth user is treated as a maps admin and
+///   gets the gallery/editing tools through the persisted auth session.
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   usePathUrlStrategy();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
+  final container = riverpod.ProviderContainer();
+  // Restore any persisted Firebase Auth session so the editor can detect
+  // authenticated users and unlock admin tools. Fire-and-forget: the UI
+  // listens via `authRiverpod` and rebuilds when state changes.
+  // ignore: unawaited_futures
+  container.read(authRiverpod).initialize();
+
   runApp(
-    riverpod.ProviderScope(
+    riverpod.UncontrolledProviderScope(
+      container: container,
       child: const CLMMapApp(),
     ),
   );
@@ -53,6 +68,12 @@ class CLMMapApp extends StatelessWidget {
       onGenerateRoute: (settings) {
         final uri = Uri.parse(settings.name ?? '');
 
+        if (_isAdminLoginRoute(uri)) {
+          return MaterialPageRoute(
+            builder: (_) => const CLMMapsAdminLoginPage(),
+          );
+        }
+
         // Handle deep links: /map/{shareCode}
         if (uri.pathSegments.length == 2 && uri.pathSegments[0] == 'map') {
           final shareCode = uri.pathSegments[1];
@@ -61,13 +82,24 @@ class CLMMapApp extends StatelessWidget {
           );
         }
 
-        // Default route — invalid link page (no gallery exposed)
+        // Default route: authenticated admins go to the gallery; everyone
+        // else sees the CLM website advert as a clean home fallback.
         return MaterialPageRoute(
-          builder: (_) => const _InvalidLinkPage(),
+          builder: (_) => const _MapsRootGate(),
         );
       },
     );
   }
+}
+
+bool _isAdminLoginRoute(Uri uri) {
+  final segments = uri.pathSegments.map((s) => s.toLowerCase()).toList();
+  if (segments.length == 1) {
+    return segments.first == 'login' || segments.first == 'admin';
+  }
+  return segments.length == 2 &&
+      segments.first == 'admin' &&
+      segments.last == 'login';
 }
 
 /// Resolves a share code and opens the map editor — no auth required.
@@ -129,50 +161,25 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
       return const ClmMapsSplash();
     }
 
-    return const _InvalidLinkPage();
+    return const CLMAdvertPage(showInvalidBanner: true);
   }
 }
 
-/// Shown when there is no valid share code — either the user navigated
-/// to the root URL or the deep link could not be resolved.
-class _InvalidLinkPage extends StatelessWidget {
-  const _InvalidLinkPage();
+/// Root gate at "/" — shows the gallery to authenticated users and the
+/// CLM advert home page to everyone else. The public page does not link to
+/// the direct-only admin login routes.
+class _MapsRootGate extends riverpod.ConsumerWidget {
+  const _MapsRootGate();
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.link_off_rounded,
-                  size: 72, color: Colors.grey.shade400),
-              const SizedBox(height: 24),
-              const Text(
-                'Invalid Map Link',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF202124),
-                ),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                'This link is invalid or has expired.\n'
-                'Please contact Community Life Media for assistance.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 15,
-                  color: Color(0xFF5F6368),
-                  height: 1.5,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final auth = ref.watch(authRiverpod);
+    if (!auth.isInitialized) {
+      return const ClmMapsSplash();
+    }
+    if (auth.isAuthenticated) {
+      return const ShareableMapsGallery();
+    }
+    return const CLMAdvertPage();
   }
 }

@@ -53,91 +53,18 @@ class DropsheetTaskRow extends StatelessWidget {
       onTap: onEdit,
       child: Container(
         decoration: BoxDecoration(
-          color: task.isMandatory
-              ? Colors.amber.withValues(alpha: 0.08)
-              : null,
+          color: task.isMandatory ? Colors.amber.withValues(alpha: 0.08) : null,
           border: Border(
             bottom: BorderSide(color: Colors.grey.shade200),
           ),
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Row(
-          children: [
-            ReorderableDragStartListener(
-              index: dragIndex,
-              child: const SizedBox(
-                width: 32,
-                child: Icon(Icons.drag_indicator,
-                    size: 18, color: Colors.grey),
-              ),
-            ),
-            SizedBox(
-              width: 64,
-              child: Text(
-                'Task $taskNumber',
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(flex: 2, child: _cell(jobLabel, bold: true)),
-            const SizedBox(width: 12),
-            Expanded(flex: 3, child: _cell(task.details)),
-            const SizedBox(width: 12),
-            SizedBox(width: 70, child: _cell(task.startTime)),
-            const SizedBox(width: 12),
-            Expanded(
-              flex: 3,
-              child: _LocationCell(
-                label: locationLabel,
-                links: mapLinks,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(flex: 2, child: _cell(task.contact)),
-            const SizedBox(width: 12),
-            Expanded(flex: 2, child: _cell(task.tel)),
-            SizedBox(
-              width: 40,
-              child: PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert, size: 18),
-                itemBuilder: (_) => [
-                  const PopupMenuItem(value: 'edit', child: Text('Edit')),
-                  if (otherSections.isNotEmpty)
-                    const PopupMenuItem(
-                        value: 'move', child: Text('Move to driver…')),
-                  if (onDelete != null)
-                    const PopupMenuItem(
-                      value: 'delete',
-                      child:
-                          Text('Delete', style: TextStyle(color: Colors.red)),
-                    ),
-                ],
-                onSelected: (v) async {
-                  if (v == 'edit') {
-                    onEdit();
-                  } else if (v == 'delete') {
-                    onDelete?.call();
-                  } else if (v == 'move') {
-                    final sel = await showDialog<String>(
-                      context: context,
-                      builder: (ctx) => SimpleDialog(
-                        title: const Text('Move to driver'),
-                        children: otherSections
-                            .map(
-                              (s) => SimpleDialogOption(
-                                onPressed: () => Navigator.pop(ctx, s.id),
-                                child: Text(s.driverName),
-                              ),
-                            )
-                            .toList(),
-                      ),
-                    );
-                    if (sel != null) onMoveToSection?.call(sel);
-                  }
-                },
-              ),
-            ),
-          ],
+        padding: const EdgeInsets.symmetric(
+          horizontal: 8,
+        ),
+        child: LayoutBuilder(
+          builder: (lCtx, box) => box.maxWidth >= 700
+              ? _buildWideRow(lCtx, jobLabel, locationLabel, mapLinks)
+              : _buildNarrowRow(lCtx, jobLabel, locationLabel, mapLinks),
         ),
       ),
     );
@@ -151,8 +78,7 @@ class DropsheetTaskRow extends StatelessWidget {
       feedback: Material(
         elevation: 6,
         child: Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           color: Colors.white,
           width: 320,
           child: Row(
@@ -177,14 +103,173 @@ class DropsheetTaskRow extends StatelessWidget {
     );
   }
 
-  Widget _cell(String text, {bool bold = false}) {
+  Widget _cell(String text, {bool bold = true}) {
     return Text(
       text,
-      maxLines: 2,
+      maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: TextStyle(
-        fontWeight: bold ? FontWeight.w600 : FontWeight.normal,
+        fontSize: 11,
+        height: 1.1,
+        fontWeight: bold ? FontWeight.bold : FontWeight.w600,
       ),
+    );
+  }
+
+  Widget _cellWrap(String text, {bool bold = true}) {
+    return Text(
+      text,
+      style: TextStyle(
+        fontSize: 11,
+        height: 1.2,
+        fontWeight: bold ? FontWeight.bold : FontWeight.w600,
+      ),
+    );
+  }
+
+  Widget _buildMenuButton(BuildContext context) {
+    return SizedBox(
+      width: 32,
+      child: PopupMenuButton<String>(
+        icon: const Icon(Icons.more_vert, size: 16),
+        itemBuilder: (_) => [
+          const PopupMenuItem(value: 'edit', child: Text('Edit')),
+          if (otherSections.isNotEmpty)
+            const PopupMenuItem(value: 'move', child: Text('Move to driver…')),
+          if (onDelete != null)
+            const PopupMenuItem(
+              value: 'delete',
+              child: Text('Delete', style: TextStyle(color: Colors.red)),
+            ),
+        ],
+        onSelected: (v) async {
+          if (v == 'edit') {
+            onEdit();
+          } else if (v == 'delete') {
+            onDelete?.call();
+          } else if (v == 'move') {
+            final sel = await showDialog<String>(
+              context: context,
+              builder: (ctx) => SimpleDialog(
+                title: const Text('Move to driver'),
+                children: otherSections
+                    .map(
+                      (s) => SimpleDialogOption(
+                        onPressed: () => Navigator.pop(ctx, s.id),
+                        child: Text(s.driverName),
+                      ),
+                    )
+                    .toList(),
+              ),
+            );
+            if (sel != null) onMoveToSection?.call(sel);
+          }
+        },
+      ),
+    );
+  }
+
+  Widget _buildWideRow(BuildContext context, String jobLabel,
+      String locationLabel, List<DropsheetMapLink> mapLinks) {
+    return Row(
+      children: [
+        ReorderableDragStartListener(
+          index: dragIndex,
+          child: const SizedBox(
+            width: 24,
+            child: Icon(Icons.drag_indicator, size: 16, color: Colors.grey),
+          ),
+        ),
+        SizedBox(
+          width: 48,
+          child: Text(
+            '#$taskNumber',
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+        const SizedBox(width: 6),
+        Expanded(flex: 2, child: _cell(jobLabel, bold: true)),
+        const SizedBox(width: 6),
+        Expanded(flex: 3, child: _cell(task.details, bold: true)),
+        const SizedBox(width: 6),
+        SizedBox(width: 70, child: _cell(task.startTime)),
+        const SizedBox(width: 6),
+        Expanded(
+          flex: 3,
+          child: _LocationCell(label: locationLabel, links: mapLinks),
+        ),
+        const SizedBox(width: 6),
+        Expanded(flex: 2, child: _cell(task.contact, bold: true)),
+        const SizedBox(width: 6),
+        Expanded(flex: 2, child: _cell(task.tel, bold: true)),
+        _buildMenuButton(context),
+      ],
+    );
+  }
+
+  Widget _buildNarrowRow(BuildContext context, String jobLabel,
+      String locationLabel, List<DropsheetMapLink> mapLinks) {
+    const indent = 78.0; // drag(24) + number(48) + gap(6)
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            ReorderableDragStartListener(
+              index: dragIndex,
+              child: const SizedBox(
+                width: 24,
+                child: Icon(Icons.drag_indicator, size: 16, color: Colors.grey),
+              ),
+            ),
+            SizedBox(
+              width: 48,
+              child: Text(
+                '#$taskNumber',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(child: _cellWrap(jobLabel)),
+            const SizedBox(width: 6),
+            if (task.startTime.isNotEmpty)
+              SizedBox(width: 60, child: _cell(task.startTime)),
+            _buildMenuButton(context),
+          ],
+        ),
+        if (task.details.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: indent, top: 2),
+            child: _cellWrap(task.details),
+          ),
+        Padding(
+          padding: const EdgeInsets.only(left: indent, top: 2),
+          child: _LocationCell(
+            label: locationLabel,
+            links: mapLinks,
+            allowWrap: true,
+          ),
+        ),
+        if (task.contact.isNotEmpty || task.tel.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: indent, top: 2, bottom: 4),
+            child: Wrap(
+              spacing: 10,
+              runSpacing: 2,
+              children: [
+                if (task.contact.isNotEmpty) _cellWrap(task.contact),
+                if (task.tel.isNotEmpty) _cellWrap(task.tel),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }
@@ -192,15 +277,25 @@ class DropsheetTaskRow extends StatelessWidget {
 class _LocationCell extends StatelessWidget {
   final String label;
   final List<DropsheetMapLink> links;
-  const _LocationCell({required this.label, required this.links});
+  final bool allowWrap;
+  const _LocationCell({
+    required this.label,
+    required this.links,
+    this.allowWrap = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     if (links.isEmpty) {
       return Text(
         label,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
+        maxLines: allowWrap ? null : 1,
+        overflow: allowWrap ? null : TextOverflow.ellipsis,
+        style: const TextStyle(
+          fontSize: 11,
+          height: 1.2,
+          fontWeight: FontWeight.bold,
+        ),
       );
     }
     if (links.length == 1) {
@@ -208,16 +303,18 @@ class _LocationCell extends StatelessWidget {
         onTap: () => _open(links.first.url),
         child: Row(
           children: [
-            const Icon(Icons.location_on, size: 16, color: Colors.blue),
-            const SizedBox(width: 4),
+            const Icon(Icons.location_on, size: 14, color: Colors.blue),
+            const SizedBox(width: 2),
             Expanded(
               child: Text(
                 label,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+                maxLines: allowWrap ? null : 1,
+                overflow: allowWrap ? null : TextOverflow.ellipsis,
                 style: const TextStyle(
+                  fontSize: 11,
+                  height: 1.2,
+                  fontWeight: FontWeight.bold,
                   color: Colors.blue,
-                  decoration: TextDecoration.underline,
                 ),
               ),
             ),
@@ -235,17 +332,19 @@ class _LocationCell extends StatelessWidget {
               onTap: () => _open(l.url),
               child: Row(
                 children: [
-                  const Icon(Icons.location_on, size: 14, color: Colors.blue),
-                  const SizedBox(width: 4),
+                  const Icon(Icons.location_on, size: 12, color: Colors.blue),
+                  const SizedBox(width: 2),
                   Expanded(
                     child: Text(
                       l.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      maxLines: allowWrap ? null : 1,
+                      overflow: allowWrap ? null : TextOverflow.ellipsis,
                       style: const TextStyle(
+                        fontSize: 11,
+                        height: 1.15,
+                        fontWeight: FontWeight.bold,
                         color: Colors.blue,
                         decoration: TextDecoration.underline,
-                        fontSize: 12,
                       ),
                     ),
                   ),

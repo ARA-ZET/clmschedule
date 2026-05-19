@@ -3,38 +3,80 @@ import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
+import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
+// Browser title update — web only, no-op on other platforms.
+// ignore: avoid_web_libraries_in_flutter, depend_on_referenced_packages
+import 'package:web/web.dart' as web show document;
 import '../../config/flavor_config.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/work_area.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../providers/unfinished_work_areas_provider.dart';
 import '../providers/shareable_map_provider.dart';
 import '../providers/map_gesture_provider.dart';
+import '../services/map_bitmap_cache.dart';
 import '../services/map_link_service.dart';
 import '../adapters/firestore_adapter.dart';
 import '../adapters/work_area_adapter.dart';
-import '../utils/point_marker_icons.dart';
-import '../utils/marker_clusterer.dart';
 import 'map_layers_sidebar.dart';
 import 'map_drawing_toolbar.dart';
 import 'map_import_dialog.dart';
+import 'shareable_maps_gallery.dart';
 import 'work_area_picker_panel.dart';
 import 'work_area_table_panel.dart';
 import '../../widgets/cloud_file_manager_screen.dart';
 import '../../track_editor/pages/track_editor_screen.dart';
 
+/// Width threshold below which the standalone Maps flavor enters a
+/// touch-friendly viewer mode: sidebar hidden, drawing toolbars hidden,
+/// markers non-draggable and all add/edit/delete buttons disabled so the
+/// user can pan/zoom freely without accidentally triggering edits.
+const double _mapsMobileBreakpoint = 700;
+
+/// True when the editor should render in mobile viewer mode — Maps flavor
+/// running on a narrow screen.
+bool isMapsMobileViewer(BuildContext context) {
+  if (!FlavorConfig.instance.isMaps) return false;
+  return MediaQuery.sizeOf(context).width < _mapsMobileBreakpoint;
+}
+
 /// Main map editor widget for the universal map editor.
 /// Displays Google Maps with drawing tools and layer management.
 /// UI elements are conditionally shown based on the active adapter's
 /// [MapEditorCapabilities].
-class ShareableMapEditor extends riverpod.ConsumerWidget {
+class ShareableMapEditor extends riverpod.ConsumerStatefulWidget {
   const ShareableMapEditor({super.key});
 
   @override
-  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+  riverpod.ConsumerState<ShareableMapEditor> createState() =>
+      _ShareableMapEditorState();
+}
+
+class _ShareableMapEditorState
+    extends riverpod.ConsumerState<ShareableMapEditor> {
+  String? _lastTitle;
+
+  /// Update the browser tab title to the map name (Maps flavor only).
+  void _syncBrowserTitle(String? mapName) {
+    if (!FlavorConfig.instance.isMaps) return;
+    final title =
+        (mapName != null && mapName.isNotEmpty) ? mapName : 'CLM Maps';
+    if (_lastTitle == title) return;
+    _lastTitle = title;
+    web.document.title = title;
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final provider = ref.watch(shareableMapRiverpod);
+    // Keep browser tab title in sync with the open map.
+    _syncBrowserTitle(provider.currentMap?.name);
+    final mobileViewer = isMapsMobileViewer(context);
+    final isMaps = FlavorConfig.instance.isMaps;
+    final isAuthenticated = ref.watch(authRiverpod).isAuthenticated;
+    final canEditInThisView = !isMaps || (isAuthenticated && !mobileViewer);
     return Scaffold(
       appBar: const MapEditorAppBar(),
       body: Builder(
@@ -52,10 +94,12 @@ class ShareableMapEditor extends riverpod.ConsumerWidget {
             children: [
               const MapViewWidget(),
               if (caps.canManageLayers) const MapSidebarWidget(),
-              if (isWorkAreaEditor) const _WorkAreaTableSidebar(),
-              if (caps.canDraw && !caps.readOnly)
+              if (isWorkAreaEditor && !mobileViewer)
+                const _WorkAreaTableSidebar(),
+              if (caps.canDraw && !caps.readOnly && canEditInThisView)
                 const MapDrawingToolbarWidget(),
-              if (!caps.readOnly) const MapDrawingControlsWidget(),
+              if (!caps.readOnly && canEditInThisView)
+                const MapDrawingControlsWidget(),
               // Cloud tracks loading indicator
               if (provider.isLoadingCloudTracks)
                 Positioned(
@@ -242,286 +286,425 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
     final caps = provider.capabilities;
     final allPolygons = provider.getSearchablePolygons();
 
-    final isMapsStandalone = FlavorConfig.instance.isMaps;
+    final isMaps = FlavorConfig.instance.isMaps;
+    // In the standalone Maps flavor, treat any authenticated viewer as an
+    // admin and unlock the full editing toolbar. Non-authenticated viewers
+    // still see the read-only / limited UI.
+    final isAuthenticated = ref.watch(authRiverpod).isAuthenticated;
+    // On narrow screens (mobile / tablet portrait) in the Maps flavor we
+    // collapse to a touch-friendly viewer so users can pan/zoom freely
+    // without admin buttons crowding the UI or accidental edits.
+    final mobileViewer = isMapsMobileViewer(context);
+    // Hide the back button only for unauthenticated maps viewers (they have
+    // no gallery / navigation history to go back to). Authenticated users in
+    // the maps flavor get a back button that takes them to the gallery.
+    final hideBackButton = isMaps && !isAuthenticated;
+    final showAdminTools = !isMaps || (isAuthenticated && !mobileViewer);
+    final showPolygonSearch = !isMaps;
 
     return AppBar(
       backgroundColor: Colors.white,
       elevation: 0,
-      leading: isMapsStandalone
+      // ── Leading button ────────────────────────────────────────────────
+      // Maps flavor uses labelled action buttons so client-facing controls are
+      // self-explanatory. Non-maps keeps the standard back button here.
+      leading: isMaps
           ? null
-          : IconButton(
-              icon: const Icon(Icons.arrow_back, color: Color(0xFF5F6368)),
-              onPressed: () async {
-                // Unfocus any active text field so pending edits
-                // (e.g. estimate changes) are committed before saving.
-                FocusManager.instance.primaryFocus?.unfocus();
-                await Future.delayed(Duration.zero);
-
-                // Auto-save on exit with thumbnail capture
-                if (provider.hasUnsavedChanges && provider.hasAdapter) {
-                  await provider.saveToAdapter(captureThumbnail: true);
-                }
-                if (context.mounted) Navigator.pop(context);
-              },
-            ),
-      automaticallyImplyLeading: !isMapsStandalone,
-      titleSpacing: isMapsStandalone ? 16 : 0,
-      title: Row(
-        children: [
-          // Search field
-          Flexible(
-            child: Autocomplete<
-                ({CustomPolygon polygon, String layerId, int index})>(
-              optionsBuilder: (TextEditingValue textEditingValue) {
-                if (textEditingValue.text.isEmpty) return allPolygons;
-                final query = textEditingValue.text.toLowerCase();
-                return allPolygons.where((entry) {
-                  final name = entry.polygon.name.toLowerCase();
-                  final desc = entry.polygon.description.toLowerCase();
-                  return name.contains(query) || desc.contains(query);
-                });
-              },
-              displayStringForOption: (option) => option.polygon.name.isNotEmpty
-                  ? option.polygon.name
-                  : 'Unnamed Polygon',
-              fieldViewBuilder: (context, textEditingController, focusNode,
-                  onFieldSubmitted) {
-                _autocompleteController = textEditingController;
-                _autocompleteFocusNode = focusNode;
-                return TextField(
-                  controller: textEditingController,
-                  focusNode: focusNode,
-                  style:
-                      const TextStyle(color: Color(0xFF202124), fontSize: 14),
-                  decoration: InputDecoration(
-                    hintText: 'Search work areas...',
-                    hintStyle:
-                        const TextStyle(color: Color(0xFF9AA0A6), fontSize: 14),
-                    prefixIcon: const Icon(Icons.search,
-                        size: 20, color: Color(0xFF9AA0A6)),
-                    suffixIcon: textEditingController.text.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(Icons.close,
-                                size: 18, color: Color(0xFF5F6368)),
-                            onPressed: () {
-                              textEditingController.clear();
-                              // Trigger rebuild so suffix icon hides
-                              // ignore: invalid_use_of_protected_member
-                              (context as Element).markNeedsBuild();
-                            },
-                          )
-                        : null,
-                    filled: true,
-                    fillColor: const Color(0xFFF1F3F4),
-                    contentPadding:
-                        const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none,
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none,
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: const BorderSide(
-                          color: Color(0xFF1967D2), width: 1.5),
-                    ),
-                  ),
-                  onChanged: (_) {
-                    // Force rebuild for suffix icon visibility
-                    // ignore: invalid_use_of_protected_member
-                    (context as Element).markNeedsBuild();
+          : (hideBackButton
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.arrow_back, color: Color(0xFF5F6368)),
+                  onPressed: () async {
+                    FocusManager.instance.primaryFocus?.unfocus();
+                    await Future.delayed(Duration.zero);
+                    if (provider.hasUnsavedChanges && provider.hasAdapter) {
+                      await provider.saveToAdapter(captureThumbnail: true);
+                    }
+                    if (!context.mounted) return;
+                    Navigator.pop(context);
                   },
-                  onSubmitted: (_) => onFieldSubmitted(),
-                );
-              },
-              optionsViewBuilder: (context, onSelected, options) {
-                return Align(
-                  alignment: Alignment.topLeft,
-                  child: Material(
-                    elevation: 4,
-                    borderRadius: BorderRadius.circular(8),
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(
-                        maxHeight: 300,
-                        maxWidth: 400,
-                      ),
-                      child: ListView.builder(
-                        padding: EdgeInsets.zero,
-                        shrinkWrap: true,
-                        itemCount: options.length,
-                        itemBuilder: (context, i) {
-                          final entry = options.elementAt(i);
-                          final poly = entry.polygon;
-                          final name = poly.name.isNotEmpty
-                              ? poly.name
-                              : 'Unnamed Polygon';
-                          final areaKm2 = _polygonAreaKm2(poly.points);
-
-                          return ListTile(
-                            dense: true,
-                            leading: Container(
-                              width: 16,
-                              height: 16,
-                              decoration: BoxDecoration(
-                                color: poly.color
-                                    .withValues(alpha: poly.fillOpacity),
-                                border: Border.all(
-                                  color: poly.color,
-                                  width: 2,
-                                ),
-                                borderRadius: BorderRadius.circular(3),
-                              ),
-                            ),
-                            title: Text(
-                              name,
-                              style: const TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            subtitle: Text(
-                              _fmtKm2(areaKm2),
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFF5F6368),
-                              ),
-                            ),
-                            onTap: () => onSelected(entry),
-                          );
-                        },
-                      ),
-                    ),
+                )),
+      automaticallyImplyLeading: false,
+      titleSpacing: isMaps ? 16 : 0,
+      title: showPolygonSearch
+          ? _buildSearchTitle(provider, allPolygons)
+          : _buildMapsTitle(provider, isAuthenticated),
+      actions: [
+        // Maps flavor: back button moves to actions so layers toggle can own
+        // the leading slot. Non-maps back button lives in leading (see above).
+        if (isMaps && !hideBackButton)
+          _AppBarLabelAction(
+            icon: Icons.arrow_back_rounded,
+            label: 'Gallery',
+            onPressed: () async {
+              FocusManager.instance.primaryFocus?.unfocus();
+              await Future.delayed(Duration.zero);
+              if (provider.hasUnsavedChanges && provider.hasAdapter) {
+                await provider.saveToAdapter(captureThumbnail: true);
+              }
+              if (!context.mounted) return;
+              final navigator = Navigator.of(context);
+              if (navigator.canPop()) {
+                navigator.pop();
+              } else {
+                navigator.pushReplacement(
+                  MaterialPageRoute(
+                    builder: (_) => const ShareableMapsGallery(),
                   ),
                 );
-              },
-              onSelected: (entry) {
-                _onSearchResultSelected(
-                  provider,
-                  entry.polygon,
-                  entry.layerId,
-                  entry.index,
-                );
-                // Clear the search field and dismiss keyboard
-                _autocompleteController?.clear();
-                _autocompleteFocusNode?.unfocus();
-              },
-            ),
+              }
+            },
           ),
-          // Context title from adapter (distributor · date · clients)
-          if (provider.adapter != null &&
-              provider.adapter!.displayName.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(left: 8),
-              child: Text(
-                provider.adapter!.displayName,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                  color: Color(0xFF5F6368),
-                ),
-                overflow: TextOverflow.ellipsis,
-                maxLines: 1,
-              ),
-            ),
-        ],
-      ),
-      actions: [
+        if (isMaps && caps.canManageLayers)
+          _AppBarLabelAction(
+            icon: Icons.layers_outlined,
+            label: 'Layers',
+            selected: provider.isSidebarVisible,
+            tooltip: provider.isSidebarVisible ? 'Hide layers' : 'Show layers',
+            onPressed: () => provider.toggleSidebar(),
+          ),
         const SizedBox(width: 4),
         // Map tools
-        IconButton(
-          icon: const Icon(Icons.undo, size: 22, color: Color(0xFF5F6368)),
-          tooltip: 'Undo',
-          onPressed: () {
-            // TODO: Implement undo
-          },
-        ),
-        IconButton(
-          icon: const Icon(Icons.redo, size: 22, color: Color(0xFF5F6368)),
-          tooltip: 'Redo',
-          onPressed: () {
-            // TODO: Implement redo
-          },
-        ),
-        const SizedBox(width: 8),
-        // Work areas import toggle (admin only — hidden in Maps flavor)
-        if (!isMapsStandalone)
-          IconButton(
-            icon: Icon(
-              Icons.workspaces_outlined,
-              size: 22,
-              color: provider.isWorkAreaPickerVisible
-                  ? const Color(0xFF1967D2)
-                  : const Color(0xFF5F6368),
-            ),
+        if (showAdminTools) ...[
+          _mapAwareAction(
+            isMaps: isMaps,
+            icon: Icons.undo,
+            label: '',
+            tooltip: 'Undo',
+            onPressed: () {
+              // TODO: Implement undo
+            },
+          ),
+          _mapAwareAction(
+            isMaps: isMaps,
+            icon: Icons.redo,
+            label: '',
+            tooltip: 'Redo',
+            onPressed: () {
+              // TODO: Implement redo
+            },
+          ),
+          const SizedBox(width: 8),
+        ],
+        // Work areas import toggle (admin only — hidden in Maps viewer mode)
+        if (showAdminTools)
+          _mapAwareAction(
+            isMaps: isMaps,
+            icon: Icons.webhook_rounded,
+            label: 'Work areas Layer',
             tooltip: 'Import work areas',
+            selected: provider.isWorkAreaPickerVisible,
             onPressed: () {
               provider.toggleWorkAreaPicker();
             },
           ),
-        // Import button (admin only — hidden in Maps flavor)
-        if (!isMapsStandalone && caps.canImport)
-          IconButton(
-            icon: const Icon(Icons.upload_file,
-                size: 22, color: Color(0xFF5F6368)),
+        // Import button (admin only — hidden in Maps viewer mode)
+        if (showAdminTools && caps.canImport)
+          _mapAwareAction(
+            isMaps: isMaps,
+            icon: Icons.upload_file,
+            label: 'Import',
             tooltip: 'Import KML/GPX',
             onPressed: () => MapEditorDialogs.showImportDialog(context),
           ),
-        // Layers toggle — only if layer management is enabled
-        if (caps.canManageLayers)
-          IconButton(
-            icon: const Icon(Icons.layers_outlined,
-                size: 22, color: Color(0xFF5F6368)),
-            tooltip: 'Toggle layers',
-            onPressed: () {
-              provider.toggleSidebar();
-            },
+        // Layers toggle — non-maps only; maps flavor uses a dedicated action above.
+        if (!isMaps && caps.canManageLayers)
+          _AppBarLabelAction(
+            icon: Icons.layers_outlined,
+            label: 'Layers',
+            selected: provider.isSidebarVisible,
+            tooltip: provider.isSidebarVisible ? 'Hide layers' : 'Show layers',
+            onPressed: () => provider.toggleSidebar(),
           ),
 
         // Polygon draw toggle — draw polygon and save to unfinished work areas
-        IconButton(
-          icon: Icon(
-            Icons.pentagon_outlined,
-            size: 22,
-            color: provider.drawingMode == DrawingMode.polygon &&
+        if (showAdminTools)
+          _mapAwareAction(
+            isMaps: isMaps,
+            icon: Icons.pentagon_outlined,
+            label: provider.drawingMode == DrawingMode.polygon &&
                     provider.isDrawingForUnfinished
-                ? const Color(0xFF1967D2)
-                : const Color(0xFF5F6368),
+                ? 'Cancel draw'
+                : 'Draw Gaps',
+            tooltip: provider.drawingMode == DrawingMode.polygon &&
+                    provider.isDrawingForUnfinished
+                ? 'Cancel polygon drawing'
+                : 'Draw polygon (save to unfinished)',
+            selected: provider.drawingMode == DrawingMode.polygon &&
+                provider.isDrawingForUnfinished,
+            onPressed: () {
+              if (provider.drawingMode == DrawingMode.polygon &&
+                  provider.isDrawingForUnfinished) {
+                provider.cancelDrawing();
+              } else {
+                provider.startDrawingForUnfinished();
+              }
+            },
           ),
-          tooltip: provider.drawingMode == DrawingMode.polygon &&
-                  provider.isDrawingForUnfinished
-              ? 'Cancel polygon drawing'
-              : 'Draw polygon (save to unfinished)',
-          onPressed: () {
-            if (provider.drawingMode == DrawingMode.polygon &&
-                provider.isDrawingForUnfinished) {
-              provider.cancelDrawing();
-            } else {
-              provider.startDrawingForUnfinished();
-            }
-          },
-        ),
-        // Share button — only for Firestore-backed maps
-        if (provider.adapter is FirestoreMapAdapter)
-          IconButton(
-            icon: const Icon(Icons.share, size: 22, color: Color(0xFF5F6368)),
-            tooltip: 'Copy share link',
-            onPressed: () => _copyShareLink(context, provider),
-          ),
+
         // Cloud files — jump to the folder linked to this map, or fall back
         // to the month folder matching the map's creation date.
-        if (provider.adapter is FirestoreMapAdapter)
-          IconButton(
-            icon: const Icon(Icons.folder_open,
-                size: 22, color: Color(0xFF5F6368)),
+        if (showAdminTools && provider.adapter is FirestoreMapAdapter)
+          _mapAwareAction(
+            isMaps: isMaps,
+            icon: Icons.folder_open,
+            label: 'Files',
             tooltip: 'Open cloud files folder',
             onPressed: () => _openCloudFolder(context, provider),
           ),
+        // Share link — copy a client-shareable URL to clipboard.
+        if (showAdminTools && provider.adapter is FirestoreMapAdapter)
+          _mapAwareAction(
+            isMaps: isMaps,
+            icon: Icons.share_outlined,
+            label: 'Share',
+            tooltip: 'Copy share link',
+            onPressed: () => _copyShareLink(context, provider),
+          ),
         const SizedBox(width: 8),
       ],
+    );
+  }
+
+  Widget _buildMapsTitle(ShareableMapProvider provider, bool isAuthenticated) {
+    final mapName = provider.currentMap?.name.trim();
+    final title = mapName != null && mapName.isNotEmpty ? mapName : 'CLM Maps';
+
+    return Row(
+      children: [
+        Icon(
+          Icons.map_outlined,
+          color: isAuthenticated
+              ? const Color(0xFF1967D2)
+              : const Color(0xFF5F6368),
+          size: 22,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xFF202124),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0,
+                ),
+              ),
+              Text(
+                isAuthenticated ? 'Admin map editor' : 'Client map',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xFF5F6368),
+                  fontSize: 11,
+                  letterSpacing: 0,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSearchTitle(
+    ShareableMapProvider provider,
+    List<({CustomPolygon polygon, String layerId, int index})> allPolygons,
+  ) {
+    return Row(
+      children: [
+        Flexible(
+          child: Autocomplete<
+              ({CustomPolygon polygon, String layerId, int index})>(
+            optionsBuilder: (TextEditingValue textEditingValue) {
+              if (textEditingValue.text.isEmpty) return allPolygons;
+              final query = textEditingValue.text.toLowerCase();
+              return allPolygons.where((entry) {
+                final name = entry.polygon.name.toLowerCase();
+                final desc = entry.polygon.description.toLowerCase();
+                return name.contains(query) || desc.contains(query);
+              });
+            },
+            displayStringForOption: (option) => option.polygon.name.isNotEmpty
+                ? option.polygon.name
+                : 'Unnamed Polygon',
+            fieldViewBuilder:
+                (context, textEditingController, focusNode, onFieldSubmitted) {
+              _autocompleteController = textEditingController;
+              _autocompleteFocusNode = focusNode;
+              return TextField(
+                controller: textEditingController,
+                focusNode: focusNode,
+                style: const TextStyle(
+                  color: Color(0xFF202124),
+                  fontSize: 14,
+                ),
+                decoration: InputDecoration(
+                  hintText: 'Search work areas...',
+                  hintStyle: const TextStyle(
+                    color: Color(0xFF9AA0A6),
+                    fontSize: 14,
+                  ),
+                  prefixIcon: const Icon(
+                    Icons.search,
+                    size: 20,
+                    color: Color(0xFF9AA0A6),
+                  ),
+                  suffixIcon: textEditingController.text.isNotEmpty
+                      ? IconButton(
+                          icon: const Icon(
+                            Icons.close,
+                            size: 18,
+                            color: Color(0xFF5F6368),
+                          ),
+                          onPressed: () {
+                            textEditingController.clear();
+                            // Trigger rebuild so suffix icon hides
+                            // ignore: invalid_use_of_protected_member
+                            (context as Element).markNeedsBuild();
+                          },
+                        )
+                      : null,
+                  filled: true,
+                  fillColor: const Color(0xFFF1F3F4),
+                  contentPadding:
+                      const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(24),
+                    borderSide: BorderSide.none,
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(24),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(24),
+                    borderSide: const BorderSide(
+                      color: Color(0xFF1967D2),
+                      width: 1.5,
+                    ),
+                  ),
+                ),
+                onChanged: (_) {
+                  // Force rebuild for suffix icon visibility
+                  // ignore: invalid_use_of_protected_member
+                  (context as Element).markNeedsBuild();
+                },
+                onSubmitted: (_) => onFieldSubmitted(),
+              );
+            },
+            optionsViewBuilder: (context, onSelected, options) {
+              return Align(
+                alignment: Alignment.topLeft,
+                child: Material(
+                  elevation: 4,
+                  borderRadius: BorderRadius.circular(8),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      maxHeight: 300,
+                      maxWidth: 400,
+                    ),
+                    child: ListView.builder(
+                      padding: EdgeInsets.zero,
+                      shrinkWrap: true,
+                      itemCount: options.length,
+                      itemBuilder: (context, i) {
+                        final entry = options.elementAt(i);
+                        final poly = entry.polygon;
+                        final name = poly.name.isNotEmpty
+                            ? poly.name
+                            : 'Unnamed Polygon';
+                        final areaKm2 = _polygonAreaKm2(poly.points);
+
+                        return ListTile(
+                          dense: true,
+                          leading: Container(
+                            width: 16,
+                            height: 16,
+                            decoration: BoxDecoration(
+                              color: poly.color
+                                  .withValues(alpha: poly.fillOpacity),
+                              border: Border.all(
+                                color: poly.color,
+                                width: 2,
+                              ),
+                              borderRadius: BorderRadius.circular(3),
+                            ),
+                          ),
+                          title: Text(
+                            name,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            _fmtKm2(areaKm2),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF5F6368),
+                            ),
+                          ),
+                          onTap: () => onSelected(entry),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              );
+            },
+            onSelected: (entry) {
+              _onSearchResultSelected(
+                provider,
+                entry.polygon,
+                entry.layerId,
+                entry.index,
+              );
+              _autocompleteController?.clear();
+              _autocompleteFocusNode?.unfocus();
+            },
+          ),
+        ),
+        if (provider.adapter != null &&
+            provider.adapter!.displayName.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: Text(
+              provider.adapter!.displayName,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: Color(0xFF5F6368),
+              ),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _mapAwareAction({
+    required bool isMaps,
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+    String? tooltip,
+    bool selected = false,
+  }) {
+    return _AppBarLabelAction(
+      icon: icon,
+      label: label,
+      tooltip: tooltip,
+      selected: selected,
+      onPressed: onPressed,
     );
   }
 
@@ -530,7 +713,7 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
   /// `Distribution/<year>/<MMM yyyy>` derived from the map's [createdAt].
   String _resolveCloudFolderPath(ShareableMapProvider provider) {
     final map = provider.currentMap;
-    final linked = map?.storageFolderPath;
+    final linked = map?.primaryCloudFolderPath;
     if (linked != null && linked.trim().isNotEmpty) {
       return linked.trim();
     }
@@ -622,6 +805,54 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
   }
 }
 
+class _AppBarLabelAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final String? tooltip;
+  final bool selected;
+
+  const _AppBarLabelAction({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    this.tooltip,
+    this.selected = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final foreground =
+        selected ? const Color(0xFF1967D2) : const Color(0xFF5F6368);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Tooltip(
+        message: tooltip ?? label,
+        child: TextButton.icon(
+          onPressed: onPressed,
+          icon: Icon(icon, size: 18),
+          label: Text(label),
+          style: TextButton.styleFrom(
+            foregroundColor: foreground,
+            minimumSize: const Size(0, 40),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            padding: const EdgeInsets.symmetric(horizontal: 9),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+            textStyle: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Empty state when no map is loaded
 class MapEditorEmptyState extends StatelessWidget {
   const MapEditorEmptyState({super.key});
@@ -670,23 +901,47 @@ class MapViewWidget extends riverpod.ConsumerStatefulWidget {
 }
 
 class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
-  // Custom marker icons for vertex editing
-  BitmapDescriptor? _vertexMarkerIcon;
-  BitmapDescriptor? _midpointMarkerIcon;
-  BitmapDescriptor? _firstVertexMarkerIcon;
-
-  // Cached point category bitmap descriptors
-  Map<PointCategory, BitmapDescriptor>? _pointIcons;
-
-  // Letterbox icon for cloud waypoints
-  BitmapDescriptor? _waypointIcon;
-
-  // Pre-rendered cluster icons (letterbox + count badge) keyed by bucketed count
-  Map<int, BitmapDescriptor> _clusterIconCache = {};
+  // Custom bitmap descriptors are owned by [MapBitmapCache] and shared
+  // across every editor instance / hot-reload. We hold a reference here
+  // so the rest of the widget code can read them synchronously without
+  // touching the cache singleton on every build.
+  final MapBitmapCache _bitmapCache = MapBitmapCache.instance;
 
   // Live camera position – updated on every onCameraMove so the info window
   // overlay can be reprojected synchronously on each frame.
-  CameraPosition? _currentCamera;
+  //
+  // Stored in a ValueNotifier instead of plain state so that high-frequency
+  // camera updates during pan/zoom don't trigger setState on the whole
+  // GoogleMap subtree (which would re-run the marker clustering pass for
+  // 12k+ waypoints every frame and freeze the UI). Marker rebuilds are
+  // instead driven by [GoogleMap.onCameraIdle], which fires once when the
+  // gesture settles. Overlays that need to track the camera continuously
+  // (info-window anchor, style panel anchor) listen to this notifier via
+  // ValueListenableBuilder.
+  final ValueNotifier<CameraPosition?> _cameraNotifier =
+      ValueNotifier<CameraPosition?>(null);
+  CameraPosition? get _currentCamera => _cameraNotifier.value;
+
+  // Debounce timer for [GoogleMap.onCameraIdle] — the idle event can fire
+  // several times in rapid succession (especially with trackpad / multi-
+  // touch gestures). Without coalescing, each fire triggers a full
+  // setState() which rebuilds the marker set (including grid clustering
+  // for 12k+ waypoint layers) and pushes thousands of marker objects
+  // across the JS-interop boundary on web, freezing the page.
+  Timer? _cameraIdleDebounce;
+
+  // ── Large-layer cluster cache ─────────────────────────────────────────
+  // `MarkerClusterer.clusterSync` is O(n) over every point in a layer and
+  // is invoked from build(). Every provider notify (auto-save toggle,
+  // info window open/close, drawing tick …) rebuilds the widget, so
+  // without memoization the same 12k-point waypoint layer is re-clustered
+  // dozens of times per second and its thousands of resulting Marker
+  // objects are diff-ed across the google_maps_flutter_web JS bridge,
+  // freezing the page. We cache the result per-layer keyed by the inputs
+  // that actually affect the output; cache misses are unavoidable when
+  // zoom/bounds/visibility/selection change.
+  final Map<String, List<Marker>> _largeLayerMarkerCache = {};
+  final Map<String, String> _largeLayerCacheKey = {};
   // Last pointer-down position in local widget coordinates.
   // Used to anchor the info window at the tapped location for polygon/polyline.
   Offset? _lastPointerDown;
@@ -710,132 +965,28 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   @override
   void initState() {
     super.initState();
-    _createMarkerIcons();
+    _ensureBitmapsLoaded();
   }
 
-  // ── Marker icon creation ───────────────────────────────────────────────
+  @override
+  void dispose() {
+    _cameraIdleDebounce?.cancel();
+    _cameraIdleDebounce = null;
+    _largeLayerMarkerCache.clear();
+    _largeLayerCacheKey.clear();
+    _cameraNotifier.dispose();
+    super.dispose();
+  }
 
-  Future<void> _createMarkerIcons() async {
-    try {
-      _vertexMarkerIcon = await _createCircleMarkerIcon(
-        size: 16.0,
-        fillColor: Colors.white,
-        borderColor: Colors.red,
-        borderWidth: 1.5,
-      );
-    } catch (_) {
-      _vertexMarkerIcon =
-          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
-    }
+  // ── Marker icon loading ────────────────────────────────────────────────
 
-    try {
-      _midpointMarkerIcon = await _createMidpointMarkerIcon();
-    } catch (_) {
-      _midpointMarkerIcon =
-          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
-    }
-
-    try {
-      _firstVertexMarkerIcon = await _createCircleMarkerIcon(
-        size: 20.0,
-        fillColor: Colors.green,
-        borderColor: Colors.white,
-        borderWidth: 2.0,
-      );
-    } catch (_) {
-      _firstVertexMarkerIcon =
-          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen);
-    }
-
-    // Preload point category icons
-    try {
-      await PointMarkerIcons.preload();
-      _pointIcons = PointMarkerIcons.allCached;
-    } catch (_) {
-      _pointIcons = null;
-    }
-
-    // Load letterbox icon for cloud waypoints
-    try {
-      final data = await rootBundle.load('assets/letterbox.png');
-      final codec = await ui.instantiateImageCodec(
-        data.buffer.asUint8List(),
-        targetWidth: 16,
-      );
-      final fi = await codec.getNextFrame();
-      final byteData =
-          await fi.image.toByteData(format: ui.ImageByteFormat.png);
-      if (byteData != null) {
-        _waypointIcon = BitmapDescriptor.bytes(byteData.buffer.asUint8List());
-      }
-    } catch (_) {
-      _waypointIcon = null;
-    }
-
-    // Pre-render cluster icons (letterbox + count badge) for common buckets
-    try {
-      await MarkerClusterer.loadBaseImage();
-      _clusterIconCache = await MarkerClusterer.warmUpClusterIcons();
-    } catch (_) {}
-
+  /// Trigger the shared [MapBitmapCache] load. If the cache is already
+  /// populated (this is not the first editor open of the session) the
+  /// future resolves synchronously and no rebuild is needed.
+  Future<void> _ensureBitmapsLoaded() async {
+    if (_bitmapCache.isLoaded) return;
+    await _bitmapCache.ensureLoaded();
     if (mounted) setState(() {});
-  }
-
-  Future<BitmapDescriptor> _createCircleMarkerIcon({
-    required double size,
-    required Color fillColor,
-    required Color borderColor,
-    required double borderWidth,
-  }) async {
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final double radius = size / 2;
-
-    final paint = Paint()
-      ..color = fillColor
-      ..style = PaintingStyle.fill;
-    canvas.drawCircle(Offset(radius, radius), radius - borderWidth, paint);
-
-    final borderPaint = Paint()
-      ..color = borderColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = borderWidth;
-    canvas.drawCircle(
-        Offset(radius, radius), radius - borderWidth, borderPaint);
-
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(size.toInt(), size.toInt());
-    final pngBytes = await img.toByteData(format: ui.ImageByteFormat.png);
-    if (pngBytes == null) {
-      throw Exception('toByteData returned null for vertex icon');
-    }
-    return BitmapDescriptor.bytes(pngBytes.buffer.asUint8List());
-  }
-
-  Future<BitmapDescriptor> _createMidpointMarkerIcon() async {
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    const double size = 12.0;
-    const double radius = size / 2;
-
-    final paint = Paint()
-      ..color = Colors.orange
-      ..style = PaintingStyle.fill;
-    canvas.drawCircle(const Offset(radius, radius), radius - 1.0, paint);
-
-    final borderPaint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.0;
-    canvas.drawCircle(const Offset(radius, radius), radius - 1.0, borderPaint);
-
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(size.toInt(), size.toInt());
-    final pngBytes = await img.toByteData(format: ui.ImageByteFormat.png);
-    if (pngBytes == null) {
-      throw Exception('toByteData returned null for midpoint icon');
-    }
-    return BitmapDescriptor.bytes(pngBytes.buffer.asUint8List());
   }
 
   // ── Midpoint / editing marker helpers ──────────────────────────────────
@@ -895,9 +1046,9 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     final editingPoints = provider.editingPoints!;
     final markers = <Marker>{};
 
-    final vertexIcon = _vertexMarkerIcon ??
+    final vertexIcon = _bitmapCache.vertex ??
         BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
-    final midpointIcon = _midpointMarkerIcon ??
+    final midpointIcon = _bitmapCache.midpoint ??
         BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
 
     final minPoints = provider.isEditingPolygon ? 3 : 2;
@@ -965,10 +1116,10 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     final canClose =
         provider.drawingMode == DrawingMode.polygon && points.length >= 3;
 
-    final normalIcon = _vertexMarkerIcon ??
+    final normalIcon = _bitmapCache.vertex ??
         BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
     final firstIcon = canClose
-        ? (_firstVertexMarkerIcon ??
+        ? (_bitmapCache.firstVertex ??
             BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen))
         : normalIcon;
 
@@ -982,7 +1133,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         position: point,
         icon: isFirst ? firstIcon : normalIcon,
         anchor: const Offset(0.5, 0.5),
-        zIndex: isFirst ? 1001 : 1000,
+        zIndexInt: isFirst ? 1001 : 1000,
         draggable: false,
         consumeTapEvents: isFirst && canClose,
         onTap: isFirst && canClose
@@ -1067,6 +1218,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
 
   /// Estimate the visible map region from the current camera + widget size.
   /// Uses 20% padding so markers near edges don't pop in/out abruptly.
+  // ignore: unused_element
   LatLngBounds? _estimateVisibleBounds() {
     final cam = _currentCamera;
     if (cam == null || _mapSize == Size.zero) return null;
@@ -1082,6 +1234,74 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       _mapSize,
     );
     return LatLngBounds(southwest: sw, northeast: ne);
+  }
+
+  /// Tracks whether the most recent call to [_markersForLayer] returned a
+  /// cached list (true) or recomputed the markers (false). Read once per
+  /// `expand` callback so build() can log how many layers were reused.
+  bool _layerMarkerCacheReused = false;
+
+  /// Build (or reuse) the [Marker] list for a single visible layer.
+  ///
+  /// We do NOT cluster and we do NOT cull by viewport — those two
+  /// passes were O(n) over every point on every camera idle and were
+  /// the direct cause of the page freeze when panning so far that
+  /// everything fell outside the visible bounds (every point still had
+  /// to be tested by `bounds.contains`). Instead we render every point
+  /// of every visible layer directly and memoize the result per-layer
+  /// on a key that does NOT include the camera, so panning/zooming
+  /// returns the cached `List<Marker>` instantly without any work.
+  ///
+  /// Cache invalidates only when the layer's data identity changes —
+  /// point count, visibility, draggable flag, or the currently selected
+  /// element id (which affects the highlighted marker icon).
+  List<Marker> _markersForLayer({
+    required dynamic layer,
+    required ShareableMapProvider provider,
+    required bool isDraggable,
+    required Map<PointCategory, BitmapDescriptor>? pointIcons,
+    required Map<PointCategory, BitmapDescriptor>? waypointPointIcons,
+  }) {
+    final layerId = layer.id as String;
+    final pointCount = (layer.points as List).length;
+    final isVisible = layer.isVisible as bool;
+    final selected = provider.selectedElementId ?? '';
+    final isWaypoint = provider.isCloudWaypointsLayer(layerId);
+    // Markers for hidden layers are still built (with visible: false) so
+    // toggling visibility is a cheap native-visibility update on the JS
+    // bridge rather than a mass add/remove of thousands of markers.
+    final canDrag = isDraggable && isVisible;
+
+    final key = '$pointCount|$isVisible|$canDrag|$selected|$isWaypoint';
+
+    if (_largeLayerCacheKey[layerId] == key) {
+      final cached = _largeLayerMarkerCache[layerId];
+      if (cached != null) {
+        _layerMarkerCacheReused = true;
+        return cached;
+      }
+    }
+
+    final renderSw = Stopwatch()..start();
+    final markers = layer.getGoogleMapsMarkers(
+      selectedElementId: provider.selectedElementId,
+      onTap: (pointId) => _handleMarkerTap(context, provider, pointId),
+      draggable: canDrag,
+      onDragEnd: canDrag
+          ? (pointId, newPos) => provider.moveMarker(pointId, newPos)
+          : null,
+      pointIcons: isWaypoint ? (waypointPointIcons ?? pointIcons) : pointIcons,
+      markerVisible: isVisible,
+    ) as List<Marker>;
+
+    debugPrint(
+        '[MapView] rebuilt layer "$layerId" markers: $pointCount points -> '
+        '${markers.length} markers in ${renderSw.elapsedMilliseconds}ms');
+
+    _largeLayerCacheKey[layerId] = key;
+    _largeLayerMarkerCache[layerId] = markers;
+    _layerMarkerCacheReused = false;
+    return markers;
   }
 
   /// Returns the LatLng of the last pointer-down, falling back to [fallback].
@@ -1291,80 +1511,97 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       if (provider.isEditingVertices && provider.getEditingPolyline() != null)
         provider.getEditingPolyline()!,
       if (provider.getDrawingPolyline() != null) provider.getDrawingPolyline()!,
+      // Lasso-select preview: dashed orange polygon outline.
+      if (provider.isLassoSelectActive && provider.lassoPoints.length >= 2)
+        Polyline(
+          polylineId: const PolylineId('lasso_preview'),
+          points: [
+            ...provider.lassoPoints,
+            // Close the loop visually once we have ≥3 points.
+            if (provider.lassoPoints.length >= 3) provider.lassoPoints.first,
+          ],
+          color: Colors.orange.withValues(alpha: 0.85),
+          width: 3,
+          patterns: [PatternItem.dash(16), PatternItem.gap(8)],
+          geodesic: true,
+        ),
     };
 
     // Combine completed markers with drawing/editing markers
-    final isDraggable = !provider.capabilities.readOnly &&
+    final isMaps = FlavorConfig.instance.isMaps;
+    final isAuthenticated = ref.watch(authRiverpod).isAuthenticated;
+    final canEditInThisView =
+        !isMaps || (isAuthenticated && !isMapsMobileViewer(context));
+    final isDraggable = canEditInThisView &&
+        !provider.capabilities.readOnly &&
         !provider.isDrawing &&
         !provider.isEditingVertices;
+    final pointIcons = _bitmapCache.pointCategoryIcons;
+    final waypointIcon = _bitmapCache.waypoint;
     // Build a special pointIcons map for the cloud waypoints layer
     // so that its generic markers use the letterbox bitmap.
     Map<PointCategory, BitmapDescriptor>? waypointPointIcons;
-    if (_waypointIcon != null) {
+    if (waypointIcon != null) {
       waypointPointIcons = {
-        if (_pointIcons != null) ..._pointIcons!,
-        PointCategory.generic: _waypointIcon!,
+        if (pointIcons != null) ...pointIcons,
+        PointCategory.generic: waypointIcon,
       };
     }
 
-    // Viewport bounds and zoom for clustering large layers.
-    final viewBounds = _estimateVisibleBounds();
+    // Viewport bounds and zoom are no longer used for marker rendering —
+    // clustering and visible-bounds culling were causing the page to
+    // freeze when panning large waypoint layers because every camera
+    // movement re-ran an O(n) pass over 12k+ points. We now render
+    // every visible layer's markers directly and rely on the per-layer
+    // identity cache below to keep the resulting Set stable across
+    // unrelated provider notifies (auto-save, info window, drawing, …).
     final currentZoom = _currentCamera?.zoom ?? map.defaultZoom;
+
+    final markerSw = Stopwatch()..start();
+    int totalRenderedMarkers = 0;
+    int reusedLayers = 0;
+    int rebuiltLayers = 0;
 
     final markers = <Marker>{
       if (!provider.isEditingVertices) ...[
-        // Small layers: render all markers directly
-        ...visibleLayers
-            .where((layer) => layer.points.length <= 200)
-            .expand((layer) {
-          final isWaypointLayer =
-              layer.name == ShareableMapProvider.waypointsLayerName;
-          return layer.getGoogleMapsMarkers(
-            selectedElementId: provider.selectedElementId,
-            onTap: (pointId) => _handleMarkerTap(context, provider, pointId),
-            draggable: isDraggable,
-            onDragEnd: isDraggable
-                ? (pointId, newPos) => provider.moveMarker(pointId, newPos)
-                : null,
-            pointIcons: isWaypointLayer
-                ? (waypointPointIcons ?? _pointIcons)
-                : _pointIcons,
+        // Iterate ALL layers (visible + hidden) so the marker set stays
+        // stable when toggling visibility. Hidden layers contribute
+        // markers with visible:false so the JS bridge only diffs the
+        // visibility property instead of removing/re-adding thousands
+        // of markers — keeps the UI responsive for 15k+ waypoint layers.
+        ...allLayersSorted.expand((layer) {
+          final result = _markersForLayer(
+            layer: layer,
+            provider: provider,
+            isDraggable: isDraggable,
+            pointIcons: pointIcons,
+            waypointPointIcons: waypointPointIcons,
           );
-        }),
-        // Large layers: always include (visible or not) with markerVisible
-        // flag so Google Maps hides/shows natively without add/remove churn.
-        ...allLayersSorted
-            .where((layer) => layer.points.length > 200)
-            .expand((layer) {
-          return MarkerClusterer.clusterSync(
-            points: layer.points,
-            zoom: currentZoom,
-            visibleBounds: viewBounds,
-            selectedElementId: provider.selectedElementId,
-            onTap: (pointId) => _handleMarkerTap(context, provider, pointId),
-            draggable: isDraggable && layer.isVisible,
-            onDragEnd: isDraggable && layer.isVisible
-                ? (pointId, newPos) => provider.moveMarker(pointId, newPos)
-                : null,
-            customIcon: _waypointIcon,
-            clusterIcons: _clusterIconCache,
-            markerVisible: layer.isVisible,
-          );
+          totalRenderedMarkers += result.length;
+          if (_layerMarkerCacheReused) {
+            reusedLayers++;
+          } else {
+            rebuiltLayers++;
+          }
+          return result;
         }),
       ],
       ..._buildDrawingMarkers(context, provider),
       ..._buildEditingMarkers(context, provider),
     };
 
+    if (markerSw.elapsedMilliseconds > 5 ||
+        rebuiltLayers > 0 ||
+        totalRenderedMarkers > 500) {
+      debugPrint('[MapView] markers built in ${markerSw.elapsedMilliseconds}ms '
+          '(total=$totalRenderedMarkers, reusedLayers=$reusedLayers, '
+          'rebuiltLayers=$rebuiltLayers, zoom=${currentZoom.toStringAsFixed(1)})');
+    }
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final mapSize = Size(constraints.maxWidth, constraints.maxHeight);
         _mapSize = mapSize;
-        // Reproject anchor LatLng → screen pixel on every frame so the
-        // overlay tracks the geographic point during pan and zoom.
-        final infoScreen = iw != null && _currentCamera != null
-            ? _latLngToScreen(iw.anchor, _currentCamera!, mapSize)
-            : null;
 
         return MouseRegion(
           onHover: (event) => _onHover(event.localPosition, provider),
@@ -1388,7 +1625,17 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                   onMapCreated: (controller) {
                     provider.setMapController(controller);
                   },
-                  onCameraMove: (pos) => setState(() => _currentCamera = pos),
+                  // Update the live camera notifier on every move so overlays
+                  // (info window / style panel) can reproject smoothly via
+                  // ValueListenableBuilder — but DO NOT call setState here
+                  // or the entire marker set (incl. 12k-point clustering)
+                  // would rebuild every frame during pan/zoom.
+                  onCameraMove: (pos) => _cameraNotifier.value = pos,
+                  // No onCameraIdle handler: marker rendering no longer
+                  // depends on the viewport, so panning/zooming does not
+                  // need to trigger a rebuild. Info-window/style-panel
+                  // overlays still track the camera continuously via the
+                  // _cameraNotifier ValueListenable above.
                   webGestureHandling:
                       ref.watch(mapGestureRiverpod).gestureHandling,
                   onTap: (position) {
@@ -1427,51 +1674,75 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                   zoomControlsEnabled: true,
                   mapToolbarEnabled: false,
                 ),
-                if (provider.showStylePanel && infoScreen != null)
-                  _MapStylePanel(screen: infoScreen),
-                if (infoScreen != null)
-                  _InfoWindowOverlay(
-                    screen: infoScreen,
-                    mapSize: mapSize,
-                    data: iw!,
-                    onDismiss: _dismissInfoWindow,
-                    onStyle: (iw.type == 'polygon' || iw.type == 'polyline')
-                        ? () {
+                // Camera-driven overlays. Listening to the camera notifier
+                // here means only this subtree (a few small Positioned
+                // widgets) rebuilds on each camera move — the GoogleMap
+                // and its 12k+ markers stay untouched.
+                ValueListenableBuilder<CameraPosition?>(
+                  valueListenable: _cameraNotifier,
+                  builder: (context, cam, _) {
+                    final infoScreen = iw != null && cam != null
+                        ? _latLngToScreen(iw.anchor, cam, mapSize)
+                        : null;
+                    if (infoScreen == null) {
+                      return const SizedBox.shrink();
+                    }
+                    return Stack(
+                      children: [
+                        if (provider.showStylePanel && canEditInThisView)
+                          _MapStylePanel(screen: infoScreen),
+                        _InfoWindowOverlay(
+                          screen: infoScreen,
+                          mapSize: mapSize,
+                          data: iw!,
+                          canEdit: canEditInThisView &&
+                              !provider.capabilities.readOnly,
+                          onDismiss: _dismissInfoWindow,
+                          onStyle: canEditInThisView &&
+                                  (iw.type == 'polygon' ||
+                                      iw.type == 'polyline')
+                              ? () {
+                                  _lastInfoWindowAction = DateTime.now();
+                                  provider.toggleStylePanel();
+                                }
+                              : null,
+                          onEditVertices: () {
                             _lastInfoWindowAction = DateTime.now();
-                            provider.toggleStylePanel();
-                          }
-                        : null,
-                    onEditVertices: () {
-                      _lastInfoWindowAction = DateTime.now();
-                      final elementId = iw.elementId;
-                      final type = iw.type;
-                      _dismissInfoWindow();
-                      if (type == 'polygon' || type == 'polyline') {
-                        provider.startVertexEditing(elementId);
-                      }
-                    },
-                    onPhoto: null,
-                    onDelete: () {
-                      _lastInfoWindowAction = DateTime.now();
-                      // Use explicit IDs from the info window data —
-                      // selectedElementId may already be cleared by a
-                      // concurrent web tap-through.
-                      final elementId = iw.elementId;
-                      final layerId = iw.layerId;
-                      _dismissInfoWindow();
-                      provider.deleteElement(elementId, layerId);
-                    },
-                    onAddToMap: iw.type == 'preview_work_area'
-                        ? () {
-                            _lastInfoWindowAction = DateTime.now();
-                            final selected = _previewWorkAreaForInfoWindow;
-                            if (selected != null) {
-                              provider.addWorkAreaToMap(selected);
-                              _dismissInfoWindow();
+                            final elementId = iw.elementId;
+                            final type = iw.type;
+                            _dismissInfoWindow();
+                            if (type == 'polygon' || type == 'polyline') {
+                              provider.startVertexEditing(elementId);
                             }
-                          }
-                        : null,
-                  ),
+                          },
+                          onPhoto: null,
+                          onDelete: () {
+                            _lastInfoWindowAction = DateTime.now();
+                            // Use explicit IDs from the info window data —
+                            // selectedElementId may already be cleared by a
+                            // concurrent web tap-through.
+                            final elementId = iw.elementId;
+                            final layerId = iw.layerId;
+                            _dismissInfoWindow();
+                            provider.deleteElement(elementId, layerId);
+                          },
+                          onAddToMap: canEditInThisView &&
+                                  iw.type == 'preview_work_area'
+                              ? () {
+                                  _lastInfoWindowAction = DateTime.now();
+                                  final selected =
+                                      _previewWorkAreaForInfoWindow;
+                                  if (selected != null) {
+                                    provider.addWorkAreaToMap(selected);
+                                    _dismissInfoWindow();
+                                  }
+                                }
+                              : null,
+                        ),
+                      ],
+                    );
+                  },
+                ),
                 // Hover tooltip overlay
                 if (_hoverTooltipData != null &&
                     _hoverPosition != null &&
@@ -1519,6 +1790,8 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       case DrawingMode.edit:
         break;
       case DrawingMode.lassoSelect:
+        // Accumulate lasso boundary points on each tap.
+        provider.addLassoPoint(position);
         break;
     }
   }
@@ -1669,12 +1942,40 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   }
 }
 
-/// Sidebar widget with layer management
-class MapSidebarWidget extends riverpod.ConsumerWidget {
+/// Sidebar widget with layer management.
+///
+/// In the Maps standalone flavor, the sidebar is hidden by default on narrow
+/// screens (mobile) and the user can toggle it with the leading app-bar button.
+class MapSidebarWidget extends riverpod.ConsumerStatefulWidget {
   const MapSidebarWidget({super.key});
 
   @override
-  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+  riverpod.ConsumerState<MapSidebarWidget> createState() =>
+      _MapSidebarWidgetState();
+}
+
+class _MapSidebarWidgetState extends riverpod.ConsumerState<MapSidebarWidget> {
+  @override
+  void initState() {
+    super.initState();
+    // On the first frame, auto-hide the sidebar when running as the Maps
+    // standalone flavor on a narrow screen so mobile users get a clean
+    // full-screen map view by default (they can still open it via the
+    // leading toggle button).
+    if (FlavorConfig.instance.isMaps) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final isMobile =
+            MediaQuery.sizeOf(context).width < _mapsMobileBreakpoint;
+        if (isMobile) {
+          ref.read(shareableMapRiverpod).setSidebarVisible(false);
+        }
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final provider = ref.watch(shareableMapRiverpod);
     if (!provider.isSidebarVisible) {
       return const SizedBox.shrink();
@@ -1767,7 +2068,10 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    final pointCount = provider.drawingPoints.length;
+    final isLasso = provider.drawingMode == DrawingMode.lassoSelect;
+    // Lasso mode tracks its own point list; regular drawing uses drawingPoints.
+    final pointCount =
+        isLasso ? provider.lassoPoints.length : provider.drawingPoints.length;
     final canComplete = _canCompleteDrawing(provider);
 
     return Positioned(
@@ -1798,11 +2102,14 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                       Icon(
                         _getDrawingModeIcon(provider.drawingMode),
                         size: 20,
-                        color: const Color(0xFF1967D2),
+                        color:
+                            isLasso ? Colors.orange : const Color(0xFF1967D2),
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        'Drawing ${_getDrawingModeLabel(provider.drawingMode)}',
+                        isLasso
+                            ? 'Lasso Select'
+                            : 'Drawing ${_getDrawingModeLabel(provider.drawingMode)}',
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w500,
@@ -1814,14 +2121,18 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 8, vertical: 2),
                         decoration: BoxDecoration(
-                          color: const Color(0xFFE8F0FE),
+                          color: isLasso
+                              ? Colors.orange.withValues(alpha: 0.12)
+                              : const Color(0xFFE8F0FE),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Text(
                           '$pointCount ${pointCount == 1 ? 'point' : 'points'}',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 12,
-                            color: Color(0xFF1967D2),
+                            color: isLasso
+                                ? Colors.orange.shade800
+                                : const Color(0xFF1967D2),
                             fontWeight: FontWeight.w500,
                           ),
                         ),
@@ -1837,8 +2148,12 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                       OutlinedButton.icon(
                         onPressed: pointCount > 0
                             ? () {
-                                provider.removeLastDrawingPoint();
-                                provider.markIgnoreNextTap();
+                                if (isLasso) {
+                                  provider.removeLastLassoPoint();
+                                } else {
+                                  provider.removeLastDrawingPoint();
+                                  provider.markIgnoreNextTap();
+                                }
                               }
                             : null,
                         icon: const Icon(Icons.undo, size: 18),
@@ -1851,7 +2166,13 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                       const SizedBox(width: 8),
                       // Cancel
                       OutlinedButton.icon(
-                        onPressed: () => provider.cancelDrawing(),
+                        onPressed: () {
+                          if (isLasso) {
+                            provider.cancelLassoSelect();
+                          } else {
+                            provider.cancelDrawing();
+                          }
+                        },
                         icon: const Icon(Icons.close, size: 18),
                         label: const Text('Cancel'),
                         style: OutlinedButton.styleFrom(
@@ -1864,20 +2185,43 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                       ElevatedButton.icon(
                         onPressed: canComplete
                             ? () {
-                                // Block drawing while dialog is open
-                                provider.setDialogOpen(true);
-                                MapEditorDialogs.showElementNameDialog(
-                                        context, provider)
-                                    .then((_) {
-                                  // Unblock drawing when dialog closes
-                                  provider.setDialogOpen(false);
-                                });
+                                if (isLasso) {
+                                  // Perform the lasso selection — find all
+                                  // work areas whose centroid falls inside
+                                  // the drawn polygon, then import them.
+                                  final workAreas =
+                                      ref.read(scheduleRiverpod).workAreas;
+                                  final matched =
+                                      provider.completeLassoSelect(workAreas);
+                                  if (matched.isNotEmpty) {
+                                    provider.addWorkAreasToMap(matched);
+                                  }
+                                  provider.finishLassoSelect();
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(matched.isEmpty
+                                          ? 'No work areas found inside the lasso'
+                                          : 'Added ${matched.length} work ${matched.length == 1 ? 'area' : 'areas'}'),
+                                      duration: const Duration(seconds: 3),
+                                    ),
+                                  );
+                                } else {
+                                  // Regular polygon/polyline/point completion.
+                                  provider.setDialogOpen(true);
+                                  MapEditorDialogs.showElementNameDialog(
+                                          context, provider)
+                                      .then((_) {
+                                    provider.setDialogOpen(false);
+                                  });
+                                }
                               }
                             : null,
-                        icon: const Icon(Icons.check, size: 18),
-                        label: const Text('Complete'),
+                        icon: Icon(isLasso ? Icons.gesture : Icons.check,
+                            size: 18),
+                        label: Text(isLasso ? 'Select' : 'Complete'),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF1967D2),
+                          backgroundColor:
+                              isLasso ? Colors.orange : const Color(0xFF1967D2),
                           foregroundColor: Colors.white,
                           disabledBackgroundColor: const Color(0xFFE8EAED),
                           disabledForegroundColor: const Color(0xFF80868B),
@@ -1885,12 +2229,14 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                       ),
                     ],
                   ),
-                  // Hint text with more guidance
+                  // Hint text
                   if (!canComplete)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: Text(
-                        _getDrawingHint(provider.drawingMode, pointCount),
+                        isLasso
+                            ? 'Tap the map to draw the lasso boundary (need ${3 - pointCount} more ${(3 - pointCount) == 1 ? 'point' : 'points'})'
+                            : _getDrawingHint(provider.drawingMode, pointCount),
                         style: const TextStyle(
                           fontSize: 12,
                           color: Color(0xFF5F6368),
@@ -1898,9 +2244,10 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                         textAlign: TextAlign.center,
                       ),
                     ),
-                  // Progress indicator for polygons and polylines
-                  if (provider.drawingMode == DrawingMode.polygon ||
-                      provider.drawingMode == DrawingMode.polyline)
+                  // Progress indicator for polygons and polylines (not lasso)
+                  if (!isLasso &&
+                      (provider.drawingMode == DrawingMode.polygon ||
+                          provider.drawingMode == DrawingMode.polyline))
                     Padding(
                       padding: const EdgeInsets.only(top: 4),
                       child: Row(
@@ -1933,6 +2280,9 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
   }
 
   bool _canCompleteDrawing(ShareableMapProvider provider) {
+    if (provider.drawingMode == DrawingMode.lassoSelect) {
+      return provider.lassoPoints.length >= 3;
+    }
     final pointCount = provider.drawingPoints.length;
     switch (provider.drawingMode) {
       case DrawingMode.polygon:
@@ -1954,6 +2304,8 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
         return Icons.timeline;
       case DrawingMode.point:
         return Icons.place_outlined;
+      case DrawingMode.lassoSelect:
+        return Icons.gesture;
       default:
         return Icons.edit;
     }
@@ -2620,6 +2972,7 @@ class _HoverTooltip extends StatelessWidget {
 /// Info window overlay that appears at the tap location, matching Google My Maps style.
 class _InfoWindowOverlay extends riverpod.ConsumerStatefulWidget {
   final InfoWindowData data;
+  final bool canEdit;
   final VoidCallback onDismiss;
 
   /// Called when the style/paint-bucket button is tapped (fill color, stroke).
@@ -2648,6 +3001,7 @@ class _InfoWindowOverlay extends riverpod.ConsumerStatefulWidget {
     required this.screen,
     required this.mapSize,
     required this.data,
+    required this.canEdit,
     required this.onDismiss,
     required this.onStyle,
     required this.onEditVertices,
@@ -2868,6 +3222,10 @@ class _InfoWindowOverlayState
 
   Widget _buildCard(BuildContext context) {
     final data = widget.data;
+    final provider = ref.watch(shareableMapRiverpod);
+    final letterBoxesReached = data.type == 'polygon'
+        ? provider.letterBoxesReachedForPolygon(data.layerId, data.elementId)
+        : null;
     final hasSubtitle = data.subtitle.isNotEmpty;
     final hasDesc = data.description.isNotEmpty;
     final isShapeable = data.type == 'polygon' || data.type == 'polyline';
@@ -2965,7 +3323,7 @@ class _InfoWindowOverlayState
             ),
 
             // ── Point category selector (points only) ──────────────
-            if (data.type == 'point') _buildCategoryRow(data),
+            if (widget.canEdit && data.type == 'point') _buildCategoryRow(data),
 
             // ── Description (optional) ─────────────────────────────
             if (hasDesc)
@@ -2987,18 +3345,24 @@ class _InfoWindowOverlayState
                 padding:
                     const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 child: _buildStatsRow(
-                    data.type, data.subtitle, data.letterBoxEstimate),
+                  data.type,
+                  data.subtitle,
+                  data.letterBoxEstimate,
+                  letterBoxesReached,
+                ),
               ),
             ],
 
             // ── Action buttons ─────────────────────────────────────
-            const Divider(height: 1, thickness: 1, color: Color(0xFFE8EAED)),
-            SizedBox(
-              height: 42,
-              child: isPreviewWorkArea
-                  ? _buildPreviewActionsRow(context)
-                  : _buildActionsRow(context, isShapeable),
-            ),
+            if (widget.canEdit) ...[
+              const Divider(height: 1, thickness: 1, color: Color(0xFFE8EAED)),
+              SizedBox(
+                height: 42,
+                child: isPreviewWorkArea
+                    ? _buildPreviewActionsRow(context)
+                    : _buildActionsRow(context, isShapeable),
+              ),
+            ],
           ],
         ),
       ),
@@ -3060,8 +3424,7 @@ class _InfoWindowOverlayState
               child: TextField(
                 controller: _estimateController,
                 focusNode: _estimateFocusNode,
-                style:
-                    const TextStyle(fontSize: 12, color: Color(0xFF5F6368)),
+                style: const TextStyle(fontSize: 12, color: Color(0xFF5F6368)),
                 keyboardType: TextInputType.number,
                 inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                 decoration: InputDecoration(
@@ -3070,8 +3433,8 @@ class _InfoWindowOverlayState
                   hintText: '0',
                   hintStyle:
                       TextStyle(fontSize: 12, color: Colors.grey.shade400),
-                  contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 2, vertical: 0),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 2, vertical: 0),
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
                   focusedBorder: InputBorder.none,
@@ -3092,7 +3455,12 @@ class _InfoWindowOverlayState
     );
   }
 
-  Widget _buildStatsRow(String type, String subtitle, int letterBoxEstimate) {
+  Widget _buildStatsRow(
+    String type,
+    String subtitle,
+    int letterBoxEstimate,
+    int? letterBoxesReached,
+  ) {
     if (type == 'polygon' || type == 'preview_work_area') {
       // subtitle format: "X.XX km²  ·  X.XX km"
       final parts = subtitle.split('·');
@@ -3120,6 +3488,15 @@ class _InfoWindowOverlayState
           if (type == 'polygon') ...[
             const SizedBox(height: 4),
             _buildEditableEstimateRow(),
+            if (letterBoxesReached != null) ...[
+              const SizedBox(height: 4),
+              _StatItem(
+                icon: const Icon(Icons.fact_check_outlined,
+                    size: 14, color: Color(0xFF5F6368)),
+                label:
+                    '$letterBoxesReached letter box${letterBoxesReached == 1 ? '' : 'es'} reached',
+              ),
+            ],
           ] else if (letterBoxEstimate > 0) ...[
             const SizedBox(height: 4),
             _StatItem(

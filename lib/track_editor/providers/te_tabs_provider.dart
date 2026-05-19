@@ -1,4 +1,6 @@
 // track_editor/providers/te_tabs_provider.dart
+import 'dart:collection';
+
 import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -26,18 +28,29 @@ class TETabsProvider with ChangeNotifier {
     TEMode.import: _defaultTabs(),
     TEMode.trim: _defaultTabs(),
     TEMode.processing: _defaultTabs(),
+    TEMode.update: _defaultTabs(),
   };
   final Map<TEMode, int> _currentByMode = {
     TEMode.import: 0,
     TEMode.trim: 0,
     TEMode.processing: 0,
+    TEMode.update: 0,
   };
 
   TEMode _activeMode = TEMode.processing;
 
   // ── Active-mode helpers ───────────────────────────────────────────────────
   TEMode get activeMode => _activeMode;
-  List<TETabItem> get tabs => _tabsByMode[_activeMode]!;
+
+  /// Read-only view of the active mode's tab list. External callers MUST go
+  /// through provider methods (`addTab`, `removeTab`, `replacePolygons`, …)
+  /// to mutate state so listeners are notified consistently.
+  List<TETabItem> get tabs => UnmodifiableListView(_tabsByMode[_activeMode]!);
+
+  /// Internal mutable accessor for the active mode's tab list. Methods inside
+  /// this provider use this to perform mutations that the public getter
+  /// disallows.
+  List<TETabItem> get _activeTabs => _tabsByMode[_activeMode]!;
   int get currentTab => _currentByMode[_activeMode]!;
 
   void setActiveMode(TEMode mode) {
@@ -48,20 +61,21 @@ class TETabsProvider with ChangeNotifier {
 
   // ── Mutations (all operate on the active mode's list) ────────────────────
   void addTab(TETabItem tab) {
-    tabs.add(tab);
+    _activeTabs.add(tab);
     notifyListeners();
   }
 
   /// Add multiple tabs at once with a single notification.
   void addTabsBatch(List<TETabItem> newTabs) {
     if (newTabs.isEmpty) return;
-    tabs.addAll(newTabs);
-    _currentByMode[_activeMode] = tabs.length - 1;
+    final list = _activeTabs;
+    list.addAll(newTabs);
+    _currentByMode[_activeMode] = list.length - 1;
     notifyListeners();
   }
 
   void removeTab(TETabItem tab) {
-    final list = tabs;
+    final list = _activeTabs;
     final idx = list.indexOf(tab);
     if (idx == -1) return;
     list.remove(tab);
@@ -80,17 +94,149 @@ class TETabsProvider with ChangeNotifier {
   }
 
   void renameTab(int index, String newTitle) {
-    final list = tabs;
+    final list = _activeTabs;
     if (index >= 0 && index < list.length) {
-      list[index] = TETabItem(
-        title: newTitle,
-        polygons: list[index].polygons,
-        tracks: list[index].tracks,
-        waypoints: list[index].waypoints,
-        targetPolygons: list[index].targetPolygons,
-      );
+      list[index] = list[index].copyWith(title: newTitle);
       notifyListeners();
     }
+  }
+
+  /// Replace the metadata fields of a tab (linked schedule jobs, drop-off
+  /// points, etc.) without disturbing its working data lists. Used when
+  /// the user refreshes against the schedule.
+  void replaceTabMeta(
+    int index, {
+    String? distributorId,
+    DateTime? trackDate,
+    List<String>? jobIds,
+    List<TEDropOffPoint>? dropOffPoints,
+    String? storageFolderPath,
+  }) {
+    final list = _activeTabs;
+    if (index < 0 || index >= list.length) return;
+    list[index] = list[index].copyWith(
+      distributorId: distributorId,
+      trackDate: trackDate,
+      jobIds: jobIds,
+      dropOffPoints: dropOffPoints,
+      storageFolderPath: storageFolderPath,
+    );
+    notifyListeners();
+  }
+
+  /// Replace the polygon list of [tabIndex] entirely. Used by the
+  /// Refresh-from-schedule action to wholesale swap in fresh work-map
+  /// polygons, and by undo to restore a previous polygon list.
+  void replacePolygons(int tabIndex, List<TEStyledPolygon> newPolygons) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final polys = list[tabIndex].polygons;
+    polys
+      ..clear()
+      ..addAll(newPolygons);
+    notifyListeners();
+  }
+
+  /// Move a single waypoint to [newPos]. Used by drag-to-edit.
+  void moveWaypoint(int tabIndex, int waypointIndex, LatLng newPos) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final wpts = list[tabIndex].waypoints;
+    if (waypointIndex < 0 || waypointIndex >= wpts.length) return;
+    final w = wpts[waypointIndex];
+    w.lat = newPos.latitude;
+    w.lon = newPos.longitude;
+    notifyListeners();
+  }
+
+  /// Move a single trackpoint (identified by global flat index across all
+  /// segments of [trackIndex]) to [newPos]. Used by scissors-mode drag.
+  void moveTrackpoint(
+    int tabIndex,
+    int trackIndex,
+    int globalPointIndex,
+    LatLng newPos,
+  ) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final tracks = list[tabIndex].tracks;
+    if (trackIndex < 0 || trackIndex >= tracks.length) return;
+    final trk = tracks[trackIndex];
+    int seen = 0;
+    for (final seg in trk.trksegs) {
+      if (globalPointIndex < seen + seg.trkpts.length) {
+        final local = globalPointIndex - seen;
+        final pt = seg.trkpts[local];
+        pt.lat = newPos.latitude;
+        pt.lon = newPos.longitude;
+        notifyListeners();
+        return;
+      }
+      seen += seg.trkpts.length;
+    }
+  }
+
+  /// Insert a track at a specific index (used by undo of [removeTrack]).
+  void insertTrack(int tabIndex, int trackIndex, Trk track) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final tracks = list[tabIndex].tracks;
+    final clamped = trackIndex.clamp(0, tracks.length);
+    tracks.insert(clamped, track);
+    notifyListeners();
+  }
+
+  /// Replace a range of tracks (used by undo of [splitTrack] which itself
+  /// uses [List.replaceRange]).
+  void replaceTrackRange(
+    int tabIndex,
+    int start,
+    int end,
+    List<Trk> replacement,
+  ) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final tracks = list[tabIndex].tracks;
+    if (start < 0 || end > tracks.length || start > end) return;
+    tracks.replaceRange(start, end, replacement);
+    notifyListeners();
+  }
+
+  /// Insert a waypoint at a specific index (used by undo of remove).
+  void insertWaypoint(int tabIndex, int waypointIndex, Wpt waypoint) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final wpts = list[tabIndex].waypoints;
+    final clamped = waypointIndex.clamp(0, wpts.length);
+    wpts.insert(clamped, waypoint);
+    notifyListeners();
+  }
+
+  /// Insert multiple waypoints at the given indices in one shot. Indices
+  /// must reflect the FINAL positions (after all inserts).
+  void insertWaypoints(
+    int tabIndex,
+    List<({int index, Wpt waypoint})> entries,
+  ) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final wpts = list[tabIndex].waypoints;
+    final sorted = [...entries]..sort((a, b) => a.index.compareTo(b.index));
+    for (final e in sorted) {
+      final clamped = e.index.clamp(0, wpts.length);
+      wpts.insert(clamped, e.waypoint);
+    }
+    notifyListeners();
+  }
+
+  /// Insert a polygon at a specific index (used by undo of remove).
+  void insertPolygon(int tabIndex, int polyIndex, TEStyledPolygon polygon) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final polys = list[tabIndex].polygons;
+    final clamped = polyIndex.clamp(0, polys.length);
+    polys.insert(clamped, polygon);
+    notifyListeners();
   }
 
   void clearTabs() {
@@ -109,7 +255,7 @@ class TETabsProvider with ChangeNotifier {
   }
 
   void addData(TETabItem data) {
-    final list = tabs;
+    final list = _activeTabs;
     final cur = _currentByMode[_activeMode]!;
     if (cur < list.length) {
       list[cur].polygons.addAll(data.polygons);
@@ -124,7 +270,7 @@ class TETabsProvider with ChangeNotifier {
   /// Replace the [LatLng] points of a single polygon in-place and notify.
   void updatePolygonPoints(
       int tabIndex, int polyIndex, List<LatLng> newPoints) {
-    final list = tabs;
+    final list = _activeTabs;
     if (tabIndex < 0 || tabIndex >= list.length) return;
     final polys = list[tabIndex].polygons;
     if (polyIndex < 0 || polyIndex >= polys.length) return;
@@ -134,7 +280,7 @@ class TETabsProvider with ChangeNotifier {
 
   /// Append [newPolygons] to the active tab's polygon list.
   void addPolygonsToCurrentTab(List<TEStyledPolygon> newPolygons) {
-    final list = tabs;
+    final list = _activeTabs;
     final cur = _currentByMode[_activeMode]!;
     if (cur < list.length) {
       list[cur].polygons.addAll(newPolygons);
@@ -144,7 +290,7 @@ class TETabsProvider with ChangeNotifier {
 
   /// Remove a polygon by index from the given tab.
   void removePolygon(int tabIndex, int polyIndex) {
-    final list = tabs;
+    final list = _activeTabs;
     if (tabIndex < 0 || tabIndex >= list.length) return;
     final polys = list[tabIndex].polygons;
     if (polyIndex < 0 || polyIndex >= polys.length) return;
@@ -154,7 +300,7 @@ class TETabsProvider with ChangeNotifier {
 
   /// Rename a polygon in the given tab.
   void renamePolygon(int tabIndex, int polyIndex, String newName) {
-    final list = tabs;
+    final list = _activeTabs;
     if (tabIndex < 0 || tabIndex >= list.length) return;
     final polys = list[tabIndex].polygons;
     if (polyIndex < 0 || polyIndex >= polys.length) return;
@@ -173,7 +319,7 @@ class TETabsProvider with ChangeNotifier {
 
   /// Remove a track by index from the given tab.
   void removeTrack(int tabIndex, int trackIndex) {
-    final list = tabs;
+    final list = _activeTabs;
     if (tabIndex < 0 || tabIndex >= list.length) return;
     final tracks = list[tabIndex].tracks;
     if (trackIndex < 0 || trackIndex >= tracks.length) return;
@@ -186,7 +332,7 @@ class TETabsProvider with ChangeNotifier {
   /// whitespace-only name is stored as `null` so the UI will fall back to
   /// the default "Track N" label.
   void renameTrack(int tabIndex, int trackIndex, String newName) {
-    final list = tabs;
+    final list = _activeTabs;
     if (tabIndex < 0 || tabIndex >= list.length) return;
     final tracks = list[tabIndex].tracks;
     if (trackIndex < 0 || trackIndex >= tracks.length) return;
@@ -199,7 +345,7 @@ class TETabsProvider with ChangeNotifier {
 
   /// Remove a waypoint by index from the given tab.
   void removeWaypoint(int tabIndex, int waypointIndex) {
-    final list = tabs;
+    final list = _activeTabs;
     if (tabIndex < 0 || tabIndex >= list.length) return;
     final waypoints = list[tabIndex].waypoints;
     if (waypointIndex < 0 || waypointIndex >= waypoints.length) return;
@@ -210,7 +356,7 @@ class TETabsProvider with ChangeNotifier {
   /// Remove multiple waypoints by index. Indices are sorted descending
   /// so removals don't shift later indices.
   void removeWaypoints(int tabIndex, Set<int> waypointIndices) {
-    final list = tabs;
+    final list = _activeTabs;
     if (tabIndex < 0 || tabIndex >= list.length) return;
     final waypoints = list[tabIndex].waypoints;
     final sorted = waypointIndices.toList()..sort((a, b) => b.compareTo(a));
@@ -229,7 +375,7 @@ class TETabsProvider with ChangeNotifier {
   ///
   /// Returns true if the split succeeded.
   bool splitTrack(int tabIndex, int trackIndex, int globalPointIndex) {
-    final list = tabs;
+    final list = _activeTabs;
     if (tabIndex < 0 || tabIndex >= list.length) return false;
     final tracks = list[tabIndex].tracks;
     if (trackIndex < 0 || trackIndex >= tracks.length) return false;
@@ -261,11 +407,11 @@ class TETabsProvider with ChangeNotifier {
         : baseName;
     // Total tracks after the split: current count + 1 (we replace 1 with 2).
     final totalAfter = tracks.length + 1;
-    String _padIdx(int oneBasedIdx) => totalAfter < 10 && oneBasedIdx < 10
+    String padIdx(int oneBasedIdx) => totalAfter < 10 && oneBasedIdx < 10
         ? oneBasedIdx.toString().padLeft(2, '0')
         : oneBasedIdx.toString();
-    final nameA = '$prefix ${_padIdx(trackIndex + 1)}';
-    final nameB = '$prefix ${_padIdx(trackIndex + 2)}';
+    final nameA = '$prefix ${padIdx(trackIndex + 1)}';
+    final nameB = '$prefix ${padIdx(trackIndex + 2)}';
 
     final trkA = Trk(
       name: nameA,

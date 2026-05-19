@@ -108,6 +108,46 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
                     foregroundColor: Colors.red.shade400,
                   ),
                 ),
+              // Refresh button — re-fetches schedule jobs (work-map polygons
+              // and drop-off points) for the CURRENT tab so edits made on the
+              // schedule grid show up here without closing/re-opening the
+              // file.
+              IconButton.outlined(
+                onPressed: (proc.loading || proc.openingTabs)
+                    ? null
+                    : () async {
+                        final idx = tabsProvider.currentTab;
+                        if (idx < 0 || idx >= tabsProvider.tabs.length) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('No tab selected'),
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                          return;
+                        }
+                        final ok = await proc.refreshTab(
+                            idx, tabsProvider, scheduleProvider);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(ok
+                                  ? 'Refreshed current tab from schedule'
+                                  : 'Current tab has no linked schedule data'),
+                              duration: const Duration(seconds: 2),
+                            ),
+                          );
+                        }
+                      },
+                icon: const Icon(Icons.refresh, size: 20),
+                tooltip: 'Refresh current tab from schedule',
+                style: IconButton.styleFrom(
+                  side: BorderSide(color: Colors.blueGrey.shade300),
+                  foregroundColor: Colors.blueGrey.shade700,
+                ),
+              ),
             ],
           ),
 

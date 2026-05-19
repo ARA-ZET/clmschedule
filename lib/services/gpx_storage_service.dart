@@ -3,11 +3,15 @@
 // Manages GPX track/waypoint files in Firebase Cloud Storage.
 // Folder structure: Distribution/{year}/{MMM YYYY}/{clientName}/Round {N}/
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:gpx/gpx.dart';
 import 'package:intl/intl.dart';
+
+import '../shareable_maps/services/shareable_maps_firestore_service.dart';
+import 'storage_upload.dart';
 
 class GpxStorageService {
   static GpxStorageService? _instance;
@@ -18,6 +22,15 @@ class GpxStorageService {
 
   /// Root prefix for all distribution files.
   static const String _root = 'Distribution';
+
+  /// Upload bytes to [ref] using a WASM-safe code path on web.
+  /// Delegates to [StorageUpload.safePutData].
+  Future<void> _safePutData(
+    Reference ref,
+    Uint8List bytes, {
+    SettableMetadata? metadata,
+  }) =>
+      StorageUpload.safePutData(ref, bytes, metadata: metadata);
 
   // ── Path building ─────────────────────────────────────────────────────────
 
@@ -90,13 +103,38 @@ class GpxStorageService {
   /// Returns the download URL.
   Future<String> uploadGpxFile(
       String folderPath, String fileName, String gpxContent) async {
-    final ref = _storage.ref('$folderPath/$fileName');
-    final bytes = Uint8List.fromList(gpxContent.codeUnits);
-    await ref.putData(
+    // Sanitize the file name so callers can't accidentally smuggle path
+    // separators (e.g. a client/work-area name containing '/') which
+    // Firebase Storage would interpret as nested folders, producing the
+    // bug where "Trim & Save" creates folders instead of .gpx files.
+    final safeName = _sanitizeFileName(fileName);
+    final cleanFolder = folderPath.replaceAll(RegExp(r'/+$'), '');
+    final ref = _storage.ref('$cleanFolder/$safeName');
+    final bytes = Uint8List.fromList(utf8.encode(gpxContent));
+    await _safePutData(
+      ref,
       bytes,
-      SettableMetadata(contentType: 'application/gpx+xml'),
+      metadata: SettableMetadata(contentType: 'application/gpx+xml'),
     );
     return ref.getDownloadURL();
+  }
+
+  /// Replace characters that Firebase Storage (or common OSes) treat as
+  /// path/illegal characters in a leaf file name. Leaves spaces, dashes,
+  /// dots and unicode letters intact.
+  static String sanitizeFileName(String name) => _sanitizeFileName(name);
+
+  static String _sanitizeFileName(String name) {
+    var n = name.trim();
+    // Replace path separators and control chars with a single space, then
+    // collapse runs of whitespace.
+    n = n.replaceAll(RegExp(r'[\\/]+'), ' ');
+    n = n.replaceAll(RegExp(r'[\u0000-\u001f\u007f]'), '');
+    // Strip characters that are illegal on Windows/macOS but legal on
+    // Storage so the round-trip download is well-behaved.
+    n = n.replaceAll(RegExp(r'[<>:"|?*]'), '');
+    n = n.replaceAll(RegExp(r' {2,}'), '   ');
+    return n.trim();
   }
 
   // ── List files ────────────────────────────────────────────────────────────
@@ -183,9 +221,10 @@ class GpxStorageService {
       String folderPath, String fileName, Uint8List bytes,
       {String? contentType}) async {
     final ref = _storage.ref('$folderPath/$fileName');
-    await ref.putData(
+    await _safePutData(
+      ref,
       bytes,
-      SettableMetadata(contentType: contentType),
+      metadata: SettableMetadata(contentType: contentType),
     );
     return ref.getDownloadURL();
   }
@@ -195,9 +234,10 @@ class GpxStorageService {
   /// while it contains at least one file.
   Future<void> createFolder(String folderPath) async {
     final ref = _storage.ref('$folderPath/.folder');
-    await ref.putData(
+    await _safePutData(
+      ref,
       Uint8List(0),
-      SettableMetadata(contentType: 'application/x-empty'),
+      metadata: SettableMetadata(contentType: 'application/x-empty'),
     );
   }
 
@@ -281,9 +321,10 @@ class GpxStorageService {
       // Metadata read is best-effort.
     }
     final dstRef = _storage.ref(toFullPath);
-    await dstRef.putData(
+    await _safePutData(
+      dstRef,
       bytes,
-      SettableMetadata(contentType: contentType),
+      metadata: SettableMetadata(contentType: contentType),
     );
     return toFullPath;
   }
@@ -381,63 +422,219 @@ class GpxStorageService {
   ///                    "sourceFile":... }, ... ] }
   /// ```
   /// Returns the waypoint count on success, or `null` on failure.
+  ///
+  /// NOTE: this only rebuilds the waypoints file. For combined
+  /// tracks + waypoints rebuild (matching the Cloud Function schema), use
+  /// [regenerateCompiledFiles].
   Future<int?> regenerateCompiledWaypoints(String folderPath) async {
+    final result = await regenerateCompiledFiles(folderPath);
+    return result?.waypointCount;
+  }
+
+  /// Rebuild BOTH `_compiled_tracks.json` and `_compiled_waypoints.json` for
+  /// [folderPath] by re-reading every GPX file in that folder. Mirrors the
+  /// schema produced by the `compileGpxOnUpload` Cloud Function so the same
+  /// client parsers work either way.
+  ///
+  /// All GPX files are downloaded and parsed in parallel for speed.
+  /// Returns the (trackCount, waypointCount) on success or `null` on failure.
+  Future<({int trackCount, int waypointCount})?> regenerateCompiledFiles(
+      String folderPath) async {
     try {
       final result = await _storage.ref(folderPath).listAll();
       final gpxItems = result.items
-          .where((i) => i.name.toLowerCase().endsWith('.gpx'))
+          .where((i) =>
+              i.name.toLowerCase().endsWith('.gpx') &&
+              !i.name.startsWith('_compiled'))
           .toList();
 
-      final aggregated = <Map<String, dynamic>>[];
-      for (final item in gpxItems) {
+      final tracksOut = <Map<String, dynamic>>[];
+      final waypointsOut = <Map<String, dynamic>>[];
+
+      // Download + parse in parallel.
+      final parsed = await Future.wait(gpxItems.map((item) async {
         try {
           final bytes = await item.getData();
-          if (bytes == null) continue;
+          if (bytes == null) return null;
           final xml = String.fromCharCodes(bytes);
           final gpx = GpxReader().fromString(xml);
-          if (gpx.wpts.isEmpty) continue;
-          for (final w in gpx.wpts) {
-            if (w.lat == null || w.lon == null) continue;
-            aggregated.add({
-              'lat': w.lat,
-              'lon': w.lon,
-              if (w.name != null) 'name': w.name,
-              if (w.desc != null) 'desc': w.desc,
-              'sourceFile': item.name,
+          return (item: item, gpx: gpx);
+        } catch (e) {
+          debugPrint(
+              'regenerateCompiledFiles: failed to parse ${item.fullPath}: $e');
+          return null;
+        }
+      }));
+
+      for (final p in parsed) {
+        if (p == null) continue;
+        final fileName = p.item.name;
+        // Waypoints
+        for (final w in p.gpx.wpts) {
+          if (w.lat == null || w.lon == null) continue;
+          waypointsOut.add({
+            'name': w.name ?? '',
+            'desc': w.desc ?? '',
+            'lat': w.lat,
+            'lon': w.lon,
+            'sourceFile': fileName,
+          });
+        }
+        // Tracks (one entry per non-empty segment)
+        for (var ti = 0; ti < p.gpx.trks.length; ti++) {
+          final trk = p.gpx.trks[ti];
+          final trkName = trk.name ?? '';
+          final trkDesc = trk.desc ?? '';
+          for (var si = 0; si < trk.trksegs.length; si++) {
+            final seg = trk.trksegs[si];
+            final coords = <List<double>>[];
+            int? startMs;
+            int? endMs;
+            for (final pt in seg.trkpts) {
+              if (pt.lat == null || pt.lon == null) continue;
+              coords.add([pt.lat!, pt.lon!]);
+              final t = pt.time;
+              if (t != null) {
+                final ms = t.millisecondsSinceEpoch;
+                if (startMs == null || ms < startMs) startMs = ms;
+                if (endMs == null || ms > endMs) endMs = ms;
+              }
+            }
+            if (coords.length < 2) continue;
+            // Haversine distance in meters.
+            double distance = 0;
+            for (var i = 0; i < coords.length - 1; i++) {
+              distance += _haversine(coords[i][0], coords[i][1],
+                  coords[i + 1][0], coords[i + 1][1]);
+            }
+            final segName = trkName.isEmpty ? 'Track ${ti + 1}' : trkName;
+            final name = trk.trksegs.length > 1
+                ? '$segName (seg ${si + 1})'
+                : segName;
+            tracksOut.add({
+              'name': name,
+              'desc': trkDesc,
+              'file': fileName,
+              'points': coords,
+              'distanceMeters': distance.round(),
+              'startTime': startMs,
+              'endTime': endMs,
+              'durationMs':
+                  (startMs != null && endMs != null) ? endMs - startMs : null,
             });
           }
-        } catch (e) {
-          debugPrint('regenerateCompiledWaypoints: '
-              'failed to parse ${item.fullPath}: $e');
+        }
+        // Routes
+        for (var ri = 0; ri < p.gpx.rtes.length; ri++) {
+          final rte = p.gpx.rtes[ri];
+          final coords = <List<double>>[];
+          for (final pt in rte.rtepts) {
+            if (pt.lat == null || pt.lon == null) continue;
+            coords.add([pt.lat!, pt.lon!]);
+          }
+          if (coords.length < 2) continue;
+          double distance = 0;
+          for (var i = 0; i < coords.length - 1; i++) {
+            distance += _haversine(coords[i][0], coords[i][1],
+                coords[i + 1][0], coords[i + 1][1]);
+          }
+          tracksOut.add({
+            'name': rte.name ?? 'Route ${ri + 1}',
+            'desc': rte.desc ?? '',
+            'file': fileName,
+            'points': coords,
+            'distanceMeters': distance.round(),
+            'startTime': null,
+            'endTime': null,
+            'durationMs': null,
+          });
         }
       }
 
-      final compiledPath = '$folderPath/_compiled_waypoints.json';
-      final compiledRef = _storage.ref(compiledPath);
+      final tracksRef = _storage.ref('$folderPath/_compiled_tracks.json');
+      final waypointsRef =
+          _storage.ref('$folderPath/_compiled_waypoints.json');
 
-      if (aggregated.isEmpty) {
-        // No waypoints left — remove any stale compiled file if it exists.
+      // Write or remove tracks.
+      if (tracksOut.isEmpty) {
         try {
-          await compiledRef.delete();
-        } catch (_) {
-          // Ignore "object-not-found" errors.
-        }
-        return 0;
+          await tracksRef.delete();
+        } catch (_) {}
+      } else {
+        final payload = jsonEncode({
+          'version': 1,
+          'compiledAt': DateTime.now().toUtc().toIso8601String(),
+          'fileCount': gpxItems.length,
+          'trackCount': tracksOut.length,
+          'waypointCount': waypointsOut.length,
+          'tracks': tracksOut,
+        });
+        await _safePutData(
+          tracksRef,
+          Uint8List.fromList(utf8.encode(payload)),
+          metadata: SettableMetadata(contentType: 'application/json'),
+        );
       }
 
-      final payload = jsonEncode({
-        'waypointCount': aggregated.length,
-        'waypoints': aggregated,
-      });
-      await compiledRef.putData(
-        Uint8List.fromList(utf8.encode(payload)),
-        SettableMetadata(contentType: 'application/json'),
-      );
-      return aggregated.length;
+      // Write or remove waypoints.
+      if (waypointsOut.isEmpty) {
+        try {
+          await waypointsRef.delete();
+        } catch (_) {}
+      } else {
+        final payload = jsonEncode({
+          'version': 1,
+          'compiledAt': DateTime.now().toUtc().toIso8601String(),
+          'fileCount': gpxItems.length,
+          'waypointCount': waypointsOut.length,
+          'waypoints': waypointsOut,
+        });
+        await _safePutData(
+          waypointsRef,
+          Uint8List.fromList(utf8.encode(payload)),
+          metadata: SettableMetadata(contentType: 'application/json'),
+        );
+      }
+
+      // Sync waypoint count onto any shareable map(s) linked to this folder
+      // so the gallery badge stays accurate. Errors are swallowed inside.
+      await _syncShareableMapCounts(folderPath, waypointsOut.length);
+
+      return (trackCount: tracksOut.length, waypointCount: waypointsOut.length);
     } catch (e) {
-      debugPrint('regenerateCompiledWaypoints error ($folderPath): $e');
+      debugPrint('regenerateCompiledFiles error ($folderPath): $e');
       return null;
     }
+  }
+
+  /// Push freshly computed waypoint count onto every shareable map
+  /// document whose `storageFolderPath` matches [folderPath]. Fire-and-forget
+  /// from the regen helpers; failures are swallowed.
+  Future<void> _syncShareableMapCounts(
+      String folderPath, int waypointCount) async {
+    try {
+      await ShareableMapsFirestoreService().updateCloudCountsByFolderPath(
+        folderPath,
+        waypointCount: waypointCount,
+      );
+    } catch (e) {
+      debugPrint('syncShareableMapCounts error ($folderPath): $e');
+    }
+  }
+
+  /// Haversine distance in meters between two (lat, lon) pairs in degrees.
+  static double _haversine(
+      double lat1, double lon1, double lat2, double lon2) {
+    const r = 6371000.0;
+    double toRad(double d) => d * 3.141592653589793 / 180.0;
+    final dLat = toRad(lat2 - lat1);
+    final dLon = toRad(lon2 - lon1);
+    final a = (math.sin(dLat / 2) * math.sin(dLat / 2)) +
+        math.cos(toRad(lat1)) *
+            math.cos(toRad(lat2)) *
+            math.sin(dLon / 2) *
+            math.sin(dLon / 2);
+    return r * 2 * math.asin(math.sqrt(a));
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────

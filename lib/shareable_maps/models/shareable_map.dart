@@ -16,6 +16,21 @@ class ShareableMap {
   final String? thumbnailUrl;
   final String? jobListItemId;
   final String? storageFolderPath;
+  final List<String> cloudFolderPaths;
+  final Map<String, int> cloudTrackColors;
+
+  /// User-defined display names for cloud overlay layers, keyed by the
+  /// folder path (same key as [cloudTrackColors]). When a key is absent the
+  /// default auto-generated name is used (e.g. "Apr 2025 Movements").
+  final Map<String, String> cloudLayerNames;
+
+  final bool autoLoadLatestCloudFolder;
+  final bool clipCloudDataToPolygons;
+
+  /// Cached count of waypoints in the linked cloud folder (set whenever the
+  /// folder's compiled GPX index is rebuilt). `null` when the map is not
+  /// linked to a cloud folder.
+  final int? cloudWaypointCount;
 
   const ShareableMap({
     required this.id,
@@ -29,6 +44,12 @@ class ShareableMap {
     this.thumbnailUrl,
     this.jobListItemId,
     this.storageFolderPath,
+    this.cloudFolderPaths = const [],
+    this.cloudTrackColors = const {},
+    this.cloudLayerNames = const {},
+    this.autoLoadLatestCloudFolder = true,
+    this.clipCloudDataToPolygons = false,
+    this.cloudWaypointCount,
   });
 
   /// Create a new map with generated ID
@@ -51,6 +72,9 @@ class ShareableMap {
       thumbnailUrl: null,
       jobListItemId: null,
       storageFolderPath: null,
+      cloudFolderPaths: const [],
+      cloudTrackColors: const {},
+      cloudLayerNames: const {},
     );
   }
 
@@ -81,17 +105,58 @@ class ShareableMap {
       thumbnailUrl: null,
       jobListItemId: jobListItemId,
       storageFolderPath: storageFolderPath,
+      cloudFolderPaths:
+          storageFolderPath == null || storageFolderPath.trim().isEmpty
+              ? const []
+              : [storageFolderPath.trim()],
+      cloudTrackColors: const {},
+      cloudLayerNames: const {},
     );
   }
 
   /// Create from Map (for Firestore/JSON)
   factory ShareableMap.fromMap(String id, Map<String, dynamic> data) {
+    final legacyFolder = data['storageFolderPath'] as String?;
+    final folders = (data['cloudFolderPaths'] as List<dynamic>?)
+            ?.whereType<String>()
+            .map((p) => p.trim())
+            .where((p) => p.isNotEmpty)
+            .toList() ??
+        <String>[];
+    if (folders.isEmpty &&
+        legacyFolder != null &&
+        legacyFolder.trim().isNotEmpty) {
+      folders.add(legacyFolder.trim());
+    }
+    final trackColorsData = (data['cloudTrackColors'] == null ? null : Map<String, dynamic>.from(data['cloudTrackColors'] as Map));
+    final trackColors = <String, int>{};
+    if (trackColorsData != null) {
+      trackColorsData.forEach((key, value) {
+        final cleanKey = key.trim();
+        if (cleanKey.isEmpty) return;
+        if (value is num) {
+          trackColors[cleanKey] = value.toInt();
+        }
+      });
+    }
+    final layerNamesData = (data['cloudLayerNames'] == null ? null : Map<String, dynamic>.from(data['cloudLayerNames'] as Map));
+    final layerNames = <String, String>{};
+    if (layerNamesData != null) {
+      layerNamesData.forEach((key, value) {
+        final cleanKey = key.trim();
+        if (cleanKey.isEmpty) return;
+        if (value is String && value.trim().isNotEmpty) {
+          layerNames[cleanKey] = value.trim();
+        }
+      });
+    }
+
     return ShareableMap(
       id: id,
       name: data['name'] as String? ?? '',
       description: data['description'] as String? ?? '',
       layers: (data['layers'] as List<dynamic>?)?.asMap().entries.map((e) {
-            final layerData = e.value as Map<String, dynamic>;
+            final layerData = Map<String, dynamic>.from(e.value as Map);
             final layerId = layerData['id'] as String? ?? 'layer_${e.key}';
             return MapLayer.fromMap(layerId, layerData);
           }).toList() ??
@@ -102,14 +167,22 @@ class ShareableMap {
       ),
       defaultZoom: (data['defaultZoom'] as num?)?.toDouble() ?? 12.0,
       createdAt: data['createdAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch(data['createdAt'] as int)
+          ? DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as num).toInt())
           : DateTime.now(),
       updatedAt: data['updatedAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch(data['updatedAt'] as int)
+          ? DateTime.fromMillisecondsSinceEpoch((data['updatedAt'] as num).toInt())
           : DateTime.now(),
       thumbnailUrl: data['thumbnailUrl'] as String?,
       jobListItemId: data['jobListItemId'] as String?,
-      storageFolderPath: data['storageFolderPath'] as String?,
+      storageFolderPath: legacyFolder,
+      cloudFolderPaths: List.unmodifiable(folders),
+      cloudTrackColors: Map.unmodifiable(trackColors),
+      cloudLayerNames: Map.unmodifiable(layerNames),
+      autoLoadLatestCloudFolder:
+          data['autoLoadLatestCloudFolder'] as bool? ?? true,
+      clipCloudDataToPolygons:
+          data['clipCloudDataToPolygons'] as bool? ?? false,
+      cloudWaypointCount: (data['cloudWaypointCount'] as num?)?.toInt(),
     );
   }
 
@@ -126,8 +199,22 @@ class ShareableMap {
       'updatedAt': updatedAt.millisecondsSinceEpoch,
       if (thumbnailUrl != null) 'thumbnailUrl': thumbnailUrl,
       if (jobListItemId != null) 'jobListItemId': jobListItemId,
-      if (storageFolderPath != null) 'storageFolderPath': storageFolderPath,
+      if ((storageFolderPath ?? primaryCloudFolderPath) != null)
+        'storageFolderPath': storageFolderPath ?? primaryCloudFolderPath,
+      if (cloudFolderPaths.isNotEmpty) 'cloudFolderPaths': cloudFolderPaths,
+      if (cloudTrackColors.isNotEmpty) 'cloudTrackColors': cloudTrackColors,
+      if (cloudLayerNames.isNotEmpty) 'cloudLayerNames': cloudLayerNames,
+      'autoLoadLatestCloudFolder': autoLoadLatestCloudFolder,
+      'clipCloudDataToPolygons': clipCloudDataToPolygons,
+      if (cloudWaypointCount != null) 'cloudWaypointCount': cloudWaypointCount,
     };
+  }
+
+  String? get primaryCloudFolderPath {
+    final legacy = storageFolderPath?.trim();
+    if (legacy != null && legacy.isNotEmpty) return legacy;
+    if (cloudFolderPaths.isEmpty) return null;
+    return cloudFolderPaths.first;
   }
 
   /// Create a copy with updated fields
@@ -141,7 +228,15 @@ class ShareableMap {
     String? thumbnailUrl,
     String? jobListItemId,
     String? storageFolderPath,
+    List<String>? cloudFolderPaths,
+    Map<String, int>? cloudTrackColors,
+    Map<String, String>? cloudLayerNames,
+    bool? autoLoadLatestCloudFolder,
+    bool? clipCloudDataToPolygons,
+    int? cloudWaypointCount,
+    bool clearStorageFolderPath = false,
   }) {
+    final nextFolders = cloudFolderPaths ?? this.cloudFolderPaths;
     return ShareableMap(
       id: id,
       name: name ?? this.name,
@@ -153,13 +248,25 @@ class ShareableMap {
       updatedAt: updatedAt ?? DateTime.now(),
       thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
       jobListItemId: jobListItemId ?? this.jobListItemId,
-      storageFolderPath: storageFolderPath ?? this.storageFolderPath,
+      storageFolderPath: clearStorageFolderPath
+          ? null
+          : storageFolderPath ?? this.storageFolderPath,
+      cloudFolderPaths: List.unmodifiable(nextFolders),
+      cloudTrackColors:
+          Map.unmodifiable(cloudTrackColors ?? this.cloudTrackColors),
+      cloudLayerNames:
+          Map.unmodifiable(cloudLayerNames ?? this.cloudLayerNames),
+      autoLoadLatestCloudFolder:
+          autoLoadLatestCloudFolder ?? this.autoLoadLatestCloudFolder,
+      clipCloudDataToPolygons:
+          clipCloudDataToPolygons ?? this.clipCloudDataToPolygons,
+      cloudWaypointCount: cloudWaypointCount ?? this.cloudWaypointCount,
     );
   }
 
-  /// Get total count of all elements across all layers
+  /// Get total count of all elements across all layers.
   int get totalElementCount {
-    return layers.fold(0, (sum, layer) => sum + layer.elementCount);
+    return layers.fold<int>(0, (sum, layer) => sum + layer.elementCount);
   }
 
   /// Get count of visible elements

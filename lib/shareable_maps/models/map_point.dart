@@ -59,14 +59,14 @@ class MapPoint {
         data['latitude'] as double? ?? 0.0,
         data['longitude'] as double? ?? 0.0,
       ),
-      color: Color(data['color'] as int? ?? Colors.red.toARGB32()),
+      color: Color((data['color'] as num?)?.toInt() ?? Colors.red.toARGB32()),
       icon: data['icon'] as String? ?? 'pin',
       pointCategory: PointCategory.fromId(data['pointCategory'] as String?),
       createdAt: data['createdAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch(data['createdAt'] as int)
+          ? DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as num).toInt())
           : DateTime.now(),
       updatedAt: data['updatedAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch(data['updatedAt'] as int)
+          ? DateTime.fromMillisecondsSinceEpoch((data['updatedAt'] as num).toInt())
           : DateTime.now(),
     );
   }

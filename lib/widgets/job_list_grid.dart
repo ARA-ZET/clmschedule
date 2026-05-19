@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:clmschedule/providers/toggler_provider.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -1931,7 +1934,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           updatedItem = item.copyWith(area: value as String);
           break;
         case 'quantity':
-          final newQuantity = value as int;
+          final newQuantity = (value as num).toInt();
           // Validate quantity for vehicle combo job types
           if (VehicleTrailerCombo.isVehicleJobType(item.jobTypeId) &&
               (newQuantity < 1 || newQuantity > 9)) {
@@ -1947,9 +1950,9 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           updatedItem = item.copyWith(quantity: newQuantity);
           break;
         case 'vehicleTrailerCombo':
-          final data = value as Map<String, dynamic>;
+          final data = Map<String, dynamic>.from(value as Map);
           updatedItem = item.copyWith(
-            quantity: data['quantity'] as int,
+            quantity: (data['quantity'] as num).toInt(),
             vehicleTrailerCombo: data['vehicleTrailerCombo'] as String,
           );
           break;
@@ -1969,7 +1972,8 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           updatedItem = item.copyWith(specialInstructions: value as String);
           break;
         case 'quantityDistributed':
-          updatedItem = item.copyWith(quantityDistributed: value as int);
+          updatedItem =
+              item.copyWith(quantityDistributed: (value as num).toInt());
           break;
         case 'invoiceDetails':
           updatedItem = item.copyWith(invoiceDetails: value as String);
@@ -2114,7 +2118,21 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
   }
 
   void _showCopyJobDialog(BuildContext context, JobListItem item) async {
+    // Capture the source job's coordinates *before* opening the dialog so
+    // that we can clone its linked map after the duplicate has been saved.
+    // Both the source job's month-id (jobLists key, "MMM YYYY") and its
+    // shareableMapId are needed by the `duplicateMapForJobCopy` callable.
+    final sourceShareableMapId = item.shareableMapId;
+    final sourceJobMonthId = _jobListMonthId(item.date);
+    final sourceJobItemId = item.id;
+    debugPrint(
+        '📋 [CopyJob] source item id=$sourceJobItemId month=$sourceJobMonthId '
+        'client="${item.client}" shareableMapId="$sourceShareableMapId"');
+
     // Create a new job with all fields copied but empty ID (so dialog treats it as new)
+    // NOTE: `area` is cleared to suppress the auto-link logic from latching
+    // onto the SOURCE map's share URL. The new map's URL is written back by
+    // `_duplicateMapForCopiedJob` once the cloud function returns.
     final copiedJob = JobListItem(
       id: '', // Empty ID so dialog treats it as a new job
       invoice: '',
@@ -2123,7 +2141,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       jobStatusId: item.jobStatusId,
       invoiceStatusId: 'INV_NOT CREATED',
       jobTypeId: item.jobTypeId,
-      area: item.area,
+      area: sourceShareableMapId.isNotEmpty ? '' : item.area,
       quantity: item.quantity,
       manDays: item.manDays,
       date: item.date,
@@ -2141,7 +2159,10 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
 
     final result = await showDialog<dynamic>(
       context: context,
-      builder: (context) => AddEditJobDialog(jobToEdit: copiedJob),
+      builder: (context) => AddEditJobDialog(
+        jobToEdit: copiedJob,
+        mapWillBeCopied: sourceShareableMapId.isNotEmpty,
+      ),
     );
 
     if (result != null && context.mounted) {
@@ -2160,9 +2181,14 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       }
 
       try {
-        // Use appropriate method based on whether allocation is skipped
+        // Persist the duplicate and capture the saved job (with its
+        // freshly-generated Firestore id) so the map-clone callable can
+        // bi-link the new job to its new map.
+        JobListItem savedJob;
         if (skipAllocation) {
-          // Job is already saved in database, just show success message
+          // Dialog already saved via `addJobListItemAndReturn`, so `job`
+          // already carries the new id.
+          savedJob = job;
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
@@ -2173,8 +2199,8 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             );
           }
         } else {
-          // Add job to database
-          await ref.read(jobListRiverpod).addJobListItem(job);
+          savedJob =
+              await ref.read(jobListRiverpod).addJobListItemAndReturn(job);
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
@@ -2183,6 +2209,25 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
               ),
             );
           }
+        }
+
+        // If the source job had a linked map, fire-and-forget a Cloud
+        // Function call that clones the map's geometry into a new map and
+        // bi-links it to the freshly-saved duplicate. The
+        // `onJobListItemWritten` trigger then takes care of creating the
+        // Cloud Storage folder for the new job and mirroring its path
+        // onto the new map.
+        debugPrint('📋 [CopyJob] saved duplicate id="${savedJob.id}"; '
+            'sourceShareableMapId="$sourceShareableMapId" → '
+            '${sourceShareableMapId.isNotEmpty && savedJob.id.isNotEmpty ? "WILL clone map" : "SKIP map clone"}');
+        if (sourceShareableMapId.isNotEmpty && savedJob.id.isNotEmpty) {
+          unawaited(_duplicateMapForCopiedJob(
+            sourceJobMonthId: sourceJobMonthId,
+            sourceJobItemId: sourceJobItemId,
+            newJobMonthId: _jobListMonthId(savedJob.date),
+            newJobItemId: savedJob.id,
+            newJob: savedJob,
+          ));
         }
       } catch (e) {
         if (context.mounted) {
@@ -2193,6 +2238,86 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             ),
           );
         }
+      }
+    }
+  }
+
+  /// Computes the `MMM YYYY` month-id used by `jobLists` for a date.
+  /// Mirrors `MonthlyService.getMonthlyDocumentId` without taking a
+  /// dependency on it from inside this widget.
+  static String _jobListMonthId(DateTime date) {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return '${months[date.month - 1]} ${date.year}';
+  }
+
+  /// Invokes the `duplicateMapForJobCopy` Cloud Function. Errors are
+  /// surfaced via SnackBar but never throw — folder creation can be
+  /// retried later by re-saving the job.
+  Future<void> _duplicateMapForCopiedJob({
+    required String sourceJobMonthId,
+    required String sourceJobItemId,
+    required String newJobMonthId,
+    required String newJobItemId,
+    required JobListItem newJob,
+  }) async {
+    debugPrint('📋 [CopyJob] calling duplicateMapForJobCopy: '
+        'source=$sourceJobMonthId/$sourceJobItemId new=$newJobMonthId/$newJobItemId');
+    try {
+      final callable =
+          FirebaseFunctions.instance.httpsCallable('duplicateMapForJobCopy');
+      final result = await callable.call(<String, dynamic>{
+        'sourceJobMonthId': sourceJobMonthId,
+        'sourceJobItemId': sourceJobItemId,
+        'newJobMonthId': newJobMonthId,
+        'newJobItemId': newJobItemId,
+      });
+      debugPrint('✅ [CopyJob] duplicateMapForJobCopy result: ${result.data}');
+
+      // After the map is cloned, generate a fresh share link and write the
+      // new URL into the duplicated job's `area` field. The cloud function
+      // already created the storage folder and set `storageFolderPath` on
+      // both the new map and new job, so we forward that path here too.
+      final data = result.data;
+      if (data is Map) {
+        final newMapId = data['newMapId'] as String?;
+        final newMapMonthKey = data['newMapMonthKey'] as String?;
+        final newMapName = data['newMapName'] as String? ?? '';
+        final newFolderPath = data['storageFolderPath'] as String?;
+        if (newMapId != null && newMapMonthKey != null && mounted) {
+          await ref.read(jobListRiverpod).linkExistingMapToJob(
+                jobId: newJobItemId,
+                mapId: newMapId,
+                monthKey: newMapMonthKey,
+                mapName: newMapName,
+                storageFolderPath: newFolderPath,
+                fallbackJob: newJob,
+              );
+          debugPrint(
+              '✅ [CopyJob] linked new map $newMapMonthKey/$newMapId to job $newJobItemId folder="$newFolderPath"');
+        }
+      }
+    } catch (e, st) {
+      debugPrint('❌ [CopyJob] duplicateMapForJobCopy failed: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Map clone failed: $e'),
+            backgroundColor: Colors.orange,
+          ),
+        );
       }
     }
   }

@@ -153,6 +153,11 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
     } catch (_) {
       _pointIcons = null;
     }
+    if (mounted) {
+      setState(() {
+        _updateMapView();
+      });
+    }
   }
 
   Future<BitmapDescriptor> _createMidpointMarkerIcon() async {

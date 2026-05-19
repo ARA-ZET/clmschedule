@@ -1,4 +1,6 @@
 // track_editor/providers/te_waypoints_provider.dart
+import 'dart:collection';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:gpx/gpx.dart';
@@ -17,7 +19,8 @@ class TEWaypointsProvider extends ChangeNotifier {
   };
   TEMode _activeMode = TEMode.processing;
 
-  List<Wpt> get waypoints => _wptsByMode[_activeMode]!;
+  /// Read-only view; mutations must go through provider methods.
+  List<Wpt> get waypoints => UnmodifiableListView(_wptsByMode[_activeMode]!);
 
   void setActiveMode(TEMode mode) {
     if (_activeMode == mode) return;

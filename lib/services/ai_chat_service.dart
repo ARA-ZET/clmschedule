@@ -271,7 +271,7 @@ class AiChatService {
       'monthId': monthId,
     });
 
-    final data = result.data as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(result.data as Map);
     if (data['success'] == true) {
       AiChatAction? action;
       if (data['action'] != null) {

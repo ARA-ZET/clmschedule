@@ -37,13 +37,13 @@ class ChatService {
         return <ChatMessage>[];
       }
 
-      final data = snapshot.data() as Map<String, dynamic>?;
+      final data = (snapshot.data() == null ? null : Map<String, dynamic>.from(snapshot.data() as Map));
       final messagesData = data?['messages'] as List<dynamic>? ?? [];
 
       // Convert to ChatMessage objects and sort by timestamp (newest first, then reverse for display)
       final messages = messagesData
           .map((messageData) =>
-              ChatMessage.fromMap(messageData as Map<String, dynamic>))
+              ChatMessage.fromMap(Map<String, dynamic>.from(messageData as Map)))
           .toList();
 
       // Sort by timestamp descending, then take limit, then reverse for chronological order
@@ -196,7 +196,7 @@ class ChatService {
 
       if (!snapshot.exists) return 0;
 
-      final data = snapshot.data() as Map<String, dynamic>?;
+      final data = (snapshot.data() == null ? null : Map<String, dynamic>.from(snapshot.data() as Map));
       final messagesData = data?['messages'] as List<dynamic>? ?? [];
 
       int unreadCount = 0;
@@ -223,7 +223,7 @@ class ChatService {
     return monthDoc.snapshots().map((snapshot) {
       if (!snapshot.exists) return 0;
 
-      final data = snapshot.data() as Map<String, dynamic>?;
+      final data = (snapshot.data() == null ? null : Map<String, dynamic>.from(snapshot.data() as Map));
       final messagesData = data?['messages'] as List<dynamic>? ?? [];
 
       int unreadCount = 0;
@@ -263,12 +263,12 @@ class ChatService {
 
       if (!snapshot.exists) return null;
 
-      final data = snapshot.data() as Map<String, dynamic>?;
+      final data = (snapshot.data() == null ? null : Map<String, dynamic>.from(snapshot.data() as Map));
       final messagesData = data?['messages'] as List<dynamic>? ?? [];
 
       for (var messageData in messagesData) {
         if (messageData['id'] == messageId) {
-          return ChatMessage.fromMap(messageData as Map<String, dynamic>);
+          return ChatMessage.fromMap(Map<String, dynamic>.from(messageData as Map));
         }
       }
 
@@ -288,7 +288,7 @@ class ChatService {
 
       if (!snapshot.exists) return [];
 
-      final data = snapshot.data() as Map<String, dynamic>?;
+      final data = (snapshot.data() == null ? null : Map<String, dynamic>.from(snapshot.data() as Map));
       final messagesData = data?['messages'] as List<dynamic>? ?? [];
 
       final matchingMessages = <ChatMessage>[];
@@ -297,7 +297,7 @@ class ChatService {
         final content = messageData['content']?.toString().toLowerCase() ?? '';
         if (content.contains(query.toLowerCase())) {
           matchingMessages
-              .add(ChatMessage.fromMap(messageData as Map<String, dynamic>));
+              .add(ChatMessage.fromMap(Map<String, dynamic>.from(messageData as Map)));
         }
 
         if (matchingMessages.length >= limit) break;
@@ -322,7 +322,7 @@ class ChatService {
       String? photoUrl;
 
       if (userDoc.exists) {
-        final userData = userDoc.data() as Map<String, dynamic>;
+        final userData = Map<String, dynamic>.from(userDoc.data() as Map);
         displayName = userData['name'] ?? userData['email'] ?? 'User';
         photoUrl = userData['photoUrl'];
       }
@@ -347,7 +347,7 @@ class ChatService {
       String? photoUrl;
 
       if (userDoc.exists) {
-        final userData = userDoc.data() as Map<String, dynamic>;
+        final userData = Map<String, dynamic>.from(userDoc.data() as Map);
         displayName = userData['name'] ?? userData['email'] ?? 'User';
         photoUrl = userData['photoUrl'];
       }
@@ -436,7 +436,7 @@ class ChatService {
       final userStatusSnapshot =
           await _firestore.collection(_userStatusCollection).get();
 
-      final data = messagesSnapshot.data() as Map<String, dynamic>?;
+      final data = (messagesSnapshot.data() == null ? null : Map<String, dynamic>.from(messagesSnapshot.data() as Map));
       final messagesData = data?['messages'] as List<dynamic>? ?? [];
       final messageCount = messagesData.length;
 
@@ -518,7 +518,7 @@ class ChatService {
 
     if (!snapshot.exists) return null;
 
-    final docData = snapshot.data() as Map<String, dynamic>?;
+    final docData = (snapshot.data() == null ? null : Map<String, dynamic>.from(snapshot.data() as Map));
     final messagesData =
         List<Map<String, dynamic>>.from(docData?['messages'] ?? []);
 
@@ -547,7 +547,7 @@ class ChatService {
 
     if (!snapshot.exists) return null;
 
-    final docData = snapshot.data() as Map<String, dynamic>?;
+    final docData = (snapshot.data() == null ? null : Map<String, dynamic>.from(snapshot.data() as Map));
     final messagesData =
         List<Map<String, dynamic>>.from(docData?['messages'] ?? []);
 

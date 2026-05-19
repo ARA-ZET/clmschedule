@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
@@ -104,15 +105,6 @@ class ScheduleJobAdapter extends MapDataAdapter {
   Future<ShareableMap> load() async {
     final now = DateTime.now();
 
-    // Debug: log all workMaps being loaded
-    debugPrint(
-        '[ScheduleJobAdapter.load] Job ${_job.id} has ${_job.workMaps.length} workMaps:');
-    for (final wm in _job.workMaps) {
-      debugPrint('  "${wm.name}" type=${wm.type} isPolygon=${wm.isPolygon} '
-          'isPolyline=${wm.isPolyline} isPoint=${wm.isPoint} isMarker=${wm.isMarker} '
-          'points=${wm.points.length} pointCategory=${wm.pointCategory.id}');
-    }
-
     // Split workMaps by element type
     final polygonWorkMaps = _job.workMaps.where((p) => p.isPolygon).toList();
     final polylineWorkMaps = _job.workMaps.where((p) => p.isPolyline).toList();
@@ -121,9 +113,6 @@ class ScheduleJobAdapter extends MapDataAdapter {
         (p) => p.pointCategory == PointCategory.dropoff && p.points.isNotEmpty);
     final inferredDropOff = _job.dropOffPoint ??
         Job.estimateDropOffPointFromWorkMaps(_job.workMaps);
-    debugPrint(
-        '[ScheduleJobAdapter.load] Split: ${polygonWorkMaps.length} polygons, '
-        '${polylineWorkMaps.length} polylines, ${pointWorkMaps.length} points');
 
     // Convert existing workMaps to a single layer
     final layer = MapLayer(
@@ -133,15 +122,7 @@ class ScheduleJobAdapter extends MapDataAdapter {
       order: 0,
       defaultColor: Colors.blue,
       polygons: polygonWorkMaps
-          .map((p) => CustomPolygon(
-                name: p.name,
-                description: p.description,
-                points: List<LatLng>.from(p.points),
-                color: p.color,
-                fillOpacity: p.fillOpacity,
-                strokeWidth: p.strokeWidth,
-                type: p.type,
-              ))
+          .map((p) => p.copyWith(points: List<LatLng>.from(p.points)))
           .toList(),
       polylines: polylineWorkMaps
           .map((p) => MapPolyline.create(
@@ -154,23 +135,35 @@ class ScheduleJobAdapter extends MapDataAdapter {
               ))
           .toList(),
       points: pointWorkMaps
-          .map((p) => MapPoint.create(
-                name: p.name,
-                description: p.description,
-                position:
-                    p.points.isNotEmpty ? p.points.first : const LatLng(0, 0),
-                color: p.color,
-                pointCategory: p.pointCategory,
-              ))
+          .toList()
+          .asMap()
+          .entries
+          .map((entry) {
+            final p = entry.value;
+            return MapPoint(
+              id: 'job_${_job.id}_point_${entry.key}',
+              name: p.name,
+              description: p.description,
+              position:
+                  p.points.isNotEmpty ? p.points.first : const LatLng(0, 0),
+              color: p.color,
+              pointCategory: p.pointCategory,
+              createdAt: now,
+              updatedAt: now,
+            );
+          })
           .followedBy(
             !hasDropoffPoint && inferredDropOff != null
                 ? [
-                    MapPoint.create(
+                    MapPoint(
+                      id: 'job_${_job.id}_dropoff',
                       name: 'Drop-off Point',
                       description: 'Auto-generated drop-off point',
                       position: inferredDropOff,
                       color: Colors.blue,
                       pointCategory: PointCategory.dropoff,
+                      createdAt: now,
+                      updatedAt: now,
                     ),
                   ]
                 : const <MapPoint>[],
@@ -217,22 +210,14 @@ class ScheduleJobAdapter extends MapDataAdapter {
   List<MapLayer> _buildUnfinishedLayers(DateTime now) {
     final provider = _unfinishedProvider;
     if (provider == null) {
-      debugPrint('[UnfinishedLayer] skipped: provider is null');
+      if (kDebugMode) debugPrint('[UnfinishedLayer] skipped: provider is null');
       return const [];
     }
     if (_job.clients.isEmpty) {
-      debugPrint(
-          '[UnfinishedLayer] skipped: job "${_job.id}" has no clients');
       return const [];
     }
 
     final jobClients = _job.clients.map((c) => c.trim().toLowerCase()).toSet();
-    debugPrint(
-        '[UnfinishedLayer] job "${_job.id}" clients (raw): ${_job.clients}');
-    debugPrint(
-        '[UnfinishedLayer] job clients (normalised): $jobClients');
-    debugPrint(
-        '[UnfinishedLayer] scanning ${provider.items.length} unfinished item(s)');
 
     final matchedPolygons = <CustomPolygon>[];
     _polygonNameToUnfinishedId.clear();
@@ -240,39 +225,20 @@ class ScheduleJobAdapter extends MapDataAdapter {
     for (final item in provider.items) {
       final itemClientsNorm =
           item.clients.map((c) => c.trim().toLowerCase()).toList();
-      final overlap = itemClientsNorm
-          .where((c) => jobClients.contains(c))
-          .toList();
+      final overlap =
+          itemClientsNorm.where((c) => jobClients.contains(c)).toList();
       final hasMatch = overlap.isNotEmpty;
-      debugPrint(
-          '[UnfinishedLayer]  item "${item.id}" clients=${item.clients} '
-          '(norm=$itemClientsNorm) polygons=${item.workMaps.where((p) => p.isPolygon).length} '
-          'match=$hasMatch overlap=$overlap');
       if (!hasMatch) continue;
 
       for (final wm in item.workMaps.where((p) => p.isPolygon)) {
         if (wm.name.isEmpty) {
-          debugPrint(
-              '[UnfinishedLayer]    skipping unnamed polygon in item "${item.id}"');
           continue;
         }
-        debugPrint(
-            '[UnfinishedLayer]    adding polygon "${wm.name}" (${wm.points.length} pts) from item "${item.id}"');
-        matchedPolygons.add(CustomPolygon(
-          name: wm.name,
-          description: wm.description,
-          points: List<LatLng>.from(wm.points),
-          color: wm.color,
-          fillOpacity: wm.fillOpacity,
-          strokeWidth: wm.strokeWidth,
-          type: wm.type,
-        ));
+        matchedPolygons.add(wm.copyWith(points: List<LatLng>.from(wm.points)));
         _polygonNameToUnfinishedId[wm.name] = item.id;
       }
     }
 
-    debugPrint(
-        '[UnfinishedLayer] total matched polygons: ${matchedPolygons.length}');
     if (matchedPolygons.isEmpty) return const [];
 
     return [
@@ -323,7 +289,10 @@ class ScheduleJobAdapter extends MapDataAdapter {
     }
 
     // --- Collect elements from job-owned layers for the Job.workMaps write.
-    final polygons = jobLayers.expand((l) => l.polygons).toList();
+    final polygons = jobLayers
+        .expand((l) => l.polygons)
+        .map((p) => p.copyWith(points: List<LatLng>.from(p.points)))
+        .toList();
 
     // Collect all polylines and convert to CustomPolygon with polyline type
     final polylineElements = jobLayers
@@ -355,13 +324,14 @@ class ScheduleJobAdapter extends MapDataAdapter {
     // Combine all element types for storage in Job.workMaps
     final allWorkMaps = [...polygons, ...polylineElements, ...pointElements];
 
-    // Debug: log what we're saving
-    debugPrint(
-        '[ScheduleJobAdapter.save] Saving ${allWorkMaps.length} workMaps: '
-        '${polygons.length} polygons, ${polylineElements.length} polylines, ${pointElements.length} points');
-    for (final wm in allWorkMaps) {
-      debugPrint('  "${wm.name}" type=${wm.type} points=${wm.points.length} '
-          'pointCategory=${wm.pointCategory.id}');
+    if (kDebugMode) {
+      debugPrint(
+          '[ScheduleJobAdapter.save] Saving ${allWorkMaps.length} workMaps: '
+          '${polygons.length} polygons, ${polylineElements.length} polylines, ${pointElements.length} points');
+      for (final wm in allWorkMaps) {
+        debugPrint('  "${wm.name}" type=${wm.type} points=${wm.points.length} '
+            'pointCategory=${wm.pointCategory.id}');
+      }
     }
 
     // Derive working area names from polygon elements only

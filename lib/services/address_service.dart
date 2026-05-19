@@ -25,7 +25,7 @@ class AddressService {
 
       return addressesData.asMap().entries.map((entry) {
         final index = entry.key;
-        final addressMap = entry.value as Map<String, dynamic>;
+        final addressMap = Map<String, dynamic>.from(entry.value as Map);
         return Address.fromMap('$areaName-$index', addressMap);
       }).toList();
     });
@@ -47,7 +47,7 @@ class AddressService {
 
       return addressesData.asMap().entries.map((entry) {
         final index = entry.key;
-        final addressMap = entry.value as Map<String, dynamic>;
+        final addressMap = Map<String, dynamic>.from(entry.value as Map);
         return Address.fromMap('$areaName-$index', addressMap);
       }).toList();
     } catch (e) {

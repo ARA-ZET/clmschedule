@@ -13,7 +13,7 @@ class AccessoryRequirement {
   factory AccessoryRequirement.fromMap(Map<String, dynamic> data) {
     return AccessoryRequirement(
       baseName: data['baseName'] ?? '',
-      quantity: data['quantity'] ?? 1,
+      quantity: (data['quantity'] as num?)?.toInt() ?? 1,
     );
   }
 
@@ -112,7 +112,7 @@ class InventoryTool {
       toolType: _parseToolType(data),
       requiredAccessories: (data['requiredAccessories'] as List<dynamic>?)
               ?.map((e) =>
-                  AccessoryRequirement.fromMap(e as Map<String, dynamic>))
+                  AccessoryRequirement.fromMap(Map<String, dynamic>.from(e as Map)))
               .toList() ??
           [],
       accessoryIds: (data['accessoryIds'] as List<dynamic>?)

@@ -92,8 +92,8 @@ class CustomPolygon {
   factory CustomPolygon.fromMap(Map<String, dynamic> data) {
     final points = (data['points'] as List<dynamic>?)
             ?.map((point) => LatLng(
-                  point['latitude'] as double,
-                  point['longitude'] as double,
+                  (point['latitude'] as num).toDouble(),
+                  (point['longitude'] as num).toDouble(),
                 ))
             .toList() ??
         [];
@@ -105,11 +105,11 @@ class CustomPolygon {
       type = MapElementType.point;
     }
 
-    final result = CustomPolygon(
+    return CustomPolygon(
       name: data['name'] as String? ?? '',
       description: data['description'] as String? ?? '',
       points: points,
-      color: Color(data['color'] as int? ?? Colors.blue.value),
+      color: Color((data['color'] as num?)?.toInt() ?? Colors.blue.value),
       fillOpacity: (data['fillOpacity'] as num?)?.toDouble() ?? 0.35,
       strokeWidth: (data['strokeWidth'] as num?)?.toInt() ?? 2,
       isDashed: data['isDashed'] as bool? ?? false,
@@ -117,10 +117,6 @@ class CustomPolygon {
       pointCategory: PointCategory.fromId(data['pointCategory'] as String?),
       letterBoxEstimate: (data['letterBoxEstimate'] as num?)?.toInt() ?? 0,
     );
-    debugPrint('[CustomPolygon.fromMap] "${result.name}" type=$type '
-        'rawType=${data['type']} points=${points.length} '
-        'pointCategory=${result.pointCategory.id}');
-    return result;
   }
 
   /// Parse the stored type string, with backward compatibility for 'marker'.
@@ -157,10 +153,6 @@ class CustomPolygon {
         'pointCategory': pointCategory.id,
       if (letterBoxEstimate > 0) 'letterBoxEstimate': letterBoxEstimate,
     };
-    if (isPoint) {
-      debugPrint('[CustomPolygon.toMap] POINT "$name" type=${map['type']} '
-          'pointCategory=${map['pointCategory']} points=${points.length}');
-    }
     return map;
   }
 
@@ -192,7 +184,9 @@ class CustomPolygon {
     return CustomPolygon(
       name: name ?? this.name,
       description: description ?? this.description,
-      points: points ?? this.points,
+      points: points != null
+          ? List<LatLng>.from(points)
+          : List<LatLng>.from(this.points),
       color: color ?? this.color,
       fillOpacity: fillOpacity ?? this.fillOpacity,
       strokeWidth: strokeWidth ?? this.strokeWidth,
@@ -241,6 +235,7 @@ class CustomPolygon {
     bool draggable = false,
     ValueChanged<LatLng>? onDragEnd,
     BitmapDescriptor? customIcon,
+    bool visible = true,
   }) {
     if (!isMarker && !isPoint || points.isEmpty) return null;
 
@@ -253,6 +248,7 @@ class CustomPolygon {
                   ? pointCategory.color
                   : color)),
       alpha: isSelected ? 1.0 : 0.85,
+      visible: visible,
       infoWindow: InfoWindow(
         title: name.isNotEmpty ? name : pointCategory.label,
         snippet: description.isNotEmpty ? description : null,
@@ -300,13 +296,39 @@ class CustomPolygon {
     return other is CustomPolygon &&
         other.name == name &&
         other.description == description &&
-        other.points.length == points.length &&
+        _samePoints(other.points, points) &&
         other.color == color &&
-        other.type == type;
+        other.fillOpacity == fillOpacity &&
+        other.strokeWidth == strokeWidth &&
+        other.isDashed == isDashed &&
+        other.type == type &&
+        other.pointCategory == pointCategory &&
+        other.letterBoxEstimate == letterBoxEstimate;
   }
 
   @override
   int get hashCode {
-    return Object.hash(name, description, points.length, color, type);
+    return Object.hash(
+      name,
+      description,
+      Object.hashAll(points.map((p) => Object.hash(p.latitude, p.longitude))),
+      color,
+      fillOpacity,
+      strokeWidth,
+      isDashed,
+      type,
+      pointCategory,
+      letterBoxEstimate,
+    );
+  }
+
+  static bool _samePoints(List<LatLng> a, List<LatLng> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].latitude != b[i].latitude || a[i].longitude != b[i].longitude) {
+        return false;
+      }
+    }
+    return true;
   }
 }

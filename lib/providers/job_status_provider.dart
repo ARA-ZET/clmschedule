@@ -32,7 +32,7 @@ class JobStatusProvider extends ChangeNotifier {
         query: _firestore.collection(_kCollectionName).orderBy('order'),
         collectionName: _kCollectionName,
         fromDoc: (doc) =>
-            CustomJobStatus.fromMap(doc.data() as Map<String, dynamic>),
+            CustomJobStatus.fromMap(Map<String, dynamic>.from(doc.data() as Map)),
       );
 
       if (_statuses.isEmpty) {

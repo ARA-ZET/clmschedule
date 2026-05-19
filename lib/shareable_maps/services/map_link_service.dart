@@ -87,7 +87,7 @@ class MapLinkService {
   Future<MapLinkData?> resolveShareCode(String shareCode) async {
     final doc = await _links.doc(shareCode).get();
     if (!doc.exists) return null;
-    final data = doc.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(doc.data() as Map);
     return MapLinkData(
       shareCode: shareCode,
       monthKey: data['monthKey'] as String,

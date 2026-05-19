@@ -29,6 +29,14 @@ class CustomJobType {
   /// numeric value still lives in `quantityDistributed`.
   final String quantityLabel;
 
+  /// When true, the `onJobListItemWritten` Cloud Function automatically
+  /// creates a Cloud Storage folder for each new job-list item of this
+  /// type, and keeps the folder renamed/moved when the client name or
+  /// distribution date changes. Used for distribution services (flyers,
+  /// magazines, calendars, etc.) where uploaded GPX tracks are filed by
+  /// `Distribution/{year}/{MMM yyyy}/{client}`.
+  final bool createsCloudFolder;
+
   // ─── Visual identity ─────────────────────────────────────────────────
   /// Optional Material icon name (e.g. `local_shipping`). Null → generic.
   final String? iconName;
@@ -51,6 +59,7 @@ class CustomJobType {
     this.appearsOnCollectionSchedule = false,
     this.tracksQuantity = true,
     this.quantityLabel = 'Quantity',
+    this.createsCloudFolder = false,
     this.iconName,
     this.colorValue,
     this.defaultTools = const [],
@@ -61,15 +70,16 @@ class CustomJobType {
       id: data['id'] as String,
       label: data['label'] as String,
       isDefault: data['isDefault'] as bool? ?? false,
-      order: data['order'] as int? ?? 0,
+      order: (data['order'] as num?)?.toInt() ?? 0,
       isHappySunService: data['isHappySunService'] as bool? ?? false,
       needsTimeSlot: data['needsTimeSlot'] as bool? ?? false,
       appearsOnCollectionSchedule:
           data['appearsOnCollectionSchedule'] as bool? ?? false,
       tracksQuantity: data['tracksQuantity'] as bool? ?? true,
       quantityLabel: data['quantityLabel'] as String? ?? 'Quantity',
+      createsCloudFolder: data['createsCloudFolder'] as bool? ?? false,
       iconName: data['iconName'] as String?,
-      colorValue: data['colorValue'] as int?,
+      colorValue: (data['colorValue'] as num?)?.toInt(),
       defaultTools:
           (data['defaultTools'] as List?)?.map((e) => e.toString()).toList() ??
               const [],
@@ -87,6 +97,7 @@ class CustomJobType {
       'appearsOnCollectionSchedule': appearsOnCollectionSchedule,
       'tracksQuantity': tracksQuantity,
       'quantityLabel': quantityLabel,
+      'createsCloudFolder': createsCloudFolder,
       'iconName': iconName,
       'colorValue': colorValue,
       'defaultTools': defaultTools,
@@ -103,6 +114,7 @@ class CustomJobType {
     bool? appearsOnCollectionSchedule,
     bool? tracksQuantity,
     String? quantityLabel,
+    bool? createsCloudFolder,
     String? iconName,
     int? colorValue,
     List<String>? defaultTools,
@@ -120,6 +132,7 @@ class CustomJobType {
           appearsOnCollectionSchedule ?? this.appearsOnCollectionSchedule,
       tracksQuantity: tracksQuantity ?? this.tracksQuantity,
       quantityLabel: quantityLabel ?? this.quantityLabel,
+      createsCloudFolder: createsCloudFolder ?? this.createsCloudFolder,
       iconName: clearIcon ? null : (iconName ?? this.iconName),
       colorValue: clearColor ? null : (colorValue ?? this.colorValue),
       defaultTools: defaultTools ?? this.defaultTools,
@@ -139,6 +152,7 @@ class CustomJobType {
         other.appearsOnCollectionSchedule == appearsOnCollectionSchedule &&
         other.tracksQuantity == tracksQuantity &&
         other.quantityLabel == quantityLabel &&
+        other.createsCloudFolder == createsCloudFolder &&
         other.iconName == iconName &&
         other.colorValue == colorValue;
   }
@@ -154,6 +168,7 @@ class CustomJobType {
         appearsOnCollectionSchedule,
         tracksQuantity,
         quantityLabel,
+        createsCloudFolder,
         iconName,
         colorValue,
       );

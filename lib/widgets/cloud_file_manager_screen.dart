@@ -8,10 +8,12 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:gpx/gpx.dart';
 import 'package:intl/intl.dart';
 
 import '../providers/cloud_file_manager_provider.dart';
+import '../providers/job_list_provider.dart';
 import '../services/gpx_storage_service.dart';
 
 class CloudFileManagerScreen extends StatefulWidget {
@@ -20,7 +22,16 @@ class CloudFileManagerScreen extends StatefulWidget {
   final void Function(String fileName, Uint8List bytes, String sourcePath)?
       onOpenInTrackEditor;
 
-  const CloudFileManagerScreen({super.key, this.onOpenInTrackEditor});
+  /// Optional initial folder path to open at, e.g.
+  /// `"Distribution/2026/Apr 2026"`. When omitted the browser starts at
+  /// the Distribution root.
+  final String? initialPath;
+
+  const CloudFileManagerScreen({
+    super.key,
+    this.onOpenInTrackEditor,
+    this.initialPath,
+  });
 
   @override
   State<CloudFileManagerScreen> createState() => _CloudFileManagerScreenState();
@@ -53,7 +64,12 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
   void initState() {
     super.initState();
     _provider.addListener(_onProviderChanged);
-    _provider.loadCurrentFolder();
+    final start = widget.initialPath?.trim();
+    if (start != null && start.isNotEmpty) {
+      _provider.navigateToPath(start);
+    } else {
+      _provider.loadCurrentFolder();
+    }
   }
 
   @override
@@ -352,99 +368,33 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
     );
   }
 
-  /// Prompts the user to pick a destination folder from every folder under
-  /// `Distribution/`. Returns the chosen folder path or `null` if cancelled.
+  /// Prompts the user to pick a destination folder by navigating the
+  /// folder tree one level at a time (lazy load), instead of loading
+  /// every folder under `Distribution/` upfront. Returns the chosen
+  /// folder path or `null` if cancelled.
   Future<String?> _pickDestinationFolder({
     required String title,
     required String excludeFolder,
   }) async {
-    List<String>? folders;
-    // Load folder list in a blocking progress dialog.
-    final future = _provider.listAllFolderPaths();
     if (!mounted) return null;
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-    try {
-      folders = await future;
-    } finally {
-      if (mounted) Navigator.of(context, rootNavigator: true).pop();
-    }
-    if (!mounted) return null;
-
-    final choices = folders
-        .where((p) => p != excludeFolder)
-        .toList(); // allow copy-to-self skipped later
-
-    if (choices.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No other folders available.')),
-      );
-      return null;
-    }
-
-    String query = '';
     return showDialog<String>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) {
-          final filtered = query.trim().isEmpty
-              ? choices
-              : choices
-                  .where((p) =>
-                      p.toLowerCase().contains(query.trim().toLowerCase()))
-                  .toList();
-          return AlertDialog(
-            title: Text(title),
-            content: SizedBox(
-              width: 480,
-              height: 420,
-              child: Column(
-                children: [
-                  TextField(
-                    autofocus: true,
-                    decoration: const InputDecoration(
-                      prefixIcon: Icon(Icons.search, size: 18),
-                      hintText: 'Filter folders…',
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                    ),
-                    onChanged: (v) => setLocal(() => query = v),
-                  ),
-                  const SizedBox(height: 8),
-                  Expanded(
-                    child: filtered.isEmpty
-                        ? Center(
-                            child: Text('No matches',
-                                style: TextStyle(color: Colors.grey[500])))
-                        : ListView.builder(
-                            itemCount: filtered.length,
-                            itemBuilder: (_, i) {
-                              final path = filtered[i];
-                              return ListTile(
-                                dense: true,
-                                leading: const Icon(Icons.folder,
-                                    color: Colors.amber, size: 20),
-                                title: Text(path,
-                                    style: const TextStyle(fontSize: 13)),
-                                onTap: () => Navigator.pop(ctx, path),
-                              );
-                            },
-                          ),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel'),
-              ),
-            ],
-          );
-        },
+      builder: (ctx) => Dialog(
+        insetPadding: const EdgeInsets.all(24),
+        child: SizedBox(
+          width: 520,
+          height: 520,
+          child: _FolderNavigatorPicker(
+            title: title,
+            rootPath: CloudFileManagerProvider.rootPath,
+            rootLabel: 'Distribution',
+            excludeFolder: excludeFolder,
+            startPath: _provider.currentPath,
+            listSubfolders: _provider.listSubfolders,
+            onPicked: (path) => Navigator.pop(ctx, path),
+            onCancel: () => Navigator.pop(ctx),
+          ),
+        ),
       ),
     );
   }
@@ -459,11 +409,7 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
     if (dest == null) return;
 
     if (mounted) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const Center(child: CircularProgressIndicator()),
-      );
+      _showTaskProgressDialog();
     }
     final ok = await _provider.copyFiles(files, dest);
     if (mounted) Navigator.of(context, rootNavigator: true).pop();
@@ -482,17 +428,13 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
     if (files.isEmpty) return;
     final srcFolder = _provider.currentPath;
     final dest = await _pickDestinationFolder(
-      title: 'Move ${files.length} file${files.length == 1 ? '' : 's'} to…',
+      title: 'Move ${files.length} file${files.length == 1 ? '' : 's'} to\u2026',
       excludeFolder: srcFolder,
     );
     if (dest == null) return;
 
     if (mounted) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const Center(child: CircularProgressIndicator()),
-      );
+      _showTaskProgressDialog();
     }
     final ok = await _provider.moveFiles(files, dest);
     if (mounted) Navigator.of(context, rootNavigator: true).pop();
@@ -531,11 +473,7 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
     if (confirmed != true) return;
 
     if (mounted) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const Center(child: CircularProgressIndicator()),
-      );
+      _showTaskProgressDialog();
     }
     final ok = await _provider.deleteFiles(files);
     if (mounted) Navigator.of(context, rootNavigator: true).pop();
@@ -559,14 +497,28 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
     );
     if (result == null) return;
 
-    for (final file in result.files) {
-      if (file.bytes == null) continue;
-      await _provider.uploadFile(
-        file.name,
-        file.bytes!,
-        _contentType(file.name),
-      );
-    }
+    final entries = <({String name, Uint8List bytes, String? contentType})>[
+      for (final f in result.files)
+        if (f.bytes != null)
+          (name: f.name, bytes: f.bytes!, contentType: _contentType(f.name)),
+    ];
+    if (entries.isEmpty) return;
+
+    _showTaskProgressDialog();
+    final ok = await _provider.uploadFiles(entries);
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    if (!mounted) return;
+
+    final hasGpx = entries.any((e) => e.name.toLowerCase().endsWith('.gpx'));
+    final tail = hasGpx
+        ? ' Compiling tracks & waypoints in the cloud\u2026'
+        : '';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Uploaded $ok of ${entries.length} file(s).$tail'),
+        backgroundColor: ok == 0 ? Colors.red : null,
+      ),
+    );
   }
 
   String? _contentType(String fileName) {
@@ -583,72 +535,153 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
     }
   }
 
+  /// Show a non-dismissable progress dialog driven by the provider's
+  /// bulk-task state. The caller is responsible for closing the dialog
+  /// (with `Navigator.of(context, rootNavigator: true).pop()`) once the
+  /// awaited bulk operation completes.
+  void _showTaskProgressDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _TaskProgressDialog(provider: _provider),
+    );
+  }
+
   Future<void> _createFolder() async {
     final level = _provider.currentLevel;
     final label = _provider.newFolderLabel;
-    final suggestions = _provider.suggestedFolderNames;
+    final baseSuggestions = _provider.suggestedFolderNames;
+
+    // At the month level (creating a client folder) merge in distinct
+    // client names from the JobList, excluding folders that already exist
+    // here so the user only sees actionable suggestions. The merged list
+    // becomes the source for live, query-driven filtering inside the dialog.
+    final allSuggestions = <String>[];
+    final seenLower = <String>{};
+    for (final s in baseSuggestions) {
+      final t = s.trim();
+      if (t.isEmpty) continue;
+      if (seenLower.add(t.toLowerCase())) allSuggestions.add(t);
+    }
+    if (level == FolderLevel.month) {
+      final existingLower =
+          _provider.folders.map((f) => f.name.toLowerCase()).toSet();
+      try {
+        final container = riverpod.ProviderScope.containerOf(
+          context,
+          listen: false,
+        );
+        final clients = container
+            .read(jobListRiverpod)
+            .allJobListItems
+            .map((j) => j.client.trim())
+            .where((c) => c.isNotEmpty)
+            .toList();
+        for (final c in clients) {
+          final lower = c.toLowerCase();
+          if (existingLower.contains(lower)) continue;
+          if (seenLower.add(lower)) allSuggestions.add(c);
+        }
+      } catch (e) {
+        debugPrint('createFolder: could not read joblist clients: $e');
+      }
+    }
 
     final controller = TextEditingController(
-      text: suggestions.isNotEmpty ? suggestions.first : '',
+      text: baseSuggestions.isNotEmpty ? baseSuggestions.first : '',
     );
 
     final name = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('New $label'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              _hintForLevel(level),
-              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              autofocus: true,
-              decoration: InputDecoration(
-                labelText: '$label name',
-                border: const OutlineInputBorder(),
-                hintText: suggestions.isNotEmpty ? suggestions.first : null,
-              ),
-              onSubmitted: (v) => Navigator.pop(ctx, v),
-            ),
-            if (suggestions.length > 1) ...[
-              const SizedBox(height: 12),
-              Text('Suggestions:',
-                  style: TextStyle(
-                      fontSize: 11,
-                      color: Colors.grey[600],
-                      fontWeight: FontWeight.w600)),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                children: suggestions
-                    .map(
-                      (s) => ActionChip(
-                        label: Text(s, style: const TextStyle(fontSize: 12)),
-                        onPressed: () => Navigator.pop(ctx, s),
-                        visualDensity: VisualDensity.compact,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final query = controller.text.trim().toLowerCase();
+          // Filter the merged list against whatever the user typed. When
+          // the field is empty we show every suggestion.
+          final filtered = query.isEmpty
+              ? allSuggestions
+              : allSuggestions
+                  .where((s) => s.toLowerCase().contains(query))
+                  .toList();
+          return AlertDialog(
+            title: Text('New $label'),
+            content: SizedBox(
+              width: 360,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _hintForLevel(level),
+                    style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      labelText: '$label name',
+                      border: const OutlineInputBorder(),
+                      hintText: baseSuggestions.isNotEmpty
+                          ? baseSuggestions.first
+                          : null,
+                    ),
+                    onChanged: (_) => setLocal(() {}),
+                    onSubmitted: (v) => Navigator.pop(ctx, v),
+                  ),
+                  if (allSuggestions.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      filtered.isEmpty
+                          ? 'No matching suggestions'
+                          : 'Suggestions:',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey[600],
+                        fontWeight: FontWeight.w600,
                       ),
-                    )
-                    .toList(),
+                    ),
+                    if (filtered.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 200),
+                        child: SingleChildScrollView(
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            children: filtered
+                                .take(80)
+                                .map(
+                                  (s) => ActionChip(
+                                    label: Text(
+                                      s,
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                    onPressed: () => Navigator.pop(ctx, s),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, controller.text),
+                child: const Text('Create'),
               ),
             ],
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, controller.text),
-            child: const Text('Create'),
-          ),
-        ],
+          );
+        },
       ),
     );
 
@@ -1117,9 +1150,7 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
                   ),
                 ],
               ),
-        onTap: _selectionMode
-            ? () => _toggleSelection(file)
-            : (canOpen ? () => _openFile(file) : null),
+        onTap: _selectionMode ? () => _toggleSelection(file) : null,
         onLongPress: () => _toggleSelection(file),
       ),
     );
@@ -1127,3 +1158,371 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
 }
 
 enum _FileAction { rename, copy, move, delete, select }
+
+/// A modal progress dialog driven by [CloudFileManagerProvider]'s
+/// bulk-task state (label, total/completed counts, current file name).
+/// Used for upload, copy, move, and delete batches so the user always
+/// sees what's happening and how far along it is.
+class _TaskProgressDialog extends StatefulWidget {
+  final CloudFileManagerProvider provider;
+  const _TaskProgressDialog({required this.provider});
+
+  @override
+  State<_TaskProgressDialog> createState() => _TaskProgressDialogState();
+}
+
+class _TaskProgressDialogState extends State<_TaskProgressDialog> {
+  @override
+  void initState() {
+    super.initState();
+    widget.provider.addListener(_onChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.provider.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.provider;
+    final total = p.taskTotal;
+    final done = p.taskCompleted;
+    final label = p.taskLabel.isEmpty ? 'Working\u2026' : p.taskLabel;
+    final progress = p.taskProgress;
+    final indeterminate = total == 0;
+
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: SizedBox(
+          width: 360,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 12),
+              LinearProgressIndicator(
+                value: indeterminate ? null : progress,
+              ),
+              const SizedBox(height: 10),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    indeterminate ? '\u2026' : '$done of $total',
+                    style: const TextStyle(
+                        fontFeatures: [FontFeature.tabularFigures()]),
+                  ),
+                  if (!indeterminate)
+                    Text('${(progress * 100).toStringAsFixed(0)}%'),
+                ],
+              ),
+              if (p.taskCurrentItem.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  p.taskCurrentItem,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.black54,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+              if (p.taskDetail.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  p.taskDetail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.black45,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Folder picker that lazily loads one folder level at a time, mirroring
+/// the file manager's own navigation. Each level is fetched via
+/// [listSubfolders] only when the user opens that folder, so we never
+/// pre-load the entire `Distribution/` tree.
+class _FolderNavigatorPicker extends StatefulWidget {
+  final String title;
+  final String rootPath;
+  final String rootLabel;
+
+  /// Folder path that is the *source* of the move/copy. The picker
+  /// disables it (and forbids picking it) so the user can't pick the
+  /// same folder as the destination. Subfolders of it are still allowed.
+  final String excludeFolder;
+
+  /// Initial folder to open at. Falls back to the root if it's blank or
+  /// not under [rootPath].
+  final String startPath;
+
+  final Future<List<StorageFolderItem>> Function(String folderPath)
+      listSubfolders;
+
+  final void Function(String pickedPath) onPicked;
+  final VoidCallback onCancel;
+
+  const _FolderNavigatorPicker({
+    required this.title,
+    required this.rootPath,
+    required this.rootLabel,
+    required this.excludeFolder,
+    required this.startPath,
+    required this.listSubfolders,
+    required this.onPicked,
+    required this.onCancel,
+  });
+
+  @override
+  State<_FolderNavigatorPicker> createState() => _FolderNavigatorPickerState();
+}
+
+class _FolderNavigatorPickerState extends State<_FolderNavigatorPicker> {
+  /// Current folder being browsed.
+  late String _currentPath;
+
+  /// Subfolders of the current path. Null while loading.
+  List<StorageFolderItem>? _subfolders;
+  String? _error;
+  bool _loading = false;
+
+  /// Tiny per-level cache so back/forward through the same path doesn't
+  /// re-hit Storage. Cleared when the dialog closes (state goes away).
+  final Map<String, List<StorageFolderItem>> _cache = {};
+
+  @override
+  void initState() {
+    super.initState();
+    final start = widget.startPath.isNotEmpty &&
+            (widget.startPath == widget.rootPath ||
+                widget.startPath.startsWith('${widget.rootPath}/'))
+        ? widget.startPath
+        : widget.rootPath;
+    _currentPath = start;
+    _load(start);
+  }
+
+  Future<void> _load(String path) async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    final cached = _cache[path];
+    if (cached != null) {
+      setState(() {
+        _currentPath = path;
+        _subfolders = cached;
+        _loading = false;
+      });
+      return;
+    }
+    try {
+      final folders = await widget.listSubfolders(path);
+      if (!mounted) return;
+      _cache[path] = folders;
+      setState(() {
+        _currentPath = path;
+        _subfolders = folders;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _loading = false;
+      });
+    }
+  }
+
+  /// Path segments from the root → current. Used for breadcrumbs.
+  List<({String name, String path})> _breadcrumbs() {
+    final out = <({String name, String path})>[];
+    out.add((name: widget.rootLabel, path: widget.rootPath));
+    if (_currentPath == widget.rootPath) return out;
+    final tail = _currentPath.substring(widget.rootPath.length + 1);
+    final parts = tail.split('/');
+    var acc = widget.rootPath;
+    for (final p in parts) {
+      acc = '$acc/$p';
+      out.add((name: p, path: acc));
+    }
+    return out;
+  }
+
+  void _goUp() {
+    if (_currentPath == widget.rootPath) return;
+    final slash = _currentPath.lastIndexOf('/');
+    final parent = slash > 0 ? _currentPath.substring(0, slash) : widget.rootPath;
+    _load(parent);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final crumbs = _breadcrumbs();
+    final canSelectHere = _currentPath != widget.excludeFolder;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Title
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.title,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Up',
+                onPressed:
+                    _currentPath == widget.rootPath || _loading ? null : _goUp,
+                icon: const Icon(Icons.arrow_upward),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // Breadcrumbs
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            reverse: true,
+            child: Row(
+              children: [
+                for (var i = 0; i < crumbs.length; i++) ...[
+                  if (i > 0)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 2),
+                      child: Icon(Icons.chevron_right,
+                          size: 16, color: Colors.grey),
+                    ),
+                  InkWell(
+                    onTap: _loading || crumbs[i].path == _currentPath
+                        ? null
+                        : () => _load(crumbs[i].path),
+                    borderRadius: BorderRadius.circular(4),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 4),
+                      child: Text(
+                        crumbs[i].name,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: i == crumbs.length - 1
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                          color: i == crumbs.length - 1
+                              ? Colors.black87
+                              : Colors.blue.shade700,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const Divider(height: 16),
+          // Folder list
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _error != null
+                    ? Center(
+                        child: Text('Failed to load: $_error',
+                            style: TextStyle(color: Colors.red.shade400)),
+                      )
+                    : (_subfolders == null || _subfolders!.isEmpty)
+                        ? Center(
+                            child: Text(
+                              'No subfolders here. Use “Select this folder” to pick the current folder.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey.shade600),
+                            ),
+                          )
+                        : ListView.builder(
+                            itemCount: _subfolders!.length,
+                            itemBuilder: (_, i) {
+                              final folder = _subfolders![i];
+                              final isSource =
+                                  folder.fullPath == widget.excludeFolder;
+                              return ListTile(
+                                dense: true,
+                                leading: Icon(Icons.folder,
+                                    color: isSource
+                                        ? Colors.grey
+                                        : Colors.amber.shade700,
+                                    size: 20),
+                                title: Text(
+                                  folder.name,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: isSource
+                                        ? Colors.grey
+                                        : Colors.black87,
+                                    fontStyle: isSource
+                                        ? FontStyle.italic
+                                        : FontStyle.normal,
+                                  ),
+                                ),
+                                subtitle: isSource
+                                    ? const Text('Source folder',
+                                        style: TextStyle(fontSize: 10))
+                                    : null,
+                                trailing: const Icon(Icons.chevron_right,
+                                    size: 18),
+                                onTap: () => _load(folder.fullPath),
+                              );
+                            },
+                          ),
+          ),
+          const SizedBox(height: 8),
+          // Action row: Cancel / Select this folder
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              TextButton(
+                onPressed: widget.onCancel,
+                child: const Text('Cancel'),
+              ),
+              FilledButton.icon(
+                onPressed: canSelectHere && !_loading
+                    ? () => widget.onPicked(_currentPath)
+                    : null,
+                icon: const Icon(Icons.check, size: 18),
+                label: Text(
+                  _currentPath == widget.rootPath
+                      ? 'Select Distribution'
+                      : 'Select this folder',
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}

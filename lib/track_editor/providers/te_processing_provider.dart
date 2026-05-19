@@ -28,6 +28,23 @@ class TEProcessingProvider extends ChangeNotifier {
   final List<TEGpxFileEntry> _files = [];
   List<TEGpxFileEntry> get files => List.unmodifiable(_files);
 
+  /// Set in [dispose]; awaited code must early-out when this is true so we
+  /// don't call [notifyListeners] on a disposed notifier.
+  bool _disposed = false;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  /// Notify only when the provider is still alive. Use this everywhere we
+  /// call [notifyListeners] inside or after an `await`.
+  void _safeNotify() {
+    if (_disposed) return;
+    notifyListeners();
+  }
+
   bool _loading = false;
   bool get loading => _loading;
 
@@ -81,9 +98,13 @@ class TEProcessingProvider extends ChangeNotifier {
   // ── Actions ────────────────────────────────────────────────────────────────
 
   /// Open a multi-file picker, parse every .gpx file and stage them.
+  /// Any previously staged files are cleared before the new pick so that
+  /// re-picking never re-opens already-opened tabs.
   Future<void> pickFiles() async {
     _loading = true;
-    notifyListeners();
+    _tabsOpened = false;
+    _files.clear(); // ← always start with a clean slate
+    _safeNotify();
 
     try {
       final result = await FilePicker.platform.pickFiles(
@@ -92,18 +113,21 @@ class TEProcessingProvider extends ChangeNotifier {
         allowedExtensions: ['gpx'],
         withData: true,
       );
+      if (_disposed) return;
       if (result != null) {
         _tabsOpened = false;
         _progressMessage = 'Parsing files...';
-        notifyListeners();
+        _safeNotify();
         final total = result.files.length;
         for (var i = 0; i < total; i++) {
+          if (_disposed) return;
           final pf = result.files[i];
           final bytes = pf.bytes;
           if (bytes == null) continue;
           _progressMessage = 'Parsing ${i + 1} of $total...';
-          notifyListeners();
+          _safeNotify();
           final entry = await parseGpxFileAsync(pf.name, bytes);
+          if (_disposed) return;
           _files.add(entry);
         }
         _progressMessage = '';
@@ -112,7 +136,7 @@ class TEProcessingProvider extends ChangeNotifier {
       debugPrint('❌ TEProcessingProvider.pickFiles: $e');
     } finally {
       _loading = false;
-      notifyListeners();
+      _safeNotify();
     }
   }
 
@@ -120,6 +144,21 @@ class TEProcessingProvider extends ChangeNotifier {
   void removeFile(TEGpxFileEntry entry) {
     _files.remove(entry);
     notifyListeners();
+  }
+
+  /// Remove every staged file whose `matchKey` equals [matchKey].
+  /// Called by the tab bar when a processing tab is closed so that the
+  /// next "Open all matched" run doesn't re-open the closed tab from
+  /// stale staged files.
+  void removeFilesForMatchKey(String? matchKey) {
+    if (matchKey == null || matchKey.isEmpty) return;
+    final before = _files.length;
+    _files.removeWhere((f) => f.matchKey == matchKey);
+    if (_files.length != before) {
+      debugPrint(
+          '🧹 removeFilesForMatchKey("$matchKey") removed ${before - _files.length} file(s)');
+      notifyListeners();
+    }
   }
 
   /// Clear all staged files.
@@ -170,6 +209,9 @@ class TEProcessingProvider extends ChangeNotifier {
       tabsProvider,
       scheduleProvider,
     );
+    if (_disposed) return;
+    final removed = _files.remove(entry);
+    if (removed) _safeNotify();
   }
 
   /// Open all auto-matched pairs as new tabs.
@@ -183,31 +225,38 @@ class TEProcessingProvider extends ChangeNotifier {
     _openingTabs = true;
     _openProgress = 0;
     _progressMessage = 'Preparing tabs...';
-    notifyListeners();
+    _safeNotify();
 
     final newTabs = <TETabItem>[];
     try {
       for (var i = 0; i < pairs.length; i++) {
+        if (_disposed) return;
         _openProgress = (i + 1) / pairs.length;
         _progressMessage = 'Loading ${i + 1} of ${pairs.length}...';
-        notifyListeners();
+        _safeNotify();
         try {
           final tab = await _buildTabForPair(pairs[i], scheduleProvider);
+          if (_disposed) return;
           newTabs.add(tab);
         } catch (e) {
           debugPrint('⚠️ Failed to build tab for "${pairs[i].matchKey}": $e');
         }
       }
 
-      if (newTabs.isNotEmpty) {
+      if (newTabs.isNotEmpty && !_disposed) {
         tabsProvider.addTabsBatch(newTabs);
+        // Remove the files that were just opened so they are not re-opened
+        // if the user picks additional files without closing the editor.
+        for (final pair in pairs) {
+          _files.removeWhere((f) => f.matchKey == pair.matchKey);
+        }
       }
     } finally {
       _openingTabs = false;
       _openProgress = 0;
       _progressMessage = '';
       _tabsOpened = true;
-      notifyListeners();
+      _safeNotify();
     }
   }
 
@@ -221,6 +270,112 @@ class TEProcessingProvider extends ChangeNotifier {
     tabsProvider.selectTab(tabsProvider.tabs.length - 1);
   }
 
+  /// Re-fetch schedule data for every currently open tab in the
+  /// processing mode and refresh its work-map polygons + drop-off points.
+  ///
+  /// Tabs without a resolved distributor/date (manual or single-file
+  /// loads) are skipped. Local edits to the polygon list are replaced
+  /// — call this only when the user explicitly clicks "Refresh".
+  Future<int> refreshOpenTabs(
+    TETabsProvider tabsProvider,
+    ScheduleProvider scheduleProvider,
+  ) async {
+    final tabs = tabsProvider.tabs;
+    int refreshed = 0;
+    _openingTabs = true;
+    _openProgress = 0;
+    _progressMessage = 'Refreshing tabs...';
+    _safeNotify();
+
+    try {
+      for (var i = 0; i < tabs.length; i++) {
+        if (_disposed) return refreshed;
+        _openProgress = (i + 1) / tabs.length;
+        _progressMessage = 'Refreshing ${i + 1} of ${tabs.length}...';
+        _safeNotify();
+
+        final ok = await _refreshTabAt(i, tabsProvider, scheduleProvider);
+        if (_disposed) return refreshed;
+        if (ok) refreshed++;
+      }
+    } finally {
+      _openingTabs = false;
+      _openProgress = 0;
+      _progressMessage = '';
+      _safeNotify();
+    }
+    return refreshed;
+  }
+
+  /// Re-fetch schedule data for a single tab by index. Returns `true`
+  /// when the tab had a resolved distributor/date and the refresh
+  /// completed (work-map polygons + drop-off points were replaced).
+  Future<bool> refreshTab(
+    int index,
+    TETabsProvider tabsProvider,
+    ScheduleProvider scheduleProvider,
+  ) async {
+    if (index < 0 || index >= tabsProvider.tabs.length) return false;
+    _openingTabs = true;
+    _openProgress = 1.0;
+    _progressMessage = 'Refreshing tab...';
+    _safeNotify();
+    try {
+      return await _refreshTabAt(index, tabsProvider, scheduleProvider);
+    } finally {
+      _openingTabs = false;
+      _openProgress = 0;
+      _progressMessage = '';
+      notifyListeners();
+    }
+  }
+
+  Future<bool> _refreshTabAt(
+    int i,
+    TETabsProvider tabsProvider,
+    ScheduleProvider scheduleProvider,
+  ) async {
+    final tabs = tabsProvider.tabs;
+    if (i < 0 || i >= tabs.length) return false;
+    final tab = tabs[i];
+    final dId = tab.distributorId;
+    final tDate = tab.trackDate;
+    if (dId == null || tDate == null) return false;
+
+    try {
+      final jobs =
+          await scheduleProvider.fetchJobsForDistributorAndDate(dId, tDate);
+      final newPolys = <TEStyledPolygon>[];
+      final newDrops = <TEDropOffPoint>[];
+      final newJobIds = <String>[];
+      for (final job in jobs) {
+        newJobIds.add(job.id);
+        for (final wm in job.workMaps) {
+          newPolys.add(_customPolygonToStyled(wm));
+        }
+        if (job.dropOffPoint != null) {
+          final clientLabel = job.clients.isNotEmpty ? job.clients.first : '';
+          newDrops.add(TEDropOffPoint(
+            label:
+                clientLabel.isNotEmpty ? 'Drop-off · $clientLabel' : 'Drop-off',
+            position: job.dropOffPoint!,
+            jobId: job.id,
+          ));
+        }
+      }
+      tabsProvider.replacePolygons(i, newPolys);
+      tabsProvider.replaceTabMeta(
+        i,
+        jobIds: newJobIds,
+        dropOffPoints: newDrops,
+      );
+      return true;
+    } catch (e) {
+      debugPrint('⚠️ refreshTab: tab "${tab.title}" failed: $e');
+      return false;
+    }
+  }
+
   /// Build a [TETabItem] from a matched pair, resolving schedule data.
   Future<TETabItem> _buildTabForPair(
     TEGpxMatchedPair pair,
@@ -229,11 +384,15 @@ class TEProcessingProvider extends ChangeNotifier {
     debugPrint('──────────────────────────────────────────');
     debugPrint('📂 Building tab for pair: "${pair.matchKey}"');
 
-    final trackDate = _extractTrackDate(pair.trackFile.tracks);
+    final trackDate = _extractTrackDate(pair.trackFile.tracks) ??
+        _extractDateFromText(pair.matchKey) ??
+        _extractDateFromText(pair.trackFile.filename);
     final distributor =
         _matchDistributor(pair.matchKey, scheduleProvider.distributors);
 
     final workMapPolygons = <TEStyledPolygon>[];
+    final dropOffs = <TEDropOffPoint>[];
+    final jobIds = <String>[];
     String? storageFolderPath;
     if (trackDate != null && distributor != null) {
       debugPrint(
@@ -243,8 +402,18 @@ class TEProcessingProvider extends ChangeNotifier {
         trackDate,
       );
       for (final job in jobs) {
+        jobIds.add(job.id);
         for (final wm in job.workMaps) {
           workMapPolygons.add(_customPolygonToStyled(wm));
+        }
+        if (job.dropOffPoint != null) {
+          final clientLabel = job.clients.isNotEmpty ? job.clients.first : '';
+          dropOffs.add(TEDropOffPoint(
+            label:
+                clientLabel.isNotEmpty ? 'Drop-off · $clientLabel' : 'Drop-off',
+            position: job.dropOffPoint!,
+            jobId: job.id,
+          ));
         }
       }
       // Resolve storage folder path from the first matched job's client.
@@ -279,7 +448,12 @@ class TEProcessingProvider extends ChangeNotifier {
       tracks: [...pair.trackFile.tracks],
       waypoints: [...pair.waypointsFile.waypoints],
       targetPolygons: [],
+      dropOffPoints: dropOffs,
       storageFolderPath: storageFolderPath,
+      matchKey: pair.matchKey,
+      distributorId: distributor?.id,
+      trackDate: trackDate,
+      jobIds: jobIds,
     );
     debugPrint(
         '✅ Tab "${pair.tabTitle}" — tracks: ${tab.tracks.length}, wpts: ${tab.waypoints.length}, polys: ${tab.polygons.length}');
@@ -298,6 +472,61 @@ class TEProcessingProvider extends ChangeNotifier {
         }
       }
     }
+    return null;
+  }
+
+  /// Extract a date from route filenames such as
+  /// `Track 11 May 2026 Distributor ...` when the GPX track points do not
+  /// carry timestamps. This lets single, unmatched track files resolve the
+  /// same schedule data as normal matched Track/Waypoints pairs.
+  static DateTime? _extractDateFromText(String text) {
+    final iso =
+        RegExp(r'\b(\d{4})[-_ ](\d{1,2})[-_ ](\d{1,2})\b').firstMatch(text);
+    if (iso != null) {
+      return _checkedDate(
+        int.parse(iso.group(1)!),
+        int.parse(iso.group(2)!),
+        int.parse(iso.group(3)!),
+      );
+    }
+
+    final dmy = RegExp(
+      r'\b(\d{1,2})[\s_\-]+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[\s_\-]+(\d{4})\b',
+      caseSensitive: false,
+    ).firstMatch(text);
+    if (dmy == null) return null;
+    final month = _monthNumber(dmy.group(2)!);
+    if (month == null) return null;
+    return _checkedDate(
+      int.parse(dmy.group(3)!),
+      month,
+      int.parse(dmy.group(1)!),
+    );
+  }
+
+  static DateTime? _checkedDate(int year, int month, int day) {
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    final date = DateTime(year, month, day);
+    if (date.year != year || date.month != month || date.day != day) {
+      return null;
+    }
+    return date;
+  }
+
+  static int? _monthNumber(String raw) {
+    final key = raw.toLowerCase();
+    if (key.startsWith('jan')) return 1;
+    if (key.startsWith('feb')) return 2;
+    if (key.startsWith('mar')) return 3;
+    if (key.startsWith('apr')) return 4;
+    if (key == 'may') return 5;
+    if (key.startsWith('jun')) return 6;
+    if (key.startsWith('jul')) return 7;
+    if (key.startsWith('aug')) return 8;
+    if (key.startsWith('sep')) return 9;
+    if (key.startsWith('oct')) return 10;
+    if (key.startsWith('nov')) return 11;
+    if (key.startsWith('dec')) return 12;
     return null;
   }
 

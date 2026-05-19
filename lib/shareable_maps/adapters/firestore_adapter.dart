@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../models/custom_polygon.dart';
@@ -175,15 +174,7 @@ class FirestoreMapAdapter extends MapDataAdapter {
 
       for (final wm in item.workMaps.where((p) => p.isPolygon)) {
         if (wm.name.isEmpty) continue;
-        matchedPolygons.add(CustomPolygon(
-          name: wm.name,
-          description: wm.description,
-          points: List<LatLng>.from(wm.points),
-          color: wm.color,
-          fillOpacity: wm.fillOpacity,
-          strokeWidth: wm.strokeWidth,
-          type: wm.type,
-        ));
+        matchedPolygons.add(wm.copyWith(points: List<LatLng>.from(wm.points)));
         _polygonNameToUnfinishedId[wm.name] = item.id;
       }
     }
@@ -213,14 +204,14 @@ class FirestoreMapAdapter extends MapDataAdapter {
   Future<void> save(ShareableMap map) async {
     // Route polygons from the unfinished-areas layer back to their source
     // unfinished items, and strip that layer before persisting on the map.
-    final unfinishedLayers = map.layers
-        .where((l) => l.id == kUnfinishedAreasLayerId)
-        .toList();
+    final unfinishedLayers =
+        map.layers.where((l) => l.id == kUnfinishedAreasLayerId).toList();
     final persistMap = unfinishedLayers.isEmpty
         ? map
         : map.copyWith(
-            layers:
-                map.layers.where((l) => l.id != kUnfinishedAreasLayerId).toList(),
+            layers: map.layers
+                .where((l) => l.id != kUnfinishedAreasLayerId)
+                .toList(),
           );
 
     if (_unfinishedProvider != null && unfinishedLayers.isNotEmpty) {

@@ -405,7 +405,7 @@ class _DistributorManagementDialogState
 
     if (result != null) {
       final updatedDistributor = result['distributor'] as Distributor;
-      final oldIndex = result['oldIndex'] as int;
+      final oldIndex = (result['oldIndex'] as num).toInt();
 
       setState(() {
         final distributorIndex =

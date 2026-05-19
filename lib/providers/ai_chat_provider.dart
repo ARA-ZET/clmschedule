@@ -222,7 +222,7 @@ class AiChatProvider extends ChangeNotifier {
         userName: _userName,
       );
 
-      final jobCount = result['jobCount'] as int? ?? jobsData.length;
+      final jobCount = (result['jobCount'] as num?)?.toInt() ?? jobsData.length;
 
       _messages[messageIndex] = AiChatMessage(
         role: message.role,
@@ -283,7 +283,7 @@ class AiChatProvider extends ChangeNotifier {
         userName: _userName,
       );
 
-      final jobCount = result['jobCount'] as int? ?? scheduleJobsData.length;
+      final jobCount = (result['jobCount'] as num?)?.toInt() ?? scheduleJobsData.length;
 
       _messages[messageIndex] = AiChatMessage(
         role: message.role,

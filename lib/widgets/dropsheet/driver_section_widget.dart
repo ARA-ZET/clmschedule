@@ -4,10 +4,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../../models/collection_job.dart';
 import '../../models/dropsheet_day.dart';
 import '../../models/dropsheet_task.dart';
+import '../../models/dropsheet_task_type_config.dart';
 import '../../providers/dropsheet_provider.dart';
+import '../../providers/dropsheet_task_config_provider.dart';
 import 'dropsheet_tab.dart' show TaskDragPayload;
 import 'dropsheet_task_editor_dialog.dart';
 import 'dropsheet_task_row.dart';
+
 /// One driver's section: header (name + vehicle/trailer) and a reorderable
 /// list of tasks. Tasks may be reordered within the section; cross-section
 /// moves use the "Move to..." popup on each task row.
@@ -26,6 +29,10 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final dropsheet = ref.read(dropsheetRiverpod);
+    // Compute once per build instead of inside the itemBuilder where it
+    // would allocate a new filtered list per row.
+    final otherSections = _otherSections();
+    final hasOtherSections = otherSections.isNotEmpty;
 
     return DragTarget<TaskDragPayload>(
       onWillAcceptWithDetails: (details) =>
@@ -80,10 +87,10 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
                     dragIndex: index,
                     sectionId: section.id,
                     onEdit: () => _editTask(context, ref, task),
-                    onDelete: task.isMandatory
+                    onDelete: _isLeadingTask(task)
                         ? null
                         : () => dropsheet.removeTask(section.id, task.id),
-                    onMoveToSection: _otherSections().isEmpty
+                    onMoveToSection: !hasOtherSections
                         ? null
                         : (targetSectionId) async {
                             await dropsheet.moveTask(
@@ -93,7 +100,7 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
                               toIndex: 0,
                             );
                           },
-                    otherSections: _otherSections(),
+                    otherSections: otherSections,
                   );
                 },
               ),
@@ -123,6 +130,12 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
   List<DropsheetDriverSection> _otherSections() =>
       allSections.where((s) => s.id != section.id).toList();
 
+  bool _isLeadingTask(DropsheetTask task) =>
+      task.isMandatory ||
+      task.type == DropsheetTaskType.inspect ||
+      task.type == DropsheetTaskType.pack ||
+      task.type == DropsheetTaskType.leave;
+
   Future<void> _editTask(
       BuildContext context, riverpod.WidgetRef ref, DropsheetTask task) async {
     final sheetDate = ref.read(dropsheetRiverpod).date;
@@ -133,9 +146,45 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
         sheetDate: sheetDate,
       ),
     );
-    if (updated != null) {
-      await ref.read(dropsheetRiverpod).updateTask(section.id, updated);
+    if (updated == null) return;
+    await ref.read(dropsheetRiverpod).updateTask(section.id, updated);
+
+    // When the Leave task's departure time changes and the section already
+    // has a computed route, propagate new ETAs offline using stored leg data.
+    if (updated.type == DropsheetTaskType.leave &&
+        updated.startTime.isNotEmpty &&
+        updated.startTime != task.startTime) {
+      final config = ref.read(dropsheetTaskConfigRiverpod);
+      await ref.read(dropsheetRiverpod).recalculateETAsFromLegs(
+            section.id,
+            updated.startTime,
+            config.serviceMinutesFor,
+          );
     }
+
+    // For any other task: if the start time was manually changed, shift
+    // all tasks that come after it in the section by the same delta so
+    // relative spacing is preserved without re-running the route API.
+    if (updated.type != DropsheetTaskType.leave &&
+        updated.startTime.isNotEmpty &&
+        task.startTime.isNotEmpty &&
+        updated.startTime != task.startTime) {
+      final delta =
+          _hhmToMinutes(updated.startTime) - _hhmToMinutes(task.startTime);
+      if (delta != 0) {
+        await ref.read(dropsheetRiverpod).shiftStartTimesAfter(
+              sectionId: section.id,
+              taskId: updated.id,
+              deltaMinutes: delta,
+            );
+      }
+    }
+  }
+
+  static int _hhmToMinutes(String hhmm) {
+    final p = hhmm.split(':');
+    if (p.length != 2) return 0;
+    return (int.tryParse(p[0]) ?? 0) * 60 + (int.tryParse(p[1]) ?? 0);
   }
 }
 
@@ -167,15 +216,19 @@ class _Header extends riverpod.ConsumerWidget {
           if (section.vehicle != null)
             _Chip(label: section.vehicle!.displayName, color: Colors.blue),
           const SizedBox(width: 6),
-          if (section.trailer != null && section.trailer != TrailerType.noTrailer)
-            _Chip(label: section.trailer!.displayName, color: Colors.deepPurple),
+          if (section.trailer != null &&
+              section.trailer != TrailerType.noTrailer)
+            _Chip(
+                label: section.trailer!.displayName, color: Colors.deepPurple),
           if (isUnassigned)
             const Padding(
               padding: EdgeInsets.only(left: 8),
               child: Text(
                 'Long-press a stop and drop it onto a driver',
                 style: TextStyle(
-                    color: Colors.orange, fontSize: 12, fontStyle: FontStyle.italic),
+                    color: Colors.orange,
+                    fontSize: 12,
+                    fontStyle: FontStyle.italic),
               ),
             ),
           const Spacer(),
@@ -215,7 +268,7 @@ class _Header extends riverpod.ConsumerWidget {
                   await _editVehicleTrailer(context, ref);
                 }
               },
-          ),
+            ),
         ],
       ),
     );
@@ -234,21 +287,21 @@ class _Header extends riverpod.ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               DropdownButtonFormField<VehicleType>(
-                value: vehicle,
+                initialValue: vehicle,
                 decoration: const InputDecoration(labelText: 'Vehicle'),
                 items: VehicleType.values
-                    .map((v) => DropdownMenuItem(
-                        value: v, child: Text(v.displayName)))
+                    .map((v) =>
+                        DropdownMenuItem(value: v, child: Text(v.displayName)))
                     .toList(),
                 onChanged: (v) => setState(() => vehicle = v),
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<TrailerType>(
-                value: trailer,
+                initialValue: trailer,
                 decoration: const InputDecoration(labelText: 'Trailer'),
                 items: TrailerType.values
-                    .map((t) => DropdownMenuItem(
-                        value: t, child: Text(t.displayName)))
+                    .map((t) =>
+                        DropdownMenuItem(value: t, child: Text(t.displayName)))
                     .toList(),
                 onChanged: (t) => setState(() => trailer = t),
               ),
@@ -318,22 +371,36 @@ class _Footer extends riverpod.ConsumerWidget {
         child: TextButton.icon(
           onPressed: () async {
             // Step 1: pick the type.
-            final type = await showDialog<DropsheetTaskType>(
+            final selection = await showDialog<TaskTypeSelection>(
               context: context,
               builder: (_) => const DropsheetTaskTypePicker(),
             );
-            if (type == null) return;
+            if (selection == null) return;
             if (!context.mounted) return;
             final dropsheet = ref.read(dropsheetRiverpod);
+            // Build the initial task based on whether it's a dynamic type.
+            final DropsheetTask initialTask;
+            if (selection.isDynamic) {
+              final def = selection.dynamicType!;
+              initialTask = DropsheetTask(
+                id: 't_${DateTime.now().microsecondsSinceEpoch}',
+                type: DropsheetTaskType.custom,
+                job: def.label,
+                typeData: {'dynamicTypeId': def.id},
+              );
+            } else {
+              final t = selection.type;
+              initialTask = DropsheetTask(
+                id: 't_${DateTime.now().microsecondsSinceEpoch}',
+                type: t,
+                job: t.displayName,
+              );
+            }
             // Step 2: open the type-aware editor.
             final newTask = await showDialog<DropsheetTask>(
               context: context,
               builder: (_) => DropsheetTaskEditorDialog(
-                initial: DropsheetTask(
-                  id: 't_${DateTime.now().microsecondsSinceEpoch}',
-                  type: type,
-                  job: type.displayName,
-                ),
+                initial: initialTask,
                 sheetDate: dropsheet.date,
               ),
             );
@@ -365,7 +432,8 @@ class _Chip extends StatelessWidget {
       ),
       child: Text(
         label,
-        style: TextStyle(color: color, fontWeight: FontWeight.w600, fontSize: 12),
+        style:
+            TextStyle(color: color, fontWeight: FontWeight.w600, fontSize: 12),
       ),
     );
   }

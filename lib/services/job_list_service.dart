@@ -24,18 +24,6 @@ class JobListService {
   Stream<List<JobListItem>> getJobListItems(
       [DateTime? date, List<String>? jobTypes]) {
     final targetDate = date ?? DateTime.now();
-    if (kDebugMode) {
-      debugPrint(
-          'JobListService: Getting job list items for date: $targetDate');
-      if (jobTypes != null && jobTypes.isNotEmpty) {
-        debugPrint(
-            'JobListService: Filtering by job types: ${jobTypes.join(", ")}');
-      }
-    }
-    if (kDebugMode) {
-      debugPrint(
-          'JobListService: Monthly doc ID: ${_monthlyService.getMonthlyDocumentId(targetDate)}');
-    }
 
     // Ensure monthly document exists when streaming
     _monthlyService.ensureJobListMonthlyDocExists(targetDate);
@@ -48,10 +36,6 @@ class JobListService {
       // Use the string values directly for Firebase query
       final jobTypeStrings = jobTypes;
       query = query.where('jobType', whereIn: jobTypeStrings);
-      if (kDebugMode) {
-        debugPrint(
-            'JobListService: Applying whereIn filter with values: $jobTypeStrings');
-      }
       // Note: Combining whereIn with orderBy requires a composite index in Firebase
       // For now, skip orderBy when filtering to avoid index requirement
       // TODO: Create composite index for (jobType, date) in Firebase Console
@@ -61,12 +45,8 @@ class JobListService {
     }
 
     return query.snapshots().map((snapshot) {
-      if (kDebugMode) {
-        debugPrint(
-            'JobListService: Firestore snapshot received with ${snapshot.docs.length} documents');
-      }
       return snapshot.docs.map((doc) {
-        return JobListItem.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+        return JobListItem.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList();
     });
   }
@@ -112,7 +92,8 @@ class JobListService {
     final targetDate = date ?? DateTime.now();
     final doc = await _getJobListItemsCollection(targetDate).doc(id).get();
     if (doc.exists && doc.data() != null) {
-      return JobListItem.fromMap(doc.id, doc.data()! as Map<String, dynamic>);
+      return JobListItem.fromMap(
+          doc.id, Map<String, dynamic>.from(doc.data()! as Map));
     }
     return null;
   }
@@ -144,7 +125,7 @@ class JobListService {
         .snapshots()
         .map((snapshot) {
       return snapshot.docs.map((doc) {
-        return JobListItem.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+        return JobListItem.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList();
     });
   }
@@ -163,7 +144,7 @@ class JobListService {
         .snapshots()
         .map((snapshot) {
       return snapshot.docs.map((doc) {
-        return JobListItem.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+        return JobListItem.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList();
     });
   }
@@ -184,7 +165,7 @@ class JobListService {
         .map((snapshot) {
           return snapshot.docs.map((doc) {
             return JobListItem.fromMap(
-                doc.id, doc.data() as Map<String, dynamic>);
+                doc.id, Map<String, dynamic>.from(doc.data() as Map));
           }).toList();
         });
   }

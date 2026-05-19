@@ -28,8 +28,7 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
                   const SizedBox(width: 8),
                   const Text(
                     'Manage drivers',
-                    style:
-                        TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                   const Spacer(),
                   IconButton(
@@ -56,8 +55,7 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
                         )
                       : ListView.separated(
                           itemCount: drivers.length,
-                          separatorBuilder: (_, __) =>
-                              const Divider(height: 1),
+                          separatorBuilder: (_, __) => const Divider(height: 1),
                           itemBuilder: (context, i) {
                             final d = drivers[i];
                             return ListTile(
@@ -87,7 +85,8 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
                                   IconButton(
                                     icon: const Icon(Icons.edit, size: 20),
                                     onPressed: () => _editDriver(
-                                        context, provider, driver: d),
+                                        context, provider,
+                                        driver: d),
                                   ),
                                   IconButton(
                                     icon: const Icon(Icons.delete_outline,
@@ -217,9 +216,8 @@ class _DriverFormDialogState extends State<_DriverFormDialog> {
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<VehicleType?>(
-              value: _vehicle,
-              decoration:
-                  const InputDecoration(labelText: 'Default vehicle'),
+              initialValue: _vehicle,
+              decoration: const InputDecoration(labelText: 'Default vehicle'),
               items: [
                 const DropdownMenuItem<VehicleType?>(
                     value: null, child: Text('—')),
@@ -232,9 +230,8 @@ class _DriverFormDialogState extends State<_DriverFormDialog> {
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<TrailerType?>(
-              value: _trailer,
-              decoration:
-                  const InputDecoration(labelText: 'Default trailer'),
+              initialValue: _trailer,
+              decoration: const InputDecoration(labelText: 'Default trailer'),
               items: [
                 const DropdownMenuItem<TrailerType?>(
                     value: null, child: Text('—')),

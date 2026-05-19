@@ -245,7 +245,7 @@ class InventoryLocalStorage {
       if (value.runtimeType.toString() == 'Timestamp') {
         final timestamp = value as dynamic;
         final dateTime = DateTime.fromMillisecondsSinceEpoch(
-          timestamp.millisecondsSinceEpoch as int,
+          (timestamp.millisecondsSinceEpoch as num).toInt(),
         );
         result[entry.key] = dateTime.toIso8601String();
       }

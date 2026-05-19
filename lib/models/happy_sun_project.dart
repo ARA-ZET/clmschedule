@@ -20,7 +20,7 @@ class CheckedOutTool {
       toolId: data['toolId'] ?? '',
       toolName: data['toolName'] ?? '',
       category: data['category'] ?? 'General',
-      quantity: data['quantity'] ?? 1,
+      quantity: (data['quantity'] as num?)?.toInt() ?? 1,
     );
   }
 
@@ -64,7 +64,7 @@ class ProjectCheckout {
       checkoutTime: _parseDateTime(data['checkoutTime']),
       tools: (data['tools'] as List<dynamic>?)
               ?.map((tool) =>
-                  CheckedOutTool.fromMap(tool as Map<String, dynamic>))
+                  CheckedOutTool.fromMap(Map<String, dynamic>.from(tool as Map)))
               .toList() ??
           [],
       notes: data['notes'],
@@ -165,7 +165,7 @@ class ProjectChecklist {
       checklistTime: ProjectCheckout._parseDateTime(data['checklistTime']),
       items: (data['items'] as List<dynamic>?)
               ?.map(
-                  (item) => ChecklistItem.fromMap(item as Map<String, dynamic>))
+                  (item) => ChecklistItem.fromMap(Map<String, dynamic>.from(item as Map)))
               .toList() ??
           [],
       allItemsChecked: data['allItemsChecked'] ?? false,
@@ -216,7 +216,7 @@ class ProjectCheckin {
       checkinTime: ProjectCheckout._parseDateTime(data['checkinTime']),
       returnedTools: (data['returnedTools'] as List<dynamic>?)
               ?.map((tool) =>
-                  CheckedOutTool.fromMap(tool as Map<String, dynamic>))
+                  CheckedOutTool.fromMap(Map<String, dynamic>.from(tool as Map)))
               .toList() ??
           [],
       missingTools:
@@ -339,18 +339,18 @@ class HappySunProject {
       address: data['address'] ?? '',
       scheduledDate: _parseDateTime(data['scheduledDate']) ?? DateTime.now(),
       scheduledTime: data['scheduledTime'],
-      numberOfTeamMembers: data['numberOfTeamMembers'] ?? 1,
+      numberOfTeamMembers: (data['numberOfTeamMembers'] as num?)?.toInt() ?? 1,
       status: data['status'] ?? 'pending',
       createdAt: _parseDateTime(data['createdAt']) ?? DateTime.now(),
       updatedAt: _parseDateTime(data['updatedAt']),
       jobType: data['jobType'] ?? 'windowCleaning',
       toolsNeeded: data['toolsNeeded'] != null
           ? CategorizedTools.fromMap(
-              data['toolsNeeded'] as Map<String, dynamic>)
+              Map<String, dynamic>.from(data['toolsNeeded'] as Map))
           : null,
       toolsUsedCategorized: data['toolsUsedCategorized'] != null
           ? CategorizedTools.fromMap(
-              data['toolsUsedCategorized'] as Map<String, dynamic>)
+              Map<String, dynamic>.from(data['toolsUsedCategorized'] as Map))
           : null,
       teamMemberIds:
           (data['teamMemberIds'] as List<dynamic>?)?.cast<String>() ?? [],
@@ -362,14 +362,14 @@ class HappySunProject {
       beforeImages: (data['beforeImages'] as List<dynamic>?)?.cast<String>(),
       afterImages: (data['afterImages'] as List<dynamic>?)?.cast<String>(),
       checklistData: data['checklistData'] != null
-          ? ChecklistData.fromMap(data['checklistData'] as Map<String, dynamic>)
+          ? ChecklistData.fromMap(Map<String, dynamic>.from(data['checklistData'] as Map))
           : null,
       statusId: data['statusId'] ?? data['status'] ?? 'scheduled',
       checkout:
-          ProjectCheckout.fromMap(data['checkout'] as Map<String, dynamic>?),
+          ProjectCheckout.fromMap((data['checkout'] == null ? null : Map<String, dynamic>.from(data['checkout'] as Map))),
       checklist:
-          ProjectChecklist.fromMap(data['checklist'] as Map<String, dynamic>?),
-      checkin: ProjectCheckin.fromMap(data['checkin'] as Map<String, dynamic>?),
+          ProjectChecklist.fromMap((data['checklist'] == null ? null : Map<String, dynamic>.from(data['checklist'] as Map))),
+      checkin: ProjectCheckin.fromMap((data['checkin'] == null ? null : Map<String, dynamic>.from(data['checkin'] as Map))),
     );
   }
 

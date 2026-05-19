@@ -41,8 +41,8 @@ class ErfProperty {
 
   /// Create from CSG ArcGIS REST API feature JSON.
   factory ErfProperty.fromCsgFeature(Map<String, dynamic> feature) {
-    final attrs = feature['attributes'] as Map<String, dynamic>;
-    final geometry = feature['geometry'] as Map<String, dynamic>?;
+    final attrs = Map<String, dynamic>.from(feature['attributes'] as Map);
+    final geometry = (feature['geometry'] == null ? null : Map<String, dynamic>.from(feature['geometry'] as Map));
 
     // Parse polygon rings - CSG returns [[[lng, lat], ...]]
     final rings = geometry?['rings'] as List<dynamic>? ?? [];
@@ -69,7 +69,7 @@ class ErfProperty {
 
     return ErfProperty(
       id: lpi.isNotEmpty ? lpi : 'erf_${attrs['PARCEL_NO']}',
-      erfNumber: attrs['PARCEL_NO'] as int? ?? 0,
+      erfNumber: (attrs['PARCEL_NO'] as num?)?.toInt() ?? 0,
       tagValue: attrs['TAG_VALUE'] as String? ?? '',
       lpiCode: lpi,
       majRegion: attrs['MAJ_REGION'] as String? ?? '',
@@ -87,7 +87,7 @@ class ErfProperty {
   factory ErfProperty.fromMap(String id, Map<String, dynamic> data) {
     return ErfProperty(
       id: id,
-      erfNumber: data['erfNumber'] as int? ?? 0,
+      erfNumber: (data['erfNumber'] as num?)?.toInt() ?? 0,
       tagValue: data['tagValue'] as String? ?? '',
       lpiCode: data['lpiCode'] as String? ?? '',
       majRegion: data['majRegion'] as String? ?? '',

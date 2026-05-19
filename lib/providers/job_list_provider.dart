@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -319,10 +320,6 @@ class JobListProvider extends ChangeNotifier {
     // Cancel existing subscription
     _jobListSubscription?.cancel();
 
-    // Debug logging
-    debugPrint(
-        'JobListProvider: Setting up listener for month: ${_jobListService.getMonthlyDocumentId(_currentMonth)}');
-
     // For Happy Sun flavor, only listen to Happy Sun-flagged job types.
     List<String>? jobTypesFilter;
     if (FlavorConfig.instance.isHappySun) {
@@ -331,16 +328,11 @@ class JobListProvider extends ChangeNotifier {
       // Firestore whereIn requires a non-empty list — fall back to a
       // sentinel that matches nothing so the query stays valid.
       jobTypesFilter = ids.isEmpty ? ['__none__'] : ids;
-      debugPrint(
-          'JobListProvider: Happy Sun flavor - filtering to ${jobTypesFilter.length} flagged job types');
     }
 
     _jobListSubscription =
         _jobListService.getJobListItems(_currentMonth, jobTypesFilter).listen(
       (jobListItems) {
-        debugPrint(
-            'JobListProvider: Received ${jobListItems.length} job list items via snapshot');
-
         // Store previous known IDs before updating
         final previousKnownIds = Set<String>.from(_knownJobIds);
 
@@ -504,6 +496,19 @@ class JobListProvider extends ChangeNotifier {
 
     // Invalidate caches since merged data changed
     _invalidateItemCaches();
+
+    // If the area field carries a CLM Maps share URL and the job either has
+    // no map linked or the area changed, auto-link the matching map.
+    final areaChanged =
+        currentItem == null || currentItem.area != jobListItem.area;
+    final needsLink = jobListItem.shareableMapId.isEmpty || areaChanged;
+    if (needsLink && _extractClmMapShareCode(jobListItem.area) != null) {
+      unawaited(_autoLinkMapFromArea(
+        jobId: jobListItem.id,
+        area: jobListItem.area,
+        date: jobListItem.date,
+      ));
+    }
 
     // Immediately update UI
     notifyListeners();
@@ -695,7 +700,16 @@ class JobListProvider extends ChangeNotifier {
   // Add job list item
   Future<void> addJobListItem(JobListItem jobListItem) async {
     try {
-      await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+      final generatedId =
+          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+
+      // Best-effort: if the area field carries a CLM Maps share URL, link
+      // the matching map to this job automatically.
+      unawaited(_autoLinkMapFromArea(
+        jobId: generatedId,
+        area: jobListItem.area,
+        date: jobListItem.date,
+      ));
 
       // NOTE: Do NOT trigger Happy Sun sync here because we don't have the generated ID yet.
       // The Firestore listener will pick up the new job, and if needed, callers should use
@@ -738,6 +752,14 @@ class JobListProvider extends ChangeNotifier {
       // Track this job as locally added to prevent duplicate sync from listener
       _locallyAddedJobIds.add(savedJob.id);
 
+      // Best-effort: auto-link a CLM Maps share URL pasted into the area
+      // field to the matching shareable map.
+      unawaited(_autoLinkMapFromArea(
+        jobId: savedJob.id,
+        area: savedJob.area,
+        date: savedJob.date,
+      ));
+
       // Trigger Happy Sun sync if job is a Happy Sun-flagged type
       if (_onJobListItemAdded != null &&
           (JobTypeProvider.instance?.isHappySunService(savedJob.jobTypeId) ??
@@ -760,7 +782,16 @@ class JobListProvider extends ChangeNotifier {
   // Add job list item without allocation (skip schedule assignment)
   Future<void> addJobListItemWithoutAllocation(JobListItem jobListItem) async {
     try {
-      await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+      final generatedId =
+          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+
+      // Best-effort: auto-link a CLM Maps share URL pasted into the area
+      // field to the matching shareable map.
+      unawaited(_autoLinkMapFromArea(
+        jobId: generatedId,
+        area: jobListItem.area,
+        date: jobListItem.date,
+      ));
 
       // NOTE: Happy Sun sync will be triggered by the Firestore listener when it detects the new job
       // This prevents issues with missing/temporary IDs
@@ -779,9 +810,13 @@ class JobListProvider extends ChangeNotifier {
     required String monthKey,
     required String mapName,
     String? storageFolderPath,
+
+    /// Optional in-memory fallback used when the Firestore stream hasn't yet
+    /// delivered the newly-created job (e.g. right after a copy operation).
+    JobListItem? fallbackJob,
   }) async {
     try {
-      final job = getJobListItemById(jobId);
+      final job = getJobListItemById(jobId) ?? fallbackJob;
       if (job == null) return;
 
       // Generate/get share link for the area field
@@ -840,6 +875,127 @@ class JobListProvider extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       debugPrint('⚠️ Link existing map to job failed: $e');
+    }
+  }
+
+  /// Detects a CLM Maps share URL anywhere inside [text] and returns the
+  /// share code (e.g. "x7Kp2m") or null if no valid link is present.
+  static final RegExp _clmMapShareUrlRegex = RegExp(
+    r'https?://clm-maps\.web\.app/map/([A-Za-z0-9_-]+)',
+    caseSensitive: false,
+  );
+  static String? _extractClmMapShareCode(String? text) {
+    if (text == null || text.isEmpty) return null;
+    final match = _clmMapShareUrlRegex.firstMatch(text);
+    return match?.group(1);
+  }
+
+  /// Auto-link a CLM Maps share URL embedded in the job's `area` field to
+  /// the corresponding shareable map. No-op if:
+  ///   * `area` does not contain a CLM Maps URL,
+  ///   * the share code can't be resolved,
+  ///   * the job is already linked to that map.
+  /// Failures are logged but never thrown.
+  Future<void> _autoLinkMapFromArea({
+    required String jobId,
+    required String area,
+    required DateTime date,
+  }) async {
+    final shareCode = _extractClmMapShareCode(area);
+    if (shareCode == null) return;
+    if (jobId.isEmpty) return;
+
+    try {
+      final linkService = MapLinkService(firestore: FirebaseFirestore.instance);
+      final resolved = await linkService.resolveShareCode(shareCode);
+      if (resolved == null) {
+        debugPrint(
+            '🔗 [AutoLink] Share code "$shareCode" did not resolve to any map');
+        return;
+      }
+
+      // Look up the job's current state. The job may have just been written,
+      // so prefer Firestore over the in-memory cache to avoid a race.
+      final mapService =
+          ShareableMapsFirestoreService(firestore: FirebaseFirestore.instance);
+      final mapDoc = await mapService.getMap(resolved.monthKey, resolved.mapId);
+      if (mapDoc == null) {
+        debugPrint(
+            '🔗 [AutoLink] Map ${resolved.monthKey}/${resolved.mapId} no longer exists');
+        return;
+      }
+
+      final job = getJobListItemById(jobId);
+      // Skip if already linked to the same map.
+      if (job != null && job.shareableMapId == resolved.mapId) {
+        debugPrint(
+            '🔗 [AutoLink] Job $jobId already linked to ${resolved.mapId} — skipping');
+        return;
+      }
+
+      debugPrint(
+          '🔗 [AutoLink] Linking job $jobId → map ${resolved.monthKey}/${resolved.mapId} ("${resolved.mapName}")');
+
+      // 1. Mirror the job-list-item id onto the map document.
+      try {
+        await mapService.updateMapFields(
+          resolved.monthKey,
+          resolved.mapId,
+          {'jobListItemId': jobId},
+        );
+      } catch (e) {
+        debugPrint('🔗 [AutoLink] Failed to set jobListItemId on map: $e');
+      }
+
+      // 2. Persist the link onto the job. We update via the Firestore
+      //    service directly (rather than through the debounced update
+      //    pipeline) to avoid races with the listener.
+      if (job != null) {
+        final updatedJob = JobListItem(
+          id: job.id,
+          invoice: job.invoice,
+          amount: job.amount,
+          client: job.client,
+          jobStatusId: job.jobStatusId,
+          invoiceStatusId: job.invoiceStatusId,
+          jobTypeId: job.jobTypeId,
+          area: job.area,
+          quantity: job.quantity,
+          manDays: job.manDays,
+          date: job.date,
+          collectionAddress: job.collectionAddress,
+          collectionDate: job.collectionDate,
+          specialInstructions: job.specialInstructions,
+          quantityDistributed: job.quantityDistributed,
+          invoiceDetails: job.invoiceDetails,
+          reportAddresses: job.reportAddresses,
+          whoToInvoice: job.whoToInvoice,
+          collectionJobId: job.collectionJobId,
+          shareableMapId: resolved.mapId,
+          storageFolderPath: mapDoc.storageFolderPath ?? job.storageFolderPath,
+          customPolygons: job.customPolygons,
+          updates: job.updates,
+          reminders: job.reminders,
+          vehicleTrailerCombo: job.vehicleTrailerCombo,
+        );
+        await _jobListService.updateJobListItem(updatedJob, updatedJob.date);
+      } else {
+        // Job not yet in local cache — write minimal fields directly via the
+        // monthly collection. This handles the immediately-after-add case.
+        final monthDate = date;
+        final col = FirebaseFirestore.instance
+            .collection('jobLists')
+            .doc(_jobListService.getMonthlyDocumentId(monthDate))
+            .collection('items');
+        await col.doc(jobId).update({
+          'shareableMapId': resolved.mapId,
+          if (mapDoc.storageFolderPath != null)
+            'storageFolderPath': mapDoc.storageFolderPath,
+        });
+      }
+      debugPrint('✅ [AutoLink] Linked job $jobId → ${resolved.mapId}');
+    } catch (e, st) {
+      debugPrint('❌ [AutoLink] Failed for job $jobId: $e\n$st');
     }
   }
 

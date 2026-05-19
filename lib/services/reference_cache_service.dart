@@ -155,7 +155,7 @@ class ReferenceCacheService {
   ///   query: _firestore.collection('customJobListStatuses').orderBy('label'),
   ///   collectionName: 'customJobListStatuses',
   ///   fromDoc: (doc) => CustomJobListStatus.fromMap({
-  ///     ...doc.data() as Map<String, dynamic>,
+  ///     ...Map<String, dynamic>.from(doc.data() as Map),
   ///     'id': doc.id,
   ///   }),
   /// );

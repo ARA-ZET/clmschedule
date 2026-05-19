@@ -79,7 +79,7 @@ class User {
 
   /// Create User from Firestore DocumentSnapshot
   factory User.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(doc.data() as Map);
     return User.fromJson(data);
   }
 

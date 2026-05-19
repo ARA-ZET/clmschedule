@@ -42,7 +42,7 @@ class ErfPropertyFirestoreService {
       final doc = await _collection.doc(id).get();
       if (doc.exists) {
         return ErfProperty.fromMap(
-            doc.id, doc.data() as Map<String, dynamic>);
+            doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }
       return null;
     } catch (e) {
@@ -59,7 +59,7 @@ class ErfPropertyFirestoreService {
           .get();
       return snapshot.docs
           .map((doc) =>
-              ErfProperty.fromMap(doc.id, doc.data() as Map<String, dynamic>))
+              ErfProperty.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map)))
           .toList();
     } catch (e) {
       debugPrint('❌ Error getting properties by suburb: $e');
@@ -75,7 +75,7 @@ class ErfPropertyFirestoreService {
           .get();
       return snapshot.docs
           .map((doc) =>
-              ErfProperty.fromMap(doc.id, doc.data() as Map<String, dynamic>))
+              ErfProperty.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map)))
           .toList();
     } catch (e) {
       debugPrint('❌ Error getting properties by minCode: $e');
@@ -112,7 +112,7 @@ class ErfPropertyFirestoreService {
     return _collection.snapshots().map((snapshot) {
       return snapshot.docs
           .map((doc) =>
-              ErfProperty.fromMap(doc.id, doc.data() as Map<String, dynamic>))
+              ErfProperty.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map)))
           .toList();
     });
   }

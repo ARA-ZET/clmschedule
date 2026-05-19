@@ -4,17 +4,33 @@ import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import '../../env.dart';
+import '../../services/storage_upload.dart';
 
 /// A path (polygon or polyline) with its display color for thumbnail rendering.
 class ThumbnailPathData {
   final List<LatLng> points;
   final Color color;
   final double fillOpacity;
+  final int strokeWidth;
 
   const ThumbnailPathData({
     required this.points,
     required this.color,
     this.fillOpacity = 0.35,
+    this.strokeWidth = 2,
+  });
+}
+
+/// A marker rendered by the Static Maps API.
+class ThumbnailMarkerData {
+  final LatLng position;
+  final Color color;
+  final String? label;
+
+  const ThumbnailMarkerData({
+    required this.position,
+    required this.color,
+    this.label,
   });
 }
 
@@ -57,6 +73,7 @@ class MapThumbnailService {
     LatLngBounds? bounds,
     List<ThumbnailPathData>? polygons,
     List<ThumbnailPathData>? polylines,
+    List<ThumbnailMarkerData>? markers,
   }) async {
     try {
       // 1. Build the Static Maps URL.
@@ -66,6 +83,7 @@ class MapThumbnailService {
         bounds: bounds,
         polygons: polygons,
         polylines: polylines,
+        markers: markers,
       );
 
       // 2. Download the image bytes from Google.
@@ -80,9 +98,10 @@ class MapThumbnailService {
       // 3. Upload to Firebase Storage.
       final path = '$_folder/${monthKey}_$docId.png';
       final ref = _storage.ref().child(path);
-      await ref.putData(
+      await StorageUpload.safePutData(
+        ref,
         Uint8List.fromList(imageBytes),
-        SettableMetadata(
+        metadata: SettableMetadata(
           contentType: 'image/png',
           cacheControl: 'public, max-age=86400', // cache 24h
         ),
@@ -133,8 +152,12 @@ class MapThumbnailService {
     LatLngBounds? bounds,
     List<ThumbnailPathData>? polygons,
     List<ThumbnailPathData>? polylines,
+    List<ThumbnailMarkerData>? markers,
     int width = _width,
     int height = _height,
+    bool detailedRoads = false,
+    int maxPolygonPoints = 30,
+    int maxPolylinePoints = 40,
   }) {
     final apiKey = Env.googleMapsApiKey;
 
@@ -147,7 +170,6 @@ class MapThumbnailService {
       'style=feature:poi|visibility:off',
       'style=feature:poi.park|element:geometry|visibility:on|color:0xc8e6c9',
       'style=feature:transit|visibility:off',
-      'style=feature:road|element:labels.icon|visibility:off',
       'style=feature:road.highway|element:geometry.fill|color:0xffd54f',
       'style=feature:road.highway|element:geometry.stroke|color:0xffca28',
       'style=feature:road.arterial|element:geometry.fill|color:0xffffff',
@@ -157,6 +179,18 @@ class MapThumbnailService {
       'style=element:labels.text.fill|color:0x616161',
       'style=element:labels.text.stroke|color:0xffffff',
     ];
+
+    if (detailedRoads) {
+      params.addAll(const [
+        'style=feature:road|element:labels|visibility:on',
+        'style=feature:road|element:labels.text.fill|color:0x222222',
+        'style=feature:road|element:labels.text.stroke|color:0xffffff',
+        'style=feature:administrative.locality|element:labels|visibility:on',
+        'style=feature:administrative.neighborhood|element:labels|visibility:on',
+      ]);
+    } else {
+      params.add('style=feature:road|element:labels.icon|visibility:off');
+    }
 
     // Use bounds if available for auto-fit, otherwise center + zoom.
     if (bounds != null) {
@@ -173,14 +207,16 @@ class MapThumbnailService {
     // Add polygon paths (simplified) — filled areas with actual colors
     if (polygons != null) {
       for (final poly in polygons) {
-        final simplified = _simplifyPath(poly.points, maxPoints: 30);
+        final simplified =
+            _simplifyPath(poly.points, maxPoints: maxPolygonPoints);
         if (simplified.length < 3) continue;
         final pathStr =
             simplified.map((p) => '${p.latitude},${p.longitude}').join('|');
         final strokeHex = _colorToHex(poly.color, 0.8);
         final fillHex = _colorToHex(poly.color, poly.fillOpacity);
+        final weight = poly.strokeWidth.clamp(1, 12);
         params.add(
-          'path=color:$strokeHex|fillcolor:$fillHex|weight:2|$pathStr',
+          'path=color:$strokeHex|fillcolor:$fillHex|weight:$weight|$pathStr',
         );
       }
     }
@@ -188,12 +224,26 @@ class MapThumbnailService {
     // Add polyline paths (simplified) with actual colors
     if (polylines != null) {
       for (final line in polylines) {
-        final simplified = _simplifyPath(line.points, maxPoints: 40);
+        final simplified =
+            _simplifyPath(line.points, maxPoints: maxPolylinePoints);
         if (simplified.length < 2) continue;
         final pathStr =
             simplified.map((p) => '${p.latitude},${p.longitude}').join('|');
         final hex = _colorToHex(line.color, 1.0);
-        params.add('path=color:$hex|weight:3|$pathStr');
+        final weight = line.strokeWidth.clamp(1, 12);
+        params.add('path=color:$hex|weight:$weight|$pathStr');
+      }
+    }
+
+    // Add point markers. Static Maps supports a single-character label.
+    if (markers != null) {
+      for (final marker in markers) {
+        final label = _cleanMarkerLabel(marker.label);
+        final labelPart = label == null ? '' : '|label:$label';
+        params.add(
+          'markers=size:mid|color:${_markerColorToHex(marker.color)}$labelPart'
+          '|${marker.position.latitude},${marker.position.longitude}',
+        );
       }
     }
 
@@ -202,8 +252,8 @@ class MapThumbnailService {
     // Safety: if the URL exceeds the limit, fall back to center-only.
     if (url.length > 8100) {
       debugPrint('[MapThumbnail] URL too long (${url.length}), '
-          'falling back to center-only thumbnail');
-      return _centerOnlyUrl(center, zoom, width, height, apiKey);
+          'falling back to viewport-only thumbnail');
+      return _viewportOnlyUrl(center, zoom, bounds, width, height, apiKey);
     }
 
     return url;
@@ -222,17 +272,38 @@ class MapThumbnailService {
     return '0x$r$g$b$a';
   }
 
-  /// Minimal fallback URL with just center + zoom (no paths).
-  static String _centerOnlyUrl(
+  /// Convert a [Color] to a marker color accepted by the Static Maps API.
+  /// Format: `0xRRGGBB`.
+  static String _markerColorToHex(Color color) {
+    final r = (color.r * 255).round().toRadixString(16).padLeft(2, '0');
+    final g = (color.g * 255).round().toRadixString(16).padLeft(2, '0');
+    final b = (color.b * 255).round().toRadixString(16).padLeft(2, '0');
+    return '0x$r$g$b';
+  }
+
+  static String? _cleanMarkerLabel(String? label) {
+    if (label == null || label.isEmpty) return null;
+    final upper = label.trim().toUpperCase();
+    if (upper.isEmpty) return null;
+    final char = upper[0];
+    return RegExp(r'^[A-Z0-9]$').hasMatch(char) ? char : null;
+  }
+
+  /// Minimal fallback URL with just viewport data (no overlays).
+  static String _viewportOnlyUrl(
     LatLng center,
     double zoom,
+    LatLngBounds? bounds,
     int width,
     int height,
     String apiKey,
   ) {
+    final viewport = bounds == null
+        ? 'center=${center.latitude},${center.longitude}&zoom=${zoom.round()}'
+        : 'visible=${bounds.southwest.latitude},${bounds.southwest.longitude}'
+            '|${bounds.northeast.latitude},${bounds.northeast.longitude}';
     return '$_baseUrl'
-        '?center=${center.latitude},${center.longitude}'
-        '&zoom=${zoom.round()}'
+        '?$viewport'
         '&size=${width}x$height'
         '&scale=2'
         '&maptype=roadmap'

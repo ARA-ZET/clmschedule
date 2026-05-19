@@ -7,7 +7,7 @@ import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 import '../models/distributor.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/scale_provider.dart';
-import 'date_schedule_map_page.dart';
+import 'day_planner/day_planner_page.dart';
 import 'month_navigation_widget.dart';
 import 'schedule_job_cell.dart';
 
@@ -118,7 +118,7 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
     await Navigator.of(context).push(
       MaterialPageRoute(
         fullscreenDialog: true,
-        builder: (_) => DateScheduleMapPage(
+        builder: (_) => DayPlannerPage(
           date: date,
           jobs: jobsWithMaps,
           distributors: scheduleProvider.distributors,

@@ -25,7 +25,7 @@ class WorkArea {
 
   // Create from Firestore document
   factory WorkArea.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(doc.data() as Map);
     final List<dynamic> points = data['polygonPoints'] ?? [];
 
     return WorkArea(
@@ -71,10 +71,10 @@ class WorkArea {
       polygonPoints: points.map((point) {
         if (point is GeoPoint) {
           return LatLng(point.latitude, point.longitude);
-        } else if (point is Map<String, dynamic>) {
+        } else if (point is Map) {
           return LatLng(
-            point['latitude'] as double,
-            point['longitude'] as double,
+            (point['latitude'] as num).toDouble(),
+            (point['longitude'] as num).toDouble(),
           );
         }
         throw ArgumentError('Invalid point format');

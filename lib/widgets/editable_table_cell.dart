@@ -348,7 +348,7 @@ class EditableDateCell extends StatelessWidget {
                                         .containsKey('quantity')) {
                                       // Fallback: get vehicle type from quantity
                                       final quantity =
-                                          jobData!['quantity'] as int? ?? 1;
+                                          (jobData!['quantity'] as num?)?.toInt() ?? 1;
                                       if (quantity >= 1 && quantity <= 3) {
                                         vehicleType = VehicleType.hyundai;
                                       } else if (quantity >= 4 &&
@@ -920,7 +920,7 @@ class _EditableVehicleComboCellState
             child: Container(
               padding: const EdgeInsets.all(2.0),
               child: DropdownButtonFormField<VehicleTrailerCombo>(
-                value: _selectedCombo,
+                initialValue: _selectedCombo,
                 decoration: const InputDecoration(
                   isDense: true,
                   contentPadding:

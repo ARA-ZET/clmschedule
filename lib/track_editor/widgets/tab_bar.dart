@@ -2,12 +2,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/tab_item.dart';
+import '../providers/te_cloud_save_state_provider.dart';
 import '../providers/te_files_provider.dart';
 import '../providers/te_map_layer_provider.dart';
+import '../providers/te_mode_provider.dart';
 import '../providers/te_processing_provider.dart';
 import '../providers/te_tabs_provider.dart';
 import '../providers/te_tools_provider.dart';
 import '../providers/te_tracks_provider.dart';
+import '../providers/te_undo_provider.dart';
 import '../providers/te_waypoints_provider.dart';
 
 class TETopTabBar extends riverpod.ConsumerWidget {
@@ -88,16 +91,33 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                               GestureDetector(
                                 behavior: HitTestBehavior.opaque,
                                 onTap: () {
-                                  final tabIndex = ref
-                                      .read(teTabsRiverpod)
-                                      .tabs
-                                      .indexOf(tab);
-                                  ref.read(teTabsRiverpod).removeTab(tab);
+                                  final tabsP = ref.read(teTabsRiverpod);
+                                  final tabIndex = tabsP.tabs.indexOf(tab);
+                                  final mode = tabsP.activeMode;
+                                  // Clear cloud-save UI state for the closing
+                                  // tab and drop its undo/redo stack so the
+                                  // next tab in this slot starts fresh.
+                                  ref.read(teCloudSaveRiverpod).clearTab(tab);
                                   if (tabIndex >= 0) {
+                                    ref
+                                        .read(teUndoRiverpod)
+                                        .removeTab(mode, tabIndex);
                                     ref
                                         .read(teMapLayerRiverpod)
                                         .removeTab(tabIndex);
                                   }
+                                  // If this tab was opened from the
+                                  // processing flow, also drop the matching
+                                  // staged GPX files so the next "Open all
+                                  // matched" run won't re-open the closed
+                                  // tab from leftover entries.
+                                  if (mode == TEMode.processing &&
+                                      tab.matchKey != null) {
+                                    ref
+                                        .read(teProcessingRiverpod)
+                                        .removeFilesForMatchKey(tab.matchKey);
+                                  }
+                                  tabsP.removeTab(tab);
                                 },
                                 child: Padding(
                                   padding: const EdgeInsets.only(left: 2),
@@ -150,13 +170,47 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                         child: Tooltip(
                           message: 'Clear all tabs and data',
                           child: TextButton(
-                            onPressed: () {
+                            onPressed: () async {
+                              // Destructive: wipes every mode (Import, Trim,
+                              // Processing, Update). Confirm before doing
+                              // anything so the user can't lose work with
+                              // a stray click.
+                              final confirmed = await showDialog<bool>(
+                                context: context,
+                                builder: (ctx) => AlertDialog(
+                                  title: const Text('Clear all data?'),
+                                  content: const Text(
+                                    'This will close every tab and discard '
+                                    'all loaded files, tracks and waypoints '
+                                    'across all modes (Import, Trim, '
+                                    'Processing and Update). This cannot be '
+                                    'undone.',
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.of(ctx).pop(false),
+                                      child: const Text('Cancel'),
+                                    ),
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.of(ctx).pop(true),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor: Colors.red.shade700,
+                                      ),
+                                      child: const Text('Clear all'),
+                                    ),
+                                  ],
+                                ),
+                              );
+                              if (confirmed != true) return;
                               ref.read(teTabsRiverpod).clearAllTabs();
                               ref.read(teMapLayerRiverpod).clearAll();
                               ref.read(teFilesRiverpod).clearAll();
                               ref.read(teTracksRiverpod).clearAll();
                               ref.read(teWaypointsRiverpod).clearAll();
                               ref.read(teProcessingRiverpod).clearFiles();
+                              ref.read(teUndoRiverpod).clearAll();
                             },
                             style: TextButton.styleFrom(
                               backgroundColor: Colors.red.shade50,
@@ -186,6 +240,43 @@ class TETopTabBar extends riverpod.ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               spacing: toolGap,
               children: [
+                // Undo / Redo (per-tab) — placed just before the scissors
+                // tool so the user can quickly revert an accidental cut or
+                // drag without leaving the tab.
+                Builder(builder: (_) {
+                  final tabsP = ref.watch(teTabsRiverpod);
+                  final undoP = ref.watch(teUndoRiverpod);
+                  final mode = tabsP.activeMode;
+                  final tabIdx = tabsP.currentTab;
+                  final canUndo = undoP.canUndo(mode, tabIdx);
+                  final undoDesc = undoP.nextUndoDescription(mode, tabIdx);
+                  return _ToolButton(
+                    icon: Icons.undo,
+                    tooltip:
+                        canUndo ? 'Undo: ${undoDesc ?? ''}' : 'Nothing to undo',
+                    isActive: canUndo,
+                    activeColor: Colors.orange.shade300,
+                    isLocked: !canUndo,
+                    onTap: () => ref.read(teUndoRiverpod).undo(mode, tabIdx),
+                  );
+                }),
+                Builder(builder: (_) {
+                  final tabsP = ref.watch(teTabsRiverpod);
+                  final undoP = ref.watch(teUndoRiverpod);
+                  final mode = tabsP.activeMode;
+                  final tabIdx = tabsP.currentTab;
+                  final canRedo = undoP.canRedo(mode, tabIdx);
+                  final redoDesc = undoP.nextRedoDescription(mode, tabIdx);
+                  return _ToolButton(
+                    icon: Icons.redo,
+                    tooltip:
+                        canRedo ? 'Redo: ${redoDesc ?? ''}' : 'Nothing to redo',
+                    isActive: canRedo,
+                    activeColor: Colors.orange.shade300,
+                    isLocked: !canRedo,
+                    onTap: () => ref.read(teUndoRiverpod).redo(mode, tabIdx),
+                  );
+                }),
                 // Scissors tool
                 _ToolButton(
                   icon: Icons.content_cut,

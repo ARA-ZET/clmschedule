@@ -2,10 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../../models/dropsheet_task.dart';
+import '../../models/dropsheet_task_type_config.dart';
 import '../../models/job.dart';
 import '../../models/job_list_item.dart';
 import '../../providers/job_list_provider.dart';
+import '../../providers/job_type_provider.dart';
+import '../../providers/dropsheet_task_config_provider.dart';
+import '../../providers/schedule_provider.dart';
 import '../../services/firestore_service.dart';
+import '../../services/geocoding_service.dart';
 import '../../utils/dropsheet_maps.dart';
 
 /// Type-aware editor for a [DropsheetTask].
@@ -46,6 +51,9 @@ class _DropsheetTaskEditorDialogState
   final TextEditingController _offloadAddress = TextEditingController();
   final TextEditingController _notes = TextEditingController();
   final TextEditingController _collectionAddress = TextEditingController();
+  final TextEditingController _serviceTime = TextEditingController();
+
+  bool _isSaving = false;
 
   late Map<String, dynamic> _typeData;
 
@@ -67,6 +75,8 @@ class _DropsheetTaskEditorDialogState
     _offloadAddress.text = (_typeData['offloadAddress'] as String?) ?? '';
     _notes.text = (_typeData['notes'] as String?) ?? '';
     _collectionAddress.text = (_typeData['address'] as String?) ?? '';
+    _serviceTime.text =
+        t.serviceTimeMinutes == null ? '' : '${t.serviceTimeMinutes}';
   }
 
   @override
@@ -81,6 +91,7 @@ class _DropsheetTaskEditorDialogState
     _offloadAddress.dispose();
     _notes.dispose();
     _collectionAddress.dispose();
+    _serviceTime.dispose();
     super.dispose();
   }
 
@@ -98,14 +109,13 @@ class _DropsheetTaskEditorDialogState
               color: Colors.blue.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(4),
             ),
-            child: Text(t.type.displayName,
+            child: Text(_dynamicTypeLabel(t) ?? t.type.displayName,
                 style: const TextStyle(fontSize: 11, color: Colors.blue)),
           ),
           if (t.isMandatory) ...[
             const SizedBox(width: 6),
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
                 color: Colors.amber.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(4),
@@ -121,23 +131,53 @@ class _DropsheetTaskEditorDialogState
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
-            children: _buildFieldsFor(t.type),
+            children: [
+              ..._buildFieldsFor(t.type),
+              if (!t.isMandatory) ...[
+                const SizedBox(height: 12),
+                _serviceTimeField(),
+              ],
+            ],
           ),
         ),
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: _isSaving ? null : () => Navigator.pop(context),
           child: const Text('CANCEL'),
         ),
-        FilledButton(onPressed: _save, child: const Text('SAVE')),
+        FilledButton(
+          onPressed: _isSaving ? null : _save,
+          child: _isSaving
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('SAVE'),
+        ),
       ],
     );
   }
 
   String _titleFor(DropsheetTask t) {
+    final dynamicLabel = _dynamicTypeLabel(t);
+    if (dynamicLabel != null) {
+      return t.job.isEmpty && t.details.isEmpty
+          ? 'New $dynamicLabel'
+          : 'Edit $dynamicLabel';
+    }
     if (t.job.isEmpty && t.details.isEmpty) return 'New ${t.type.displayName}';
     return 'Edit ${t.type.displayName}';
+  }
+
+  /// Returns the label of the user-defined dynamic type if this task has one,
+  /// otherwise null.
+  String? _dynamicTypeLabel(DropsheetTask t) {
+    final id = t.typeData['dynamicTypeId'] as String?;
+    if (id == null || id.isEmpty) return null;
+    final def = ref.read(dropsheetTaskConfigRiverpod).dynamicTypeById(id);
+    return def?.label.isNotEmpty == true ? def!.label : 'Custom';
   }
 
   // ---------------------------------------------------------------------------
@@ -145,6 +185,24 @@ class _DropsheetTaskEditorDialogState
   // ---------------------------------------------------------------------------
 
   List<Widget> _buildFieldsFor(DropsheetTaskType type) {
+    // User-defined dynamic types: route to the correct field builder based on
+    // the type's configured section (distributor / additional / mandatory / custom).
+    final dynamicTypeId = widget.initial.typeData['dynamicTypeId'] as String?;
+    if (dynamicTypeId != null && dynamicTypeId.isNotEmpty) {
+      final def =
+          ref.read(dropsheetTaskConfigRiverpod).dynamicTypeById(dynamicTypeId);
+      final label = def?.label.isNotEmpty == true ? def!.label : 'item';
+      switch (def?.section ?? DynamicTaskSection.custom) {
+        case DynamicTaskSection.distributor:
+          return _distributorFields(DropsheetTaskType.custom);
+        case DynamicTaskSection.additional:
+          return _collectionFields(type, labelOverride: label);
+        case DynamicTaskSection.mandatory:
+        case DynamicTaskSection.custom:
+          return _genericFields();
+      }
+    }
+
     switch (type) {
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
@@ -155,7 +213,9 @@ class _DropsheetTaskEditorDialogState
       case DropsheetTaskType.pickUp:
         return _distributorFields(type);
       case DropsheetTaskType.collection:
-        return _collectionFields();
+      case DropsheetTaskType.jobReturn:
+      case DropsheetTaskType.pickFlyers:
+        return _collectionFields(type);
       case DropsheetTaskType.furnitureMove:
         return _furnitureFields();
     }
@@ -177,8 +237,7 @@ class _DropsheetTaskEditorDialogState
   }
 
   List<Widget> _distributorFields(DropsheetTaskType type) {
-    final selectedName =
-        (_typeData['distributorName'] as String?) ?? '';
+    final selectedName = (_typeData['distributorName'] as String?) ?? '';
     final workArea = (_typeData['workArea'] as String?) ?? '';
     final hasCoord = _typeData['lat'] != null && _typeData['lng'] != null;
 
@@ -221,17 +280,22 @@ class _DropsheetTaskEditorDialogState
     ];
   }
 
-  List<Widget> _collectionFields() {
+  List<Widget> _collectionFields(DropsheetTaskType type,
+      {String? labelOverride}) {
     final client = (_typeData['client'] as String?) ?? '';
+    final typeLabel = labelOverride ??
+        switch (type) {
+          DropsheetTaskType.jobReturn => 'return',
+          DropsheetTaskType.pickFlyers => 'flyers',
+          _ => 'collection',
+        };
     return [
       _jobField(),
       const SizedBox(height: 8),
       OutlinedButton.icon(
         onPressed: _pickJobListItem,
         icon: const Icon(Icons.search),
-        label: Text(client.isEmpty
-            ? 'Choose collection from job list'
-            : 'Client: $client'),
+        label: Text(client.isEmpty ? 'Choose $typeLabel' : 'Client: $client'),
       ),
       const SizedBox(height: 8),
       TextField(
@@ -254,12 +318,23 @@ class _DropsheetTaskEditorDialogState
   }
 
   List<Widget> _furnitureFields() {
+    final client = (_typeData['client'] as String?) ?? '';
     return [
       _jobField(),
       const SizedBox(height: 8),
+      OutlinedButton.icon(
+        onPressed: _pickJobListItem,
+        icon: const Icon(Icons.search),
+        label:
+            Text(client.isEmpty ? 'Choose furniture move' : 'Client: $client'),
+      ),
+      const SizedBox(height: 8),
       TextField(
         controller: _loadingAddress,
-        decoration: const InputDecoration(labelText: 'Loading address'),
+        decoration: const InputDecoration(
+          labelText: 'Loading address',
+          helperText: 'Auto-filled from job list — edit if needed',
+        ),
       ),
       const SizedBox(height: 8),
       TextField(
@@ -337,6 +412,42 @@ class _DropsheetTaskEditorDialogState
     );
   }
 
+  Widget _serviceTimeField() {
+    final config = ref.watch(dropsheetTaskConfigRiverpod);
+    final defaultMinutes = _resolveTypeDefaultServiceMinutes(config);
+    final hint = defaultMinutes > 0
+        ? 'Default for this type: $defaultMinutes min'
+        : 'No default — leave blank to skip';
+    return Row(
+      children: [
+        const Icon(Icons.schedule_outlined, size: 18, color: Colors.black54),
+        const SizedBox(width: 8),
+        Expanded(
+          child: TextField(
+            controller: _serviceTime,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: 'Time at stop (min) — override',
+              helperText: hint,
+              isDense: true,
+              border: const OutlineInputBorder(),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Resolves the service-time default for *this* task's effective type
+  /// (dynamic type → enum config → 0).
+  int _resolveTypeDefaultServiceMinutes(DropsheetTaskConfigProvider config) {
+    final dynId = widget.initial.typeData['dynamicTypeId'] as String?;
+    if (dynId != null && dynId.isNotEmpty) {
+      return config.dynamicTypeById(dynId)?.serviceTimeMinutes ?? 0;
+    }
+    return config.configFor(widget.initial.type).serviceTimeMinutes;
+  }
+
   // ---------------------------------------------------------------------------
   // Pickers
   // ---------------------------------------------------------------------------
@@ -358,70 +469,160 @@ class _DropsheetTaskEditorDialogState
                   child: Text('No distributors scheduled on this date.'),
                 ),
               ]
-            : jobs
-                .map(
-                  (j) => SimpleDialogOption(
-                    onPressed: () => Navigator.pop(ctx, j),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          j.workingAreas.isEmpty
-                              ? '(no work area)'
-                              : j.workingAreas.join(', '),
-                          style:
-                              const TextStyle(fontWeight: FontWeight.w600),
+            : (() {
+                final distributors = ref.read(scheduleRiverpod).distributors;
+                final distById = {for (final d in distributors) d.id: d};
+                return jobs
+                    .map(
+                      (j) => SimpleDialogOption(
+                        onPressed: () => Navigator.pop(ctx, j),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              distById[j.distributorId]?.name ??
+                                  j.distributorId,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            Text(
+                              j.workingAreas.isEmpty
+                                  ? (j.dropOffPoint == null
+                                      ? '⚠ no drop-off point'
+                                      : 'No work area')
+                                  : j.workingAreas.join(', '),
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.black54),
+                            ),
+                          ],
                         ),
-                        Text(
-                          j.dropOffPoint == null
-                              ? 'distributorId: ${j.distributorId}  ⚠ no drop-off point'
-                              : 'distributorId: ${j.distributorId}  •  ${j.dropOffPoint!.latitude.toStringAsFixed(5)}, ${j.dropOffPoint!.longitude.toStringAsFixed(5)}',
-                          style: const TextStyle(
-                              fontSize: 12, color: Colors.black54),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-                .toList(),
+                      ),
+                    )
+                    .toList();
+              })(),
       ),
     );
 
     if (selected == null) return;
+    final distributors = ref.read(scheduleRiverpod).distributors;
+    final distById = {for (final d in distributors) d.id: d};
+    final dist = distById[selected.distributorId];
+    final distName = dist?.name ?? selected.distributorId;
+    final distPhone = dist?.phone1 ?? '';
+    final workArea = selected.workingAreas.join(', ');
+
     setState(() {
+      // Mirror the same typeData shape that _buildDistributorDropOffTask
+      // produces during schedule sync so every downstream consumer
+      // (day-planner map, dropsheet row, print map) sees consistent data.
       _typeData = {
         'distributorJobId': selected.id,
-        'distributorName':
-            selected.distributorId, // best we have without a Distributor lookup
-        'workArea': selected.workingAreas.join(', '),
+        'distributorId': selected.distributorId,
+        'distributorName': distName,
+        'workArea': workArea,
         if (selected.dropOffPoint != null) ...{
           'lat': selected.dropOffPoint!.latitude,
           'lng': selected.dropOffPoint!.longitude,
         },
       };
-      // Mirror onto the legacy `location` field for sort/filter compatibility.
-      _location.text = selected.workingAreas.join(', ');
 
-      // If the user hasn't customised the row label, use "<Type>: <area>".
-      final defaultLabel =
-          DropsheetMaps.defaultJobLabel(widget.initial.type);
+      // job  → "Drop off: <distributor name>"  (matches sync)
+      final defaultLabel = DropsheetMaps.defaultJobLabel(widget.initial.type);
       if (_job.text.trim() == defaultLabel || _job.text.trim().isEmpty) {
-        final wa = selected.workingAreas.join(', ');
-        _job.text = wa.isEmpty ? defaultLabel : '$defaultLabel: $wa';
+        _job.text =
+            distName.isEmpty ? defaultLabel : '$defaultLabel: $distName';
       }
 
-      // Pre-fill notes with the area name if details is still blank — the
-      // driver can extend it (flyer count etc.) before saving.
-      if (_details.text.trim().isEmpty &&
-          selected.workingAreas.isNotEmpty) {
-        _details.text = selected.workingAreas.join(', ');
+      // details → work area  (matches sync)
+      if (_details.text.trim().isEmpty) {
+        _details.text = workArea;
       }
+
+      // location → work area  (matches sync)
+      _location.text = workArea;
+
+      // contact / tel → distributor name + phone  (matches sync)
+      if (_contact.text.trim().isEmpty) _contact.text = distName;
+      if (_tel.text.trim().isEmpty) _tel.text = distPhone;
     });
+  }
+
+  /// Returns job-type IDs whose label matches the given keywords (lower-case).
+  Set<String> _jobTypeIdsMatching(
+      JobTypeProvider jtProvider, List<String> keywords) {
+    return {
+      for (final jt in jtProvider.jobTypes)
+        if (keywords.any((kw) => jt.label.toLowerCase().contains(kw))) jt.id,
+    };
+  }
+
+  /// Filters [items] to those relevant for the current task type.
+  /// If the task has a `dynamicTypeId` in its typeData, that type's configured
+  /// job type IDs are used first. Otherwise the enum-type config is checked,
+  /// and finally falls back to keyword-based smart defaults. Configured job
+  /// type IDs are treated as the preferred suggestion list; if none match, the
+  /// picker shows an empty preferred result instead of unrelated jobs.
+  List<JobListItem> _filterItemsForTaskType(
+      List<JobListItem> items, JobTypeProvider jtProvider) {
+    final type = widget.initial.type;
+    final configProvider = ref.read(dropsheetTaskConfigRiverpod);
+
+    // ── Check dynamic (user-defined) type first ───────────────────────
+    final dynamicTypeId = widget.initial.typeData['dynamicTypeId'] as String?;
+    if (dynamicTypeId != null && dynamicTypeId.isNotEmpty) {
+      final dynIds = configProvider.allowedJobTypeIdsForDynamic(dynamicTypeId);
+      if (dynIds.isNotEmpty) {
+        final filtered =
+            items.where((it) => dynIds.contains(it.jobTypeId)).toList();
+        return filtered;
+      }
+      // Dynamic type with no job type config — show all items.
+      return items;
+    }
+
+    // ── Check configured job type IDs for enum type ──────────────────
+    final configuredIds = configProvider.allowedJobTypeIds(type);
+    if (configuredIds.isNotEmpty) {
+      final filtered =
+          items.where((it) => configuredIds.contains(it.jobTypeId)).toList();
+      return filtered;
+    }
+
+    // ── Keyword-based smart defaults ─────────────────────────────────
+    List<JobListItem> filtered;
+    switch (type) {
+      case DropsheetTaskType.furnitureMove:
+        final ids = _jobTypeIdsMatching(jtProvider, ['furniture']);
+        ids.add('furnitureMove'); // always include the default id
+        filtered = items.where((it) => ids.contains(it.jobTypeId)).toList();
+      case DropsheetTaskType.collection:
+        final collectionIds = {
+          for (final jt in jtProvider.jobTypes)
+            if (jtProvider.appearsOnCollectionSchedule(jt.id)) jt.id,
+        };
+        filtered =
+            items.where((it) => collectionIds.contains(it.jobTypeId)).toList();
+      case DropsheetTaskType.jobReturn:
+        final ids = _jobTypeIdsMatching(jtProvider, ['return']);
+        filtered = items.where((it) => ids.contains(it.jobTypeId)).toList();
+      case DropsheetTaskType.pickFlyers:
+        final ids = _jobTypeIdsMatching(
+            jtProvider, ['flyer', 'poster', 'calender', 'distribution']);
+        filtered = items.where((it) => ids.contains(it.jobTypeId)).toList();
+      default:
+        filtered = items;
+    }
+    // Fall back to all items if the filter matched nothing.
+    return filtered.isEmpty ? items : filtered;
   }
 
   Future<void> _pickJobListItem() async {
     final items = ref.read(jobListRiverpod).allJobListItems;
-    final dayMatches = items.where((it) => _sameDay(it.date, widget.sheetDate)).toList();
+    final jobTypeProvider = ref.read(jobTypeRiverpod);
+    final dayMatches =
+        items.where((it) => _sameDay(it.date, widget.sheetDate)).toList();
+    final filtered = _filterItemsForTaskType(dayMatches, jobTypeProvider);
+    final isFiltered = filtered.length < dayMatches.length;
     if (!mounted) return;
 
     final selected = await showDialog<JobListItem>(
@@ -429,23 +630,42 @@ class _DropsheetTaskEditorDialogState
       builder: (ctx) => SimpleDialog(
         title: Text(
             'Job list items on ${widget.sheetDate.toIso8601String().substring(0, 10)}'),
-        children: dayMatches.isEmpty
+        children: filtered.isEmpty
             ? [
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Text('No job list items on this date.'),
+                Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text(dayMatches.isEmpty
+                      ? 'No job list items on this date.'
+                      : 'No preferred job-list suggestions match this task type on this date.'),
                 ),
               ]
-            : dayMatches
-                .map(
+            : [
+                if (isFiltered)
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    child: Text(
+                      'Showing ${filtered.length} of ${dayMatches.length} items',
+                      style:
+                          const TextStyle(fontSize: 11, color: Colors.black45),
+                    ),
+                  ),
+                ...filtered.map(
                   (it) => SimpleDialogOption(
                     onPressed: () => Navigator.pop(ctx, it),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(it.client,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.w600)),
+                            style:
+                                const TextStyle(fontWeight: FontWeight.w600)),
+                        Text(
+                          jobTypeProvider.getJobTypeLabel(it.jobTypeId),
+                          style: const TextStyle(
+                              fontSize: 11,
+                              color: Colors.blue,
+                              fontWeight: FontWeight.w500),
+                        ),
                         Text(
                           it.collectionAddress.isEmpty
                               ? '(no collection address)'
@@ -456,55 +676,134 @@ class _DropsheetTaskEditorDialogState
                       ],
                     ),
                   ),
-                )
-                .toList(),
+                ),
+              ],
       ),
     );
 
     if (selected == null) return;
+    final address = _addressForJobListItem(selected);
+    final location =
+        selected.area.trim().isNotEmpty ? selected.area.trim() : address;
+    final contactTel = _contactTelFromClient(selected.client);
+    final jobTypeLabel = jobTypeProvider.getJobTypeLabel(selected.jobTypeId);
+    final dynamicTypeId = _typeData['dynamicTypeId'] as String? ??
+        widget.initial.typeData['dynamicTypeId'] as String?;
     setState(() {
       _typeData = {
+        if (dynamicTypeId != null && dynamicTypeId.isNotEmpty)
+          'dynamicTypeId': dynamicTypeId,
         'jobListItemId': selected.id,
         'client': selected.client,
-        'address': selected.collectionAddress,
+        'address': address,
         'jobType': selected.jobTypeId,
+        'jobTypeLabel': jobTypeLabel,
         if (selected.area.isNotEmpty) 'area': selected.area,
         if (selected.quantity > 0) 'quantity': selected.quantity,
         if (selected.invoice.isNotEmpty) 'invoice': selected.invoice,
         if (selected.specialInstructions.isNotEmpty)
           'specialInstructions': selected.specialInstructions,
       };
-      _collectionAddress.text = selected.collectionAddress;
+      if (widget.initial.type == DropsheetTaskType.furnitureMove) {
+        final area = selected.area.trim();
+        final colAddr = selected.collectionAddress.trim();
+        final si = selected.specialInstructions.trim();
+        // Loading: area → collectionAddress, only if currently empty
+        if (_loadingAddress.text.trim().isEmpty) {
+          _typeData['loadingAddress'] = address;
+          _loadingAddress.text = address;
+        }
+        // Offload: if area filled loading use collectionAddress,
+        // otherwise fall back to specialInstructions, only if currently empty
+        if (_offloadAddress.text.trim().isEmpty) {
+          final offload =
+              (area.isNotEmpty && !_isMapLinkOrUrl(area) && colAddr.isNotEmpty)
+                  ? colAddr
+                  : si.isNotEmpty
+                      ? si
+                      : '';
+          if (offload.isNotEmpty) {
+            _typeData['offloadAddress'] = offload;
+            _offloadAddress.text = offload;
+          }
+        }
+      } else {
+        _collectionAddress.text = address;
+      }
 
-      // Use the client name as the row's `Label` if the user hasn't
-      // customised it (still equal to the type's default).
+      // Use the task type label if the user hasn't customised it.
       if (_job.text.trim() ==
               DropsheetMaps.defaultJobLabel(widget.initial.type) ||
           _job.text.trim().isEmpty) {
-        _job.text = selected.client.isNotEmpty
-            ? selected.client
-            : DropsheetMaps.defaultJobLabel(widget.initial.type);
+        final clientName = selected.client.trim();
+        final dynamicId = widget.initial.typeData['dynamicTypeId'] as String?;
+        final typeLabel = dynamicId != null
+            ? (ref
+                    .read(dropsheetTaskConfigRiverpod)
+                    .dynamicTypeById(dynamicId)
+                    ?.label ??
+                jobTypeLabel)
+            : switch (widget.initial.type) {
+                DropsheetTaskType.collection => 'Collection',
+                DropsheetTaskType.jobReturn => 'Return',
+                DropsheetTaskType.pickFlyers => 'Pick flyers',
+                DropsheetTaskType.furnitureMove => 'Furniture move',
+                _ => jobTypeLabel,
+              };
+        _job.text = clientName.isEmpty ? typeLabel : '$typeLabel: $clientName';
       }
 
-      // Build a useful Details string from job-type + qty + special
-      // instructions. Don't overwrite if the user already typed details.
+      // Details come straight from joblist special instructions.
+      // Preserve the raw text verbatim — no trim/split — so multi-line
+      // notes and leading/trailing punctuation are kept intact.
       if (_details.text.trim().isEmpty) {
-        final parts = <String>[
-          if (selected.jobTypeId.isNotEmpty) selected.jobTypeId,
-          if (selected.quantity > 0) '${selected.quantity}x',
-          if (selected.area.isNotEmpty) selected.area,
-        ];
-        final summary = parts.join(' • ');
-        _details.text = [
-          if (summary.isNotEmpty) summary,
-          if (selected.specialInstructions.isNotEmpty)
-            selected.specialInstructions,
-        ].join('\n');
+        _details.text = selected.specialInstructions;
       }
 
-      // Mirror onto legacy `location` so search/sort still work.
-      _location.text = selected.collectionAddress;
+      if (jobTypeProvider.needsTimeSlot(selected.jobTypeId)) {
+        _startTime.text = _formatTime(selected.date);
+      }
+
+      // Location comes from the JobList area field.
+      _location.text = location;
+      _contact.text = contactTel.contact;
+      _tel.text = contactTel.tel;
     });
+  }
+
+  String _addressForJobListItem(JobListItem item) {
+    final area = item.area.trim();
+    if (area.isNotEmpty && !_isMapLinkOrUrl(area)) return area;
+    final collectionAddress = item.collectionAddress.trim();
+    if (collectionAddress.isNotEmpty) return collectionAddress;
+    return area;
+  }
+
+  _ContactTel _contactTelFromClient(String client) {
+    final trimmed = client.trim();
+    if (trimmed.isEmpty) return const _ContactTel('', '');
+
+    final phoneMatch =
+        RegExp(r'(?:\+?27|0)[0-9\s()\-]{8,}$').firstMatch(trimmed);
+    if (phoneMatch == null) return _ContactTel(trimmed, '');
+
+    final tel = phoneMatch.group(0)!.trim();
+    final contact = trimmed.substring(0, phoneMatch.start).trim();
+    return _ContactTel(contact.isEmpty ? trimmed : contact, tel);
+  }
+
+  String _formatTime(DateTime date) =>
+      '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+
+  bool _isMapLinkOrUrl(String text) {
+    final value = text.trim().toLowerCase();
+    if (value.isEmpty) return false;
+    return value.startsWith('http://') ||
+        value.startsWith('https://') ||
+        value.contains('clm-maps.web.app/map/') ||
+        value.contains('google.com/maps') ||
+        value.contains('maps.app.goo.gl') ||
+        value.contains('goo.gl/maps');
   }
 
   bool _sameDay(DateTime a, DateTime b) =>
@@ -531,23 +830,62 @@ class _DropsheetTaskEditorDialogState
   // Save
   // ---------------------------------------------------------------------------
 
-  void _save() {
+  void _save() async {
+    if (_isSaving) return;
+    setState(() => _isSaving = true);
     final t = widget.initial;
 
     // Roll up type-specific fields back into typeData on save.
     final newTypeData = Map<String, dynamic>.from(_typeData);
     String? sourceJobListItemId = t.sourceJobListItemId;
     String location = _location.text.trim();
+    final dynamicTypeId = newTypeData['dynamicTypeId'] as String?;
+
+    // Tracks which address fields changed (so we only re-geocode when needed).
+    final geocoder = GeocodingService();
+    final addressesToGeocode = <String, String>{};
 
     switch (t.type) {
       case DropsheetTaskType.collection:
-        newTypeData['address'] = _collectionAddress.text.trim();
+      case DropsheetTaskType.jobReturn:
+      case DropsheetTaskType.pickFlyers:
+        final addr = _collectionAddress.text.trim();
+        newTypeData['address'] = addr;
         sourceJobListItemId = newTypeData['jobListItemId'] as String?;
+        if (_addressChanged(
+            previous: (t.typeData['address'] as String?) ?? '',
+            current: addr,
+            currentLat: newTypeData['lat'],
+            currentLng: newTypeData['lng'])) {
+          addressesToGeocode['address'] = addr;
+          newTypeData.remove('lat');
+          newTypeData.remove('lng');
+        }
         break;
       case DropsheetTaskType.furnitureMove:
-        newTypeData['loadingAddress'] = _loadingAddress.text.trim();
-        newTypeData['offloadAddress'] = _offloadAddress.text.trim();
+        final loading = _loadingAddress.text.trim();
+        final offload = _offloadAddress.text.trim();
+        newTypeData['loadingAddress'] = loading;
+        newTypeData['offloadAddress'] = offload;
         newTypeData['notes'] = _notes.text.trim();
+        if (_addressChanged(
+            previous: (t.typeData['loadingAddress'] as String?) ?? '',
+            current: loading,
+            currentLat: newTypeData['loadingLat'],
+            currentLng: newTypeData['loadingLng'])) {
+          addressesToGeocode['loadingAddress'] = loading;
+          newTypeData.remove('loadingLat');
+          newTypeData.remove('loadingLng');
+        }
+        if (_addressChanged(
+            previous: (t.typeData['offloadAddress'] as String?) ?? '',
+            current: offload,
+            currentLat: newTypeData['offloadLat'],
+            currentLng: newTypeData['offloadLng'])) {
+          addressesToGeocode['offloadAddress'] = offload;
+          newTypeData.remove('offloadLat');
+          newTypeData.remove('offloadLng');
+        }
         break;
       case DropsheetTaskType.dropOff:
       case DropsheetTaskType.pickUp:
@@ -555,8 +893,57 @@ class _DropsheetTaskEditorDialogState
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
       case DropsheetTaskType.custom:
+        if (dynamicTypeId != null && dynamicTypeId.isNotEmpty) {
+          final addr = _collectionAddress.text.trim();
+          newTypeData['address'] = addr;
+          sourceJobListItemId = newTypeData['jobListItemId'] as String?;
+          if (_addressChanged(
+              previous: (t.typeData['address'] as String?) ?? '',
+              current: addr,
+              currentLat: newTypeData['lat'],
+              currentLng: newTypeData['lng'])) {
+            addressesToGeocode['address'] = addr;
+            newTypeData.remove('lat');
+            newTypeData.remove('lng');
+          }
+        }
         break;
     }
+
+    // Eager geocode any changed addresses. Best-effort: failures just
+    // leave lat/lng off the task and the user can re-edit later.
+    for (final entry in addressesToGeocode.entries) {
+      final raw = entry.value;
+      if (raw.isEmpty) continue;
+      final query = raw.toLowerCase().contains('south africa')
+          ? raw
+          : '$raw, Western Cape, South Africa';
+      debugPrint('[DropsheetEditor] geocoding ${entry.key}="$query"');
+      final res = await geocoder.geocodeAddress(query);
+      if (res != null) {
+        switch (entry.key) {
+          case 'address':
+            newTypeData['lat'] = res['lat'];
+            newTypeData['lng'] = res['lng'];
+            break;
+          case 'loadingAddress':
+            newTypeData['loadingLat'] = res['lat'];
+            newTypeData['loadingLng'] = res['lng'];
+            break;
+          case 'offloadAddress':
+            newTypeData['offloadLat'] = res['lat'];
+            newTypeData['offloadLng'] = res['lng'];
+            break;
+        }
+      } else {
+        debugPrint('[DropsheetEditor] geocode FAILED for ${entry.key}');
+      }
+    }
+
+    // Parse service-time override (blank/invalid → null → fall back to type default).
+    final rawMinutes = _serviceTime.text.trim();
+    final parsedMinutes = int.tryParse(rawMinutes);
+    final clearedMinutes = rawMinutes.isEmpty;
 
     final updated = t.copyWith(
       job: _job.text.trim(),
@@ -567,41 +954,89 @@ class _DropsheetTaskEditorDialogState
       tel: _tel.text.trim(),
       typeData: newTypeData,
       sourceJobListItemId: sourceJobListItemId,
+      serviceTimeMinutes: parsedMinutes,
+      clearServiceTimeMinutes: clearedMinutes,
     );
+    if (!mounted) return;
+    setState(() => _isSaving = false);
     Navigator.pop(context, updated);
+  }
+
+  bool _addressChanged({
+    required String previous,
+    required String current,
+    required dynamic currentLat,
+    required dynamic currentLng,
+  }) {
+    if (current.isEmpty) return false;
+    if (previous.trim() != current) return true;
+    // Same address but no coords cached → geocode now.
+    return currentLat == null || currentLng == null;
   }
 }
 
 /// Picker dialog used when the user taps "Add task" — they pick a type
-/// before the editor opens. Returns the picked [DropsheetTaskType].
-class DropsheetTaskTypePicker extends StatelessWidget {
+/// before the editor opens. Returns a [TaskTypeSelection].
+class DropsheetTaskTypePicker extends riverpod.ConsumerWidget {
   const DropsheetTaskTypePicker({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final addable = [
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final taskConfig = ref.watch(dropsheetTaskConfigRiverpod);
+    const addable = [
       DropsheetTaskType.dropOff,
       DropsheetTaskType.pickUp,
       DropsheetTaskType.collection,
+      DropsheetTaskType.jobReturn,
+      DropsheetTaskType.pickFlyers,
       DropsheetTaskType.furnitureMove,
       DropsheetTaskType.custom,
     ];
     return SimpleDialog(
       title: const Text('Add task'),
-      children: addable
-          .map(
-            (t) => SimpleDialogOption(
-              onPressed: () => Navigator.pop(context, t),
+      children: [
+        // Built-in enum types
+        ...addable.map(
+          (t) => SimpleDialogOption(
+            onPressed: () =>
+                Navigator.pop(context, TaskTypeSelection.enumType(t)),
+            child: Row(
+              children: [
+                Icon(_iconFor(t), size: 20),
+                const SizedBox(width: 12),
+                Text(taskConfig.effectiveLabelFor(t)),
+              ],
+            ),
+          ),
+        ),
+        // User-defined dynamic types
+        if (taskConfig.customTypes.isNotEmpty) ...[
+          const Divider(height: 16),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Text(
+              'Custom types',
+              style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black45),
+            ),
+          ),
+          ...taskConfig.customTypes.map(
+            (def) => SimpleDialogOption(
+              onPressed: () => Navigator.pop(context,
+                  TaskTypeSelection.dynamic(DropsheetTaskType.custom, def)),
               child: Row(
                 children: [
-                  Icon(_iconFor(t), size: 20),
+                  const Icon(Icons.add_task, size: 20),
                   const SizedBox(width: 12),
-                  Text(t.displayName),
+                  Text(def.label.isNotEmpty ? def.label : '(unnamed)'),
                 ],
               ),
             ),
-          )
-          .toList(),
+          ),
+        ],
+      ],
     );
   }
 
@@ -613,6 +1048,10 @@ class DropsheetTaskTypePicker extends StatelessWidget {
         return Icons.move_to_inbox_outlined;
       case DropsheetTaskType.collection:
         return Icons.inventory_2_outlined;
+      case DropsheetTaskType.jobReturn:
+        return Icons.assignment_return_outlined;
+      case DropsheetTaskType.pickFlyers:
+        return Icons.newspaper_outlined;
       case DropsheetTaskType.furnitureMove:
         return Icons.chair_outlined;
       case DropsheetTaskType.custom:
@@ -625,4 +1064,11 @@ class DropsheetTaskTypePicker extends StatelessWidget {
         return Icons.directions_car_outlined;
     }
   }
+}
+
+class _ContactTel {
+  final String contact;
+  final String tel;
+
+  const _ContactTel(this.contact, this.tel);
 }

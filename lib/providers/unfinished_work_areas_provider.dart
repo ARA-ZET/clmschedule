@@ -43,7 +43,7 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
       (snapshot) {
         debugPrint('UnfinishedWorkAreas stream: ${snapshot.docs.length} docs');
         _items = snapshot.docs.map((doc) {
-          final data = doc.data() as Map<String, dynamic>;
+          final data = Map<String, dynamic>.from(doc.data() as Map);
           return _jobFromDoc(doc.id, data);
         }).toList();
         _isLoading = false;
@@ -62,7 +62,7 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
   Job _jobFromDoc(String id, Map<String, dynamic> data) {
     LatLng? dropOffPoint;
     final dropMap = data['dropOffPoint'];
-    if (dropMap is Map<String, dynamic>) {
+    if (dropMap is Map) {
       final lat = (dropMap['latitude'] as num?)?.toDouble();
       final lng = (dropMap['longitude'] as num?)?.toDouble();
       if (lat != null && lng != null) {
@@ -77,7 +77,7 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
           (data['workingAreas'] as List<dynamic>?)?.cast<String>() ?? [],
       workMaps: (data['workMaps'] as List<dynamic>?)
               ?.map((mapData) =>
-                  CustomPolygon.fromMap(mapData as Map<String, dynamic>))
+                  CustomPolygon.fromMap(Map<String, dynamic>.from(mapData as Map)))
               .toList() ??
           [],
       distributorId: '',

@@ -1,10 +1,14 @@
 // track_editor/providers/te_polygons_provider.dart
+import 'dart:collection';
+
 import 'package:flutter/material.dart';
 import '../models/styled_polygon.dart';
 
 class TEPolygonsProvider extends ChangeNotifier {
   List<TEStyledPolygon> _polygons = [];
-  List<TEStyledPolygon> get polygons => _polygons;
+
+  /// Read-only view; mutations must go through provider methods.
+  List<TEStyledPolygon> get polygons => UnmodifiableListView(_polygons);
 
   void clearPolygons() {
     _polygons.clear();

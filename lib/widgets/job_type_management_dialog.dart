@@ -28,6 +28,7 @@ class _JobTypeManagementDialogState
   bool _needsTimeSlot = false;
   bool _appearsOnCollectionSchedule = false;
   bool _tracksQuantity = true;
+  bool _createsCloudFolder = false;
   String? _iconName;
   int? _colorValue;
 
@@ -48,6 +49,7 @@ class _JobTypeManagementDialogState
       _needsTimeSlot = false;
       _appearsOnCollectionSchedule = false;
       _tracksQuantity = true;
+      _createsCloudFolder = false;
       _iconName = null;
       _colorValue = null;
     });
@@ -63,6 +65,7 @@ class _JobTypeManagementDialogState
       _needsTimeSlot = jobType.needsTimeSlot;
       _appearsOnCollectionSchedule = jobType.appearsOnCollectionSchedule;
       _tracksQuantity = jobType.tracksQuantity;
+      _createsCloudFolder = jobType.createsCloudFolder;
       _iconName = jobType.iconName;
       _colorValue = jobType.colorValue;
     });
@@ -102,6 +105,7 @@ class _JobTypeManagementDialogState
           appearsOnCollectionSchedule: _appearsOnCollectionSchedule,
           tracksQuantity: _tracksQuantity,
           quantityLabel: quantityLabel,
+          createsCloudFolder: _createsCloudFolder,
           iconName: _iconName,
           colorValue: _colorValue,
           clearIcon: _iconName == null,
@@ -116,6 +120,7 @@ class _JobTypeManagementDialogState
           appearsOnCollectionSchedule: _appearsOnCollectionSchedule,
           tracksQuantity: _tracksQuantity,
           quantityLabel: quantityLabel,
+          createsCloudFolder: _createsCloudFolder,
           iconName: _iconName,
           colorValue: _colorValue,
           clearIcon: _iconName == null,
@@ -281,6 +286,7 @@ class _JobTypeManagementDialogState
       if (jt.needsTimeSlot) 'Time slot',
       if (jt.appearsOnCollectionSchedule) 'Collection',
       if (!jt.tracksQuantity) 'No quantity',
+      if (jt.createsCloudFolder) 'Cloud folder',
     ];
     final color = jt.colorValue != null ? Color(jt.colorValue!) : null;
     return ListTile(
@@ -401,6 +407,18 @@ class _JobTypeManagementDialogState
               ),
               value: _tracksQuantity,
               onChanged: (v) => setState(() => _tracksQuantity = v),
+            ),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Creates cloud folder'),
+              subtitle: const Text(
+                'Auto-create a Cloud Storage folder per job; folder is renamed/'
+                'moved when client name or distribution date changes',
+                style: TextStyle(fontSize: 11),
+              ),
+              value: _createsCloudFolder,
+              onChanged: (v) => setState(() => _createsCloudFolder = v),
             ),
             if (_tracksQuantity) ...[
               const SizedBox(height: 8),

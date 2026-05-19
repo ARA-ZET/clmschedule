@@ -56,7 +56,7 @@ class Distributor {
     return Distributor(
       id: id,
       name: data['name'] as String,
-      index: data['index'] as int? ?? 0, // Default to 0 if not set
+      index: (data['index'] as num?)?.toInt() ?? 0, // Default to 0 if not set
       phone1: data['phone1'] as String?,
       phone2: data['phone2'] as String?,
       status: DistributorStatus.fromString(data['status'] as String?),

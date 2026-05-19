@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
+import 'package:printing/printing.dart';
 
 import '../../models/collection_job.dart';
 import '../../models/driver.dart';
@@ -8,8 +9,12 @@ import '../../models/dropsheet_day.dart';
 import '../../models/dropsheet_task.dart';
 import '../../providers/driver_provider.dart';
 import '../../providers/dropsheet_provider.dart';
+import '../../providers/schedule_provider.dart';
+import '../../utils/dropsheet_pdf.dart';
+import '../day_planner/day_planner_page.dart';
 import 'driver_management_dialog.dart';
 import 'driver_section_widget.dart';
+import 'task_manager_dialog.dart';
 
 /// Main Dropsheet screen.
 ///
@@ -24,6 +29,7 @@ class DropsheetTab extends riverpod.ConsumerWidget {
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final dropsheet = ref.watch(dropsheetRiverpod);
     final drivers = ref.watch(driverRiverpod);
+    final schedule = ref.watch(scheduleRiverpod);
     final day = dropsheet.day;
 
     return Column(
@@ -36,6 +42,29 @@ class DropsheetTab extends riverpod.ConsumerWidget {
             context: context,
             builder: (_) => const DriverManagementDialog(),
           ),
+          onTaskManager: () => showDialog(
+            context: context,
+            builder: (_) => const TaskManagerDialog(),
+          ),
+          onPrint: () async {
+            final day = dropsheet.day;
+            final date = dropsheet.date;
+            await Printing.layoutPdf(
+              name: 'Dropsheet ${DateFormat('yyyy-MM-dd').format(date)}',
+              onLayout: (_) => generateDropsheetPdf(day, date),
+            );
+          },
+          onOpenDayPlanner: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => DayPlannerPage(
+                  date: dropsheet.date,
+                  jobs: schedule.getJobsForDate(dropsheet.date),
+                  distributors: schedule.distributors,
+                ),
+              ),
+            );
+          },
           onSyncFromSchedule: () async {
             await dropsheet.syncFromSchedule();
             if (context.mounted) {
@@ -45,8 +74,28 @@ class DropsheetTab extends riverpod.ConsumerWidget {
               );
             }
           },
-          driversAvailable:
-              drivers.activeDrivers.length > day.sections.length,
+          onSyncPickups: () async {
+            final result = await dropsheet.syncPickupsFromDropOffs();
+            if (!context.mounted) return;
+
+            final message = switch (result.dropOffs) {
+              0 => 'No assigned drop-off tasks found to create pickups from.',
+              _ when result.created == 0 && result.reordered > 0 =>
+                result.reordered == 1
+                    ? 'Moved 1 pickup task to the bottom.'
+                    : 'Moved ${result.reordered} pickup tasks to the bottom.',
+              _ when result.created == 0 =>
+                'All assigned drop-offs already have pickup tasks.',
+              _ => result.created == 1
+                  ? 'Created 1 pickup task at the bottom.'
+                  : 'Created ${result.created} pickup tasks at the bottom.',
+            };
+
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(message)),
+            );
+          },
+          driversAvailable: drivers.activeDrivers.length > day.sections.length,
         ),
         const Divider(height: 1),
         Expanded(
@@ -101,11 +150,10 @@ class DropsheetTab extends riverpod.ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               DropdownButtonFormField<Driver>(
-                value: selectedDriver,
+                initialValue: selectedDriver,
                 decoration: const InputDecoration(labelText: 'Driver'),
                 items: available
-                    .map((d) =>
-                        DropdownMenuItem(value: d, child: Text(d.name)))
+                    .map((d) => DropdownMenuItem(value: d, child: Text(d.name)))
                     .toList(),
                 onChanged: (d) => setState(() {
                   selectedDriver = d;
@@ -115,7 +163,7 @@ class DropsheetTab extends riverpod.ConsumerWidget {
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<VehicleType>(
-                value: vehicle,
+                initialValue: vehicle,
                 decoration: const InputDecoration(labelText: 'Vehicle'),
                 items: VehicleType.values
                     .map((v) => DropdownMenuItem(
@@ -127,7 +175,7 @@ class DropsheetTab extends riverpod.ConsumerWidget {
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<TrailerType>(
-                value: trailer,
+                initialValue: trailer,
                 decoration: const InputDecoration(labelText: 'Trailer'),
                 items: TrailerType.values
                     .map((t) => DropdownMenuItem(
@@ -167,7 +215,11 @@ class _TopBar extends StatelessWidget {
   final ValueChanged<DateTime> onDateChanged;
   final VoidCallback onAddDriver;
   final VoidCallback onManageDrivers;
+  final VoidCallback onOpenDayPlanner;
+  final VoidCallback onTaskManager;
+  final VoidCallback onPrint;
   final VoidCallback onSyncFromSchedule;
+  final VoidCallback onSyncPickups;
   final bool driversAvailable;
 
   const _TopBar({
@@ -175,12 +227,26 @@ class _TopBar extends StatelessWidget {
     required this.onDateChanged,
     required this.onAddDriver,
     required this.onManageDrivers,
+    required this.onOpenDayPlanner,
+    required this.onTaskManager,
+    required this.onPrint,
     required this.onSyncFromSchedule,
+    required this.onSyncPickups,
     required this.driversAvailable,
   });
 
   @override
   Widget build(BuildContext context) {
+    Future<void> pickDate() async {
+      final picked = await showDatePicker(
+        context: context,
+        initialDate: date,
+        firstDate: DateTime(2020),
+        lastDate: DateTime(2100),
+      );
+      if (picked != null) onDateChanged(picked);
+    }
+
     return Container(
       color: Colors.black,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -194,15 +260,7 @@ class _TopBar extends StatelessWidget {
                 onDateChanged(date.subtract(const Duration(days: 1))),
           ),
           InkWell(
-            onTap: () async {
-              final picked = await showDatePicker(
-                context: context,
-                initialDate: date,
-                firstDate: DateTime(2020),
-                lastDate: DateTime(2100),
-              );
-              if (picked != null) onDateChanged(picked);
-            },
+            onTap: pickDate,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               child: Text(
@@ -219,10 +277,25 @@ class _TopBar extends StatelessWidget {
             color: Colors.white,
             icon: const Icon(Icons.chevron_right),
             tooltip: 'Next day',
-            onPressed: () =>
-                onDateChanged(date.add(const Duration(days: 1))),
+            onPressed: () => onDateChanged(date.add(const Duration(days: 1))),
+          ),
+          IconButton(
+            color: Colors.white,
+            icon: const Icon(Icons.calendar_month_outlined),
+            tooltip: 'Pick date',
+            onPressed: pickDate,
           ),
           const Spacer(),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Colors.white54),
+            ),
+            onPressed: onOpenDayPlanner,
+            icon: const Icon(Icons.map_outlined),
+            label: const Text('Day planner'),
+          ),
+          const SizedBox(width: 8),
           OutlinedButton.icon(
             style: OutlinedButton.styleFrom(
               foregroundColor: Colors.white,
@@ -238,9 +311,39 @@ class _TopBar extends StatelessWidget {
               foregroundColor: Colors.white,
               side: const BorderSide(color: Colors.white54),
             ),
+            onPressed: onSyncPickups,
+            icon: const Icon(Icons.move_to_inbox_outlined),
+            label: const Text('Sync pickups'),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Colors.white54),
+            ),
             onPressed: onManageDrivers,
             icon: const Icon(Icons.people_outline),
             label: const Text('Drivers'),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Colors.white54),
+            ),
+            onPressed: onTaskManager,
+            icon: const Icon(Icons.tune),
+            label: const Text('Task manager'),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Colors.white54),
+            ),
+            onPressed: onPrint,
+            icon: const Icon(Icons.print_outlined),
+            label: const Text('Print'),
           ),
           const SizedBox(width: 8),
           FilledButton.icon(

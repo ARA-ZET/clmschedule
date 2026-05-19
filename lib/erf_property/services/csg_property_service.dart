@@ -160,7 +160,7 @@ class CsgPropertyService {
 
         return features
             .map((f) =>
-                ErfProperty.fromCsgFeature(f as Map<String, dynamic>))
+                ErfProperty.fromCsgFeature(Map<String, dynamic>.from(f as Map)))
             .toList();
       } else {
         debugPrint('❌ CSG HTTP error: ${response.statusCode}');

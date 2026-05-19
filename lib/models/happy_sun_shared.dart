@@ -78,15 +78,15 @@ class ChecklistData {
     return ChecklistData(
       items: (data['items'] as List<dynamic>?)
               ?.map((item) =>
-                  ToolChecklistItem.fromMap(item as Map<String, dynamic>))
+                  ToolChecklistItem.fromMap(Map<String, dynamic>.from(item as Map)))
               .toList() ??
           [],
       completedAt: _parseDateTime(data['completedAt']) ?? DateTime.now(),
       completedBy: data['completedBy'] ?? '',
-      totalTools: data['totalTools'] ?? 0,
-      verifiedCount: data['verifiedCount'] ?? 0,
-      brokenCount: data['brokenCount'] ?? 0,
-      missingCount: data['missingCount'] ?? 0,
+      totalTools: (data['totalTools'] as num?)?.toInt() ?? 0,
+      verifiedCount: (data['verifiedCount'] as num?)?.toInt() ?? 0,
+      brokenCount: (data['brokenCount'] as num?)?.toInt() ?? 0,
+      missingCount: (data['missingCount'] as num?)?.toInt() ?? 0,
       summary: data['summary'] ?? '',
       isCompleted: data['isCompleted'] ?? false,
     );
@@ -128,7 +128,7 @@ class HappySunToolUsage {
       toolId: data['toolId'] ?? '',
       toolName: data['toolName'] ?? '',
       category: data['category'] ?? 'General',
-      quantity: data['quantity'] ?? 1,
+      quantity: (data['quantity'] as num?)?.toInt() ?? 1,
       usedAt: ChecklistData._parseDateTime(data['usedAt']),
     );
   }
@@ -162,7 +162,7 @@ class GroupedToolItem {
     return GroupedToolItem(
       baseName: data['baseName'] ?? '',
       category: data['category'] ?? 'General',
-      totalQuantity: data['totalQuantity'] ?? 0,
+      totalQuantity: (data['totalQuantity'] as num?)?.toInt() ?? 0,
       toolIds: (data['toolIds'] as List<dynamic>?)?.cast<String>() ?? [],
     );
   }
@@ -195,22 +195,22 @@ class CategorizedTools {
     return CategorizedTools(
       teamTools: (data['teamTools'] as List<dynamic>?)
               ?.map((tool) =>
-                  GroupedToolItem.fromMap(tool as Map<String, dynamic>))
+                  GroupedToolItem.fromMap(Map<String, dynamic>.from(tool as Map)))
               .toList() ??
           [],
       individualTools: (data['individualTools'] as List<dynamic>?)
               ?.map((tool) =>
-                  GroupedToolItem.fromMap(tool as Map<String, dynamic>))
+                  GroupedToolItem.fromMap(Map<String, dynamic>.from(tool as Map)))
               .toList() ??
           [],
       extras: (data['extras'] as List<dynamic>?)
               ?.map((tool) =>
-                  GroupedToolItem.fromMap(tool as Map<String, dynamic>))
+                  GroupedToolItem.fromMap(Map<String, dynamic>.from(tool as Map)))
               .toList() ??
           [],
       accessories: (data['accessories'] as List<dynamic>?)
               ?.map((tool) =>
-                  GroupedToolItem.fromMap(tool as Map<String, dynamic>))
+                  GroupedToolItem.fromMap(Map<String, dynamic>.from(tool as Map)))
               .toList() ??
           [],
     );

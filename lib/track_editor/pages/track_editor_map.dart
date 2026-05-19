@@ -6,11 +6,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:gpx/gpx.dart';
 import '../providers/te_tabs_provider.dart';
 import '../providers/te_map_layer_provider.dart';
 import '../providers/te_mode_provider.dart';
 import '../providers/te_tools_provider.dart';
+import '../providers/te_undo_provider.dart';
 import '../models/styled_polygon.dart';
+import '../models/tab_item.dart';
 import '../services/point_in_polygon.dart';
 import '../utils/te_track_stats.dart';
 import '../../providers/schedule_provider.dart';
@@ -121,6 +124,11 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       }
     }
 
+    // Ctrl/Cmd + Z and Ctrl/Cmd + Y are handled by the page-level
+    // `CallbackShortcuts` wrapper in `track_editor_page.dart` so they
+    // fire reliably on Flutter web regardless of focus state. We don't
+    // duplicate them here.
+
     // 'b' key = split (break) at the selected scissors point.
     if (event is KeyDownEvent &&
         event.logicalKey == LogicalKeyboardKey.keyB &&
@@ -141,34 +149,59 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     }
 
     // Delete / Backspace removes whatever is currently selected on the map
-    // (waypoint, polygon, or track) after a confirmation so a stray keypress
-    // never silently drops data.
+    // (waypoint, polygon, or track) immediately — no confirmation. Each
+    // delete is recorded as an undoable TECommand so Ctrl/Cmd+Z restores it.
     if (event is KeyDownEvent &&
         (event.logicalKey == LogicalKeyboardKey.delete ||
             event.logicalKey == LogicalKeyboardKey.backspace)) {
       final tabsProvider = ref.read(teTabsRiverpod);
       final currentTab = tabsProvider.currentTab;
       final tabData = tabsProvider.tabs[currentTab];
+      final undoP = ref.read(teUndoRiverpod);
+      final mode = tabsProvider.activeMode;
 
       // Priority: waypoint > polygon > track. Only one overlay is open at a
       // time, so at most one of these is non-null in practice.
       if (_wptIndex != null) {
         final wi = _wptIndex!;
         if (wi >= 0 && wi < tabData.waypoints.length) {
+          final removedWpt = tabData.waypoints[wi];
           final name = _wptName?.trim().isNotEmpty == true
               ? _wptName!
               : 'Waypoint ${wi + 1}';
-          _confirmAndDeleteWaypoint(currentTab, wi, name);
+          _closeWptInfoWindow();
+          undoP.run(
+            mode,
+            currentTab,
+            TECommand(
+              description: 'Delete waypoint "$name"',
+              doFn: () => tabsProvider.removeWaypoint(currentTab, wi),
+              undoFn: () =>
+                  tabsProvider.insertWaypoint(currentTab, wi, removedWpt),
+            ),
+          );
+          ref.read(teMapLayerRiverpod).selectWaypoint(currentTab, null);
         }
         return true;
       }
       if (_polyIndex != null) {
         final pi = _polyIndex!;
         if (pi >= 0 && pi < tabData.polygons.length) {
+          final removedPoly = tabData.polygons[pi];
           final name = _polyName?.trim().isNotEmpty == true
               ? _polyName!
               : 'Polygon ${pi + 1}';
-          _confirmAndDeletePolygon(currentTab, pi, name);
+          _closePolyInfoWindow();
+          undoP.run(
+            mode,
+            currentTab,
+            TECommand(
+              description: 'Delete area "$name"',
+              doFn: () => tabsProvider.removePolygon(currentTab, pi),
+              undoFn: () =>
+                  tabsProvider.insertPolygon(currentTab, pi, removedPoly),
+            ),
+          );
         }
         return true;
       }
@@ -176,10 +209,30 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
         final trackIndex = _selectedTrackIndex!;
         final tracks = tabData.tracks;
         if (trackIndex >= 0 && trackIndex < tracks.length) {
-          final rawName = tracks[trackIndex].name?.trim() ?? '';
+          final removedTrack = tracks[trackIndex];
+          final rawName = removedTrack.name?.trim() ?? '';
           final trackName =
               rawName.isNotEmpty ? rawName : 'Track ${trackIndex + 1}';
-          _confirmAndDeleteTrack(currentTab, trackIndex, trackName);
+          _closeInfoWindow();
+          undoP.run(
+            mode,
+            currentTab,
+            TECommand(
+              description: 'Delete track "$trackName"',
+              doFn: () => tabsProvider.removeTrack(currentTab, trackIndex),
+              undoFn: () => tabsProvider.insertTrack(
+                  currentTab, trackIndex, removedTrack),
+            ),
+          );
+          if (mounted) {
+            setState(() {
+              if (_scissorsTrackIdx == trackIndex) {
+                _scissorsTrackIdx = null;
+                _scissorsSelectedIdx = null;
+              }
+              _selectedTrackIndex = null;
+            });
+          }
         }
         return true;
       }
@@ -221,7 +274,20 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     final tracks = tabsProvider.tabs[tabIndex].tracks;
     if (trackIndex < 0 || trackIndex >= tracks.length) return;
 
-    tabsProvider.removeTrack(tabIndex, trackIndex);
+    // Capture the track for undo so removing it can be reversed.
+    final removedTrack = tracks[trackIndex];
+    final undoP = ref.read(teUndoRiverpod);
+    final mode = tabsProvider.activeMode;
+    undoP.run(
+      mode,
+      tabIndex,
+      TECommand(
+        description: 'Delete track "$trackName"',
+        doFn: () => tabsProvider.removeTrack(tabIndex, trackIndex),
+        undoFn: () =>
+            tabsProvider.insertTrack(tabIndex, trackIndex, removedTrack),
+      ),
+    );
     if (mounted) {
       setState(() {
         if (_scissorsTrackIdx == trackIndex) {
@@ -254,11 +320,24 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     if (waypointIndex < 0 || waypointIndex >= waypoints.length) return;
 
     _closeWptInfoWindow();
-    tabsProvider.removeWaypoint(tabIndex, waypointIndex);
+    final removedWpt = waypoints[waypointIndex];
+    final undoP = ref.read(teUndoRiverpod);
+    final mode = tabsProvider.activeMode;
+    undoP.run(
+      mode,
+      tabIndex,
+      TECommand(
+        description: 'Delete waypoint "$name"',
+        doFn: () => tabsProvider.removeWaypoint(tabIndex, waypointIndex),
+        undoFn: () => tabsProvider.insertWaypoint(
+            tabIndex, waypointIndex, removedWpt),
+      ),
+    );
     ref.read(teMapLayerRiverpod).selectWaypoint(tabIndex, null);
   }
 
   /// Confirm + delete a polygon from the currently-active tab.
+  // ignore: unused_element
   Future<void> _confirmAndDeletePolygon(
     int tabIndex,
     int polyIndex,
@@ -273,7 +352,19 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     if (polyIndex < 0 || polyIndex >= polys.length) return;
 
     _closePolyInfoWindow();
-    tabsProvider.removePolygon(tabIndex, polyIndex);
+    final removedPoly = polys[polyIndex];
+    final undoP = ref.read(teUndoRiverpod);
+    final mode = tabsProvider.activeMode;
+    undoP.run(
+      mode,
+      tabIndex,
+      TECommand(
+        description: 'Delete area "$name"',
+        doFn: () => tabsProvider.removePolygon(tabIndex, polyIndex),
+        undoFn: () =>
+            tabsProvider.insertPolygon(tabIndex, polyIndex, removedPoly),
+      ),
+    );
   }
 
   Future<void> _loadWaypointIcon() async {
@@ -407,40 +498,40 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
   }
 
   Future<void> _loadScissorsIcons() async {
-    const double size = 18.0;
-    const double radius = 7.0;
+    // Render at 2× the display size and pass `imagePixelRatio: 2.0` so the
+    // marker stays crisp on high-DPI displays / web.
+    const double displaySize = 16.0; // logical px on screen
+    const double pxRatio = 2.0;
+    const double bmpSize = displaySize * pxRatio;
+    const double radius = bmpSize * 0.42;
+    const double ringWidth = bmpSize * 0.10;
+    const double dotRadius = bmpSize * 0.14;
+    final center = const Offset(bmpSize / 2, bmpSize / 2);
 
-    // Blue circle for unselected scissors points
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final center = Offset(size / 2, size / 2);
-    canvas.drawCircle(center, radius + 1.5, Paint()..color = Colors.white);
-    canvas.drawCircle(center, radius, Paint()..color = Colors.blue);
-    canvas.drawCircle(center, 2.5, Paint()..color = Colors.white);
-    final picture = recorder.endRecording();
-    final image = await picture.toImage(size.toInt(), size.toInt());
-    final data = await image.toByteData(format: ui.ImageByteFormat.png);
-    if (mounted && data != null) {
-      setState(() {
-        _scissorsPointIcon = BitmapDescriptor.bytes(data.buffer.asUint8List());
-      });
+    Future<BitmapDescriptor> drawCircle(Color fill) async {
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      // White ring for contrast against any map background.
+      canvas.drawCircle(center, radius + ringWidth, Paint()..color = Colors.white);
+      canvas.drawCircle(center, radius, Paint()..color = fill);
+      // Inner white dot so the marker reads as a "target" pip.
+      canvas.drawCircle(center, dotRadius, Paint()..color = Colors.white);
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(bmpSize.toInt(), bmpSize.toInt());
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      return BitmapDescriptor.bytes(
+        data!.buffer.asUint8List(),
+        imagePixelRatio: pxRatio,
+      );
     }
 
-    // Red circle for the selected scissors point
-    final recorder2 = ui.PictureRecorder();
-    final canvas2 = Canvas(recorder2);
-    canvas2.drawCircle(center, radius + 1.5, Paint()..color = Colors.white);
-    canvas2.drawCircle(center, radius, Paint()..color = Colors.red);
-    canvas2.drawCircle(center, 2.5, Paint()..color = Colors.white);
-    final picture2 = recorder2.endRecording();
-    final image2 = await picture2.toImage(size.toInt(), size.toInt());
-    final data2 = await image2.toByteData(format: ui.ImageByteFormat.png);
-    if (mounted && data2 != null) {
-      setState(() {
-        _scissorsSelectedIcon =
-            BitmapDescriptor.bytes(data2.buffer.asUint8List());
-      });
-    }
+    final blue = await drawCircle(Colors.blue);
+    final orange = await drawCircle(Colors.orange);
+    if (!mounted) return;
+    setState(() {
+      _scissorsPointIcon = blue;
+      _scissorsSelectedIcon = orange;
+    });
   }
 
   // ── Drawing mode handlers ─────────────────────────────────────────────────
@@ -777,7 +868,25 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
           outline: true,
         ),
       );
-      ref.read(teTabsRiverpod).addPolygonsToCurrentTab([polygon]);
+      // Wrap as an undoable command so Ctrl+Z removes the just-drawn
+      // polygon. The undo simply drops the last polygon on the tab
+      // (matches our "append" pattern in `addPolygonsToCurrentTab`).
+      final tabsP = ref.read(teTabsRiverpod);
+      final tabIdx = tabsP.currentTab;
+      ref.read(teUndoRiverpod).run(
+            tabsP.activeMode,
+            tabIdx,
+            TECommand(
+              description: 'Draw polygon "${result['name']}"',
+              doFn: () => tabsP.addPolygonsToCurrentTab([polygon]),
+              undoFn: () {
+                if (tabIdx < 0 || tabIdx >= tabsP.tabs.length) return;
+                final cur = tabsP.tabs[tabIdx].polygons;
+                if (cur.isEmpty) return;
+                tabsP.replacePolygons(tabIdx, cur.sublist(0, cur.length - 1));
+              },
+            ),
+          );
 
       // Always save to Firestore unfinished work areas.
       final customPoly = CustomPolygon(
@@ -851,7 +960,23 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
           outline: true,
         ),
       );
-      ref.read(teTabsRiverpod).addPolygonsToCurrentTab([point]);
+      // Wrap as undoable so Ctrl+Z removes the just-added point.
+      final tabsP = ref.read(teTabsRiverpod);
+      final tabIdx = tabsP.currentTab;
+      ref.read(teUndoRiverpod).run(
+            tabsP.activeMode,
+            tabIdx,
+            TECommand(
+              description: 'Add point "$result"',
+              doFn: () => tabsP.addPolygonsToCurrentTab([point]),
+              undoFn: () {
+                if (tabIdx < 0 || tabIdx >= tabsP.tabs.length) return;
+                final cur = tabsP.tabs[tabIdx].polygons;
+                if (cur.isEmpty) return;
+                tabsP.replacePolygons(tabIdx, cur.sublist(0, cur.length - 1));
+              },
+            ),
+          );
       // Stay in point mode — user can keep placing points
     } else {
       // User cancelled — exit drawing mode (like shareable maps)
@@ -902,6 +1027,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     _drawingPoints.clear();
     _scissorsTrackIdx = null;
     _scissorsSelectedIdx = null;
+    _selectedTrackIndex = null;
   }
 
   Future<void> _fitTabBounds(TETabsProvider tabsProvider) async {
@@ -1089,8 +1215,27 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
 
   void _saveEditPolygon(TETabsProvider tabsProvider, int tabIndex) {
     if (_editingPolyIndex == null || _editingPoints == null) return;
-    tabsProvider.updatePolygonPoints(
-        tabIndex, _editingPolyIndex!, List<LatLng>.from(_editingPoints!));
+    final polyIndex = _editingPolyIndex!;
+    final newPoints = List<LatLng>.from(_editingPoints!);
+    final oldPoints = tabIndex >= 0 &&
+            tabIndex < tabsProvider.tabs.length &&
+            polyIndex < tabsProvider.tabs[tabIndex].polygons.length
+        ? List<LatLng>.from(
+            tabsProvider.tabs[tabIndex].polygons[polyIndex].points)
+        : <LatLng>[];
+    final undoP = ref.read(teUndoRiverpod);
+    final mode = tabsProvider.activeMode;
+    undoP.run(
+      mode,
+      tabIndex,
+      TECommand(
+        description: 'Edit polygon vertices',
+        doFn: () =>
+            tabsProvider.updatePolygonPoints(tabIndex, polyIndex, newPoints),
+        undoFn: () =>
+            tabsProvider.updatePolygonPoints(tabIndex, polyIndex, oldPoints),
+      ),
+    );
     setState(() {
       _editingPolyIndex = null;
       _editingPoints = null;
@@ -1130,8 +1275,22 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
 
   void _deletePolygon(
       TETabsProvider tabsProvider, int tabIndex, int polyIndex) {
+    if (tabIndex < 0 || tabIndex >= tabsProvider.tabs.length) return;
+    final polys = tabsProvider.tabs[tabIndex].polygons;
+    if (polyIndex < 0 || polyIndex >= polys.length) return;
+    final removedPoly = polys[polyIndex];
+    final name = removedPoly.name;
     _closePolyInfoWindow();
-    tabsProvider.removePolygon(tabIndex, polyIndex);
+    ref.read(teUndoRiverpod).run(
+          tabsProvider.activeMode,
+          tabIndex,
+          TECommand(
+            description: 'Delete area "$name"',
+            doFn: () => tabsProvider.removePolygon(tabIndex, polyIndex),
+            undoFn: () =>
+                tabsProvider.insertPolygon(tabIndex, polyIndex, removedPoly),
+          ),
+        );
   }
 
   // ── Scissors mode ─────────────────────────────────────────────────────────
@@ -1152,8 +1311,35 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     final tabsProvider = ref.read(teTabsRiverpod);
 
     final splitIdx = _scissorsTrackIdx!;
-    final success =
-        tabsProvider.splitTrack(currentTab, splitIdx, _scissorsSelectedIdx!);
+    final splitPointIdx = _scissorsSelectedIdx!;
+    final tracks = tabsProvider.tabs[currentTab].tracks;
+    if (splitIdx < 0 || splitIdx >= tracks.length) return;
+    // Capture the original track for undo so the user can revert a cut.
+    final originalTrack = tracks[splitIdx];
+    final undoP = ref.read(teUndoRiverpod);
+    final mode = tabsProvider.activeMode;
+
+    bool success = false;
+    undoP.run(
+      mode,
+      currentTab,
+      TECommand(
+        description: 'Split track',
+        doFn: () {
+          success = tabsProvider.splitTrack(
+              currentTab, splitIdx, splitPointIdx);
+        },
+        undoFn: () {
+          // The split replaced 1 track with 2 starting at splitIdx.
+          tabsProvider.replaceTrackRange(
+            currentTab,
+            splitIdx,
+            splitIdx + 2,
+            [originalTrack],
+          );
+        },
+      ),
+    );
     if (success) {
       setState(() {
         // Select the second half of the split to give visual feedback.
@@ -1165,8 +1351,34 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     }
   }
 
+  /// Build markers for any drop-off points pulled from the schedule
+  /// jobs that are matched to the active tab. Sits at a low zIndex so
+  /// regular waypoints stay clickable on top of it.
+  Set<Marker> _buildDropOffMarkers(TETabItem tabData, int currentTab) {
+    final drops = tabData.dropOffPoints;
+    if (drops.isEmpty) return const <Marker>{};
+    final markers = <Marker>{};
+    for (var i = 0; i < drops.length; i++) {
+      final d = drops[i];
+      markers.add(Marker(
+        markerId: MarkerId('dropoff_${currentTab}_$i'),
+        position: d.position,
+        anchor: const Offset(0.5, 1.0),
+        zIndex: 3,
+        icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueViolet),
+        infoWindow: InfoWindow(title: d.label),
+      ));
+    }
+    return markers;
+  }
+
   /// Build markers for all points of the scissors-selected track.
-  /// The user picks a point from these; the selected one is highlighted.
+  /// Build markers for every trackpoint of the active scissors track.
+  /// Each marker is tap-selectable; the picked one is highlighted in
+  /// orange and shows the "Press B to split here" hint. We deliberately
+  /// do NOT make these draggable — a full track can have thousands of
+  /// points and per-marker drag handlers add a lot of overhead.
   Set<Marker> _buildScissorsPointMarkers(int currentTab) {
     if (_scissorsTrackIdx == null) return {};
     final tabsProvider = ref.read(teTabsRiverpod);
@@ -1184,25 +1396,44 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
         }
         final idx = globalIdx;
         final isSelected = idx == _scissorsSelectedIdx;
+        final originalPos = LatLng(pt.lat!, pt.lon!);
+        final trackIndex = _scissorsTrackIdx!;
         markers.add(Marker(
           markerId: MarkerId('scissors_pt_$idx'),
-          position: LatLng(pt.lat!, pt.lon!),
+          position: originalPos,
           anchor: const Offset(0.5, 0.5),
           zIndex: isSelected ? 12 : 8,
+          draggable: true,
           icon: isSelected
               ? (_scissorsSelectedIcon ??
                   BitmapDescriptor.defaultMarkerWithHue(
-                      BitmapDescriptor.hueRed))
+                      BitmapDescriptor.hueOrange))
               : (_scissorsPointIcon ??
                   BitmapDescriptor.defaultMarkerWithHue(
                       BitmapDescriptor.hueBlue)),
           infoWindow: isSelected
               ? const InfoWindow(title: 'Press B to split here')
               : InfoWindow.noText,
+          consumeTapEvents: true,
           onTap: () {
             setState(() {
               _scissorsSelectedIdx = idx;
             });
+          },
+          onDragEnd: (newPos) {
+            final tabsP = ref.read(teTabsRiverpod);
+            final undoP = ref.read(teUndoRiverpod);
+            undoP.run(
+              tabsP.activeMode,
+              currentTab,
+              TECommand(
+                description: 'Move trackpoint',
+                doFn: () => tabsP.moveTrackpoint(
+                    currentTab, trackIndex, idx, newPos),
+                undoFn: () => tabsP.moveTrackpoint(
+                    currentTab, trackIndex, idx, originalPos),
+              ),
+            );
           },
         ));
         globalIdx++;
@@ -1260,7 +1491,19 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     );
     ctrl.dispose();
     if (result != null && result.isNotEmpty) {
-      tabsProvider.renamePolygon(tabIndex, polyIndex, result);
+      // Capture old name for undo before mutating.
+      final oldName = currentName;
+      ref.read(teUndoRiverpod).run(
+            tabsProvider.activeMode,
+            tabIndex,
+            TECommand(
+              description: 'Rename area "$oldName" → "$result"',
+              doFn: () =>
+                  tabsProvider.renamePolygon(tabIndex, polyIndex, result),
+              undoFn: () =>
+                  tabsProvider.renamePolygon(tabIndex, polyIndex, oldName),
+            ),
+          );
       // Keep overlay open but update name
       setState(() => _polyName = result);
     }
@@ -1412,6 +1655,9 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                   : (sp.style.fill
                       ? sp.style.fillColor.withAlpha(100)
                       : Colors.transparent),
+              // Keep polygons visually behind tracks and markers so a tap
+              // on a marker that overlaps a polygon hits the marker first.
+              zIndex: 0,
               consumeTapEvents: !isDrawing,
               onTap: (isEditing || isDrawing)
                   ? null
@@ -1464,6 +1710,10 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
         position: LatLng(wpt.lat!, wpt.lon!),
         anchor: const Offset(0.5, 0.5),
         zIndex: isMultiSelected ? 6 : (isSelected ? 5 : 1),
+        // Drag-to-edit waypoint position. Long-press starts the drag on
+        // touch devices; on web/desktop a click-and-hold drag works too.
+        // The move is wrapped in an undo command so Ctrl+Z reverts it.
+        draggable: true,
         icon: isMultiSelected
             ? (_multiSelectWptIcon ??
                 BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed))
@@ -1486,13 +1736,27 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
             idx,
           );
         },
+        onDragEnd: (newPos) {
+          final tabsP = ref.read(teTabsRiverpod);
+          final undoP = ref.read(teUndoRiverpod);
+          // Snapshot the original position so undo restores it.
+          final oldPos = LatLng(wpt.lat!, wpt.lon!);
+          undoP.run(
+            tabsP.activeMode,
+            currentTab,
+            TECommand(
+              description: 'Move waypoint',
+              doFn: () => tabsP.moveWaypoint(currentTab, idx, newPos),
+              undoFn: () => tabsP.moveWaypoint(currentTab, idx, oldPos),
+            ),
+          );
+        },
       );
     }).toSet();
 
     final Set<Polyline> polylines = tabData.tracks.asMap().entries.map((e) {
       final idx = e.key;
       final track = e.value;
-      final stats = TETrackStats.fromTrack(track);
       final rawName = track.name?.trim() ?? '';
       final trackName = rawName.isNotEmpty ? rawName : 'Track ${idx + 1}';
       final allPts = track.trksegs
@@ -1511,6 +1775,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                 ? Colors.red
                 : Colors.blue,
         width: isScissorsTarget || isSelected ? 7 : 5,
+        // Sit above polygons but below markers so points stay clickable.
+        zIndex: 2,
         consumeTapEvents: true,
         onTap: isDrawing
             ? null
@@ -1518,6 +1784,10 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                 ? () => _handleScissorsSelectTrack(idx)
                 : () {
                     if (midPt != null) {
+                      // Compute stats lazily — only the tapped track pays
+                      // the haversine cost, instead of every track every
+                      // build.
+                      final stats = TETrackStats.fromTrack(track);
                       _openInfoWindow(LatLng(midPt.lat!, midPt.lon!), trackName,
                           stats, idx);
                     }
@@ -1582,6 +1852,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                       ...mapPolygons,
                     },
                     markers: {
+                      ..._buildDropOffMarkers(tabData, currentTab),
                       ...mapMarkers,
                       ...vertexMarkers,
                       ..._buildDrawingMarkers(),
@@ -1728,8 +1999,39 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                                         'waypoints',
                                         '$count waypoint${count == 1 ? '' : 's'}');
                                     if (!confirm) return;
-                                    ref.read(teTabsRiverpod).removeWaypoints(
-                                        currentTab, multiSelectedWpts);
+                                    final tabsP = ref.read(teTabsRiverpod);
+                                    if (currentTab < 0 ||
+                                        currentTab >= tabsP.tabs.length) {
+                                      return;
+                                    }
+                                    final wpts =
+                                        tabsP.tabs[currentTab].waypoints;
+                                    final indicesAsc = multiSelectedWpts
+                                        .toList()
+                                      ..sort();
+                                    // Capture waypoints with their original
+                                    // indices so we can restore them on undo.
+                                    final removed = <({int index, Wpt waypoint})>[];
+                                    for (final i in indicesAsc) {
+                                      if (i >= 0 && i < wpts.length) {
+                                        removed.add(
+                                            (index: i, waypoint: wpts[i]));
+                                      }
+                                    }
+                                    final selSet = Set<int>.from(
+                                        multiSelectedWpts);
+                                    ref.read(teUndoRiverpod).run(
+                                          tabsP.activeMode,
+                                          currentTab,
+                                          TECommand(
+                                            description:
+                                                'Delete $count waypoint${count == 1 ? '' : 's'}',
+                                            doFn: () => tabsP.removeWaypoints(
+                                                currentTab, selSet),
+                                            undoFn: () => tabsP.insertWaypoints(
+                                                currentTab, removed),
+                                          ),
+                                        );
                                     ref
                                         .read(teMapLayerRiverpod)
                                         .clearMultiSelection(currentTab);
@@ -1979,11 +2281,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                       ? () async {
                           final ti = _selectedTrackIndex!;
                           final name = _infoName ?? 'this track';
-                          final confirm =
-                              await _confirmDelete(context, 'track', name);
-                          if (!confirm || !mounted) return;
                           _closeInfoWindow();
-                          ref.read(teTabsRiverpod).removeTrack(currentTab, ti);
+                          await _confirmAndDeleteTrack(currentTab, ti, name);
                         }
                       : null,
                 ),
@@ -1998,16 +2297,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                       ? () async {
                           final wi = _wptIndex!;
                           final name = _wptName ?? 'this waypoint';
-                          final confirm =
-                              await _confirmDelete(context, 'waypoint', name);
-                          if (!confirm || !mounted) return;
-                          _closeWptInfoWindow();
-                          ref
-                              .read(teTabsRiverpod)
-                              .removeWaypoint(currentTab, wi);
-                          ref
-                              .read(teMapLayerRiverpod)
-                              .selectWaypoint(currentTab, null);
+                          await _confirmAndDeleteWaypoint(currentTab, wi, name);
                         }
                       : null,
                 ),

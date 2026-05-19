@@ -87,6 +87,41 @@ class ShareableMapsFirestoreService {
     await _mapsCollection(monthKey).doc(docId).update(fields);
   }
 
+  /// Update cached cloud waypoint count on every map document that is
+  /// linked to [folderPath] via [ShareableMap.storageFolderPath].
+  ///
+  /// Called whenever the compiled GPX index for a folder is rebuilt so the
+  /// gallery tile badges stay in sync with the actual cloud contents.
+  /// Does NOT bump `updatedAt` to avoid reordering maps in the gallery just
+  /// because their linked folder changed.
+  Future<int> updateCloudCountsByFolderPath(
+    String folderPath, {
+    required int waypointCount,
+  }) async {
+    if (folderPath.isEmpty) return 0;
+    try {
+      final snapshot = await _firestore
+          .collectionGroup('maps')
+          .where('storageFolderPath', isEqualTo: folderPath)
+          .get();
+      if (snapshot.docs.isEmpty) return 0;
+      final batch = _firestore.batch();
+      for (final doc in snapshot.docs) {
+        batch.update(doc.reference, {
+          'cloudWaypointCount': waypointCount,
+        });
+      }
+      await batch.commit();
+      debugPrint(
+          '[ShareableMapsFirestore] Updated cloud waypoint count for ${snapshot.docs.length} map(s) linked to "$folderPath" (waypoints=$waypointCount)');
+      return snapshot.docs.length;
+    } catch (e) {
+      debugPrint(
+          '[ShareableMapsFirestore] updateCloudCountsByFolderPath failed for "$folderPath": $e');
+      return 0;
+    }
+  }
+
   /// Delete a map document.
   Future<void> deleteMap(String monthKey, String docId) async {
     await _mapsCollection(monthKey).doc(docId).delete();
@@ -97,7 +132,7 @@ class ShareableMapsFirestoreService {
   Future<ShareableMap?> getMap(String monthKey, String docId) async {
     final doc = await _mapsCollection(monthKey).doc(docId).get();
     if (!doc.exists) return null;
-    return ShareableMap.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+    return ShareableMap.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
   }
 
   /// Stream a single map document for real-time updates.
@@ -107,7 +142,7 @@ class ShareableMapsFirestoreService {
   Stream<ShareableMap?> streamMap(String monthKey, String docId) {
     return _mapsCollection(monthKey).doc(docId).snapshots().map((doc) {
       if (!doc.exists) return null;
-      return ShareableMap.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+      return ShareableMap.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
     });
   }
 
@@ -191,7 +226,7 @@ class ShareableMapsFirestoreService {
 
   List<ShareableMap> _snapshotToList(QuerySnapshot snapshot) {
     return snapshot.docs.map((doc) {
-      return ShareableMap.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+      return ShareableMap.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
     }).toList();
   }
 

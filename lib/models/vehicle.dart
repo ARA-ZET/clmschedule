@@ -27,7 +27,7 @@ class Vehicle {
   }
 
   factory Vehicle.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(doc.data() as Map);
     return Vehicle.fromMap(doc.id, data);
   }
 
@@ -84,7 +84,7 @@ class Driver {
   }
 
   factory Driver.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(doc.data() as Map);
     return Driver.fromMap(doc.id, data);
   }
 
@@ -148,15 +148,15 @@ class DailyTrackingEntry {
       vehicleId: data['vehicleId'] as String?,
       distributorId: data['distributorId'] as String,
       area: data['area'] as String,
-      bagOut: data['bagOut'] as int?,
-      bagIn: data['bagIn'] as int?,
+      bagOut: (data['bagOut'] as num?)?.toInt(),
+      bagIn: (data['bagIn'] as num?)?.toInt(),
       specialInstructions: data['specialInstructions'] as String?,
       createdAt: (data['createdAt'] as Timestamp).toDate(),
     );
   }
 
   factory DailyTrackingEntry.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+    final data = Map<String, dynamic>.from(doc.data() as Map);
     return DailyTrackingEntry.fromMap(doc.id, data);
   }
 

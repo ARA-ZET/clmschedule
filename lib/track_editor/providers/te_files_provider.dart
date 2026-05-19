@@ -1,4 +1,6 @@
 // track_editor/providers/te_files_provider.dart
+import 'dart:collection';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'te_mode_provider.dart';
@@ -15,7 +17,9 @@ class TEFilesProvider extends ChangeNotifier {
   };
   TEMode _activeMode = TEMode.processing;
 
-  List<String> get selectedFileNames => _filesByMode[_activeMode]!;
+  /// Read-only view; mutations must go through provider methods.
+  List<String> get selectedFileNames =>
+      UnmodifiableListView(_filesByMode[_activeMode]!);
 
   void setActiveMode(TEMode mode) {
     if (_activeMode == mode) return;

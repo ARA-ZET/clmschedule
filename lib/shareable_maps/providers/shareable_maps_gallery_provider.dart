@@ -21,6 +21,7 @@ class MapGalleryItem {
   final String monthKey; // e.g. '03-2026'
   final int layerCount;
   final int elementCount;
+  final int waypointCount;
   final double centerLat;
   final double centerLng;
   final String? thumbnailUrl;
@@ -34,6 +35,7 @@ class MapGalleryItem {
     required this.monthKey,
     required this.layerCount,
     required this.elementCount,
+    required this.waypointCount,
     required this.centerLat,
     required this.centerLng,
     this.thumbnailUrl,
@@ -50,6 +52,7 @@ class MapGalleryItem {
       monthKey: mwm.monthKey,
       layerCount: map.layers.length,
       elementCount: map.totalElementCount,
+      waypointCount: map.cloudWaypointCount ?? 0,
       centerLat: map.defaultCenter.latitude,
       centerLng: map.defaultCenter.longitude,
       thumbnailUrl: map.thumbnailUrl,

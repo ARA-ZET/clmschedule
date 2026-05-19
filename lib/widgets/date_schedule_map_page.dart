@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../models/distributor.dart';
 import '../models/job.dart';
+import '../providers/schedule_provider.dart';
 import '../shareable_maps/adapters/date_schedule_adapter.dart';
 import '../shareable_maps/providers/shareable_map_provider.dart';
 import '../shareable_maps/widgets/shareable_map_editor.dart';
@@ -31,41 +32,125 @@ class DateScheduleMapPage extends riverpod.ConsumerStatefulWidget {
 
 class _DateScheduleMapPageState extends riverpod
     .ConsumerState<DateScheduleMapPage> with SingleTickerProviderStateMixin {
-  late final TabController _tabController;
+  late TabController _tabController;
 
   /// Distributor entries that actually have work-map polygons on this date.
-  late final List<_DistributorTab> _tabs;
+  List<_DistributorTab> _tabs = const [];
+  List<Job> _liveJobs = const [];
+  List<Distributor> _liveDistributors = const [];
+  String _loadedSignature = '';
 
   @override
   void initState() {
     super.initState();
 
-    // Build per-distributor tab data (only those with maps).
+    _liveJobs = widget.jobs.where((j) => j.workMaps.isNotEmpty).toList();
+    _liveDistributors = widget.distributors;
+    _tabs = _buildTabs(_liveJobs, _liveDistributors);
+
+    // +1 for the "All" tab at index 0
+    _tabController = TabController(length: _tabs.length + 1, vsync: this);
+    _tabController.addListener(_onTabChanged);
+
+    // Load live provider data initially with fit-to-bounds.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _refreshFromSchedule(ref.read(scheduleRiverpod), force: true);
+    });
+  }
+
+  List<_DistributorTab> _buildTabs(
+    List<Job> jobs,
+    List<Distributor> distributors,
+  ) {
     final byDistributor = <String, List<Job>>{};
-    for (final job in widget.jobs) {
+    for (final job in jobs) {
       if (job.workMaps.isNotEmpty) {
         byDistributor.putIfAbsent(job.distributorId, () => []).add(job);
       }
     }
 
-    _tabs = byDistributor.entries.map((entry) {
-      final dist =
-          widget.distributors.where((d) => d.id == entry.key).firstOrNull;
+    return byDistributor.entries.map((entry) {
+      final dist = distributors.where((d) => d.id == entry.key).firstOrNull;
       return _DistributorTab(
         distributorId: entry.key,
         name: dist?.name ?? 'Unknown',
         jobs: entry.value,
       );
     }).toList();
+  }
 
-    // +1 for the "All" tab at index 0
-    _tabController = TabController(length: _tabs.length + 1, vsync: this);
-    _tabController.addListener(_onTabChanged);
+  void _refreshFromSchedule(
+    ScheduleProvider schedule, {
+    bool force = false,
+  }) {
+    if (!mounted) return;
 
-    // Load the "All" tab initially with fit-to-bounds.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _loadTab(0);
+    final jobs = schedule
+        .getJobsForDate(widget.date)
+        .where((j) => j.workMaps.isNotEmpty)
+        .toList();
+    final distributors = schedule.distributors.isNotEmpty
+        ? schedule.distributors
+        : widget.distributors;
+    final tabs = _buildTabs(jobs, distributors);
+    final signature = _signatureFor(jobs, distributors);
+
+    if (!force && signature == _loadedSignature) return;
+
+    final oldIndex = _tabController.index;
+    final newLength = tabs.length + 1;
+    if (_tabController.length != newLength) {
+      _tabController.removeListener(_onTabChanged);
+      _tabController.dispose();
+      _tabController = TabController(
+        length: newLength,
+        vsync: this,
+        initialIndex: oldIndex.clamp(0, newLength - 1).toInt(),
+      );
+      _tabController.addListener(_onTabChanged);
+    }
+
+    setState(() {
+      _liveJobs = jobs;
+      _liveDistributors = distributors;
+      _tabs = tabs;
+      _loadedSignature = signature;
     });
+
+    _loadTab(_tabController.index);
+  }
+
+  String _signatureFor(List<Job> jobs, List<Distributor> distributors) {
+    final distributorKey =
+        distributors.map((d) => '${d.id}:${d.name}').join(';');
+    final jobKey = jobs.map((job) {
+      final mapKey = job.workMaps.map((wm) {
+        final points = wm.points
+            .map((p) =>
+                '${p.latitude.toStringAsFixed(7)},${p.longitude.toStringAsFixed(7)}')
+            .join('|');
+        return [
+          wm.name,
+          wm.description,
+          wm.type.name,
+          wm.pointCategory.id,
+          wm.color.toARGB32().toString(),
+          wm.fillOpacity.toString(),
+          wm.strokeWidth.toString(),
+          wm.isDashed.toString(),
+          wm.letterBoxEstimate.toString(),
+          points,
+        ].join('~');
+      }).join('#');
+      return [
+        job.id,
+        job.distributorId,
+        job.clients.join(','),
+        job.workingAreas.join(','),
+        mapKey,
+      ].join('|');
+    }).join(';');
+    return '$distributorKey::$jobKey';
   }
 
   @override
@@ -83,18 +168,19 @@ class _DateScheduleMapPageState extends riverpod
   /// Load the adapter for the given tab index and request fit-to-bounds.
   void _loadTab(int index) {
     final provider = ref.read(shareableMapRiverpod);
+    final safeIndex = index.clamp(0, _tabs.length).toInt();
 
     final List<Job> jobs;
-    if (index == 0) {
-      jobs = widget.jobs;
+    if (safeIndex == 0) {
+      jobs = _liveJobs;
     } else {
-      jobs = _tabs[index - 1].jobs;
+      jobs = _tabs[safeIndex - 1].jobs;
     }
 
     final adapter = DateScheduleAdapter(
       date: widget.date,
       jobs: jobs,
-      distributors: widget.distributors,
+      distributors: _liveDistributors,
     );
 
     provider.requestFitBoundsOnLoad();
@@ -232,6 +318,12 @@ class _DateScheduleMapPageState extends riverpod
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<ScheduleProvider>(scheduleRiverpod, (_, next) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _refreshFromSchedule(next);
+      });
+    });
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Colors.white,

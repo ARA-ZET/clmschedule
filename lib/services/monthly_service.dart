@@ -124,7 +124,7 @@ class MonthlyService {
       _scheduleMonthsCacheTime = null;
     } else {
       // Ensure jobs field exists for existing documents
-      final data = docSnapshot.data() as Map<String, dynamic>?;
+      final data = (docSnapshot.data() == null ? null : Map<String, dynamic>.from(docSnapshot.data() as Map));
       if (data != null && !data.containsKey('jobs')) {
         await doc.update({'jobs': []});
       }
@@ -205,7 +205,7 @@ class MonthlyService {
       _collectionScheduleMonthsCacheTime = null;
     } else {
       // Ensure collectionJobs field exists for existing documents
-      final data = docSnapshot.data() as Map<String, dynamic>?;
+      final data = (docSnapshot.data() == null ? null : Map<String, dynamic>.from(docSnapshot.data() as Map));
       if (data != null && !data.containsKey('collectionJobs')) {
         await doc.update({'collectionJobs': []});
       }

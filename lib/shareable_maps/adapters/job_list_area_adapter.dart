@@ -6,6 +6,8 @@ import 'package:intl/intl.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/job_list_item.dart';
 import '../models/map_layer.dart';
+import '../models/map_point.dart';
+import '../models/map_polyline.dart';
 import '../models/shareable_map.dart';
 import '../services/map_link_service.dart';
 import 'map_data_adapter.dart';
@@ -65,17 +67,41 @@ class JobListAreaAdapter extends MapDataAdapter {
   Future<ShareableMap> load() async {
     final now = DateTime.now();
 
-    // Convert existing custom polygons
-    final polygons = _item.customPolygons
-        .map((p) => CustomPolygon(
+    // Convert existing custom elements without flattening points/polylines
+    // into polygons.
+    final polygonElements = _item.customPolygons
+        .where((p) => p.isPolygon)
+        .map((p) => p.copyWith(points: List<LatLng>.from(p.points)))
+        .toList();
+    final polylineElements = _item.customPolygons
+        .where((p) => p.isPolyline)
+        .map((p) => MapPolyline.create(
               name: p.name,
               description: p.description,
               points: List<LatLng>.from(p.points),
               color: p.color,
-              fillOpacity: p.fillOpacity,
-              strokeWidth: p.strokeWidth,
+              strokeWidth: p.strokeWidth.toDouble(),
+              isDashed: p.isDashed,
             ))
         .toList();
+    final pointElements = _item.customPolygons
+        .where((p) => p.isPoint && p.points.isNotEmpty)
+        .toList()
+        .asMap()
+        .entries
+        .map((entry) {
+      final p = entry.value;
+      return MapPoint(
+        id: 'joblist_${_item.id}_point_${entry.key}',
+        name: p.name,
+        description: p.description,
+        position: p.points.first,
+        color: p.color,
+        pointCategory: p.pointCategory,
+        createdAt: now,
+        updatedAt: now,
+      );
+    }).toList();
 
     final layer = MapLayer(
       id: 'job_list_layer',
@@ -83,18 +109,20 @@ class JobListAreaAdapter extends MapDataAdapter {
       description: 'Area polygons for job: ${_item.client}',
       order: 0,
       defaultColor: Colors.blue,
-      polygons: polygons,
+      polygons: polygonElements,
+      polylines: polylineElements,
+      points: pointElements,
       createdAt: now,
       updatedAt: now,
     );
 
     // Center on existing polygons
     LatLng center = const LatLng(-33.925, 18.425);
-    if (polygons.isNotEmpty) {
+    if (_item.customPolygons.isNotEmpty) {
       double latSum = 0, lngSum = 0;
       int count = 0;
-      for (final polygon in polygons) {
-        for (final pt in polygon.points) {
+      for (final element in _item.customPolygons) {
+        for (final pt in element.points) {
           latSum += pt.latitude;
           lngSum += pt.longitude;
           count++;
@@ -120,8 +148,35 @@ class JobListAreaAdapter extends MapDataAdapter {
 
   @override
   Future<void> save(ShareableMap map) async {
-    // Collect all polygons from all layers
-    final polygons = map.layers.expand((l) => l.polygons).toList();
+    // Collect all map element types back into JobListItem.customPolygons.
+    final polygons = map.layers
+        .expand((l) => l.polygons)
+        .map((p) => p.copyWith(points: List<LatLng>.from(p.points)))
+        .toList();
+    final polylines = map.layers
+        .expand((l) => l.polylines)
+        .map((p) => CustomPolygon(
+              name: p.name,
+              description: p.description,
+              points: List<LatLng>.from(p.points),
+              color: p.color,
+              strokeWidth: p.strokeWidth.toInt(),
+              isDashed: p.isDashed,
+              type: MapElementType.polyline,
+            ))
+        .toList();
+    final points = map.layers
+        .expand((l) => l.points)
+        .map((p) => CustomPolygon(
+              name: p.name,
+              description: p.description,
+              points: [p.position],
+              color: p.color,
+              type: MapElementType.point,
+              pointCategory: p.pointCategory,
+            ))
+        .toList();
+    final elements = [...polygons, ...polylines, ...points];
 
     // Generate share link URL if the job has a linked shareable map
     String? areaLink;
@@ -141,6 +196,6 @@ class JobListAreaAdapter extends MapDataAdapter {
       }
     }
 
-    await _onSave(polygons, areaLink);
+    await _onSave(elements, areaLink);
   }
 }

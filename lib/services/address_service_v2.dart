@@ -55,7 +55,7 @@ class AddressServiceV2 {
 
       final addressesData = data[suburb] as List<dynamic>;
       return addressesData.asMap().entries.map((entry) {
-        final map = entry.value as Map<String, dynamic>;
+        final map = Map<String, dynamic>.from(entry.value as Map);
         return Address.fromMap('$suburb-${entry.key}', map);
       }).toList();
     } catch (e) {
@@ -78,7 +78,7 @@ class AddressServiceV2 {
 
       final addressesData = data[suburb] as List<dynamic>;
       return addressesData.asMap().entries.map((entry) {
-        final map = entry.value as Map<String, dynamic>;
+        final map = Map<String, dynamic>.from(entry.value as Map);
         return Address.fromMap('$suburb-${entry.key}', map);
       }).toList();
     });
@@ -99,7 +99,7 @@ class AddressServiceV2 {
 
         final addressesData = data[suburb] as List<dynamic>;
         final addresses = addressesData.asMap().entries.map((entry) {
-          final map = entry.value as Map<String, dynamic>;
+          final map = Map<String, dynamic>.from(entry.value as Map);
           return Address.fromMap('$suburb-${entry.key}', map);
         }).toList();
 
@@ -325,7 +325,7 @@ class AddressServiceV2 {
       final data = doc.data()!;
       if (!data.containsKey(suburb)) return null;
 
-      return SuburbRouteData.fromMap(data[suburb] as Map<String, dynamic>);
+      return SuburbRouteData.fromMap(Map<String, dynamic>.from(data[suburb] as Map));
     } catch (e) {
       debugPrint('Error getting route data: $e');
       return null;

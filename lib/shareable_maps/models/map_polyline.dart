@@ -72,14 +72,14 @@ class MapPolyline {
                   ))
               .toList() ??
           [],
-      color: Color(data['color'] as int? ?? Colors.blue.toARGB32()),
+      color: Color((data['color'] as num?)?.toInt() ?? Colors.blue.toARGB32()),
       strokeWidth: (data['strokeWidth'] as num?)?.toDouble() ?? 3.0,
       isDashed: data['isDashed'] as bool? ?? false,
       createdAt: data['createdAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch(data['createdAt'] as int)
+          ? DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as num).toInt())
           : DateTime.now(),
       updatedAt: data['updatedAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch(data['updatedAt'] as int)
+          ? DateTime.fromMillisecondsSinceEpoch((data['updatedAt'] as num).toInt())
           : DateTime.now(),
     );
   }
@@ -159,6 +159,7 @@ class MapPolyline {
       color: lineColor,
       width: lineWidth.toInt(),
       patterns: patterns,
+      zIndex: isSelected ? 10 : 0,
       consumeTapEvents: onTap != null,
       onTap: onTap,
     );

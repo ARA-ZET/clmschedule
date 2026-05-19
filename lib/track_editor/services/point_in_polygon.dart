@@ -5,12 +5,47 @@ import 'package:gpx/gpx.dart';
 import '../models/styled_polygon.dart';
 import '../models/te_gpx_file_entry.dart';
 
+/// Cached bounding box for a polygon's vertex list. Keyed by the
+/// `List<LatLng>` instance so it stays valid as long as the polygon
+/// hasn't been rebuilt (`copyWith(points: ...)` creates a new list).
+class _Bbox {
+  final double minLat, maxLat, minLon, maxLon;
+  const _Bbox(this.minLat, this.maxLat, this.minLon, this.maxLon);
+  bool contains(LatLng p) =>
+      p.latitude >= minLat &&
+      p.latitude <= maxLat &&
+      p.longitude >= minLon &&
+      p.longitude <= maxLon;
+}
+
+final Expando<_Bbox> _bboxCache = Expando<_Bbox>('te_polygon_bbox');
+
+_Bbox _bboxFor(List<LatLng> points) {
+  final cached = _bboxCache[points];
+  if (cached != null) return cached;
+  double minLat = double.infinity, maxLat = -double.infinity;
+  double minLon = double.infinity, maxLon = -double.infinity;
+  for (final p in points) {
+    if (p.latitude < minLat) minLat = p.latitude;
+    if (p.latitude > maxLat) maxLat = p.latitude;
+    if (p.longitude < minLon) minLon = p.longitude;
+    if (p.longitude > maxLon) maxLon = p.longitude;
+  }
+  final bb = _Bbox(minLat, maxLat, minLon, maxLon);
+  _bboxCache[points] = bb;
+  return bb;
+}
+
 /// Check if point is inside polygon using ray-casting algorithm.
 bool isPointInPolygon(LatLng point, List<LatLng> polygon) {
+  final n = polygon.length;
+  if (n < 3) return false;
+  // Bbox short-circuit: cheap reject for points far from the polygon.
+  if (!_bboxFor(polygon).contains(point)) return false;
   int intersectCount = 0;
-  for (int j = 0; j < polygon.length - 1; j++) {
+  for (int j = 0; j < n; j++) {
     final p1 = polygon[j];
-    final p2 = polygon[j + 1];
+    final p2 = polygon[(j + 1) % n];
     if ((p1.latitude > point.latitude) != (p2.latitude > point.latitude)) {
       final lon = (p2.longitude - p1.longitude) *
               (point.latitude - p1.latitude) /

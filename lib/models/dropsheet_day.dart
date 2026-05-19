@@ -1,10 +1,12 @@
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+
 import 'collection_job.dart';
 import 'dropsheet_task.dart';
 
 /// One driver's section inside a daily dropsheet:
 ///   - which driver
 ///   - which vehicle + trailer they're using that day
-///   - their ordered task list (first 3 are the mandatory template)
+///   - their ordered task list (mandatory Inspect / Pack / Leave stay first)
 class DropsheetDriverSection {
   final String id; // stable id for reorder keys (matches driverId)
   final String driverId;
@@ -13,6 +15,18 @@ class DropsheetDriverSection {
   final TrailerType? trailer;
   final List<DropsheetTask> tasks;
 
+  /// Polyline of the most recently optimised route for this driver,
+  /// starting at the depot. Empty when no route has been computed.
+  final List<LatLng> routePolyline;
+
+  /// Total drive distance (metres) of the optimised route. 0 when no
+  /// route has been computed.
+  final double routeDistanceMeters;
+
+  /// Total drive duration (seconds) of the optimised route. 0 when no
+  /// route has been computed.
+  final int routeDurationSeconds;
+
   const DropsheetDriverSection({
     required this.id,
     required this.driverId,
@@ -20,6 +34,9 @@ class DropsheetDriverSection {
     this.vehicle,
     this.trailer,
     this.tasks = const [],
+    this.routePolyline = const [],
+    this.routeDistanceMeters = 0,
+    this.routeDurationSeconds = 0,
   });
 
   factory DropsheetDriverSection.fromMap(Map<String, dynamic> data) {
@@ -50,9 +67,21 @@ class DropsheetDriverSection {
       vehicle: vehicle,
       trailer: trailer,
       tasks: (data['tasks'] as List<dynamic>?)
-              ?.map((e) => DropsheetTask.fromMap(e as Map<String, dynamic>))
+              ?.map((e) => DropsheetTask.fromMap(Map<String, dynamic>.from(e as Map)))
               .toList() ??
           const [],
+      routePolyline: (data['routePolyline'] as List<dynamic>?)
+              ?.whereType<Map>()
+              .map((m) => LatLng(
+                    (m['lat'] as num).toDouble(),
+                    (m['lng'] as num).toDouble(),
+                  ))
+              .toList() ??
+          const [],
+      routeDistanceMeters:
+          (data['routeDistanceMeters'] as num?)?.toDouble() ?? 0.0,
+      routeDurationSeconds:
+          (data['routeDurationSeconds'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -63,6 +92,13 @@ class DropsheetDriverSection {
         if (vehicle != null) 'vehicle': vehicle!.name,
         if (trailer != null) 'trailer': trailer!.name,
         'tasks': tasks.map((t) => t.toMap()).toList(),
+        if (routePolyline.isNotEmpty)
+          'routePolyline': routePolyline
+              .map((p) => {'lat': p.latitude, 'lng': p.longitude})
+              .toList(),
+        if (routeDistanceMeters > 0) 'routeDistanceMeters': routeDistanceMeters,
+        if (routeDurationSeconds > 0)
+          'routeDurationSeconds': routeDurationSeconds,
       };
 
   DropsheetDriverSection copyWith({
@@ -70,6 +106,9 @@ class DropsheetDriverSection {
     VehicleType? vehicle,
     TrailerType? trailer,
     List<DropsheetTask>? tasks,
+    List<LatLng>? routePolyline,
+    double? routeDistanceMeters,
+    int? routeDurationSeconds,
   }) =>
       DropsheetDriverSection(
         id: id,
@@ -78,6 +117,9 @@ class DropsheetDriverSection {
         vehicle: vehicle ?? this.vehicle,
         trailer: trailer ?? this.trailer,
         tasks: tasks ?? this.tasks,
+        routePolyline: routePolyline ?? this.routePolyline,
+        routeDistanceMeters: routeDistanceMeters ?? this.routeDistanceMeters,
+        routeDurationSeconds: routeDurationSeconds ?? this.routeDurationSeconds,
       );
 
   /// Build a fresh section seeded with the 3 mandatory tasks.
@@ -113,8 +155,7 @@ class DropsheetDay {
   });
 
   /// Format `YYYY-MM-DD` used as the Firestore document id.
-  static String docIdFor(DateTime d) =>
-      '${d.year.toString().padLeft(4, '0')}-'
+  static String docIdFor(DateTime d) => '${d.year.toString().padLeft(4, '0')}-'
       '${d.month.toString().padLeft(2, '0')}-'
       '${d.day.toString().padLeft(2, '0')}';
 
@@ -131,7 +172,7 @@ class DropsheetDay {
       date: date,
       sections: (data['sections'] as List<dynamic>?)
               ?.map((e) =>
-                  DropsheetDriverSection.fromMap(e as Map<String, dynamic>))
+                  DropsheetDriverSection.fromMap(Map<String, dynamic>.from(e as Map)))
               .toList() ??
           const [],
     );

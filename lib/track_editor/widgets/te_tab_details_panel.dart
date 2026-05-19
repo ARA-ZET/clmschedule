@@ -11,9 +11,13 @@ import 'package:gpx/gpx.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
 import '../../models/work_area.dart';
+import '../../models/custom_polygon.dart';
 import '../models/styled_polygon.dart';
+import '../models/tab_item.dart';
 import '../providers/te_map_layer_provider.dart';
+import '../providers/te_mode_provider.dart';
 import '../providers/te_tabs_provider.dart';
+import '../providers/te_undo_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
 import '../utils/te_track_stats.dart';
@@ -31,6 +35,10 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
 
     final hasTracks = tab.tracks.isNotEmpty;
     final hasWaypoints = tab.waypoints.isNotEmpty;
+    final isUpdateMode = provider.activeMode == TEMode.update;
+    final showLegacySaveTrim = provider.activeMode != TEMode.processing &&
+        !isUpdateMode;
+    final hasSource = (tab.sourceStoragePath ?? '').isNotEmpty;
 
     if (!hasTracks && !hasWaypoints && tab.polygons.isEmpty) {
       return _PolygonsSection(
@@ -40,6 +48,13 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
     return Column(
       spacing: 12,
       children: [
+        // ── Update-mode: show cloud update panel at top ─────────────
+        if (isUpdateMode && (hasTracks || hasWaypoints) && hasSource)
+          _CloudUpdateSection(
+            tracks: tab.tracks,
+            waypoints: tab.waypoints,
+            sourceStoragePath: tab.sourceStoragePath!,
+          ),
         _PolygonsSection(
             polygons: tab.polygons, tabIndex: tabIdx, waypoints: tab.waypoints),
         if (hasTracks) _TracksSection(tracks: tab.tracks),
@@ -48,7 +63,7 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
             waypoints: tab.waypoints,
             tabIndex: tabIdx,
           ),
-        if (hasTracks || hasWaypoints)
+        if (showLegacySaveTrim && (hasTracks || hasWaypoints))
           _SaveTrimSection(
             tabTitle: tab.title,
             tracks: tab.tracks,
@@ -135,12 +150,80 @@ class _PolygonsSectionState extends riverpod.ConsumerState<_PolygonsSection> {
         ),
       );
     }).toList();
-    ref.read(teTabsRiverpod).addPolygonsToCurrentTab(newPolygons);
+
+    final tabsP = ref.read(teTabsRiverpod);
+    final undoP = ref.read(teUndoRiverpod);
+    final mode = tabsP.activeMode;
+    final tabIdx = widget.tabIndex;
+    final tab =
+        tabIdx >= 0 && tabIdx < tabsP.tabs.length ? tabsP.tabs[tabIdx] : null;
+    final addedCount = newPolygons.length;
+
+    // Run as an undoable command so Ctrl+Z removes the just-added maps.
+    undoP.run(
+      mode,
+      tabIdx,
+      TECommand(
+        description: 'Add ${addedCount == 1 ? 'map' : '$addedCount maps'}',
+        doFn: () => tabsP.addPolygonsToCurrentTab(newPolygons),
+        undoFn: () {
+          // Remove the trailing N polygons we just appended.
+          if (tabIdx < 0 || tabIdx >= tabsP.tabs.length) return;
+          final current = tabsP.tabs[tabIdx].polygons;
+          final keep = current.length - addedCount;
+          if (keep < 0) return;
+          tabsP.replacePolygons(tabIdx, current.sublist(0, keep));
+        },
+      ),
+    );
+
+    // Write back to the matched schedule jobs when this tab was opened
+    // through the processing flow. We append the new CustomPolygons to
+    // each linked job's `workMaps` and persist via the schedule provider
+    // so the job grid + map view see the new areas immediately.
+    if (mode == TEMode.processing && tab != null && tab.jobIds.isNotEmpty) {
+      _persistMapsToJobs(tab, toAdd);
+    }
+
     setState(() {
       _searchOpen = false;
       _allWorkAreas = [];
       _selected.clear();
     });
+  }
+
+  /// Persist the newly added work-areas back to the matched schedule
+  /// jobs so the same maps are visible on the schedule grid + map view.
+  Future<void> _persistMapsToJobs(
+      TETabItem tab, List<WorkArea> addedAreas) async {
+    final scheduleProvider = ref.read(scheduleRiverpod);
+    final newCustomPolys = addedAreas
+        .map((w) => CustomPolygon(
+              name: w.name,
+              description: w.description,
+              points: List.from(w.polygonPoints),
+              color: Colors.teal.shade700,
+            ))
+        .toList();
+    for (final jobId in tab.jobIds) {
+      try {
+        final job =
+            scheduleProvider.jobs.where((j) => j.id == jobId).firstOrNull;
+        if (job == null) continue;
+        // Skip names that already exist on the job to avoid duplicates.
+        final existingNames =
+            job.workMaps.map((p) => p.name.toLowerCase()).toSet();
+        final toAppend = newCustomPolys
+            .where((p) => !existingNames.contains(p.name.toLowerCase()))
+            .toList();
+        if (toAppend.isEmpty) continue;
+        final updated = job.copyWith(workMaps: [...job.workMaps, ...toAppend]);
+        await scheduleProvider.updateJob(updated);
+      } catch (e) {
+        // Best-effort: keep going even if one job fails.
+        debugPrint('⚠️ _persistMapsToJobs: $e');
+      }
+    }
   }
 
   @override
@@ -628,10 +711,39 @@ class _TracksSection extends riverpod.ConsumerWidget {
                   final confirm =
                       await _confirmDelete(context, 'track', trackName);
                   if (!confirm) return;
-                  ref.read(teTabsRiverpod).removeTrack(tabIdx, e.key);
+                  final tabsP = ref.read(teTabsRiverpod);
+                  if (tabIdx < 0 || tabIdx >= tabsP.tabs.length) return;
+                  final tracksList = tabsP.tabs[tabIdx].tracks;
+                  if (e.key < 0 || e.key >= tracksList.length) return;
+                  final removed = tracksList[e.key];
+                  ref.read(teUndoRiverpod).run(
+                        tabsP.activeMode,
+                        tabIdx,
+                        TECommand(
+                          description: 'Delete track "$trackName"',
+                          doFn: () => tabsP.removeTrack(tabIdx, e.key),
+                          undoFn: () =>
+                              tabsP.insertTrack(tabIdx, e.key, removed),
+                        ),
+                      );
                 },
                 onRename: (newName) {
-                  ref.read(teTabsRiverpod).renameTrack(tabIdx, e.key, newName);
+                  final tabsP = ref.read(teTabsRiverpod);
+                  if (tabIdx < 0 || tabIdx >= tabsP.tabs.length) return;
+                  final tracksList = tabsP.tabs[tabIdx].tracks;
+                  if (e.key < 0 || e.key >= tracksList.length) return;
+                  final oldName = tracksList[e.key].name ?? '';
+                  if (oldName == newName) return;
+                  ref.read(teUndoRiverpod).run(
+                        tabsP.activeMode,
+                        tabIdx,
+                        TECommand(
+                          description: 'Rename track "$oldName" → "$newName"',
+                          doFn: () => tabsP.renameTrack(tabIdx, e.key, newName),
+                          undoFn: () =>
+                              tabsP.renameTrack(tabIdx, e.key, oldName),
+                        ),
+                      );
                 },
               );
             },
@@ -1153,8 +1265,27 @@ class _WaypointsSectionState extends riverpod.ConsumerState<_WaypointsSection> {
                                     final confirm = await _confirmDelete(
                                         context, 'waypoint', name);
                                     if (!confirm) return;
-                                    ref.read(teTabsRiverpod).removeWaypoint(
-                                        widget.tabIndex, realIdx);
+                                    final tabsP = ref.read(teTabsRiverpod);
+                                    final tabIdx = widget.tabIndex;
+                                    if (tabIdx < 0 ||
+                                        tabIdx >= tabsP.tabs.length) {
+                                      return;
+                                    }
+                                    final wpts = tabsP.tabs[tabIdx].waypoints;
+                                    if (realIdx >= wpts.length) return;
+                                    final removed = wpts[realIdx];
+                                    ref.read(teUndoRiverpod).run(
+                                          tabsP.activeMode,
+                                          tabIdx,
+                                          TECommand(
+                                            description:
+                                                'Delete waypoint "$name"',
+                                            doFn: () => tabsP.removeWaypoint(
+                                                tabIdx, realIdx),
+                                            undoFn: () => tabsP.insertWaypoint(
+                                                tabIdx, realIdx, removed),
+                                          ),
+                                        );
                                     ref
                                         .read(teMapLayerRiverpod)
                                         .selectWaypoint(widget.tabIndex, null);
@@ -1231,7 +1362,9 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
     final parts = <String>[type, _dateStr, _clientName];
     if (_workAreas.isNotEmpty) parts.add(_workAreas);
     parts.add(count.toString());
-    return '${parts.join('   ')}.gpx';
+    // Sanitize so '/' or other illegal chars in client/work-area names
+    // don't get interpreted as folder separators on upload.
+    return GpxStorageService.sanitizeFileName('${parts.join('   ')}.gpx');
   }
 
   Future<void> _onSaveTracks(BuildContext context) async {
@@ -1733,6 +1866,252 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
                     child: trimButton,
                   ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// UPDATE SECTION  (update mode — overwrite the original cloud file)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Shown at the top of the sidebar in [TEMode.update] when the tab was opened
+/// from cloud storage.  Lets the user push their edits back to the exact file
+/// they opened and, for waypoints files, regenerates the compiled aggregate.
+class _CloudUpdateSection extends StatefulWidget {
+  final List<Trk> tracks;
+  final List<Wpt> waypoints;
+  final String sourceStoragePath;
+
+  const _CloudUpdateSection({
+    required this.tracks,
+    required this.waypoints,
+    required this.sourceStoragePath,
+  });
+
+  @override
+  State<_CloudUpdateSection> createState() => _CloudUpdateSectionState();
+}
+
+class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
+  bool _busy = false;
+  bool _recompileBusy = false;
+
+  String get _sourceFileName => widget.sourceStoragePath.split('/').last;
+
+  String get _folderPath {
+    final p = widget.sourceStoragePath;
+    final slash = p.lastIndexOf('/');
+    return slash > 0 ? p.substring(0, slash) : '';
+  }
+
+  bool get _isWaypointFile =>
+      _sourceFileName.toLowerCase().contains('waypoint') ||
+      (widget.waypoints.isNotEmpty && widget.tracks.isEmpty);
+
+  Future<void> _onUpdateInDrive(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Update file in Drive?'),
+        content: Text(
+          'This will overwrite "$_sourceFileName" with your current edits.\n\n'
+          'The previous version cannot be recovered.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.orange[700]),
+            child: const Text('Update'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      final fm = TEFileManager();
+      final gpxStorage = GpxStorageService();
+
+      final String gpxContent;
+      if (_isWaypointFile && widget.waypoints.isNotEmpty) {
+        gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
+      } else if (widget.tracks.isNotEmpty) {
+        gpxContent = await fm.toGpxTracksString(widget.tracks);
+      } else if (widget.waypoints.isNotEmpty) {
+        gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
+      } else {
+        throw StateError('Nothing to save: no tracks or waypoints.');
+      }
+
+      await gpxStorage.deleteFile(widget.sourceStoragePath);
+      await gpxStorage.uploadGpxFile(_folderPath, _sourceFileName, gpxContent);
+
+      int? rebuiltCount;
+      if (_isWaypointFile && _folderPath.isNotEmpty) {
+        rebuiltCount =
+            await gpxStorage.regenerateCompiledWaypoints(_folderPath);
+      }
+
+      if (mounted) {
+        final suffix = rebuiltCount != null
+            ? ' · recompiled $rebuiltCount waypoints'
+            : '';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Updated $_sourceFileName$suffix'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Update failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+    if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _onRecompileOnly(BuildContext context) async {
+    if (_folderPath.isEmpty) return;
+    setState(() => _recompileBusy = true);
+    try {
+      final count = await GpxStorageService()
+          .regenerateCompiledWaypoints(_folderPath);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Recompiled waypoints: $count'),
+            backgroundColor: Colors.blue,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Recompile failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+    if (mounted) setState(() => _recompileBusy = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasTracks = widget.tracks.isNotEmpty;
+    final hasWaypoints = widget.waypoints.isNotEmpty;
+    final canUpdate = hasTracks || hasWaypoints;
+    final busy = _busy || _recompileBusy;
+
+    return Container(
+      width: 420,
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.orange[50],
+        border: Border.all(color: Colors.orange[200]!),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Header ──────────────────────────────────────────────
+          Row(
+            children: [
+              Icon(Icons.cloud_sync, size: 18, color: Colors.orange[700]),
+              const SizedBox(width: 6),
+              Text(
+                'Update in Drive',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                  color: Colors.orange[800],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _sourceFileName,
+            style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 10),
+          // ── Update button ────────────────────────────────────────
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed:
+                  (busy || !canUpdate) ? null : () => _onUpdateInDrive(context),
+              icon: _busy
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
+                    )
+                  : Icon(
+                      _isWaypointFile ? Icons.place : Icons.route,
+                      size: 16,
+                    ),
+              label: Text(
+                _isWaypointFile
+                    ? 'Update Waypoints in Drive'
+                    : 'Update Track in Drive',
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor:
+                    canUpdate ? Colors.orange[700] : Colors.grey[500],
+                foregroundColor: Colors.white,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                textStyle: const TextStyle(fontSize: 12),
+              ),
+            ),
+          ),
+          // ── Recompile button (waypoints only) ───────────────────
+          if (_isWaypointFile) ...[
+            const SizedBox(height: 6),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: (busy || _folderPath.isEmpty)
+                    ? null
+                    : () => _onRecompileOnly(context),
+                icon: _recompileBusy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh, size: 16),
+                label: const Text('Recompile Waypoints Only'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.blue[700],
+                  side: BorderSide(color: Colors.blue[300]!),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                  textStyle: const TextStyle(fontSize: 11),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );

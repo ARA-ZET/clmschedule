@@ -8,6 +8,7 @@ import '../models/job_list_item_update.dart';
 import '../models/collection_job.dart';
 import '../models/custom_job_list_status.dart';
 import '../models/custom_job_type.dart';
+import '../models/custom_polygon.dart';
 import '../models/happy_sun_shared.dart';
 import '../providers/auth_provider.dart';
 import '../providers/job_list_provider.dart';
@@ -19,13 +20,23 @@ import '../providers/tool_settings_provider.dart';
 import '../providers/job_type_provider.dart';
 import '../services/job_assignment_service.dart';
 import '../shareable_maps/services/map_link_service.dart';
+import 'address_point_search_dialog.dart';
 import 'job_assignment_preview_dialog.dart';
 import 'happy_sun_tools_dialog.dart';
 
 class AddEditJobDialog extends riverpod.ConsumerStatefulWidget {
   final JobListItem? jobToEdit;
 
-  const AddEditJobDialog({super.key, this.jobToEdit});
+  /// When true, shows a read-only "Map will be copied" notice in the Area
+  /// field to indicate that the linked map from the source job will be
+  /// cloned after the copy is saved.
+  final bool mapWillBeCopied;
+
+  const AddEditJobDialog({
+    super.key,
+    this.jobToEdit,
+    this.mapWillBeCopied = false,
+  });
 
   @override
   riverpod.ConsumerState<AddEditJobDialog> createState() =>
@@ -408,6 +419,25 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   /// shareable map names as the user types. Selecting a suggestion
   /// inserts the shareable map link URL into the field.
   Widget _buildAreaAutocomplete() {
+    // When copying a job that has a linked map, show a read-only hint
+    // instead of an empty editable field — the map URL will be filled in
+    // automatically once the cloud function finishes cloning the map.
+    if (widget.mapWillBeCopied) {
+      return InputDecorator(
+        decoration: const InputDecoration(
+          labelText: 'Area',
+          border: OutlineInputBorder(),
+        ),
+        child: const Text(
+          'Map will be copied',
+          style: TextStyle(
+            color: Colors.blueGrey,
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      );
+    }
+
     return Autocomplete<_MapSuggestion>(
       initialValue: TextEditingValue(text: _areaController.text),
       optionsBuilder: (TextEditingValue textEditingValue) {
@@ -1596,6 +1626,39 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       debugPrint('   - Has Tools: ${jobListItem.toolsNeeded != null}');
 
       try {
+        // Offer address geocoding for jobs with a usable address.
+        // Priority: `area` field (when it's a free-text address, not a map link)
+        // → `collectionAddress` field. Skip if area is a URL/map-link.
+        JobListItem finalJobListItem = jobListItem;
+        CustomPolygon? addressPoint;
+
+        final areaText = jobListItem.area.trim();
+        final collectionText = jobListItem.collectionAddress.trim();
+        final areaIsMapLink = _isMapLinkOrUrl(areaText);
+
+        String? addressToSearch;
+        if (areaText.isNotEmpty && !areaIsMapLink) {
+          addressToSearch = areaText;
+        } else if (collectionText.isNotEmpty) {
+          addressToSearch = collectionText;
+        }
+
+        if (addressToSearch != null) {
+          addressPoint = await _resolveAddressPoint(
+            addressToSearch,
+            _selectedJobType,
+          );
+          if (addressPoint != null) {
+            // Attach the geocoded point to the job list item's custom polygons
+            finalJobListItem = jobListItem.copyWith(
+              customPolygons: [
+                ...jobListItem.customPolygons,
+                addressPoint,
+              ],
+            );
+          }
+        }
+
         // If editing existing job
         if (widget.jobToEdit != null) {
           debugPrint(
@@ -1608,26 +1671,21 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
             // Update the linked collection job if date/time changed
             // Collection job updates are now automatic via JobListProvider stream
           }
-          Navigator.of(context).pop(jobListItem);
+          Navigator.of(context).pop(finalJobListItem);
           return;
         }
 
-        // For new jobs, check if this is a collection job type
+        // For new jobs, run the assignment preview for ALL job types so the
+        // user gets distributor allocation on the schedule. Vehicle/collection
+        // jobs additionally appear on the collection schedule via JobListProvider.
         if (VehicleTrailerCombo.isVehicleJobType(_selectedJobType)) {
-          debugPrint('   🚚 Collection job type - returning to caller');
           debugPrint(
-              '   No direct DB write - JobList/JobListGrid handles creation');
-          // Collection jobs are automatically derived from job list data
-          // Just save the job and it will appear in collection schedule
-          if (mounted) {
-            Navigator.of(context).pop(jobListItem);
-          }
-          return;
+              '   🚚 Collection job type - showing assignment preview for schedule allocation');
         } else {
           debugPrint('   📅 Non-collection job - showing assignment preview');
-          // For other job types, show regular assignment preview
-          await _showJobAssignmentPreview(jobListItem);
         }
+        await _showJobAssignmentPreview(finalJobListItem,
+            addressPoint: addressPoint);
       } finally {
         if (mounted) {
           setState(() {
@@ -1652,16 +1710,23 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       final jobListItem = _buildJobListItem();
 
       try {
-        // Save the job to database but skip automatic schedule allocation
+        // Save the job to database but skip automatic schedule allocation.
+        // Use `addJobListItemAndReturn` (instead of the void variant) so
+        // the dialog can return the *saved* job — including its generated
+        // Firestore id — to the caller. Callers like the Job-List "copy"
+        // flow rely on that id to clone the linked map afterwards.
         debugPrint(
-            '   🔥 Calling JobListProvider.addJobListItem (direct DB write)');
+            '   🔥 Calling JobListProvider.addJobListItemAndReturn (direct DB write)');
         debugPrint(
             '   This will trigger Happy Sun sync if window/solar cleaning!');
-        await ref.read(jobListRiverpod).addJobListItem(jobListItem);
-        debugPrint('   ✅ JobListProvider.addJobListItem completed');
+        final savedJob = await ref
+            .read(jobListRiverpod)
+            .addJobListItemAndReturn(jobListItem);
+        debugPrint(
+            '   ✅ JobListProvider.addJobListItemAndReturn completed (id=${savedJob.id})');
 
-        // Return job with a special flag to indicate skip allocation
-        Navigator.of(context).pop({'job': jobListItem, 'skipAllocation': true});
+        // Return the saved job (with id) plus the skip-allocation flag.
+        Navigator.of(context).pop({'job': savedJob, 'skipAllocation': true});
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -1702,20 +1767,72 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     }
   }
 
-  Future<void> _showJobAssignmentPreview(JobListItem jobListItem) async {
+  /// Returns true if [text] looks like a URL or a shareable-map link (and
+  /// therefore is NOT a free-text street address that should be geocoded).
+  bool _isMapLinkOrUrl(String text) {
+    final t = text.trim().toLowerCase();
+    if (t.isEmpty) return false;
+    return t.startsWith('http://') ||
+        t.startsWith('https://') ||
+        t.contains('clm-maps.web.app/map/') ||
+        t.contains('google.com/maps') ||
+        t.contains('maps.app.goo.gl') ||
+        t.contains('goo.gl/maps');
+  }
+
+  Future<CustomPolygon?> _resolveAddressPoint(
+      String address, String jobTypeId) async {
+    if (!mounted) return null;
+
+    final isHappySun =
+        JobTypeProvider.instance?.isHappySunService(jobTypeId) ?? false;
+    final isFurniture = jobTypeId == 'furnitureMove';
+
+    PointCategory category;
+    String label;
+    if (isHappySun) {
+      category = PointCategory.cleaning;
+      label = 'Cleaning Address';
+    } else if (isFurniture) {
+      category = PointCategory.loading;
+      label = 'Furniture Address';
+    } else {
+      category = PointCategory.pickup;
+      label = 'Collection Address';
+    }
+
+    final result = await showDialog<AddressPointResult?>(
+      context: context,
+      builder: (_) => AddressPointSearchDialog(
+        initialAddress: address,
+        label: label,
+        category: category,
+      ),
+    );
+
+    return result?.toCustomPolygon();
+  }
+
+  Future<void> _showJobAssignmentPreview(JobListItem jobListItem,
+      {CustomPolygon? addressPoint}) async {
     try {
       // Get the schedule provider
       final scheduleProvider = ref.read(scheduleRiverpod);
 
       // Create the assignment service
       final assignmentService = JobAssignmentService(scheduleProvider);
+      final areaText = jobListItem.area.trim();
+      final assignmentWorkArea =
+          areaText.isNotEmpty && !_isMapLinkOrUrl(areaText)
+              ? areaText
+              : 'To be assigned';
 
       // Calculate the job assignments
       final assignments = assignmentService.calculateJobAssignments(
         client: jobListItem.client,
         manDays: jobListItem.manDays,
         startDate: jobListItem.date,
-        workingArea: '.', // Default - can be edited later on schedule
+        workingArea: assignmentWorkArea,
       );
 
       if (assignments.isEmpty) {
@@ -1745,7 +1862,8 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
 
         if (confirmed == true && mounted) {
           // User confirmed - create the jobs on the schedule
-          await _createScheduleJobs(assignmentService, assignments);
+          await _createScheduleJobs(assignmentService, assignments,
+              addressPoint: addressPoint);
 
           // Return the original job list item
           if (mounted) {
@@ -1765,13 +1883,21 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     }
   }
 
-  Future<void> _createScheduleJobs(JobAssignmentService assignmentService,
-      List<JobAssignment> assignments) async {
+  Future<void> _createScheduleJobs(
+      JobAssignmentService assignmentService, List<JobAssignment> assignments,
+      {CustomPolygon? addressPoint}) async {
     try {
       final scheduleProvider = ref.read(scheduleRiverpod);
 
       // Convert assignments to Job objects
-      final jobs = assignmentService.createJobsFromAssignments(assignments);
+      var jobs = assignmentService.createJobsFromAssignments(assignments);
+
+      // Inject the geocoded address point into each schedule job's workMaps
+      if (addressPoint != null) {
+        jobs = jobs
+            .map((j) => j.copyWith(workMaps: [...j.workMaps, addressPoint]))
+            .toList();
+      }
 
       // Add each job to the schedule
       for (final job in jobs) {

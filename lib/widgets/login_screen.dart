@@ -349,7 +349,7 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
       );
     }
 
-    if (success) {
+    if (success && mounted) {
       // Clear form fields on successful authentication
       _emailController.clear();
       _passwordController.clear();

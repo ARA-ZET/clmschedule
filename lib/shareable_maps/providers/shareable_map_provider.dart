@@ -82,9 +82,9 @@ List<MapPolyline> _parseCompiledTracks(Uint8List bytes) {
     final name = (t['name'] as String?) ?? 'Track ${seq + 1}';
     final desc = (t['desc'] as String?) ?? '';
     final distM = (t['distanceMeters'] as num?)?.toDouble();
-    final startMs = t['startTime'] as int?;
-    final endMs = t['endTime'] as int?;
-    final durMs = t['durationMs'] as int?;
+    final startMs = (t['startTime'] as num?)?.toInt();
+    final endMs = (t['endTime'] as num?)?.toInt();
+    final durMs = (t['durationMs'] as num?)?.toInt();
 
     results.add(MapPolyline(
       id: 'compiled_trk_${now.millisecondsSinceEpoch}_${seq++}',
@@ -205,13 +205,33 @@ class ShareableMapProvider extends ChangeNotifier {
   String? _editingElementId; // Track which element is being edited
 
   // ── Cloud overlay layers (ephemeral — never persisted to Firestore) ───
-  MapLayer? _cloudTracksLayer;
-  MapLayer? _cloudWaypointsLayer;
+  final Map<String, MapLayer> _cloudTracksLayers = {};
+  final Map<String, MapLayer> _cloudWaypointsLayers = {};
+  final Set<String> _loadingCloudTrackFolders = {};
+  final Set<String> _loadingCloudWaypointFolders = {};
+  final Set<String> _loadedCloudTrackFolders = {};
+  final Set<String> _loadedCloudWaypointFolders = {};
+
+  /// Layer IDs currently mid-visibility-toggle. The map widget needs a
+  /// frame to push the marker-set diff across the JS bridge; ignoring
+  /// rapid repeat taps avoids queueing thousands of marker diffs that
+  /// would freeze the page when toggling large (15k+) waypoint layers.
+  final Set<String> _togglingLayers = {};
+  static const _toggleCooldown = Duration(milliseconds: 250);
+
+  /// Returns true if [layerId] should be UI-disabled because a previous
+  /// visibility toggle is still being applied.
+  bool isLayerToggling(String layerId) => _togglingLayers.contains(layerId);
 
   // Real-time sync state
   StreamSubscription<ShareableMap?>? _realtimeSubscription;
   Timer? _autoSaveTimer;
   Timer? _thumbnailTimer;
+
+  /// Flag set in [dispose] so any async/microtask/timer callbacks that
+  /// outlive the provider become no-ops instead of touching freed state
+  /// or calling [notifyListeners] on a disposed ChangeNotifier.
+  bool _isDisposed = false;
 
   /// Timestamp of last local save — used to skip echoed Firestore snapshots.
   int _lastSaveTimestamp = 0;
@@ -288,17 +308,52 @@ class ShareableMapProvider extends ChangeNotifier {
   List<MapLayer> get layers {
     final base = _currentMap?.layers ?? [];
     final overlays = <MapLayer>[
-      if (_cloudTracksLayer != null) _cloudTracksLayer!,
-      if (_cloudWaypointsLayer != null) _cloudWaypointsLayer!,
-    ];
+      ..._cloudTracksLayers.values.where(_shouldShowCloudTrackLayer),
+      ..._cloudWaypointsLayers.values.where(_shouldShowCloudWaypointLayer),
+    ]..sort((a, b) => a.order.compareTo(b.order));
     if (overlays.isEmpty) return base;
     return [...base, ...overlays];
   }
 
+  bool _shouldShowCloudTrackLayer(MapLayer layer) {
+    final folderPath = layer.description.trim();
+    if (folderPath.isEmpty) return false;
+    return layer.polylines.isNotEmpty ||
+        layer.points.isNotEmpty ||
+        _loadedCloudTrackFolders.contains(folderPath) ||
+        _loadingCloudTrackFolders.contains(folderPath);
+  }
+
+  bool _shouldShowCloudWaypointLayer(MapLayer layer) {
+    final folderPath = layer.description.trim();
+    if (folderPath.isEmpty) return false;
+    final folders = linkedCloudFolders;
+    final isSingleLinkedFolder =
+        folders.length == 1 && folders.first == folderPath;
+    return layer.points.isNotEmpty ||
+        isSingleLinkedFolder ||
+        _loadedCloudWaypointFolders.contains(folderPath) ||
+        _loadingCloudWaypointFolders.contains(folderPath);
+  }
+
   /// Whether the given layer is a cloud overlay (ephemeral, read-only).
   bool isCloudOverlayLayer(String layerId) {
-    return layerId == _cloudTracksLayer?.id ||
-        layerId == _cloudWaypointsLayer?.id;
+    return _cloudTracksLayers.containsKey(layerId) ||
+        _cloudWaypointsLayers.containsKey(layerId);
+  }
+
+  bool isCloudTracksLayer(String layerId) =>
+      _cloudTracksLayers.containsKey(layerId);
+
+  bool isCloudWaypointsLayer(String layerId) =>
+      _cloudWaypointsLayers.containsKey(layerId);
+
+  String? cloudFolderForLayer(String layerId) {
+    final track = _cloudTracksLayers[layerId];
+    if (track != null) return track.description;
+    final waypoint = _cloudWaypointsLayers[layerId];
+    if (waypoint != null) return waypoint.description;
+    return null;
   }
 
   // === ADAPTER OPERATIONS ===
@@ -316,12 +371,20 @@ class ShareableMapProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Clean up previous real-time listener
-      _stopRealtimeSync();
+      // Clean up previous real-time listener. Await the cancel so the
+      // previous Firestore listener is fully torn down before we attach a
+      // new one — otherwise overlapping listeners briefly double the
+      // snapshot traffic and memory footprint when rapidly switching maps.
+      await _stopRealtimeSync();
       await _adapter?.dispose();
       debugPrint(
           '[loadFromAdapter] cleanup done in ${sw.elapsedMilliseconds}ms');
       _adapter = adapter;
+
+      // Reset all per-map ephemeral state so data from the previously open
+      // map (cloud overlays, selection, info window, drawing/editing flags)
+      // doesn't bleed into the new map.
+      _resetPerMapState();
 
       // Load the map data
       final map = await adapter.load();
@@ -351,6 +414,7 @@ class ShareableMapProvider extends ChangeNotifier {
     if (_mapController != null) {
       _pendingFitBounds = false;
       Future.delayed(const Duration(milliseconds: 300), () {
+        if (_isDisposed) return;
         fitMapToBounds();
       });
     } else {
@@ -359,19 +423,179 @@ class ShareableMapProvider extends ChangeNotifier {
 
     // Initialise cloud overlay shells and auto-load tracks (deferred)
     _initCloudOverlays();
+    final latestFolder = latestLinkedCloudFolder;
+    if (_mapController != null &&
+        autoLoadLatestCloudFolder &&
+        latestFolder != null) {
+      Future.microtask(() {
+        if (_isDisposed) return;
+        loadCloudFolderTracks(folderPath: latestFolder);
+      });
+    }
     debugPrint('[loadFromAdapter] TOTAL: ${sw.elapsedMilliseconds}ms');
   }
 
   // ── Cloud folder loading (ephemeral — never saved to Firestore) ────────
 
-  bool _isLoadingCloudTracks = false;
-  bool _isLoadingCloudWaypoints = false;
-  bool _cloudTracksLoaded = false;
-  bool _cloudWaypointsLoaded = false;
-  bool get isLoadingCloudTracks => _isLoadingCloudTracks;
-  bool get isLoadingCloudWaypoints => _isLoadingCloudWaypoints;
-  bool get cloudTracksLoaded => _cloudTracksLoaded;
-  bool get cloudWaypointsLoaded => _cloudWaypointsLoaded;
+  bool get isLoadingCloudTracks => _loadingCloudTrackFolders.isNotEmpty;
+  bool get isLoadingCloudWaypoints => _loadingCloudWaypointFolders.isNotEmpty;
+  bool get cloudTracksLoaded => _loadedCloudTrackFolders.isNotEmpty;
+  bool get cloudWaypointsLoaded => _loadedCloudWaypointFolders.isNotEmpty;
+
+  List<String> get linkedCloudFolders {
+    final map = _currentMap;
+    if (map == null) return const [];
+    final folders = <String>[];
+    for (final path in map.cloudFolderPaths) {
+      final clean = path.trim();
+      if (clean.isNotEmpty && !folders.contains(clean)) folders.add(clean);
+    }
+    final legacy = map.storageFolderPath?.trim();
+    if (legacy != null && legacy.isNotEmpty && !folders.contains(legacy)) {
+      folders.insert(0, legacy);
+    }
+    return List.unmodifiable(folders);
+  }
+
+  bool get autoLoadLatestCloudFolder =>
+      _currentMap?.autoLoadLatestCloudFolder ?? true;
+
+  bool get clipCloudDataToPolygons =>
+      _currentMap?.clipCloudDataToPolygons ?? false;
+
+  String? get latestLinkedCloudFolder {
+    final folders = linkedCloudFolders;
+    if (folders.isEmpty) return null;
+    final sorted = List<String>.from(folders)
+      ..sort(
+          (a, b) => _cloudFolderSortDate(b).compareTo(_cloudFolderSortDate(a)));
+    return sorted.first;
+  }
+
+  int? letterBoxesReachedForPolygon(String layerId, String elementId) {
+    final folders = linkedCloudFolders;
+    if (folders.isEmpty || _currentMap == null) return null;
+
+    final match = RegExp(r'^(.+)_polygon_(\d+)$').firstMatch(elementId);
+    if (match == null) return null;
+
+    final resolvedLayerId = match.group(1) ?? layerId;
+    final polygonIndex = int.tryParse(match.group(2) ?? '');
+    if (polygonIndex == null) return null;
+
+    final layer = _currentMap!.getLayer(resolvedLayerId);
+    if (layer == null || polygonIndex >= layer.polygons.length) return null;
+
+    final polygon = layer.polygons[polygonIndex];
+    if (!polygon.isPolygon || polygon.points.length < 3) return null;
+
+    final linkedFolders = folders.toSet();
+    var reached = 0;
+    for (final waypointLayer in _cloudWaypointsLayers.values) {
+      final folderPath = waypointLayer.description.trim();
+      if (!linkedFolders.contains(folderPath)) continue;
+      for (final point in waypointLayer.points) {
+        if (_pointInPolygon(point.position, polygon.points)) reached++;
+      }
+    }
+    return reached;
+  }
+
+  bool cloudTracksLoadedFor(String folderPath) =>
+      _loadedCloudTrackFolders.contains(folderPath.trim());
+
+  bool cloudWaypointsLoadedFor(String folderPath) =>
+      _loadedCloudWaypointFolders.contains(folderPath.trim());
+
+  bool isLoadingCloudTracksFor(String folderPath) =>
+      _loadingCloudTrackFolders.contains(folderPath.trim());
+
+  bool isLoadingCloudWaypointsFor(String folderPath) =>
+      _loadingCloudWaypointFolders.contains(folderPath.trim());
+
+  Color cloudTrackColorForFolder(String folderPath) {
+    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
+    final savedColor = _currentMap?.cloudTrackColors[cleanPath];
+    if (savedColor != null) return Color(savedColor);
+    return _defaultCloudTrackColor(cleanPath);
+  }
+
+  void setCloudTrackColor(String folderPath, Color color) {
+    if (_currentMap == null) return;
+    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
+    if (cleanPath.isEmpty) return;
+
+    final colors = Map<String, int>.from(_currentMap!.cloudTrackColors);
+    colors[cleanPath] = color.toARGB32();
+    _currentMap = _currentMap!.copyWith(cloudTrackColors: colors);
+
+    final layerId = _cloudLayerId('tracks', cleanPath);
+    final layer = _cloudTracksLayers[layerId];
+    if (layer != null) {
+      _cloudTracksLayers[layerId] = _applyCloudTrackColor(cleanPath, layer);
+    }
+    _notifyAndSave();
+  }
+
+  /// Rename a cloud overlay layer. The new name is persisted in
+  /// [ShareableMap.cloudLayerNames] so it survives reloads and works across
+  /// all flavours. The key is `"wpt:<folderPath>"` for waypoint layers and
+  /// plain `"<folderPath>"` for track layers.
+  void renameCloudLayer(String layerId, String newName) {
+    if (_currentMap == null) return;
+    final trimmed = newName.trim();
+    if (trimmed.isEmpty) return;
+
+    final folderPath = cloudFolderForLayer(layerId);
+    if (folderPath == null) return;
+    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
+
+    final isWaypoint = isCloudWaypointsLayer(layerId);
+    final nameKey = isWaypoint ? 'wpt:$cleanPath' : cleanPath;
+
+    final names = Map<String, String>.from(_currentMap!.cloudLayerNames);
+    names[nameKey] = trimmed;
+    _currentMap = _currentMap!.copyWith(cloudLayerNames: names);
+
+    // Apply immediately to the in-memory layer shell.
+    if (isWaypoint) {
+      final layer = _cloudWaypointsLayers[layerId];
+      if (layer != null) {
+        _cloudWaypointsLayers[layerId] = layer.copyWith(name: trimmed);
+      }
+    } else {
+      final layer = _cloudTracksLayers[layerId];
+      if (layer != null) {
+        _cloudTracksLayers[layerId] = layer.copyWith(name: trimmed);
+      }
+    }
+    _notifyAndSave();
+  }
+
+  void unloadCloudFolderTracks(String folderPath) {
+    final cleanPath = folderPath.trim();
+    final layerId = _cloudLayerId('tracks', cleanPath);
+    final layer = _cloudTracksLayers[layerId];
+    if (layer != null) {
+      _cloudTracksLayers[layerId] = layer.copyWith(
+        polylines: const [],
+        points: const [],
+      );
+    }
+    _loadedCloudTrackFolders.remove(cleanPath);
+    notifyListeners();
+  }
+
+  void unloadCloudFolderWaypoints(String folderPath) {
+    final cleanPath = folderPath.trim();
+    final layerId = _cloudLayerId('waypoints', cleanPath);
+    final layer = _cloudWaypointsLayers[layerId];
+    if (layer != null) {
+      _cloudWaypointsLayers[layerId] = layer.copyWith(points: const []);
+    }
+    _loadedCloudWaypointFolders.remove(cleanPath);
+    notifyListeners();
+  }
 
   /// The layer name used for auto-loaded tracks.
   static const String tracksLayerName = 'Movements of the Distributors';
@@ -386,45 +610,229 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Tracks are auto-loaded (deferred); waypoints show as empty until
   /// the user explicitly requests them.
   void _initCloudOverlays() {
-    final folder = _currentMap?.storageFolderPath;
-    if (folder == null || folder.isEmpty) {
-      _cloudTracksLayer = null;
-      _cloudWaypointsLayer = null;
-      _cloudTracksLoaded = false;
-      _cloudWaypointsLoaded = false;
+    final folders = linkedCloudFolders;
+    if (folders.isEmpty) {
+      _cloudTracksLayers.clear();
+      _cloudWaypointsLayers.clear();
+      _loadedCloudTrackFolders.clear();
+      _loadedCloudWaypointFolders.clear();
       return;
     }
 
-    // Create empty shell layers so they appear in the sidebar immediately.
-    // Use distinct IDs to avoid millisecond collision.
-    _cloudTracksLayer ??= MapLayer(
-      id: 'cloud_tracks',
-      name: tracksLayerName,
-      description: 'Loaded from cloud',
-      order: 998,
-      defaultColor: Colors.blue,
-      createdAt: DateTime.now(),
-      updatedAt: DateTime.now(),
-    );
-    _cloudWaypointsLayer ??= MapLayer(
-      id: 'cloud_waypoints',
-      name: waypointsLayerName,
-      description: 'Click to load from cloud',
-      order: 999,
-      defaultColor: Colors.red,
-      createdAt: DateTime.now(),
-      updatedAt: DateTime.now(),
-    );
+    final validTrackIds = <String>{};
+    final validWaypointIds = <String>{};
+    for (int i = 0; i < folders.length; i++) {
+      final folder = folders[i];
+      final trackId = _cloudLayerId('tracks', folder);
+      final waypointId = _cloudLayerId('waypoints', folder);
+      validTrackIds.add(trackId);
+      validWaypointIds.add(waypointId);
+      final trackLayer = _cloudTracksLayers[trackId] ??
+          _cloudTrackLayerShell(folder, order: 900 + i * 2);
+      _cloudTracksLayers[trackId] = _applyCloudTrackColor(
+        folder,
+        trackLayer.copyWith(order: 900 + i * 2),
+      );
+      _cloudWaypointsLayers.putIfAbsent(waypointId,
+          () => _cloudWaypointLayerShell(folder, order: 901 + i * 2));
+    }
+
+    _cloudTracksLayers.removeWhere((id, _) => !validTrackIds.contains(id));
+    _cloudWaypointsLayers
+        .removeWhere((id, _) => !validWaypointIds.contains(id));
+    _loadedCloudTrackFolders.removeWhere((p) => !folders.contains(p));
+    _loadedCloudWaypointFolders.removeWhere((p) => !folders.contains(p));
 
     // Tracks will auto-load once the Google Maps controller is ready
     // (see setMapController).
   }
 
+  String _cloudLayerId(String kind, String folderPath) =>
+      'cloud_${kind}_${_stableFolderKey(folderPath)}';
+
+  String _stableFolderKey(String folderPath) {
+    var hash = 0;
+    for (final unit in folderPath.codeUnits) {
+      hash = (hash * 31 + unit) & 0x7fffffff;
+    }
+    return hash.toRadixString(16);
+  }
+
+  MapLayer _cloudTrackLayerShell(String folderPath, {required int order}) {
+    final now = DateTime.now();
+    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
+    final label = cloudFolderMonthLabel(folderPath);
+    final customName = _currentMap?.cloudLayerNames[cleanPath];
+    return MapLayer(
+      id: _cloudLayerId('tracks', folderPath),
+      name: customName ?? '$label Movements',
+      description: folderPath,
+      order: order,
+      defaultColor: cloudTrackColorForFolder(folderPath),
+      createdAt: now,
+      updatedAt: now,
+    );
+  }
+
+  static const List<Color> _cloudTrackPalette = [
+    Color(0xFF1967D2),
+    Color(0xFFD93025),
+    Color(0xFF188038),
+    Color(0xFFF29900),
+    Color(0xFF9334E6),
+    Color(0xFF0097A7),
+    Color(0xFFE91E63),
+    Color(0xFF795548),
+  ];
+
+  Color _defaultCloudTrackColor(String folderPath) {
+    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
+    final index = linkedCloudFolders.indexOf(cleanPath);
+    if (index >= 0) {
+      return _cloudTrackPalette[index % _cloudTrackPalette.length];
+    }
+    var hash = 0;
+    for (final unit in cleanPath.codeUnits) {
+      hash = (hash * 31 + unit) & 0x7fffffff;
+    }
+    return _cloudTrackPalette[hash % _cloudTrackPalette.length];
+  }
+
+  MapLayer _applyCloudTrackColor(String folderPath, MapLayer layer) {
+    final color = cloudTrackColorForFolder(folderPath);
+    return layer.copyWith(
+      defaultColor: color,
+      polylines: layer.polylines
+          .map((polyline) => polyline.copyWith(color: color))
+          .toList(),
+      points:
+          layer.points.map((point) => point.copyWith(color: color)).toList(),
+    );
+  }
+
+  List<MapPolyline> _applyCloudTrackColorToPolylines(
+    String folderPath,
+    List<MapPolyline> polylines,
+  ) {
+    final color = cloudTrackColorForFolder(folderPath);
+    return polylines
+        .map((polyline) => polyline.copyWith(color: color))
+        .toList();
+  }
+
+  List<MapPoint> _applyCloudTrackColorToPoints(
+    String folderPath,
+    List<MapPoint> points,
+  ) {
+    final color = cloudTrackColorForFolder(folderPath);
+    return points.map((point) => point.copyWith(color: color)).toList();
+  }
+
+  MapLayer _cloudWaypointLayerShell(String folderPath, {required int order}) {
+    final now = DateTime.now();
+    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
+    final label = cloudFolderMonthLabel(folderPath);
+    final customName = _currentMap?.cloudLayerNames['wpt:$cleanPath'];
+    return MapLayer(
+      id: _cloudLayerId('waypoints', folderPath),
+      name: customName ?? '$label Letter Boxes',
+      description: folderPath,
+      order: order,
+      defaultColor: Colors.red,
+      createdAt: now,
+      updatedAt: now,
+    );
+  }
+
+  String cloudFolderMonthLabel(String folderPath) {
+    final parts = folderPath.split('/').where((p) => p.trim().isNotEmpty);
+    for (final part in parts) {
+      final trimmed = part.trim();
+      if (RegExp(r'^[A-Za-z]{3}\s+\d{4}$').hasMatch(trimmed) ||
+          RegExp(r'^\d{2}-\d{4}$').hasMatch(trimmed)) {
+        return trimmed;
+      }
+    }
+    return parts.isNotEmpty ? parts.last : 'Cloud';
+  }
+
+  DateTime _cloudFolderSortDate(String folderPath) {
+    final label = cloudFolderMonthLabel(folderPath);
+    final mm = RegExp(r'^(\d{2})-(\d{4})$').firstMatch(label);
+    if (mm != null) {
+      return DateTime(int.parse(mm.group(2)!), int.parse(mm.group(1)!));
+    }
+    final named = RegExp(r'^([A-Za-z]{3})\s+(\d{4})$').firstMatch(label);
+    if (named != null) {
+      const months = {
+        'jan': 1,
+        'feb': 2,
+        'mar': 3,
+        'apr': 4,
+        'may': 5,
+        'jun': 6,
+        'jul': 7,
+        'aug': 8,
+        'sep': 9,
+        'oct': 10,
+        'nov': 11,
+        'dec': 12,
+      };
+      final month = months[named.group(1)!.toLowerCase()] ?? 1;
+      return DateTime(int.parse(named.group(2)!), month);
+    }
+    return DateTime.fromMillisecondsSinceEpoch(0);
+  }
+
+  /// Reset all per-map ephemeral state. Called at the start of
+  /// [loadFromAdapter] so that opening a different map does not retain
+  /// cloud overlays (distributor movements, letter boxes), selection,
+  /// info windows or in-progress drawing from the previously open map.
+  void _resetPerMapState() {
+    // Cloud overlays — discard fully so the new map fetches fresh data.
+    _cloudTracksLayers.clear();
+    _cloudWaypointsLayers.clear();
+    _loadedCloudTrackFolders.clear();
+    _loadedCloudWaypointFolders.clear();
+    _loadingCloudTrackFolders.clear();
+    _loadingCloudWaypointFolders.clear();
+
+    // Selection / overlays
+    _selectedElementId = null;
+    _infoWindowData = null;
+
+    // Drawing / editing
+    _drawingMode = DrawingMode.none;
+    _isDrawing = false;
+    _drawingPoints.clear();
+    _drawingToUnfinished = false;
+    _isEditingVertices = false;
+    _isEditingPolygon = false;
+    _editingElementId = null;
+    _editingPoints = null;
+    _isLassoSelectActive = false;
+    _lassoPoints.clear();
+    _isWorkAreaPickerVisible = false;
+    _hasUnsavedChanges = false;
+  }
+
   /// Link a cloud storage folder to this map.
   /// Also ensures a "Target Areas" persisted layer exists.
   void linkCloudFolder(String folderPath) {
+    addCloudFolderLink(folderPath, loadNow: true);
+  }
+
+  void addCloudFolderLink(String folderPath, {bool loadNow = false}) {
     if (_currentMap == null) return;
-    _currentMap = _currentMap!.copyWith(storageFolderPath: folderPath);
+    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
+    if (cleanPath.isEmpty) return;
+
+    final folders = List<String>.from(linkedCloudFolders);
+    if (!folders.contains(cleanPath)) folders.add(cleanPath);
+    _currentMap = _currentMap!.copyWith(
+      storageFolderPath: folders.first,
+      cloudFolderPaths: List.unmodifiable(folders),
+    );
 
     // Ensure a persisted "Target Areas" layer exists
     final hasTargetAreas =
@@ -454,43 +862,86 @@ class ShareableMapProvider extends ChangeNotifier {
 
     _initCloudOverlays();
     _notifyAndSave();
-    debugPrint('Linked cloud folder: $folderPath');
+    debugPrint('Linked cloud folder: $cleanPath');
 
-    // Kick off cloud data load immediately so the user doesn't have to
-    // reopen or manually refresh the map. Tracks normally auto-load when
-    // the map controller is first set, but if the map is already open we
-    // need to trigger the fetch ourselves. Waypoints are fetched too so
-    // linking a folder gives instant visible feedback.
-    // Fire-and-forget: errors are surfaced through the existing loading
-    // state / debug logs inside each loader.
-    Future.microtask(() async {
-      await loadCloudFolderTracks(force: true);
-      await loadCloudFolderWaypoints(force: true);
-    });
+    if (loadNow) {
+      Future.microtask(() async {
+        if (_isDisposed) return;
+        await loadCloudFolderTracks(folderPath: cleanPath, force: true);
+        if (_isDisposed) return;
+        await loadCloudFolderWaypoints(folderPath: cleanPath, force: true);
+      });
+    }
   }
 
-  /// Unlink the cloud storage folder and clear cloud overlay layers.
-  void unlinkCloudFolder() {
+  /// Unlink one cloud storage folder, or all folders when [folderPath] is null.
+  void unlinkCloudFolder([String? folderPath]) {
     if (_currentMap == null) return;
-    _currentMap = ShareableMap(
-      id: _currentMap!.id,
-      name: _currentMap!.name,
-      description: _currentMap!.description,
-      layers: _currentMap!.layers,
-      defaultCenter: _currentMap!.defaultCenter,
-      defaultZoom: _currentMap!.defaultZoom,
-      createdAt: _currentMap!.createdAt,
-      updatedAt: DateTime.now(),
-      thumbnailUrl: _currentMap!.thumbnailUrl,
-      jobListItemId: _currentMap!.jobListItemId,
-      storageFolderPath: null,
+    final removeAll = folderPath == null || folderPath.trim().isEmpty;
+    final cleanPath = folderPath?.trim().replaceAll(RegExp(r'/+$'), '');
+    final folders = removeAll
+        ? <String>[]
+        : linkedCloudFolders.where((p) => p != cleanPath).toList();
+    final trackColors = Map<String, int>.from(_currentMap!.cloudTrackColors);
+    if (removeAll) {
+      trackColors.clear();
+    } else if (cleanPath != null) {
+      trackColors.remove(cleanPath);
+    }
+    _currentMap = _currentMap!.copyWith(
+      storageFolderPath: folders.isEmpty ? null : folders.first,
+      clearStorageFolderPath: folders.isEmpty,
+      cloudFolderPaths: List.unmodifiable(folders),
+      cloudTrackColors: trackColors,
     );
-    _cloudTracksLayer = null;
-    _cloudWaypointsLayer = null;
-    _cloudTracksLoaded = false;
-    _cloudWaypointsLoaded = false;
+
+    if (removeAll) {
+      _cloudTracksLayers.clear();
+      _cloudWaypointsLayers.clear();
+      _loadedCloudTrackFolders.clear();
+      _loadedCloudWaypointFolders.clear();
+    } else {
+      final trackId = _cloudLayerId('tracks', cleanPath!);
+      final waypointId = _cloudLayerId('waypoints', cleanPath);
+      _cloudTracksLayers.remove(trackId);
+      _cloudWaypointsLayers.remove(waypointId);
+      _loadedCloudTrackFolders.remove(cleanPath);
+      _loadedCloudWaypointFolders.remove(cleanPath);
+    }
     _notifyAndSave();
-    debugPrint('Unlinked cloud folder');
+    debugPrint(
+        removeAll ? 'Unlinked all cloud folders' : 'Unlinked $cleanPath');
+  }
+
+  void setAutoLoadLatestCloudFolder(bool value) {
+    if (_currentMap == null) return;
+    _currentMap = _currentMap!.copyWith(autoLoadLatestCloudFolder: value);
+    _notifyAndSave();
+    if (value && latestLinkedCloudFolder != null) {
+      Future.microtask(() {
+        if (_isDisposed) return;
+        loadCloudFolderTracks(folderPath: latestLinkedCloudFolder);
+      });
+    }
+  }
+
+  void setClipCloudDataToPolygons(bool value) {
+    if (_currentMap == null) return;
+    if (_currentMap!.clipCloudDataToPolygons == value) return;
+    final loadedTracks = List<String>.from(_loadedCloudTrackFolders);
+    final loadedWaypoints = List<String>.from(_loadedCloudWaypointFolders);
+    _currentMap = _currentMap!.copyWith(clipCloudDataToPolygons: value);
+    _notifyAndSave();
+    Future.microtask(() async {
+      for (final folder in loadedTracks) {
+        if (_isDisposed) return;
+        await loadCloudFolderTracks(folderPath: folder, force: true);
+      }
+      for (final folder in loadedWaypoints) {
+        if (_isDisposed) return;
+        await loadCloudFolderWaypoints(folderPath: folder, force: true);
+      }
+    });
   }
 
   /// Download bytes for a list of [StorageFileItem]s in parallel.
@@ -520,24 +971,28 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Tries to download a pre-compiled `_compiled_tracks.json` first (single
   /// small file produced by the Cloud Function). Falls back to downloading
   /// and parsing individual GPX files if the compiled file doesn't exist yet.
-  Future<void> loadCloudFolderTracks({bool force = false}) async {
-    final folderPath = _currentMap?.storageFolderPath;
-    if (folderPath == null || folderPath.isEmpty) return;
-    if (_isLoadingCloudTracks) return;
-    if (_cloudTracksLoaded && !force) return;
-    if (force) _cloudTracksLoaded = false;
+  Future<void> loadCloudFolderTracks(
+      {String? folderPath, bool force = false}) async {
+    final resolvedFolderPath = (folderPath ?? latestLinkedCloudFolder)
+        ?.trim()
+        .replaceAll(RegExp(r'/+$'), '');
+    if (resolvedFolderPath == null || resolvedFolderPath.isEmpty) return;
+    if (_loadingCloudTrackFolders.contains(resolvedFolderPath)) return;
+    if (_loadedCloudTrackFolders.contains(resolvedFolderPath) && !force) return;
+    if (force) _loadedCloudTrackFolders.remove(resolvedFolderPath);
 
-    _isLoadingCloudTracks = true;
+    _loadingCloudTrackFolders.add(resolvedFolderPath);
+    _initCloudOverlays();
     notifyListeners();
     final sw = Stopwatch()..start();
-    debugPrint('[CloudTracks] START folder=$folderPath');
+    debugPrint('[CloudTracks] START folder=$resolvedFolderPath');
 
     try {
       final storage = GpxStorageService();
 
       // ── Try compiled JSON first (fast path) ──
-      final compiledBytes =
-          await storage.downloadFileBytes('$folderPath/_compiled_tracks.json');
+      final compiledBytes = await storage
+          .downloadFileBytes('$resolvedFolderPath/_compiled_tracks.json');
       if (compiledBytes != null) {
         debugPrint(
             '[CloudTracks] compiled JSON downloaded in ${sw.elapsedMilliseconds}ms (${(compiledBytes.length / 1024).toStringAsFixed(1)}KB)');
@@ -545,21 +1000,22 @@ class ShareableMapProvider extends ChangeNotifier {
         debugPrint(
             '[CloudTracks] parsed ${polylines.length} tracks from compiled JSON in ${sw.elapsedMilliseconds}ms');
 
-        var layer = _cloudTracksLayer ??
-            MapLayer.create(
-              name: tracksLayerName,
-              description: 'Loaded from cloud',
-              order: 998,
-              defaultColor: Colors.blue,
-            );
-        layer = layer.copyWith(
-          polylines: polylines,
+        final clippedPolylines = _applyCloudTrackColorToPolylines(
+          resolvedFolderPath,
+          _clipCloudDataToPolygons(polylines),
         );
-        _cloudTracksLayer = layer;
-        _cloudTracksLoaded = true;
+        final layerId = _cloudLayerId('tracks', resolvedFolderPath);
+        var layer = _cloudTracksLayers[layerId] ??
+            _cloudTrackLayerShell(resolvedFolderPath, order: 900);
+        layer = layer.copyWith(
+          defaultColor: cloudTrackColorForFolder(resolvedFolderPath),
+          polylines: clippedPolylines,
+        );
+        _cloudTracksLayers[layerId] = layer;
+        _loadedCloudTrackFolders.add(resolvedFolderPath);
         debugPrint(
-            '[CloudTracks] DONE (compiled) in ${sw.elapsedMilliseconds}ms — ${polylines.length} tracks');
-        _isLoadingCloudTracks = false;
+            '[CloudTracks] DONE (compiled) in ${sw.elapsedMilliseconds}ms — ${clippedPolylines.length}/${polylines.length} tracks');
+        _loadingCloudTrackFolders.remove(resolvedFolderPath);
         notifyListeners();
         return;
       }
@@ -568,7 +1024,7 @@ class ShareableMapProvider extends ChangeNotifier {
           '[CloudTracks] no compiled JSON, falling back to individual GPX files');
 
       // ── Fallback: download individual GPX files ──
-      final contents = await storage.listFolderContents(folderPath);
+      final contents = await storage.listFolderContents(resolvedFolderPath);
       debugPrint(
           '[CloudTracks] listFolderContents in ${sw.elapsedMilliseconds}ms');
 
@@ -580,8 +1036,8 @@ class ShareableMapProvider extends ChangeNotifier {
 
       if (trackFiles.isEmpty) {
         debugPrint('[CloudTracks] no track files found');
-        _cloudTracksLoaded = true;
-        _isLoadingCloudTracks = false;
+        _loadedCloudTrackFolders.add(resolvedFolderPath);
+        _loadingCloudTrackFolders.remove(resolvedFolderPath);
         notifyListeners();
         return;
       }
@@ -591,8 +1047,8 @@ class ShareableMapProvider extends ChangeNotifier {
       debugPrint(
           '[CloudTracks] downloaded ${downloaded.length} files in ${sw.elapsedMilliseconds}ms');
       if (downloaded.isEmpty) {
-        _cloudTracksLoaded = true;
-        _isLoadingCloudTracks = false;
+        _loadedCloudTrackFolders.add(resolvedFolderPath);
+        _loadingCloudTrackFolders.remove(resolvedFolderPath);
         notifyListeners();
         return;
       }
@@ -604,21 +1060,24 @@ class ShareableMapProvider extends ChangeNotifier {
       debugPrint(
           '[CloudTracks] parsed in isolate in ${sw.elapsedMilliseconds}ms');
 
-      var layer = _cloudTracksLayer ??
-          MapLayer.create(
-            name: tracksLayerName,
-            description: 'Loaded from cloud',
-            order: 998,
-            defaultColor: Colors.blue,
-          );
+      final layerId = _cloudLayerId('tracks', resolvedFolderPath);
+      var layer = _cloudTracksLayers[layerId] ??
+          _cloudTrackLayerShell(resolvedFolderPath, order: 900);
 
       layer = layer.copyWith(
-        polylines: result.polylines,
-        points: result.points,
+        defaultColor: cloudTrackColorForFolder(resolvedFolderPath),
+        polylines: _applyCloudTrackColorToPolylines(
+          resolvedFolderPath,
+          _clipCloudDataToPolygons(result.polylines),
+        ),
+        points: _applyCloudTrackColorToPoints(
+          resolvedFolderPath,
+          _clipCloudPointsToPolygons(result.points),
+        ),
       );
 
-      _cloudTracksLayer = layer;
-      _cloudTracksLoaded = true;
+      _cloudTracksLayers[layerId] = layer;
+      _loadedCloudTrackFolders.add(resolvedFolderPath);
       debugPrint(
           '[CloudTracks] DONE (fallback) in ${sw.elapsedMilliseconds}ms — '
           '${result.polylines.length} polylines from ${downloaded.length} files');
@@ -626,7 +1085,7 @@ class ShareableMapProvider extends ChangeNotifier {
       debugPrint('[CloudTracks] FAILED at ${sw.elapsedMilliseconds}ms: $e');
     }
 
-    _isLoadingCloudTracks = false;
+    _loadingCloudTrackFolders.remove(resolvedFolderPath);
     notifyListeners();
   }
 
@@ -634,24 +1093,30 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Called on-demand by the user (never auto-loaded).
   ///
   /// Tries compiled `_compiled_waypoints.json` first, falls back to GPX.
-  Future<void> loadCloudFolderWaypoints({bool force = false}) async {
-    final folderPath = _currentMap?.storageFolderPath;
-    if (folderPath == null || folderPath.isEmpty) return;
-    if (_isLoadingCloudWaypoints) return;
-    if (_cloudWaypointsLoaded && !force) return;
-    if (force) _cloudWaypointsLoaded = false;
+  Future<void> loadCloudFolderWaypoints(
+      {String? folderPath, bool force = false}) async {
+    final resolvedFolderPath = (folderPath ?? latestLinkedCloudFolder)
+        ?.trim()
+        .replaceAll(RegExp(r'/+$'), '');
+    if (resolvedFolderPath == null || resolvedFolderPath.isEmpty) return;
+    if (_loadingCloudWaypointFolders.contains(resolvedFolderPath)) return;
+    if (_loadedCloudWaypointFolders.contains(resolvedFolderPath) && !force) {
+      return;
+    }
+    if (force) _loadedCloudWaypointFolders.remove(resolvedFolderPath);
 
-    _isLoadingCloudWaypoints = true;
+    _loadingCloudWaypointFolders.add(resolvedFolderPath);
+    _initCloudOverlays();
     notifyListeners();
     final sw = Stopwatch()..start();
-    debugPrint('[CloudWaypoints] START folder=$folderPath');
+    debugPrint('[CloudWaypoints] START folder=$resolvedFolderPath');
 
     try {
       final storage = GpxStorageService();
 
       // ── Try compiled JSON first (fast path) ──
       final compiledBytes = await storage
-          .downloadFileBytes('$folderPath/_compiled_waypoints.json');
+          .downloadFileBytes('$resolvedFolderPath/_compiled_waypoints.json');
       if (compiledBytes != null) {
         debugPrint(
             '[CloudWaypoints] compiled JSON downloaded in ${sw.elapsedMilliseconds}ms (${(compiledBytes.length / 1024).toStringAsFixed(1)}KB)');
@@ -659,21 +1124,18 @@ class ShareableMapProvider extends ChangeNotifier {
         debugPrint(
             '[CloudWaypoints] parsed ${points.length} waypoints from compiled JSON in ${sw.elapsedMilliseconds}ms');
 
-        var layer = _cloudWaypointsLayer ??
-            MapLayer.create(
-              name: waypointsLayerName,
-              description: 'Loaded from cloud',
-              order: 999,
-              defaultColor: Colors.red,
-            );
+        final clippedPoints = _clipCloudPointsToPolygons(points);
+        final layerId = _cloudLayerId('waypoints', resolvedFolderPath);
+        var layer = _cloudWaypointsLayers[layerId] ??
+            _cloudWaypointLayerShell(resolvedFolderPath, order: 901);
         layer = layer.copyWith(
-          points: points,
+          points: clippedPoints,
         );
-        _cloudWaypointsLayer = layer;
-        _cloudWaypointsLoaded = true;
+        _cloudWaypointsLayers[layerId] = layer;
+        _loadedCloudWaypointFolders.add(resolvedFolderPath);
         debugPrint(
-            '[CloudWaypoints] DONE (compiled) in ${sw.elapsedMilliseconds}ms — ${points.length} waypoints');
-        _isLoadingCloudWaypoints = false;
+            '[CloudWaypoints] DONE (compiled) in ${sw.elapsedMilliseconds}ms — ${clippedPoints.length}/${points.length} waypoints');
+        _loadingCloudWaypointFolders.remove(resolvedFolderPath);
         notifyListeners();
         return;
       }
@@ -682,7 +1144,7 @@ class ShareableMapProvider extends ChangeNotifier {
           '[CloudWaypoints] no compiled JSON, falling back to individual GPX files');
 
       // ── Fallback: download individual GPX files ──
-      final contents = await storage.listFolderContents(folderPath);
+      final contents = await storage.listFolderContents(resolvedFolderPath);
 
       final waypointFiles = contents.files
           .where((f) =>
@@ -691,8 +1153,8 @@ class ShareableMapProvider extends ChangeNotifier {
 
       if (waypointFiles.isEmpty) {
         debugPrint('[CloudWaypoints] no waypoint files found');
-        _cloudWaypointsLoaded = true;
-        _isLoadingCloudWaypoints = false;
+        _loadedCloudWaypointFolders.add(resolvedFolderPath);
+        _loadingCloudWaypointFolders.remove(resolvedFolderPath);
         notifyListeners();
         return;
       }
@@ -703,8 +1165,8 @@ class ShareableMapProvider extends ChangeNotifier {
       debugPrint(
           '[CloudWaypoints] downloaded ${downloaded.length} files in ${sw.elapsedMilliseconds}ms');
       if (downloaded.isEmpty) {
-        _cloudWaypointsLoaded = true;
-        _isLoadingCloudWaypoints = false;
+        _loadedCloudWaypointFolders.add(resolvedFolderPath);
+        _loadingCloudWaypointFolders.remove(resolvedFolderPath);
         notifyListeners();
         return;
       }
@@ -714,20 +1176,16 @@ class ShareableMapProvider extends ChangeNotifier {
         _IsolateParseInput(downloaded),
       );
 
-      var layer = _cloudWaypointsLayer ??
-          MapLayer.create(
-            name: waypointsLayerName,
-            description: 'Loaded from cloud',
-            order: 999,
-            defaultColor: Colors.red,
-          );
+      final layerId = _cloudLayerId('waypoints', resolvedFolderPath);
+      var layer = _cloudWaypointsLayers[layerId] ??
+          _cloudWaypointLayerShell(resolvedFolderPath, order: 901);
 
       layer = layer.copyWith(
-        points: result.points,
+        points: _clipCloudPointsToPolygons(result.points),
       );
 
-      _cloudWaypointsLayer = layer;
-      _cloudWaypointsLoaded = true;
+      _cloudWaypointsLayers[layerId] = layer;
+      _loadedCloudWaypointFolders.add(resolvedFolderPath);
       debugPrint(
           '[CloudWaypoints] DONE (fallback) in ${sw.elapsedMilliseconds}ms — '
           '${result.points.length} points from ${downloaded.length} files');
@@ -735,8 +1193,81 @@ class ShareableMapProvider extends ChangeNotifier {
       debugPrint('[CloudWaypoints] FAILED at ${sw.elapsedMilliseconds}ms: $e');
     }
 
-    _isLoadingCloudWaypoints = false;
+    _loadingCloudWaypointFolders.remove(resolvedFolderPath);
     notifyListeners();
+  }
+
+  List<List<LatLng>> _cloudClipPolygons() {
+    if (!clipCloudDataToPolygons || _currentMap == null) {
+      return const [];
+    }
+    final polygons = <List<LatLng>>[];
+    for (final layer in _currentMap!.layers) {
+      for (final polygon in layer.polygons) {
+        if (polygon.isPolygon && polygon.points.length >= 3) {
+          polygons.add(polygon.points);
+        }
+      }
+    }
+    return polygons;
+  }
+
+  bool _isInsideAnyClipPolygon(LatLng point, List<List<LatLng>> polygons) {
+    for (final polygon in polygons) {
+      if (_pointInPolygon(point, polygon)) return true;
+    }
+    return false;
+  }
+
+  List<MapPoint> _clipCloudPointsToPolygons(List<MapPoint> points) {
+    final polygons = _cloudClipPolygons();
+    if (polygons.isEmpty) return points;
+    return points
+        .where((point) => _isInsideAnyClipPolygon(point.position, polygons))
+        .toList();
+  }
+
+  List<MapPolyline> _clipCloudDataToPolygons(List<MapPolyline> polylines) {
+    final polygons = _cloudClipPolygons();
+    if (polygons.isEmpty) return polylines;
+
+    final clipped = <MapPolyline>[];
+    final now = DateTime.now();
+    int segmentSeq = 0;
+
+    for (final polyline in polylines) {
+      final segment = <LatLng>[];
+
+      void flushSegment() {
+        if (segment.length < 2) {
+          segment.clear();
+          return;
+        }
+        clipped.add(MapPolyline(
+          id: '${polyline.id}_clip_${segmentSeq++}',
+          name: polyline.name,
+          description: polyline.description,
+          points: List<LatLng>.from(segment),
+          color: polyline.color,
+          strokeWidth: polyline.strokeWidth,
+          isDashed: polyline.isDashed,
+          createdAt: now,
+          updatedAt: now,
+        ));
+        segment.clear();
+      }
+
+      for (final point in polyline.points) {
+        if (_isInsideAnyClipPolygon(point, polygons)) {
+          segment.add(point);
+        } else {
+          flushSegment();
+        }
+      }
+      flushSegment();
+    }
+
+    return clipped;
   }
 
   /// Save the current map state via the active adapter.
@@ -820,14 +1351,14 @@ class ShareableMapProvider extends ChangeNotifier {
 
       // Include visible cloud tracks in the thumbnail.
       // Limit to avoid exceeding Static Maps API URL length.
-      if (_cloudTracksLayer != null && _cloudTracksLayer!.isVisible) {
-        for (final polyline in _cloudTracksLayer!.polylines) {
-          if (polyline.points.isNotEmpty) {
-            polylines.add(ThumbnailPathData(
-              points: polyline.points,
-              color: polyline.color,
-            ));
-          }
+      for (final cloudLayer in _cloudTracksLayers.values) {
+        if (!cloudLayer.isVisible) continue;
+        for (final polyline in cloudLayer.polylines) {
+          if (polyline.points.isEmpty) continue;
+          polylines.add(ThumbnailPathData(
+            points: polyline.points,
+            color: polyline.color,
+          ));
         }
       }
       // Cap total polylines so the Static Maps URL stays under the limit.
@@ -847,7 +1378,7 @@ class ShareableMapProvider extends ChangeNotifier {
         polylines: polylines.isNotEmpty ? polylines : null,
       );
 
-      if (url != null && _currentMap != null) {
+      if (url != null && !_isDisposed && _currentMap != null) {
         // Persist the Storage URL on the Firestore document.
         final firestoreService = ShareableMapsFirestoreService();
         await firestoreService.updateMapFields(
@@ -856,6 +1387,7 @@ class ShareableMapProvider extends ChangeNotifier {
           {'thumbnailUrl': url},
         );
 
+        if (_isDisposed || _currentMap == null) return;
         // Update local state so the gallery picks it up.
         _currentMap = _currentMap!.copyWith(thumbnailUrl: url);
         debugPrint('[Thumbnail] Updated thumbnail for $docId');
@@ -868,7 +1400,7 @@ class ShareableMapProvider extends ChangeNotifier {
 
   /// Clear the active adapter and reset to standalone mode.
   Future<void> clearAdapter() async {
-    _stopRealtimeSync();
+    await _stopRealtimeSync();
     await _adapter?.dispose();
     _adapter = null;
     notifyListeners();
@@ -930,17 +1462,23 @@ class ShareableMapProvider extends ChangeNotifier {
       _selectedLayerId = remoteMap.layers.first.id;
     }
 
+    _initCloudOverlays();
+
     notifyListeners();
   }
 
-  /// Stop the real-time Firestore listener.
-  void _stopRealtimeSync() {
+  /// Stop the real-time Firestore listener and cancel any pending
+  /// auto-save / thumbnail timers. Awaiting the returned future ensures the
+  /// underlying StreamSubscription has fully closed before a new listener
+  /// is attached (prevents overlapping listeners during rapid map switches).
+  Future<void> _stopRealtimeSync() async {
     _autoSaveTimer?.cancel();
     _autoSaveTimer = null;
     _thumbnailTimer?.cancel();
     _thumbnailTimer = null;
-    _realtimeSubscription?.cancel();
+    final sub = _realtimeSubscription;
     _realtimeSubscription = null;
+    await sub?.cancel();
   }
 
   /// Schedule a debounced auto-save. Each call resets the timer.
@@ -949,10 +1487,11 @@ class ShareableMapProvider extends ChangeNotifier {
   /// propagate to Firestore (and thus to other viewers) without
   /// requiring the user to press Save manually.
   void _scheduleAutoSave() {
-    if (_adapter == null || _currentMap == null) return;
+    if (_isDisposed || _adapter == null || _currentMap == null) return;
 
     _autoSaveTimer?.cancel();
     _autoSaveTimer = Timer(_autoSaveDelay, () {
+      if (_isDisposed || _adapter == null || _currentMap == null) return;
       saveToAdapter();
       _scheduleThumbnailCapture();
     });
@@ -961,9 +1500,12 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Schedule a debounced thumbnail capture after auto-saves settle.
   /// Resets on each auto-save so it only captures once editing pauses.
   void _scheduleThumbnailCapture() {
-    if (_adapter == null || _adapter is! FirestoreMapAdapter) return;
+    if (_isDisposed || _adapter == null || _adapter is! FirestoreMapAdapter) {
+      return;
+    }
     _thumbnailTimer?.cancel();
     _thumbnailTimer = Timer(_thumbnailDelay, () {
+      if (_isDisposed) return;
       final adapter = _adapter;
       if (adapter is FirestoreMapAdapter) {
         _captureThumbnailAsync(adapter);
@@ -1079,6 +1621,7 @@ class ShareableMapProvider extends ChangeNotifier {
       color: color ?? Colors.orange,
       fillOpacity: 0.25,
       strokeWidth: 2,
+      letterBoxEstimate: workArea.letterBoxEstimate,
     );
 
     final updatedLayer = layer.addPolygon(polygon);
@@ -1164,16 +1707,62 @@ class ShareableMapProvider extends ChangeNotifier {
     String? name,
     String? description,
     Color? color,
+    bool applyColorToPolygons = false,
+    bool applyColorToPolylines = false,
+    bool applyMarkerCategory = false,
+    PointCategory? markerCategory,
   }) {
     if (_currentMap == null) return;
 
     final layer = _currentMap!.getLayer(layerId);
     if (layer == null) return;
 
+    final shouldUpdatePolygonEntries =
+        (color != null && (applyColorToPolygons || applyColorToPolylines)) ||
+            (applyMarkerCategory && markerCategory != null);
+    final updatedPolygonEntries = shouldUpdatePolygonEntries
+        ? layer.polygons.map((polygon) {
+            var updated = polygon;
+            if (color != null && applyColorToPolygons && polygon.isPolygon) {
+              updated = updated.copyWith(color: color);
+            }
+            if (color != null && applyColorToPolylines && polygon.isPolyline) {
+              updated = updated.copyWith(color: color);
+            }
+            if (applyMarkerCategory &&
+                markerCategory != null &&
+                polygon.isMarker) {
+              updated = updated.copyWith(
+                color: markerCategory.color,
+                pointCategory: markerCategory,
+              );
+            }
+            return updated;
+          }).toList()
+        : null;
+
+    final updatedPolylines = color != null && applyColorToPolylines
+        ? layer.polylines
+            .map((polyline) => polyline.copyWith(color: color))
+            .toList()
+        : null;
+
+    final updatedPoints = applyMarkerCategory && markerCategory != null
+        ? layer.points
+            .map((point) => point.copyWith(
+                  color: markerCategory.color,
+                  pointCategory: markerCategory,
+                ))
+            .toList()
+        : null;
+
     final updatedLayer = layer.copyWith(
       name: name,
       description: description,
       defaultColor: color,
+      polygons: updatedPolygonEntries,
+      polylines: updatedPolylines,
+      points: updatedPoints,
     );
 
     _currentMap = _currentMap!.updateLayer(layerId, updatedLayer);
@@ -1184,21 +1773,35 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Toggle layer visibility
   void toggleLayerVisibility(String layerId) {
     if (_currentMap == null) return;
+    // Ignore rapid repeat taps while the previous toggle is still being
+    // applied to the GoogleMap widget (the JS-side marker diff for large
+    // layers can take 100-300ms).
+    if (_togglingLayers.contains(layerId)) return;
+    _togglingLayers.add(layerId);
+    Timer(_toggleCooldown, () {
+      if (_isDisposed) return;
+      if (_togglingLayers.remove(layerId)) {
+        notifyListeners();
+      }
+    });
+
     // Handle cloud overlay layers
-    if (_cloudTracksLayer?.id == layerId) {
-      final nowVisible = !_cloudTracksLayer!.isVisible;
-      _cloudTracksLayer = _cloudTracksLayer!.copyWith(
+    if (_cloudTracksLayers.containsKey(layerId)) {
+      final layer = _cloudTracksLayers[layerId]!;
+      final nowVisible = !layer.isVisible;
+      _cloudTracksLayers[layerId] = layer.copyWith(
         isVisible: nowVisible,
-        isExpanded: nowVisible ? _cloudTracksLayer!.isExpanded : false,
+        isExpanded: nowVisible ? layer.isExpanded : false,
       );
       notifyListeners();
       return;
     }
-    if (_cloudWaypointsLayer?.id == layerId) {
-      final nowVisible = !_cloudWaypointsLayer!.isVisible;
-      _cloudWaypointsLayer = _cloudWaypointsLayer!.copyWith(
+    if (_cloudWaypointsLayers.containsKey(layerId)) {
+      final layer = _cloudWaypointsLayers[layerId]!;
+      final nowVisible = !layer.isVisible;
+      _cloudWaypointsLayers[layerId] = layer.copyWith(
         isVisible: nowVisible,
-        isExpanded: nowVisible ? _cloudWaypointsLayer!.isExpanded : false,
+        isExpanded: nowVisible ? layer.isExpanded : false,
       );
       notifyListeners();
       return;
@@ -1211,15 +1814,17 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Toggle layer expanded state
   void toggleLayerExpanded(String layerId) {
     if (_currentMap == null) return;
-    if (_cloudTracksLayer?.id == layerId) {
-      _cloudTracksLayer = _cloudTracksLayer!
-          .copyWith(isExpanded: !_cloudTracksLayer!.isExpanded);
+    if (_cloudTracksLayers.containsKey(layerId)) {
+      final layer = _cloudTracksLayers[layerId]!;
+      _cloudTracksLayers[layerId] =
+          layer.copyWith(isExpanded: !layer.isExpanded);
       notifyListeners();
       return;
     }
-    if (_cloudWaypointsLayer?.id == layerId) {
-      _cloudWaypointsLayer = _cloudWaypointsLayer!
-          .copyWith(isExpanded: !_cloudWaypointsLayer!.isExpanded);
+    if (_cloudWaypointsLayers.containsKey(layerId)) {
+      final layer = _cloudWaypointsLayers[layerId]!;
+      _cloudWaypointsLayers[layerId] =
+          layer.copyWith(isExpanded: !layer.isExpanded);
       notifyListeners();
       return;
     }
@@ -2043,13 +2648,20 @@ class ShareableMapProvider extends ChangeNotifier {
     if (_pendingFitBounds) {
       _pendingFitBounds = false;
       Future.delayed(const Duration(milliseconds: 300), () {
+        if (_isDisposed) return;
         fitMapToBounds();
       });
     }
 
-    // Auto-load cloud tracks once the map is ready to render them
-    if (!_cloudTracksLoaded && _cloudTracksLayer != null) {
-      Future.microtask(() => loadCloudFolderTracks());
+    // Auto-load the latest linked month once the map is ready to render it.
+    final latest = latestLinkedCloudFolder;
+    if (autoLoadLatestCloudFolder &&
+        latest != null &&
+        !_loadedCloudTrackFolders.contains(latest)) {
+      Future.microtask(() {
+        if (_isDisposed) return;
+        loadCloudFolderTracks(folderPath: latest);
+      });
     }
   }
 
@@ -2114,6 +2726,96 @@ class ShareableMapProvider extends ChangeNotifier {
     // Animate camera to fit polygon bounds
     await _mapController!.animateCamera(
       CameraUpdate.newLatLngBounds(bounds, 80),
+    );
+  }
+
+  /// Animate the camera to fit a polyline, select it, and open its info
+  /// window — mirrors [focusOnPolygon] for track/route elements.
+  Future<void> focusOnPolyline(
+      String layerId, String polylineId) async {
+    if (_currentMap == null) return;
+
+    // Search persisted layers first, then cloud overlay layers.
+    MapPolyline? found;
+    String resolvedLayerId = layerId;
+    final allLayers = [
+      ..._currentMap!.layers,
+      ..._cloudTracksLayers.values,
+    ];
+    for (final layer in allLayers) {
+      final match =
+          layer.polylines.where((p) => p.id == polylineId).firstOrNull;
+      if (match != null) {
+        found = match;
+        resolvedLayerId = layer.id;
+        break;
+      }
+    }
+    if (found == null || found.points.isEmpty) return;
+
+    // Select the polyline so it highlights (red + elevated zIndex) visually.
+    _selectedLayerId = resolvedLayerId;
+    _selectedElementId = polylineId;
+    _ignoreNextTap = true;
+
+    // Build the info-window subtitle (same logic as _handlePolylineTap in the
+    // editor widget).
+    String subtitle;
+    if (found.hasTrackMetadata) {
+      final parts = <String>[found.formattedDistance];
+      if (found.formattedTimeRange.isNotEmpty) {
+        parts.add(found.formattedTimeRange);
+      }
+      if (found.formattedDuration.isNotEmpty) {
+        parts.add(found.formattedDuration);
+      }
+      subtitle = parts.join(' · ');
+    } else {
+      final km = found.totalDistanceMeters / 1000;
+      subtitle =
+          km < 1 ? '${(km * 1000).round()} m' : '${km.toStringAsFixed(2)} km';
+    }
+
+    // Anchor the info window at the polyline centroid.
+    final avgLat = found.points.map((p) => p.latitude).reduce((a, b) => a + b) /
+        found.points.length;
+    final avgLng =
+        found.points.map((p) => p.longitude).reduce((a, b) => a + b) /
+            found.points.length;
+
+    _showStylePanel = false;
+    _infoWindowData = InfoWindowData(
+      elementId: polylineId,
+      layerId: resolvedLayerId,
+      title: found.name.isNotEmpty ? found.name : 'Unnamed Polyline',
+      description: found.description,
+      subtitle: subtitle,
+      type: 'polyline',
+      anchor: LatLng(avgLat, avgLng),
+    );
+    notifyListeners();
+
+    if (_mapController == null) return;
+
+    // Fit camera to polyline bounds.
+    double minLat = found.points.first.latitude;
+    double maxLat = found.points.first.latitude;
+    double minLng = found.points.first.longitude;
+    double maxLng = found.points.first.longitude;
+    for (final pt in found.points) {
+      if (pt.latitude < minLat) minLat = pt.latitude;
+      if (pt.latitude > maxLat) maxLat = pt.latitude;
+      if (pt.longitude < minLng) minLng = pt.longitude;
+      if (pt.longitude > maxLng) maxLng = pt.longitude;
+    }
+    await _mapController!.animateCamera(
+      CameraUpdate.newLatLngBounds(
+        LatLngBounds(
+          southwest: LatLng(minLat, minLng),
+          northeast: LatLng(maxLat, maxLng),
+        ),
+        80,
+      ),
     );
   }
 
@@ -2263,6 +2965,14 @@ class ShareableMapProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Explicitly set sidebar visibility — used by the editor widget to
+  /// apply a screen-size-dependent initial state (e.g. hidden on mobile).
+  void setSidebarVisible(bool visible) {
+    if (_isSidebarVisible == visible) return;
+    _isSidebarVisible = visible;
+    notifyListeners();
+  }
+
   /// Toggle the work area picker panel
   void toggleWorkAreaPicker() {
     _isWorkAreaPickerVisible = !_isWorkAreaPickerVisible;
@@ -2409,10 +3119,44 @@ class ShareableMapProvider extends ChangeNotifier {
   }
 
   @override
+  void notifyListeners() {
+    // Guard against late callbacks (timers, microtasks, awaited Futures)
+    // firing after the provider has been disposed — Flutter throws
+    // "A ChangeNotifier was used after being disposed" otherwise.
+    if (_isDisposed) return;
+    super.notifyListeners();
+  }
+
+  @override
   void dispose() {
-    _stopRealtimeSync();
+    // Set the disposed flag FIRST so any callback that races with dispose
+    // (e.g. a Firestore snapshot arriving as we tear down, an auto-save
+    // timer firing, a microtask scheduled by loadCloudFolder*) becomes a
+    // no-op instead of touching freed state.
+    _isDisposed = true;
+    _autoSaveTimer?.cancel();
+    _autoSaveTimer = null;
+    _thumbnailTimer?.cancel();
+    _thumbnailTimer = null;
+    _realtimeSubscription?.cancel();
+    _realtimeSubscription = null;
     _adapter?.dispose();
+    _adapter = null;
     _mapController?.dispose();
+    _mapController = null;
+    // Drop heavy per-map data so the GC can reclaim it immediately —
+    // important on web where the Riverpod ChangeNotifierProvider keeps
+    // the provider instance alive for the app session.
+    _cloudTracksLayers.clear();
+    _cloudWaypointsLayers.clear();
+    _loadingCloudTrackFolders.clear();
+    _loadingCloudWaypointFolders.clear();
+    _loadedCloudTrackFolders.clear();
+    _loadedCloudWaypointFolders.clear();
+    _drawingPoints.clear();
+    _lassoPoints.clear();
+    _editingPoints = null;
+    _currentMap = null;
     super.dispose();
   }
 
