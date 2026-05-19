@@ -210,7 +210,6 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
   Size _printSelectionSize = Size.zero;
   Size _lastMapSize = Size.zero;
   _PrintSelectionHandle? _activePrintSelectionHandle;
-  double _mapBearing = 0.0;
 
   @override
   void initState() {
@@ -559,105 +558,6 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
   }
 
   // ── Vertex editing helpers ────────────────────────────────────────
-
-  Future<void> _setMapBearing(double bearing) async {
-    final normalized = ((bearing % 360) + 360) % 360;
-    setState(() => _mapBearing = normalized);
-    if (_controller == null || !mounted) return;
-    try {
-      final zoom = await _controller!.getZoomLevel();
-      await _controller!.animateCamera(
-        CameraUpdate.newCameraPosition(
-          CameraPosition(
-            target: _center,
-            zoom: zoom,
-            bearing: normalized,
-          ),
-        ),
-      );
-    } catch (e) {
-      debugPrint('Error rotating map: $e');
-    }
-  }
-
-  void _showRotationDialog() {
-    var currentBearing = _mapBearing;
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Text('Rotate Map'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'Bearing: ${currentBearing.round()}°',
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w500),
-                  ),
-                  const SizedBox(height: 8),
-                  Slider(
-                    value: currentBearing,
-                    min: 0,
-                    max: 360,
-                    divisions: 72,
-                    label: '${currentBearing.round()}°',
-                    onChanged: (value) {
-                      setDialogState(() => currentBearing = value);
-                      _setMapBearing(value);
-                    },
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      TextButton.icon(
-                        icon: const Icon(Icons.rotate_left),
-                        label: const Text('-45°'),
-                        onPressed: () {
-                          final next =
-                              ((currentBearing - 45) % 360 + 360) % 360;
-                          setDialogState(() => currentBearing = next);
-                          _setMapBearing(next);
-                        },
-                      ),
-                      TextButton.icon(
-                        icon: const Icon(Icons.navigation),
-                        label: const Text('North'),
-                        onPressed: () {
-                          setDialogState(() => currentBearing = 0);
-                          _setMapBearing(0);
-                        },
-                      ),
-                      TextButton.icon(
-                        icon: const Icon(Icons.rotate_right),
-                        label: const Text('+45°'),
-                        onPressed: () {
-                          final next =
-                              ((currentBearing + 45) % 360 + 360) % 360;
-                          setDialogState(() => currentBearing = next);
-                          _setMapBearing(next);
-                        },
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('Close'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
 
   Future<void> _createMarkerIcons() async {
     try {
@@ -1523,37 +1423,6 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
               );
             },
           ),
-          // Rotation button
-          Tooltip(
-            message: _mapBearing == 0.0
-                ? 'Rotate Map'
-                : 'Rotate Map (${_mapBearing.round()}°)',
-            child: IconButton(
-              icon: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Transform.rotate(
-                    angle: -_mapBearing * (3.141592653589793 / 180),
-                    child: const Icon(Icons.navigation),
-                  ),
-                  if (_mapBearing != 0.0)
-                    Positioned(
-                      bottom: 0,
-                      right: 0,
-                      child: Container(
-                        width: 8,
-                        height: 8,
-                        decoration: const BoxDecoration(
-                          color: Colors.orange,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-              onPressed: _showRotationDialog,
-            ),
-          ),
           // Help button
           IconButton(
             icon: const Icon(Icons.help_outline),
@@ -1662,12 +1531,6 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                           debugPrint('Error in onMapCreated: $e');
                         }
                       },
-                      onCameraMove: (position) {
-                        _center = position.target;
-                        if ((_mapBearing - position.bearing).abs() > 0.1) {
-                          setState(() => _mapBearing = position.bearing);
-                        }
-                      },
                       initialCameraPosition:
                           CameraPosition(target: _center, zoom: 12),
                       polygons: _polygons,
@@ -1692,11 +1555,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                           !_isDraggingWorkAreasBox &&
                           !_isResizingWorkAreasBox &&
                           !selectionIsInteracting,
-                      rotateGesturesEnabled: !_isDraggingInfoBox &&
-                          !_isResizingInfoBox &&
-                          !_isDraggingWorkAreasBox &&
-                          !_isResizingWorkAreasBox &&
-                          !selectionIsInteracting,
+                      rotateGesturesEnabled: false,
                       tiltGesturesEnabled: false,
                     ),
                     // Loading overlay
