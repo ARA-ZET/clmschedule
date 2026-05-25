@@ -520,6 +520,187 @@
       }
     }, 5000);
   </script>
+
+  <!-- Browser capture helpers used by PrintMapView (WASM-compatible).
+       Exposes:
+         window.clmCaptureBrowserViewportArea(left, top, w, h)
+           -> uses navigator.mediaDevices.getDisplayMedia (asks user to pick tab)
+         window.clmCaptureDomArea(left, top, w, h)
+           -> uses html-to-image (loaded on demand) — no prompt
+         window.clmIsScreenCaptureSupported()
+         window.clmIsDomCaptureSupported() -->
+  <script>
+    (function () {
+      if (window.clmCaptureBrowserViewportArea && window.clmCaptureDomArea) return;
+
+      window.clmIsScreenCaptureSupported = function () {
+        return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+      };
+
+      window.clmIsDomCaptureSupported = function () {
+        return true; // html-to-image is loaded on demand
+      };
+
+      // ----- Screen capture (getDisplayMedia) -----
+      window.clmCaptureBrowserViewportArea = async function (left, top, width, height) {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+          throw new Error('Screen capture is not supported by this browser.');
+        }
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            displaySurface: 'browser',
+            preferCurrentTab: true,
+            selfBrowserSurface: 'include',
+            surfaceSwitching: 'exclude'
+          },
+          audio: false
+        });
+
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.srcObject = stream;
+        video.style.cssText =
+          'position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;opacity:0;pointer-events:none;';
+        document.body.appendChild(video);
+
+        try {
+          await new Promise(function (resolve, reject) {
+            const t = setTimeout(function () {
+              reject(new Error('Timed out waiting for browser capture.'));
+            }, 10000);
+            video.onloadedmetadata = function () { clearTimeout(t); resolve(); };
+            video.onerror = function () { clearTimeout(t); reject(new Error('Video error during capture.')); };
+          });
+          await video.play().catch(function () {});
+
+          const videoW = video.videoWidth;
+          const videoH = video.videoHeight;
+          const dpr = window.devicePixelRatio || 1;
+          const innerW = window.innerWidth;
+          const innerH = window.innerHeight;
+
+          // Map CSS-pixel rect → video-pixel rect.
+          const scaleX = videoW / (innerW * dpr) * dpr;
+          const scaleY = videoH / (innerH * dpr) * dpr;
+          const sx = Math.max(0, Math.round(left * scaleX));
+          const sy = Math.max(0, Math.round(top * scaleY));
+          const sw = Math.max(1, Math.round(width * scaleX));
+          const sh = Math.max(1, Math.round(height * scaleY));
+
+          const canvas = document.createElement('canvas');
+          canvas.width = sw;
+          canvas.height = sh;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+          return canvas.toDataURL('image/png');
+        } finally {
+          try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+          if (video.parentNode) video.parentNode.removeChild(video);
+        }
+      };
+
+      // ----- DOM capture (html-to-image) -----
+      let htiPromise = null;
+      function ensureHtmlToImage() {
+        if (window.htmlToImage) return Promise.resolve(window.htmlToImage);
+        if (htiPromise) return htiPromise;
+        htiPromise = new Promise(function (resolve, reject) {
+          const s = document.createElement('script');
+          s.src = 'https://cdn.jsdelivr.net/npm/html-to-image@1.11.13/dist/html-to-image.min.js';
+          s.async = true;
+          s.onload = function () { resolve(window.htmlToImage); };
+          s.onerror = function () { reject(new Error('Failed to load html-to-image library.')); };
+          document.head.appendChild(s);
+        });
+        return htiPromise;
+      }
+
+      window.clmCaptureDomArea = async function (left, top, width, height) {
+        const hti = await ensureHtmlToImage();
+
+        // Force-snapshot every WebGL canvas on the page into a 2D canvas
+        // overlay so html-to-image can serialize the pixels. WebGL canvases
+        // normally come back blank because `preserveDrawingBuffer` is false.
+        const overlays = [];
+        function snapshotWebGLCanvases(doc) {
+          if (!doc) return;
+          const canvases = doc.querySelectorAll('canvas');
+          canvases.forEach(function (cnv) {
+            try {
+              const gl = cnv.getContext('webgl2', { preserveDrawingBuffer: true }) ||
+                         cnv.getContext('webgl', { preserveDrawingBuffer: true }) ||
+                         cnv.getContext('experimental-webgl', { preserveDrawingBuffer: true });
+              if (!gl) return;
+              // Copy current framebuffer to a 2D canvas placed over the original.
+              const snap = document.createElement('canvas');
+              snap.width = cnv.width;
+              snap.height = cnv.height;
+              const ctx = snap.getContext('2d');
+              try {
+                ctx.drawImage(cnv, 0, 0);
+              } catch (e) {
+                return;
+              }
+              const rect = cnv.getBoundingClientRect();
+              snap.style.cssText =
+                'position:fixed;left:' + rect.left + 'px;top:' + rect.top +
+                'px;width:' + rect.width + 'px;height:' + rect.height +
+                'px;pointer-events:none;z-index:2147483646;';
+              document.body.appendChild(snap);
+              overlays.push(snap);
+            } catch (e) {}
+          });
+          // Recurse into same-origin iframes (the Google Maps element view).
+          const frames = doc.querySelectorAll('iframe');
+          frames.forEach(function (f) {
+            try {
+              snapshotWebGLCanvases(f.contentDocument);
+            } catch (e) {}
+          });
+        }
+
+        snapshotWebGLCanvases(document);
+        // Allow the overlays to lay out.
+        await new Promise(function (r) { requestAnimationFrame(function () { r(); }); });
+
+        let fullDataUrl;
+        try {
+          fullDataUrl = await hti.toPng(document.body, {
+            cacheBust: true,
+            pixelRatio: window.devicePixelRatio || 1,
+            skipFonts: false,
+          });
+        } finally {
+          overlays.forEach(function (n) {
+            if (n.parentNode) n.parentNode.removeChild(n);
+          });
+        }
+
+        return new Promise(function (resolve, reject) {
+          const img = new Image();
+          img.onload = function () {
+            const dpr = window.devicePixelRatio || 1;
+            const sx = Math.max(0, Math.round(left * dpr));
+            const sy = Math.max(0, Math.round(top * dpr));
+            const sw = Math.max(1, Math.round(width * dpr));
+            const sh = Math.max(1, Math.round(height * dpr));
+            const canvas = document.createElement('canvas');
+            canvas.width = sw;
+            canvas.height = sh;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+            resolve(canvas.toDataURL('image/png'));
+          };
+          img.onerror = function () {
+            reject(new Error('Failed to decode captured image.'));
+          };
+          img.src = fullDataUrl;
+        });
+      };
+    })();
+  </script>
   
 
 

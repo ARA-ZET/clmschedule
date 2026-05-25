@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/collection_job.dart';
@@ -9,6 +10,7 @@ import '../models/distributor.dart';
 import '../models/job.dart';
 import '../services/dropsheet_service.dart';
 import '../services/firestore_service.dart';
+import 'schedule_provider.dart';
 
 /// Synthetic section id used for distributors auto-imported from the
 /// schedule that haven't yet been assigned to a driver. Lives at the
@@ -42,7 +44,7 @@ final dropsheetServiceRiverpod =
     riverpod.Provider<DropsheetService>((ref) => DropsheetService());
 
 final dropsheetRiverpod = riverpod.ChangeNotifierProvider<DropsheetProvider>(
-  (ref) => DropsheetProvider(ref.read(dropsheetServiceRiverpod)),
+  (ref) => DropsheetProvider(ref.read(dropsheetServiceRiverpod), ref),
 );
 
 /// Manages the currently selected day's dropsheet.
@@ -52,15 +54,31 @@ final dropsheetRiverpod = riverpod.ChangeNotifierProvider<DropsheetProvider>(
 /// All mutations write the full day document back to Firestore.
 class DropsheetProvider extends ChangeNotifier {
   final DropsheetService _service;
+  final riverpod.Ref? _ref;
   StreamSubscription? _sub;
+  StreamSubscription<List<Job>>? _scheduleSub;
+  Timer? _autoSyncDebounce;
+  bool _dayReady = false;
+  List<Job> _pendingJobs = const [];
 
   DateTime _date = _today();
   DropsheetDay _day = DropsheetDay(date: _today());
   bool _isLoading = false;
   String? _error;
 
-  DropsheetProvider(this._service) {
+  DropsheetProvider(this._service, [this._ref]) {
     _listen();
+  }
+
+  /// Return distributors from the already-streamed [ScheduleProvider] cache
+  /// when available, falling back to a cache-first one-shot fetch only when
+  /// the cache is empty (e.g. dropsheet flavor started before the schedule
+  /// stream delivered its first snapshot). This avoids re-reading the
+  /// `distributors` collection every time the dropsheet seeds / syncs.
+  Future<List<Distributor>> _resolveDistributors(FirestoreService fs) async {
+    final cached = _ref?.read(scheduleRiverpod).distributors;
+    if (cached != null && cached.isNotEmpty) return cached;
+    return fs.fetchDistributorsOnce();
   }
 
   DateTime get date => _date;
@@ -73,6 +91,31 @@ class DropsheetProvider extends ChangeNotifier {
     return DateTime(n.year, n.month, n.day);
   }
 
+  /// The next "planning day" after [from], skipping weekends so that
+  /// Friday's planning window reaches Monday.
+  ///
+  ///  - Mon → Tue, Tue → Wed, Wed → Thu, Thu → Fri
+  ///  - Fri → Mon (skip Sat/Sun)
+  ///  - Sat → Mon, Sun → Mon
+  static DateTime _nextPlanningDay(DateTime from) {
+    var d = from.add(const Duration(days: 1));
+    while (d.weekday == DateTime.saturday || d.weekday == DateTime.sunday) {
+      d = d.add(const Duration(days: 1));
+    }
+    return DateTime(d.year, d.month, d.day);
+  }
+
+  /// Whether [activeDate] falls inside the auto-sync window — today or
+  /// the next planning day (which on Friday/weekends is the upcoming
+  /// Monday). Any other date is treated as historical / future planning
+  /// and is left alone unless the user triggers a manual sync.
+  static bool _isAutoSyncEligible(DateTime activeDate) {
+    final today = _today();
+    if (activeDate == today) return true;
+    if (activeDate == _nextPlanningDay(today)) return true;
+    return false;
+  }
+
   void setDate(DateTime d) {
     final normalised = DateTime(d.year, d.month, d.day);
     if (normalised == _date) return;
@@ -83,62 +126,77 @@ class DropsheetProvider extends ChangeNotifier {
 
   void _listen() {
     _sub?.cancel();
+    _scheduleSub?.cancel();
+    _autoSyncDebounce?.cancel();
     _isLoading = true;
-    _sub = _service.streamDay(_date).listen(
+    _dayReady = false;
+    _pendingJobs = const [];
+    final activeDate = _date;
+    _sub = _service.streamDay(activeDate).listen(
       (day) {
+        if (activeDate != _date) return;
         _day = day;
         _isLoading = false;
         _error = null;
+        _dayReady = true;
         notifyListeners();
+        // Once we know the live day state, run any pending sync.
+        if (_pendingJobs.isNotEmpty || _day.sections.isEmpty) {
+          _scheduleAutoSync();
+        }
       },
       onError: (e) {
+        if (activeDate != _date) return;
         _error = e.toString();
         _isLoading = false;
         notifyListeners();
       },
     );
-    // First-open seeding: if the day's document doesn't exist yet, build
-    // an "Unassigned" section pre-filled with one drop-off task per
-    // distributor scheduled for that date.
-    _maybeAutoSeed(_date);
+
+    // Listen to the schedule's jobs for the active date and keep the
+    // dropsheet in sync with it (replaces the server-side
+    // `onScheduleDayChanged` trigger). Bursts of writes are debounced
+    // so we don't thrash the Pass-1/Pass-2 sync loop.
+    //
+    // Only auto-sync for the live planning window (today + next planning
+    // day, which is Monday when today is Fri/Sat/Sun). Historical and
+    // far-future dates can still be synced manually but won't subscribe
+    // to the schedule stream.
+    if (!_isAutoSyncEligible(activeDate)) return;
+    final fs = FirestoreService();
+    _scheduleSub = fs.streamJobsForDate(activeDate).listen(
+      (jobs) {
+        if (activeDate != _date) return;
+        _pendingJobs = jobs;
+        _scheduleAutoSync();
+      },
+      onError: (e) {
+        debugPrint('DropsheetProvider: schedule stream error: $e');
+      },
+    );
   }
 
-  /// If the day document doesn't yet exist in Firestore, build a fresh
-  /// dropsheet seeded from `/schedule/daily/{date}`: one drop-off task
-  /// per distributor scheduled, parked under a synthetic "Unassigned"
-  /// section that the user drags onto driver sections.
-  Future<void> _maybeAutoSeed(DateTime date) async {
+  void _scheduleAutoSync() {
+    // Wait until the dropsheet day stream has delivered its first
+    // snapshot — otherwise Pass 1 would run against the empty
+    // placeholder day and wipe live driver assignments.
+    if (!_dayReady) return;
+    // Skip dates outside the live planning window (today + next
+    // planning day). Manual `syncFromSchedule()` calls still work.
+    if (!_isAutoSyncEligible(_date)) return;
+    _autoSyncDebounce?.cancel();
+    _autoSyncDebounce = Timer(const Duration(milliseconds: 400), () {
+      final jobs = _pendingJobs;
+      if (jobs.isEmpty && _day.sections.isEmpty) return;
+      _autoSyncFromJobs(jobs);
+    });
+  }
+
+  Future<void> _autoSyncFromJobs(List<Job> jobs) async {
     try {
-      final exists = await _service.dayExists(date);
-      if (exists) return;
-      // Race-guard: don't seed for an old date if the user has moved on.
-      if (date != _date) return;
-      // Race-guard: if the stream listener has already delivered a
-      // non-empty day for this date (e.g. doc was created between the
-      // dayExists check and now, or the cloud auto-sync seeded it),
-      // bail out so we don't accidentally overwrite real allocations
-      // with a fresh "Unassigned" seed.
-      if (_day.sections.isNotEmpty) return;
-      final fs = FirestoreService();
-      final jobs = await fs.fetchJobsForDate(date);
-      if (jobs.isEmpty) return;
-      final distributors = await fs.fetchDistributorsOnce();
-      final byId = {for (final d in distributors) d.id: d};
-      final tasks = _buildDropOffTasks(jobs, byId);
-      if (tasks.isEmpty) return;
-      final unassigned = DropsheetDriverSection(
-        id: kUnassignedSectionId,
-        driverId: kUnassignedSectionId,
-        driverName: 'Unassigned stops',
-        tasks: tasks,
-      );
-      // Race-guard: another listener may have written meanwhile.
-      if (date != _date) return;
-      if (_day.sections.isNotEmpty) return;
-      await _save(_day.copyWith(sections: [unassigned, ..._day.sections]));
-    } catch (_) {
-      // Auto-seed failures are non-fatal — the user can still build the
-      // dropsheet manually.
+      await syncFromSchedule(jobs: jobs);
+    } catch (e) {
+      debugPrint('DropsheetProvider: auto-sync failed: $e');
     }
   }
 
@@ -157,21 +215,25 @@ class DropsheetProvider extends ChangeNotifier {
   ///   task migrated to a different job via the work-area fallback.
   ///
   /// Pass 2 — append genuinely new work areas to the Unassigned bucket.
-  Future<void> syncFromSchedule() async {
+  ///
+  /// When [jobs] is provided we skip the one-off Firestore read and use
+  /// the caller's pre-fetched list (the auto-sync path passes the live
+  /// schedule stream snapshot).
+  Future<void> syncFromSchedule({List<Job>? jobs}) async {
     final fs = FirestoreService();
-    final jobs = await fs.fetchJobsForDate(_date);
-    final distributors = await fs.fetchDistributorsOnce();
+    final scheduleJobs = jobs ?? await fs.fetchJobsForDate(_date);
+    final distributors = await _resolveDistributors(fs);
     final byId = {for (final d in distributors) d.id: d};
 
     // Build O(1) lookup maps from the live schedule. We also cache each
     // job's joined working-area string once here so later passes don't
     // recompute it 2-3 times per job.
-    final jobById = <String, Job>{for (final j in jobs) j.id: j};
+    final jobById = <String, Job>{for (final j in scheduleJobs) j.id: j};
     final workAreaByJobId = <String, String>{
-      for (final j in jobs) j.id: j.workingAreas.join(', '),
+      for (final j in scheduleJobs) j.id: j.workingAreas.join(', '),
     };
     final jobByWorkArea = <String, Job>{};
-    for (final j in jobs) {
+    for (final j in scheduleJobs) {
       final wa = workAreaByJobId[j.id]!;
       if (wa.isNotEmpty) jobByWorkArea[wa] = j;
     }
@@ -242,7 +304,8 @@ class DropsheetProvider extends ChangeNotifier {
     }).toList();
 
     // ── Pass 2: append genuinely new work areas to Unassigned ─────────────
-    final newJobs = jobs.where((j) => !consumedJobIds.contains(j.id)).toList();
+    final newJobs =
+        scheduleJobs.where((j) => !consumedJobIds.contains(j.id)).toList();
     List<DropsheetDriverSection> finalSections = updatedSections;
     if (newJobs.isNotEmpty) {
       final newTasks = _buildDropOffTasks(newJobs, byId);
@@ -268,7 +331,20 @@ class DropsheetProvider extends ChangeNotifier {
       }
     }
 
-    await _save(_day.copyWith(sections: finalSections));
+    await _save(_day.copyWith(sections: finalSections), skipIfUnchanged: true);
+  }
+
+  /// Returns true when [a] and [b] would serialise to the same Firestore
+  /// document. Used to suppress no-op writes from auto-sync, which would
+  /// otherwise bump `updatedAt` on every schedule snapshot and create an
+  /// infinite write loop with our own `streamDay` listener.
+  bool _sectionsEquivalent(
+      List<DropsheetDriverSection> a, List<DropsheetDriverSection> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    final encA = jsonEncode(a.map((s) => s.toMap()).toList());
+    final encB = jsonEncode(b.map((s) => s.toMap()).toList());
+    return encA == encB;
   }
 
   /// Creates one pick-up task for each assigned drop-off task that does not
@@ -488,7 +564,11 @@ class DropsheetProvider extends ChangeNotifier {
   // Mutations
   // ---------------------------------------------------------------------------
 
-  Future<void> _save(DropsheetDay updated) async {
+  Future<void> _save(DropsheetDay updated,
+      {bool skipIfUnchanged = false}) async {
+    if (skipIfUnchanged && _sectionsEquivalent(_day.sections, updated.sections)) {
+      return;
+    }
     _day = updated;
     notifyListeners();
     await _service.saveDay(updated);
@@ -595,7 +675,16 @@ class DropsheetProvider extends ChangeNotifier {
         );
     final next = _day.sections.map((s) {
       if (s.id != sectionId) return s;
-      return s.copyWith(tasks: [...s.tasks, newTask]);
+      // Keep the trailing "Arrive at office" task pinned to the bottom
+      // — new tasks are inserted just before it.
+      final trailingIdx =
+          s.tasks.indexWhere(DropsheetTask.isTrailing);
+      if (trailingIdx == -1) {
+        return s.copyWith(tasks: [...s.tasks, newTask]);
+      }
+      final tasks = [...s.tasks];
+      tasks.insert(trailingIdx, newTask);
+      return s.copyWith(tasks: tasks);
     }).toList();
     await _save(_day.copyWith(sections: next));
   }
@@ -809,7 +898,13 @@ class DropsheetProvider extends ChangeNotifier {
     final next = _day.sections.map((s) {
       if (s.id != sectionId) return s;
       final byId = {for (final t in s.tasks) t.id: t};
-      final mandatory = s.tasks.where((t) => t.isMandatory).toList();
+      // Mandatory tasks split into leading (inspect/pack/leave) and
+      // trailing (arrive). Trailing always renders last so the route
+      // visualisation ends at the office.
+      final leading = s.tasks
+          .where((t) => t.isMandatory && !DropsheetTask.isTrailing(t))
+          .toList();
+      final trailing = s.tasks.where(DropsheetTask.isTrailing).toList();
       final orderedRest = <DropsheetTask>[];
       for (final id in taskOrder) {
         final t = byId[id];
@@ -854,7 +949,7 @@ class DropsheetProvider extends ChangeNotifier {
           .toList();
 
       return s.copyWith(
-        tasks: [...mandatory, ...orderedRest, ...tail],
+        tasks: [...leading, ...orderedRest, ...tail, ...trailing],
         routePolyline: List.from(polyline),
         routeDistanceMeters: totalDistanceMeters,
         routeDurationSeconds: totalDurationSeconds,
@@ -883,16 +978,24 @@ class DropsheetProvider extends ChangeNotifier {
 
     final fromTasks = [...sections[fromIdx].tasks];
     if (fromIndex < 0 || fromIndex >= fromTasks.length) return;
+    // The trailing "Arrive at office" task is pinned — never move it.
+    if (DropsheetTask.isTrailing(fromTasks[fromIndex])) return;
     final task = fromTasks.removeAt(fromIndex);
 
     if (fromSectionId == toSectionId) {
-      final clamped = toIndex.clamp(0, fromTasks.length);
+      // Cap the insert position so nothing can land after a trailing task.
+      final trailingIdx = fromTasks.indexWhere(DropsheetTask.isTrailing);
+      final maxIdx =
+          trailingIdx == -1 ? fromTasks.length : trailingIdx;
+      final clamped = toIndex.clamp(0, maxIdx);
       fromTasks.insert(clamped, task);
       sections[fromIdx] = sections[fromIdx].copyWith(tasks: fromTasks);
     } else {
       sections[fromIdx] = sections[fromIdx].copyWith(tasks: fromTasks);
       final toTasks = [...sections[toIdx].tasks];
-      final clamped = toIndex.clamp(0, toTasks.length);
+      final trailingIdx = toTasks.indexWhere(DropsheetTask.isTrailing);
+      final maxIdx = trailingIdx == -1 ? toTasks.length : trailingIdx;
+      final clamped = toIndex.clamp(0, maxIdx);
       toTasks.insert(clamped, task);
       sections[toIdx] = sections[toIdx].copyWith(tasks: toTasks);
     }
@@ -903,6 +1006,8 @@ class DropsheetProvider extends ChangeNotifier {
   @override
   void dispose() {
     _sub?.cancel();
+    _scheduleSub?.cancel();
+    _autoSyncDebounce?.cancel();
     super.dispose();
   }
 }

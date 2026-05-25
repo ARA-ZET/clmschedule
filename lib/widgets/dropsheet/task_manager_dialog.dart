@@ -154,6 +154,7 @@ class _TaskManagerDialogState
                     DropsheetTaskType.inspect,
                     DropsheetTaskType.pack,
                     DropsheetTaskType.leave,
+                    DropsheetTaskType.arrive,
                   ])
                     _TaskTypeRow(
                       type: type,
@@ -378,7 +379,9 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
           decoration: InputDecoration(
             labelText: widget.type == DropsheetTaskType.leave
                 ? 'Preparation time at office (min)'
-                : 'Estimated time at stop (min)',
+                : widget.type == DropsheetTaskType.arrive
+                    ? 'Wrap-up time at office (min)'
+                    : 'Estimated time at stop (min)',
             helperText: 'Used by route optimisation. 0 = no default.',
             isDense: true,
             border: const OutlineInputBorder(),
@@ -387,6 +390,7 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
               .copyWith(serviceTimeMinutes: int.tryParse(v.trim()) ?? 0)),
         ),
         if (widget.type == DropsheetTaskType.leave) ..._leaveInfo(),
+        if (widget.type == DropsheetTaskType.arrive) ..._arriveInfo(),
         if (_showsJobList) ...[
           const SizedBox(height: 12),
           _JobTypeChips(
@@ -415,6 +419,7 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
         DropsheetTaskType.inspect,
         DropsheetTaskType.pack,
         DropsheetTaskType.leave,
+        DropsheetTaskType.arrive,
         DropsheetTaskType.dropOff,
         DropsheetTaskType.pickUp,
       }.contains(widget.type);
@@ -447,6 +452,33 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
         ),
       ];
 
+  List<Widget> _arriveInfo() => [
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: const Color(0xFFE3F2FD),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFF90CAF9)),
+          ),
+          child: const Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.info_outline, size: 16, color: Color(0xFF1565C0)),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'The Arrive task always returns to the Office address '
+                  'configured above and is pinned to the bottom of every '
+                  'driver section. It cannot be deleted or reordered.',
+                  style: TextStyle(fontSize: 11, color: Color(0xFF1565C0)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ];
+
   IconData _iconFor(DropsheetTaskType t) {
     switch (t) {
       case DropsheetTaskType.inspect:
@@ -455,6 +487,8 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
         return Icons.inventory_outlined;
       case DropsheetTaskType.leave:
         return Icons.logout_outlined;
+      case DropsheetTaskType.arrive:
+        return Icons.home_outlined;
       case DropsheetTaskType.dropOff:
         return Icons.local_shipping_outlined;
       case DropsheetTaskType.pickUp:

@@ -1034,14 +1034,14 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                                                         BoxDecoration(
                                                                       color: isOccupied
                                                                           ? conflictColor
-                                                                              .withOpacity(0.1)
+                                                                              .withValues(alpha: 0.1)
                                                                           : null,
                                                                       borderRadius:
                                                                           BorderRadius.circular(
                                                                               4),
                                                                       border: isOccupied
                                                                           ? Border.all(
-                                                                              color: conflictColor.withOpacity(0.3))
+                                                                              color: conflictColor.withValues(alpha: 0.3))
                                                                           : null,
                                                                     ),
                                                                     child:

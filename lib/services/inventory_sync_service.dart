@@ -28,11 +28,10 @@ class InventorySyncService {
     required InventoryService firebaseService,
     required InventoryLocalStorage localStorage,
     required ImageCacheService imageCacheService,
-    required ConnectivityService connectivityService,
+    required this.connectivityService,
   })  : _firebaseService = firebaseService,
         _localStorage = localStorage,
-        _imageCacheService = imageCacheService,
-        connectivityService = connectivityService;
+        _imageCacheService = imageCacheService;
 
   /// Initialize sync service and set up connectivity listener
   Future<void> initialize() async {

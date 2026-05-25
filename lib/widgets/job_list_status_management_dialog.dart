@@ -322,7 +322,7 @@ class _JobListStatusManagementDialogState
                                   border: Border.all(
                                     color: isSelected
                                         ? Colors.black
-                                        : Colors.grey.withOpacity(0.3),
+                                        : Colors.grey.withValues(alpha: 0.3),
                                     width: isSelected ? 3 : 1,
                                   ),
                                 ),
@@ -373,7 +373,7 @@ class _JobListStatusManagementDialogState
                     padding: const EdgeInsets.all(8),
                     margin: const EdgeInsets.only(bottom: 16),
                     decoration: BoxDecoration(
-                      color: Colors.red.withOpacity(0.1),
+                      color: Colors.red.withValues(alpha: 0.1),
                       border: Border.all(color: Colors.red),
                       borderRadius: BorderRadius.circular(4),
                     ),

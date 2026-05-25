@@ -190,14 +190,12 @@ Future<({Uint8List bytes, Offset anchor})> _renderPinBytes({
   // gets cropped when the PNG is encoded. Buffer is generous enough to
   // cover the worst-case wasm font-fallback discrepancy.
   const double textMeasureBuffer = 12.0;
-  final double rawInnerW = primaryTp == null
-      ? 0.0
-      : math.max(
-          primaryTp.width,
-          secondaryTp?.width ?? 0.0,
-        );
+  // Uniform badge width: every labelled marker is rendered at exactly
+  // [maxBadgeTextW] regardless of the actual measured text width, so all
+  // markers on the day planner share the same footprint. Text longer
+  // than [maxBadgeTextW] is ellipsis-truncated by the TextPainter above.
   final double badgeInnerW =
-      primaryTp == null ? 0.0 : rawInnerW + textMeasureBuffer;
+      primaryTp == null ? 0.0 : maxBadgeTextW + textMeasureBuffer;
   final double badgeW = hasLabel ? (labelPadH * 2 + badgeInnerW) : 0.0;
   final double sideExt = hasLabel ? (outerR - 2) + gap + badgeW : 0.0;
   // Pin circle is LEFT-aligned in the bitmap: only `outerR + pad` of empty

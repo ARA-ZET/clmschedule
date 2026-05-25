@@ -82,11 +82,34 @@ class PointMarkerIcons {
 
     final picture = recorder.endRecording();
     final img = await picture.toImage(_size.toInt(), _size.toInt());
+    debugPrint(
+        '[WASM-DEBUG] PointMarkerIcons.$cat: img=${img.width}x${img.height}');
     final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
+    debugPrint('[WASM-DEBUG] PointMarkerIcons.$cat: png bytes='
+        '${bytes?.lengthInBytes ?? 0} (null=${bytes == null})');
     if (bytes == null) {
       return BitmapDescriptor.defaultMarkerWithHue(
           HSLColor.fromColor(cat.color).hue);
     }
-    return BitmapDescriptor.bytes(bytes.buffer.asUint8List());
+    final u8 = bytes.buffer.asUint8List();
+    // Validate PNG magic (skwasm/WASM has been observed producing empty/bad PNG).
+    final isValidPng = u8.length >= 8 &&
+        u8[0] == 0x89 &&
+        u8[1] == 0x50 &&
+        u8[2] == 0x4E &&
+        u8[3] == 0x47;
+    if (!isValidPng) {
+      debugPrint(
+          '[WASM-DEBUG] PointMarkerIcons.$cat: \u26a0\ufe0f INVALID PNG, '
+          'first8=${u8.take(8).map((b) => b.toRadixString(16)).toList()} '
+          '\u2014 falling back to defaultMarkerWithHue');
+      return BitmapDescriptor.defaultMarkerWithHue(
+          HSLColor.fromColor(cat.color).hue);
+    }
+    return BitmapDescriptor.bytes(
+      u8,
+      width: _size,
+      height: _size,
+    );
   }
 }

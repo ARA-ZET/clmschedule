@@ -165,7 +165,7 @@ class _UnfinishedWorkAreasPanelState
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.08),
+            color: Colors.black.withValues(alpha: 0.08),
             blurRadius: 8,
             offset: const Offset(-2, 0),
           ),
@@ -245,7 +245,7 @@ class _UnfinishedWorkAreasPanelState
                   duration: const Duration(milliseconds: 200),
                   decoration: BoxDecoration(
                     color: isHovering
-                        ? Colors.orange.withOpacity(0.15)
+                        ? Colors.orange.withValues(alpha: 0.15)
                         : Colors.transparent,
                     border: isHovering
                         ? Border.all(color: Colors.orange, width: 2)

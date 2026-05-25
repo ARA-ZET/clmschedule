@@ -5,11 +5,13 @@ import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/schedule.dart';
 import '../models/work_area.dart';
+import '../models/work_suburb.dart';
 import '../models/custom_polygon.dart';
 import '../services/firestore_service.dart';
+import 'dropsheet_provider.dart';
 
 final scheduleRiverpod = riverpod.ChangeNotifierProvider<ScheduleProvider>(
-  (ref) => ScheduleProvider(),
+  (ref) => ScheduleProvider(ref: ref),
 );
 
 class ScheduleProvider extends ChangeNotifier {
@@ -19,6 +21,7 @@ class ScheduleProvider extends ChangeNotifier {
   List<Job> _currentMonthJobs = [];
   List<Job> _nextMonthJobs = [];
   List<WorkArea> _workAreas = [];
+  List<WorkSuburb> _workSuburbs = [];
   DateTime _currentMonth = DateTime.now();
 
   // Cached combined jobs list — invalidated when either month's data changes
@@ -143,12 +146,14 @@ class ScheduleProvider extends ChangeNotifier {
   StreamSubscription<List<Job>>? _currentMonthJobsSubscription;
   StreamSubscription<List<Job>>? _nextMonthJobsSubscription;
   StreamSubscription<List<WorkArea>>? _workAreasSubscription;
+  StreamSubscription<List<WorkSuburb>>? _workSuburbsSubscription;
 
   // Getters
   List<Distributor> get distributors => _distributors;
   List<Job> get jobs =>
       _cachedJobs ??= [..._currentMonthJobs, ..._nextMonthJobs];
   List<WorkArea> get workAreas => _workAreas;
+  List<WorkSuburb> get workSuburbs => _workSuburbs;
   Schedule get schedule =>
       _cachedSchedule ??= Schedule(distributors: _distributors, jobs: jobs);
 
@@ -187,8 +192,36 @@ class ScheduleProvider extends ChangeNotifier {
   // Helper method to check if the next month has any jobs
   bool get hasJobsInNextMonth => _nextMonthJobs.isNotEmpty;
 
-  ScheduleProvider({FirestoreService? firestoreService})
-      : _firestoreService = firestoreService ?? FirestoreService();
+  ScheduleProvider({FirestoreService? firestoreService, riverpod.Ref? ref})
+      : _firestoreService = firestoreService ?? FirestoreService(),
+        _ref = ref;
+
+  /// Optional riverpod ref so the provider can notify peer providers
+  /// (currently the dropsheet) about distributor coordinate changes.
+  final riverpod.Ref? _ref;
+
+  /// Push dropOff/pickUp coordinate changes for [updatedJob] into the
+  /// dropsheet provider so any task linked to this job updates its
+  /// cached `lat`/`lng` immediately. Safe to call from any screen — the
+  /// dropsheet ignores the call when no matching task exists.
+  void _notifyDropsheetOfCoordChanges(Job? previous, Job updatedJob) {
+    final ref = _ref;
+    if (ref == null) return;
+    final prevDrop = previous?.dropOffPoint;
+    final newDrop = updatedJob.dropOffPoint;
+    final dropChanged = !_sameLatLng(prevDrop, newDrop);
+    final prevPick = previous?.pickUpPoint;
+    final newPick = updatedJob.pickUpPoint;
+    final pickChanged = !_sameLatLng(prevPick, newPick);
+    if (!dropChanged && !pickChanged) return;
+    final dropsheet = ref.read(dropsheetRiverpod);
+    if (dropChanged) {
+      unawaited(dropsheet.refreshDropOffCoords(updatedJob.id, newDrop));
+    }
+    if (pickChanged) {
+      unawaited(dropsheet.refreshPickUpCoords(updatedJob.id, newPick));
+    }
+  }
   // Don't initialize streams in constructor - let it be done async
 
   // Initialize streams asynchronously without blocking (full app)
@@ -249,6 +282,17 @@ class ScheduleProvider extends ChangeNotifier {
       },
       onError: (error) {
         debugPrint('ScheduleProvider: WorkAreas stream error: $error');
+      },
+    );
+
+    // Listen to work suburbs single-document stream
+    _workSuburbsSubscription = _firestoreService.streamWorkSuburbs().listen(
+      (suburbs) {
+        _workSuburbs = suburbs;
+        notifyListeners();
+      },
+      onError: (error) {
+        debugPrint('ScheduleProvider: WorkSuburbs stream error: $error');
       },
     );
   }
@@ -493,13 +537,32 @@ class ScheduleProvider extends ChangeNotifier {
   }
 
   Future<void> updateJob(Job job) async {
+    final normalized = _normalizeDropOffPoint(job);
+    // Optimistic UI: surface the change locally before the Firestore
+    // round-trip so the calling screen (work-areas map, print map, day
+    // planner, etc.) reflects the new state instantly. The Firestore
+    // stream listener will reconcile if the server-side write differs.
+    Job? previous;
+    for (final j in jobs) {
+      if (j.id == normalized.id) {
+        previous = j;
+        break;
+      }
+    }
+    if (previous != null) {
+      _optimisticUpdateJob(normalized);
+    }
     try {
-      final normalized = _normalizeDropOffPoint(job);
-      // Update Firestore directly - stream will handle local state update
       await _firestoreService.updateJob(normalized, normalized.date);
+      _notifyDropsheetOfCoordChanges(previous, normalized);
       debugPrint('Successfully updated job ${job.id}');
     } catch (e) {
       debugPrint('Error updating job: $e');
+      // Roll back the optimistic update so the UI returns to the last
+      // known-good state instead of showing the failed write.
+      if (previous != null) {
+        _optimisticUpdateJob(previous);
+      }
       rethrow;
     }
   }
@@ -574,6 +637,7 @@ class ScheduleProvider extends ChangeNotifier {
     final normalized = _normalizeDropOffPoint(modifiedJob);
     // Optimistic UI update — show change instantly before Firestore write
     _optimisticUpdateJob(normalized);
+    _notifyDropsheetOfCoordChanges(originalJob, normalized);
 
     // Check if we're moving the job to a different date
     if (!_isSameDay(originalJob.date, normalized.date)) {
@@ -721,6 +785,7 @@ class ScheduleProvider extends ChangeNotifier {
     _currentMonthJobsSubscription?.cancel();
     _nextMonthJobsSubscription?.cancel();
     _workAreasSubscription?.cancel();
+    _workSuburbsSubscription?.cancel();
     super.dispose();
   }
 }

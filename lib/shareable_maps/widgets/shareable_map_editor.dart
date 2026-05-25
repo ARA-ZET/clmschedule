@@ -11,6 +11,7 @@ import 'package:web/web.dart' as web show document;
 import '../../config/flavor_config.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/work_area.dart';
+import '../../models/work_suburb.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../providers/unfinished_work_areas_provider.dart';
@@ -20,12 +21,14 @@ import '../services/map_bitmap_cache.dart';
 import '../services/map_link_service.dart';
 import '../adapters/firestore_adapter.dart';
 import '../adapters/work_area_adapter.dart';
+import '../adapters/work_suburbs_adapter.dart';
 import 'map_layers_sidebar.dart';
 import 'map_drawing_toolbar.dart';
 import 'map_import_dialog.dart';
 import 'shareable_maps_gallery.dart';
 import 'work_area_picker_panel.dart';
 import 'work_area_table_panel.dart';
+import 'work_suburbs_table_panel.dart';
 import '../../widgets/cloud_file_manager_screen.dart';
 import '../../track_editor/pages/track_editor_screen.dart';
 
@@ -90,12 +93,15 @@ class _ShareableMapEditorState
           final caps = provider.capabilities;
           final isWorkAreaEditor =
               provider.adapter is WorkAreaCollectionAdapter;
+          final isWorkSuburbsEditor = provider.adapter is WorkSuburbsAdapter;
           return Stack(
             children: [
               const MapViewWidget(),
               if (caps.canManageLayers) const MapSidebarWidget(),
               if (isWorkAreaEditor && !mobileViewer)
                 const _WorkAreaTableSidebar(),
+              if (isWorkSuburbsEditor && !mobileViewer)
+                const _WorkSuburbsTableSidebar(),
               if (caps.canDraw && !caps.readOnly && canEditInThisView)
                 const MapDrawingToolbarWidget(),
               if (!caps.readOnly && canEditInThisView)
@@ -942,6 +948,14 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   // zoom/bounds/visibility/selection change.
   final Map<String, List<Marker>> _largeLayerMarkerCache = {};
   final Map<String, String> _largeLayerCacheKey = {};
+  // Stable polygon and polyline set caches.
+  // GoogleMap.didUpdateWidget compares polygon/polyline sets with !=
+  // (Dart Set identity), so reusing the same object reference skips the
+  // entire JS-bridge diff on unrelated provider notifies.
+  Set<Polygon>? _stablePolygons;
+  String? _stablePolygonsKey;
+  Set<Polyline>? _stablePolylines;
+  String? _stablePolylinesKey;
   // Last pointer-down position in local widget coordinates.
   // Used to anchor the info window at the tapped location for polygon/polyline.
   Offset? _lastPointerDown;
@@ -961,6 +975,8 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
 
   /// Data to display in the hover tooltip (null when not hovering a polygon).
   _HoverTooltipData? _hoverTooltipData;
+  // Throttle: timestamp of last hover hit-test execution.
+  DateTime? _lastHoverTime;
 
   @override
   void initState() {
@@ -1046,10 +1062,17 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     final editingPoints = provider.editingPoints!;
     final markers = <Marker>{};
 
-    final vertexIcon = _bitmapCache.vertex ??
+    final cacheVertex = _bitmapCache.vertex;
+    final cacheMidpoint = _bitmapCache.midpoint;
+    final vertexIcon = cacheVertex ??
         BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
-    final midpointIcon = _bitmapCache.midpoint ??
+    final midpointIcon = cacheMidpoint ??
         BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
+    debugPrint('[WASM-DEBUG] _buildEditingMarkers: editingPoints='
+        '${editingPoints.length} '
+        'cacheLoaded=${_bitmapCache.isLoaded} '
+        'vertexIcon=${cacheVertex == null ? "FALLBACK" : "cached"} '
+        'midpointIcon=${cacheMidpoint == null ? "FALLBACK" : "cached"}');
 
     final minPoints = provider.isEditingPolygon ? 3 : 2;
 
@@ -1116,12 +1139,19 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     final canClose =
         provider.drawingMode == DrawingMode.polygon && points.length >= 3;
 
-    final normalIcon = _bitmapCache.vertex ??
+    final cacheVertex = _bitmapCache.vertex;
+    final cacheFirst = _bitmapCache.firstVertex;
+    final normalIcon = cacheVertex ??
         BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
     final firstIcon = canClose
-        ? (_bitmapCache.firstVertex ??
+        ? (cacheFirst ??
             BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen))
         : normalIcon;
+    debugPrint('[WASM-DEBUG] _buildDrawingMarkers: points=${points.length} '
+        'mode=${provider.drawingMode} canClose=$canClose '
+        'cacheLoaded=${_bitmapCache.isLoaded} '
+        'normalIcon=${cacheVertex == null ? "FALLBACK" : "cached"} '
+        'firstIcon=${cacheFirst == null ? "FALLBACK" : "cached"}');
 
     return points.asMap().entries.map((entry) {
       final index = entry.key;
@@ -1342,6 +1372,29 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     return total;
   }
 
+  /// Closest distance from [p] to the line segment [a]→[b] in km.
+  static double _distToSegmentKm(LatLng p, LatLng a, LatLng b) {
+    final dx = b.longitude - a.longitude;
+    final dy = b.latitude - a.latitude;
+    if (dx == 0 && dy == 0) return _haversineKm(p, a);
+    final t =
+        ((p.longitude - a.longitude) * dx + (p.latitude - a.latitude) * dy) /
+            (dx * dx + dy * dy);
+    final clamped = t.clamp(0.0, 1.0);
+    return _haversineKm(
+        p, LatLng(a.latitude + clamped * dy, a.longitude + clamped * dx));
+  }
+
+  /// Minimum distance from [p] to any segment of the polyline [pts] in km.
+  static double _minDistToPolylineKm(LatLng p, List<LatLng> pts) {
+    double best = double.infinity;
+    for (int i = 0; i < pts.length - 1; i++) {
+      final d = _distToSegmentKm(p, pts[i], pts[i + 1]);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
   /// Approximate polygon area in km² using shoelace + unit conversion
   static double _polygonAreaKm2(List<LatLng> points) {
     if (points.length < 3) return 0;
@@ -1407,6 +1460,14 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       }
       return;
     }
+    // Throttle polygon hit-testing to ~25 fps — avoids O(n·v) work on
+    // every raw pointer-move event for maps with many complex polygons.
+    final hoverNow = DateTime.now();
+    if (_lastHoverTime != null &&
+        hoverNow.difference(_lastHoverTime!).inMilliseconds < 40) {
+      return;
+    }
+    _lastHoverTime = hoverNow;
 
     final hoverLatLng =
         _screenToLatLng(localPosition, _currentCamera!, _mapSize);
@@ -1465,67 +1526,161 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     final allLayersSorted = provider.layers.toList()
       ..sort((a, b) => a.order.compareTo(b.order));
 
-    // Combine completed polygons with drawing preview (or editing preview)
-    final polygons = <Polygon>{
-      ...visibleLayers.expand((layer) => layer.getGoogleMapsPolygons(
-            selectedElementId: provider.selectedElementId,
-            editingElementId: provider.editingElementId,
-            onTap: provider.isEditingVertices
-                ? null
-                : (polygonId) =>
-                    _handlePolygonTap(context, provider, polygonId),
-          )),
-      if (provider.isEditingVertices && provider.getEditingPolygon() != null)
-        provider.getEditingPolygon()!,
-    };
+    // Pre-watch overlay schedule data so Riverpod tracks the dependency on
+    // every build, including cache-hit builds where the inner if-blocks skip.
+    final overlaySchedule = (provider.isWorkAreaPickerVisible ||
+            provider.showWorkAreasOverlay ||
+            provider.showSuburbsOverlay)
+        ? ref.watch(scheduleRiverpod)
+        : null;
+    final overlayWorkAreas = overlaySchedule?.workAreas ?? const <WorkArea>[];
+    final overlaySuburbs = overlaySchedule?.workSuburbs ?? const <WorkSuburb>[];
 
-    // When work area picker is visible, overlay ghost polygons for all
-    // unimported work areas so the user can tap them on the map to add.
-    if (provider.isWorkAreaPickerVisible) {
-      final workAreas = ref.watch(scheduleRiverpod).workAreas;
-      for (final wa in workAreas) {
-        if (provider.isWorkAreaImported(wa.name)) continue;
-        if (wa.polygonPoints.length < 3) continue;
-        polygons.add(Polygon(
-          polygonId: PolygonId('preview_wa_${wa.name}'),
-          points: wa.polygonPoints,
-          strokeColor: Colors.blue.withValues(alpha: 0.7),
-          strokeWidth: 2,
-          fillColor: Colors.blue.withValues(alpha: 0.10),
-          consumeTapEvents: true,
-          onTap: () => _handlePreviewWorkAreaTap(context, provider, wa),
-        ));
+    // Stable polygon set cache.
+    // GoogleMap.didUpdateWidget uses != (Dart Set identity) so passing the
+    // same object reference on unchanged builds skips the entire JS diff.
+    final polyKeyBuf = StringBuffer()
+      ..write(provider.selectedElementId ?? '_')
+      ..write('|')
+      ..write(provider.editingElementId ?? '_')
+      ..write('|')
+      ..write(provider.isEditingVertices)
+      ..write('|')
+      ..write(provider.isWorkAreaPickerVisible)
+      ..write('|')
+      ..write(provider.showWorkAreasOverlay)
+      ..write('|')
+      ..write(provider.showSuburbsOverlay)
+      ..write('|wa${overlayWorkAreas.length}|sub${overlaySuburbs.length}|');
+    for (final l in visibleLayers) {
+      polyKeyBuf.write('${l.id}:${l.polygons.length},');
+    }
+    final polyKey = polyKeyBuf.toString();
+
+    final Set<Polygon> polygons;
+    if (polyKey == _stablePolygonsKey && _stablePolygons != null) {
+      polygons = _stablePolygons!;
+    } else {
+      final polys = <Polygon>{
+        ...visibleLayers.expand((layer) => layer.getGoogleMapsPolygons(
+              selectedElementId: provider.selectedElementId,
+              editingElementId: provider.editingElementId,
+              onTap: provider.isEditingVertices
+                  ? null
+                  : (polygonId) =>
+                      _handlePolygonTap(context, provider, polygonId),
+            )),
+        if (provider.isEditingVertices && provider.getEditingPolygon() != null)
+          provider.getEditingPolygon()!,
+      };
+      // Preview work areas (import picker).
+      if (provider.isWorkAreaPickerVisible) {
+        for (final wa in overlayWorkAreas) {
+          if (provider.isWorkAreaImported(wa.name)) continue;
+          if (wa.polygonPoints.length < 3) continue;
+          polys.add(Polygon(
+            polygonId: PolygonId('preview_wa_${wa.name}'),
+            points: wa.polygonPoints,
+            strokeColor: Colors.blue.withValues(alpha: 0.7),
+            strokeWidth: 2,
+            fillColor: Colors.blue.withValues(alpha: 0.10),
+            consumeTapEvents: true,
+            onTap: () => _handlePreviewWorkAreaTap(context, provider, wa),
+          ));
+        }
       }
+      // Work Areas overlay.
+      if (provider.showWorkAreasOverlay) {
+        for (final wa in overlayWorkAreas) {
+          if (wa.polygonPoints.length < 3) continue;
+          polys.add(Polygon(
+            polygonId: PolygonId('overlay_wa_${wa.name}'),
+            points: wa.polygonPoints,
+            strokeColor: Colors.blue.withValues(alpha: 0.85),
+            strokeWidth: 2,
+            fillColor: Colors.blue.withValues(alpha: 0.08),
+            consumeTapEvents: true,
+            onTap: () => _handleWorkAreaOverlayTap(context, provider, wa),
+          ));
+        }
+      }
+      // Work Suburbs overlay.
+      if (provider.showSuburbsOverlay) {
+        for (final suburb in overlaySuburbs) {
+          if (suburb.polygonPoints.length < 3) continue;
+          polys.add(Polygon(
+            polygonId: PolygonId('overlay_suburb_${suburb.id}'),
+            points: suburb.polygonPoints,
+            strokeColor: Colors.green.withValues(alpha: 0.85),
+            strokeWidth: 2,
+            fillColor: Colors.green.withValues(alpha: 0.08),
+            consumeTapEvents: true,
+            onTap: () => _handleSuburbOverlayTap(context, provider, suburb),
+          ));
+        }
+      }
+      polygons = polys;
+      _stablePolygons = polys;
+      _stablePolygonsKey = polyKey;
     }
 
-    // Combine completed polylines with drawing preview (or editing preview)
-    final polylines = <Polyline>{
-      ...visibleLayers.expand((layer) => layer.getGoogleMapsPolylines(
-            selectedElementId: provider.selectedElementId,
-            editingElementId: provider.editingElementId,
-            onTap: provider.isEditingVertices
-                ? null
-                : (polylineId) =>
-                    _handlePolylineTap(context, provider, polylineId),
-          )),
-      if (provider.isEditingVertices && provider.getEditingPolyline() != null)
-        provider.getEditingPolyline()!,
-      if (provider.getDrawingPolyline() != null) provider.getDrawingPolyline()!,
-      // Lasso-select preview: dashed orange polygon outline.
-      if (provider.isLassoSelectActive && provider.lassoPoints.length >= 2)
-        Polyline(
-          polylineId: const PolylineId('lasso_preview'),
-          points: [
-            ...provider.lassoPoints,
-            // Close the loop visually once we have ≥3 points.
-            if (provider.lassoPoints.length >= 3) provider.lassoPoints.first,
-          ],
-          color: Colors.orange.withValues(alpha: 0.85),
-          width: 3,
-          patterns: [PatternItem.dash(16), PatternItem.gap(8)],
-          geodesic: true,
-        ),
-    };
+    // Stable polyline set cache (same identity-equality trick as polygons).
+    final lineKeyBuf = StringBuffer()
+      ..write(provider.selectedElementId ?? '_')
+      ..write('|')
+      ..write(provider.editingElementId ?? '_')
+      ..write('|')
+      ..write(provider.isEditingVertices)
+      ..write('|')
+      ..write(provider.isDrawing)
+      ..write('|')
+      ..write(provider.drawingPoints.length)
+      ..write('|')
+      ..write(provider.isLassoSelectActive)
+      ..write('|')
+      ..write(provider.lassoPoints.length)
+      ..write('|');
+    for (final l in visibleLayers) {
+      lineKeyBuf.write('${l.id}:${l.polylines.length},');
+    }
+    final lineKey = lineKeyBuf.toString();
+
+    final Set<Polyline> polylines;
+    if (lineKey == _stablePolylinesKey && _stablePolylines != null) {
+      polylines = _stablePolylines!;
+    } else {
+      final lines = <Polyline>{
+        ...visibleLayers.expand((layer) => layer.getGoogleMapsPolylines(
+              selectedElementId: provider.selectedElementId,
+              editingElementId: provider.editingElementId,
+              onTap: provider.isEditingVertices
+                  ? null
+                  : (polylineId) =>
+                      _handlePolylineTap(context, provider, polylineId),
+            )),
+        if (provider.isEditingVertices && provider.getEditingPolyline() != null)
+          provider.getEditingPolyline()!,
+        if (provider.getDrawingPolyline() != null)
+          provider.getDrawingPolyline()!,
+        // Lasso-select preview: dashed orange polygon outline.
+        if (provider.isLassoSelectActive && provider.lassoPoints.length >= 2)
+          Polyline(
+            polylineId: const PolylineId('lasso_preview'),
+            points: [
+              ...provider.lassoPoints,
+              // Close the loop visually once we have ≥3 points.
+              if (provider.lassoPoints.length >= 3) provider.lassoPoints.first,
+            ],
+            color: Colors.orange.withValues(alpha: 0.85),
+            width: 3,
+            patterns: [PatternItem.dash(16), PatternItem.gap(8)],
+            geodesic: true,
+          ),
+      };
+      polylines = lines;
+      _stablePolylines = lines;
+      _stablePolylinesKey = lineKey;
+    }
 
     // Combine completed markers with drawing/editing markers
     final isMaps = FlavorConfig.instance.isMaps;
@@ -1639,10 +1794,13 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                   webGestureHandling:
                       ref.watch(mapGestureRiverpod).gestureHandling,
                   onTap: (position) {
+                    debugPrint('[MapTap] background tap at $position '
+                        'infoOpen=${provider.infoWindowData?.elementId}');
                     // Guard: ignore map tap when user is interacting with
                     // a UI overlay (gestures disabled by MouseRegion/Listener).
                     if (ref.read(mapGestureRiverpod).gestureHandling ==
                         WebGestureHandling.none) {
+                      debugPrint('[MapTap] BAIL — gestures disabled');
                       return;
                     }
                     // Guard: on web, both the Flutter overlay InkWell and
@@ -1654,6 +1812,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                                 .difference(_lastInfoWindowAction!)
                                 .inMilliseconds <
                             300) {
+                      debugPrint('[MapTap] BAIL — recent info-window action');
                       return;
                     }
                     // Dismiss hover tooltip on tap
@@ -1661,6 +1820,8 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                       _hoverTooltipData = null;
                       _hoverPosition = null;
                     });
+                    debugPrint(
+                        '[MapTap] dismissing info window + handleMapTap');
                     _dismissInfoWindow();
                     _handleMapTap(context, provider, position);
                   },
@@ -1762,12 +1923,25 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
 
   static void _handleMapTap(
       BuildContext context, ShareableMapProvider provider, LatLng position) {
+    debugPrint('[WASM-DEBUG] _handleMapTap: '
+        'pos=(${position.latitude.toStringAsFixed(5)},'
+        '${position.longitude.toStringAsFixed(5)}) '
+        'mode=${provider.drawingMode} '
+        'isDrawing=${provider.isDrawing} '
+        'isEditingVertices=${provider.isEditingVertices}');
     if (provider.isEditingVertices) {
-      if (provider.shouldIgnoreNextTap()) return;
+      if (provider.shouldIgnoreNextTap()) {
+        debugPrint(
+            '[WASM-DEBUG] _handleMapTap BAIL — shouldIgnoreNextTap (editing)');
+        return;
+      }
       provider.saveVertexEditing();
       return;
     }
-    if (provider.shouldIgnoreNextTap()) return;
+    if (provider.shouldIgnoreNextTap()) {
+      debugPrint('[WASM-DEBUG] _handleMapTap BAIL — shouldIgnoreNextTap');
+      return;
+    }
 
     switch (provider.drawingMode) {
       case DrawingMode.polygon:
@@ -1796,20 +1970,350 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     }
   }
 
-  Future<void> _handlePolygonTap(BuildContext context,
-      ShareableMapProvider provider, String polygonId) async {
-    // Ignore element taps when gestures are disabled (user is over a UI overlay)
+  void _handleWorkAreaOverlayTap(
+      BuildContext context, ShareableMapProvider provider, WorkArea wa) {
     if (ref.read(mapGestureRiverpod).gestureHandling ==
         WebGestureHandling.none) {
       return;
     }
-    // Guard against tap-through from the info window overlay on web.
-    // If the info window is open, dismiss it and swallow the tap.
     if (provider.infoWindowData != null) {
-      _dismissInfoWindow();
+      _cycleElementsAtTap(context, provider);
+      return;
+    }
+    final areaKm2 = _polygonAreaKm2(wa.polygonPoints);
+    final perimeterKm = _pathLengthKm(wa.polygonPoints, closed: true);
+    provider.openInfoWindow(InfoWindowData(
+      elementId: 'overlay_wa_${wa.name}',
+      layerId: '__overlay_work_areas__',
+      title: wa.name,
+      description: wa.description,
+      subtitle: '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}',
+      type: 'overlay_work_area',
+      anchor: _tapAnchor(_centroid(wa.polygonPoints)),
+      letterBoxEstimate: wa.letterBoxEstimate,
+    ));
+  }
+
+  void _handleSuburbOverlayTap(
+      BuildContext context, ShareableMapProvider provider, WorkSuburb suburb) {
+    if (ref.read(mapGestureRiverpod).gestureHandling ==
+        WebGestureHandling.none) {
+      return;
+    }
+    if (provider.infoWindowData != null) {
+      _cycleElementsAtTap(context, provider);
+      return;
+    }
+    final areaKm2 = _polygonAreaKm2(suburb.polygonPoints);
+    final perimeterKm = _pathLengthKm(suburb.polygonPoints, closed: true);
+    provider.openInfoWindow(InfoWindowData(
+      elementId: 'overlay_suburb_${suburb.id}',
+      layerId: '__overlay_suburbs__',
+      title: suburb.name,
+      description: suburb.description,
+      subtitle: '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}',
+      type: 'overlay_suburb',
+      anchor: _tapAnchor(_centroid(suburb.polygonPoints)),
+      letterBoxEstimate: suburb.letterBoxEstimate,
+    ));
+  }
+
+  /// True when the user is holding Shift, Ctrl, or Meta (Cmd on macOS) —
+  /// triggers "cycle through overlapping elements" on tap.
+  bool get _isCycleModifierHeld {
+    final keys = HardwareKeyboard.instance.logicalKeysPressed;
+    return keys.contains(LogicalKeyboardKey.shift) ||
+        keys.contains(LogicalKeyboardKey.shiftLeft) ||
+        keys.contains(LogicalKeyboardKey.shiftRight) ||
+        keys.contains(LogicalKeyboardKey.control) ||
+        keys.contains(LogicalKeyboardKey.controlLeft) ||
+        keys.contains(LogicalKeyboardKey.controlRight) ||
+        keys.contains(LogicalKeyboardKey.meta) ||
+        keys.contains(LogicalKeyboardKey.metaLeft) ||
+        keys.contains(LogicalKeyboardKey.metaRight);
+  }
+
+  /// When Shift/Ctrl/Meta is held and the user taps any element, collect ALL
+  /// polygons, polylines and markers at the tap screen position and open the
+  /// info window for the next element relative to the currently selected one.
+  void _cycleElementsAtTap(
+      BuildContext context, ShareableMapProvider provider) {
+    if (_lastPointerDown == null ||
+        _currentCamera == null ||
+        _mapSize == Size.zero) {
+      debugPrint('[Cycle] BAIL — lastPointerDown=$_lastPointerDown '
+          'camera=$_currentCamera mapSize=$_mapSize');
+      return;
+    }
+
+    final tapLatLng =
+        _screenToLatLng(_lastPointerDown!, _currentCamera!, _mapSize);
+
+    // Tap tolerance: ~20 screen pixels converted to km at current zoom.
+    final zoom = _currentCamera!.zoom;
+    final degsPerPx = 360.0 / (256.0 * math.pow(2, zoom));
+    final threshKm = 20.0 * degsPerPx * 111.32;
+
+    debugPrint('[Cycle] tapScreen=$_lastPointerDown '
+        'tapLatLng=(${tapLatLng.latitude.toStringAsFixed(5)},'
+        '${tapLatLng.longitude.toStringAsFixed(5)}) '
+        'zoom=${zoom.toStringAsFixed(1)} threshKm=${threshKm.toStringAsFixed(4)}');
+
+    // Collect all elements at the tap position.
+    // Order: markers (top) → polylines → polygons (bottom).
+    // Within each type, higher-order layers come first.
+    final visibleLayers = provider.layers.where((l) => l.isVisible).toList()
+      ..sort((a, b) => b.order.compareTo(a.order));
+
+    debugPrint('[Cycle] visibleLayers=${visibleLayers.map((l) => '\'${l.id}\' '
+        '(${l.polygons.length}poly ${l.polylines.length}line '
+        '${l.points.length}pt)').join(', ')}');
+
+    final hits = <({String elementId, String layerId, String type})>[];
+
+    for (final layer in visibleLayers) {
+      for (final pt in layer.points) {
+        if (_haversineKm(tapLatLng, pt.position) <= threshKm) {
+          hits.add((elementId: pt.id, layerId: layer.id, type: 'point'));
+        }
+      }
+    }
+    for (final layer in visibleLayers) {
+      for (final pl in layer.polylines) {
+        if (pl.points.length >= 2 &&
+            _minDistToPolylineKm(tapLatLng, pl.points) <= threshKm) {
+          hits.add((elementId: pl.id, layerId: layer.id, type: 'polyline'));
+        }
+      }
+    }
+    for (final layer in visibleLayers) {
+      for (int i = 0; i < layer.polygons.length; i++) {
+        final poly = layer.polygons[i];
+        if (poly.points.length >= 3 &&
+            _pointInPolygon(tapLatLng, poly.points)) {
+          hits.add((
+            elementId: '${layer.id}_polygon_$i',
+            layerId: layer.id,
+            type: 'polygon',
+          ));
+        }
+      }
+    }
+
+    // Overlay work areas (shown when showWorkAreasOverlay is active).
+    if (provider.showWorkAreasOverlay) {
+      final schedule = ref.read(scheduleRiverpod);
+      for (final wa in schedule.workAreas) {
+        if (wa.polygonPoints.length >= 3 &&
+            _pointInPolygon(tapLatLng, wa.polygonPoints)) {
+          hits.add((
+            elementId: 'overlay_wa_${wa.name}',
+            layerId: '__overlay_work_areas__',
+            type: 'overlay_work_area',
+          ));
+        }
+      }
+    }
+
+    // Overlay suburbs (shown when showSuburbsOverlay is active).
+    if (provider.showSuburbsOverlay) {
+      final schedule = ref.read(scheduleRiverpod);
+      for (final suburb in schedule.workSuburbs) {
+        if (suburb.polygonPoints.length >= 3 &&
+            _pointInPolygon(tapLatLng, suburb.polygonPoints)) {
+          hits.add((
+            elementId: 'overlay_suburb_${suburb.id}',
+            layerId: '__overlay_suburbs__',
+            type: 'overlay_suburb',
+          ));
+        }
+      }
+    }
+
+    // Preview work areas (shown when the work area picker is open).
+    if (provider.isWorkAreaPickerVisible) {
+      final schedule = ref.read(scheduleRiverpod);
+      for (final wa in schedule.workAreas) {
+        if (provider.isWorkAreaImported(wa.name)) continue;
+        if (wa.polygonPoints.length >= 3 &&
+            _pointInPolygon(tapLatLng, wa.polygonPoints)) {
+          hits.add((
+            elementId: 'preview_wa_${wa.name}',
+            layerId: '__preview_work_areas__',
+            type: 'preview_work_area',
+          ));
+        }
+      }
+    }
+
+    debugPrint('[Cycle] hits(${hits.length}): '
+        '${hits.map((h) => '${h.type}:${h.elementId}').join(', ')}');
+
+    if (hits.isEmpty) {
+      debugPrint('[Cycle] BAIL — no hits at tap point');
+      return;
+    }
+
+    // Advance past the currently selected element, wrapping around.
+    final currentId = provider.selectedElementId ?? '';
+    final currentIdx = hits.indexWhere((h) => h.elementId == currentId);
+    final nextIdx = (currentIdx + 1) % hits.length;
+    final hit = hits[nextIdx];
+
+    debugPrint('[Cycle] currentId=\'$currentId\' currentIdx=$currentIdx '
+        '→ nextIdx=$nextIdx hit=${hit.type}:${hit.elementId}');
+
+    if (hit.type == 'polygon') {
+      final match = RegExp(r'^(.+)_polygon_(\d+)$').firstMatch(hit.elementId);
+      if (match == null) return;
+      final layer =
+          provider.layers.where((l) => l.id == hit.layerId).firstOrNull;
+      final idx = int.parse(match.group(2)!);
+      if (layer == null || idx >= layer.polygons.length) return;
+      final polygon = layer.polygons[idx];
+      final areaKm2 = _polygonAreaKm2(polygon.points);
+      final perimeterKm = _pathLengthKm(polygon.points, closed: true);
+      provider.openInfoWindow(InfoWindowData(
+        elementId: hit.elementId,
+        layerId: hit.layerId,
+        title: polygon.name.isNotEmpty ? polygon.name : 'Unnamed Polygon',
+        description: polygon.description,
+        subtitle: '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}',
+        type: 'polygon',
+        anchor: _tapAnchor(_centroid(polygon.points)),
+        letterBoxEstimate: polygon.letterBoxEstimate,
+      ));
+    } else if (hit.type == 'polyline') {
+      final layer =
+          provider.layers.where((l) => l.id == hit.layerId).firstOrNull;
+      final found =
+          layer?.polylines.where((p) => p.id == hit.elementId).firstOrNull;
+      if (found == null) return;
+      String subtitle;
+      if (found.hasTrackMetadata) {
+        final parts = <String>[found.formattedDistance];
+        if (found.formattedTimeRange.isNotEmpty) {
+          parts.add(found.formattedTimeRange);
+        }
+        if (found.formattedDuration.isNotEmpty) {
+          parts.add(found.formattedDuration);
+        }
+        subtitle = parts.join(' · ');
+      } else {
+        subtitle = _fmtKm(_pathLengthKm(found.points));
+      }
+      provider.openInfoWindow(InfoWindowData(
+        elementId: hit.elementId,
+        layerId: hit.layerId,
+        title: found.name.isNotEmpty ? found.name : 'Unnamed Polyline',
+        description: found.description,
+        subtitle: subtitle,
+        type: 'polyline',
+        anchor: _tapAnchor(_centroid(found.points)),
+      ));
+    } else if (hit.type == 'point') {
+      final layer =
+          provider.layers.where((l) => l.id == hit.layerId).firstOrNull;
+      final found =
+          layer?.points.where((p) => p.id == hit.elementId).firstOrNull;
+      if (found == null) return;
+      provider.openInfoWindow(InfoWindowData(
+        elementId: hit.elementId,
+        layerId: hit.layerId,
+        title: found.name.isNotEmpty ? found.name : 'Unnamed Point',
+        description: found.description,
+        subtitle: '',
+        type: 'point',
+        anchor: found.position,
+      ));
+    } else if (hit.type == 'overlay_work_area') {
+      final schedule = ref.read(scheduleRiverpod);
+      final wa = schedule.workAreas
+          .where((w) => 'overlay_wa_${w.name}' == hit.elementId)
+          .firstOrNull;
+      if (wa == null) return;
+      final areaKm2 = _polygonAreaKm2(wa.polygonPoints);
+      final perimeterKm = _pathLengthKm(wa.polygonPoints, closed: true);
+      provider.openInfoWindow(InfoWindowData(
+        elementId: hit.elementId,
+        layerId: hit.layerId,
+        title: wa.name,
+        description: wa.description,
+        subtitle: '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}',
+        type: 'overlay_work_area',
+        anchor: _tapAnchor(_centroid(wa.polygonPoints)),
+        letterBoxEstimate: wa.letterBoxEstimate,
+      ));
+    } else if (hit.type == 'overlay_suburb') {
+      final schedule = ref.read(scheduleRiverpod);
+      final suburb = schedule.workSuburbs
+          .where((s) => 'overlay_suburb_${s.id}' == hit.elementId)
+          .firstOrNull;
+      if (suburb == null) return;
+      final areaKm2 = _polygonAreaKm2(suburb.polygonPoints);
+      final perimeterKm = _pathLengthKm(suburb.polygonPoints, closed: true);
+      provider.openInfoWindow(InfoWindowData(
+        elementId: hit.elementId,
+        layerId: hit.layerId,
+        title: suburb.name,
+        description: suburb.description,
+        subtitle: '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}',
+        type: 'overlay_suburb',
+        anchor: _tapAnchor(_centroid(suburb.polygonPoints)),
+        letterBoxEstimate: suburb.letterBoxEstimate,
+      ));
+    } else if (hit.type == 'preview_work_area') {
+      final schedule = ref.read(scheduleRiverpod);
+      final wa = schedule.workAreas
+          .where((w) => 'preview_wa_${w.name}' == hit.elementId)
+          .firstOrNull;
+      if (wa == null) return;
+      final areaKm2 = _polygonAreaKm2(wa.polygonPoints);
+      final perimeterKm = _pathLengthKm(wa.polygonPoints, closed: true);
+      setState(() => _previewWorkAreaForInfoWindow = wa);
+      provider.openInfoWindow(InfoWindowData(
+        elementId: hit.elementId,
+        layerId: hit.layerId,
+        title: wa.name,
+        description: wa.description,
+        subtitle: '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}',
+        type: 'preview_work_area',
+        anchor: _tapAnchor(_centroid(wa.polygonPoints)),
+        letterBoxEstimate: wa.letterBoxEstimate,
+      ));
+    }
+  }
+
+  Future<void> _handlePolygonTap(BuildContext context,
+      ShareableMapProvider provider, String polygonId) async {
+    debugPrint('[PolyTap] polygonId=$polygonId '
+        'gestureHandling=${ref.read(mapGestureRiverpod).gestureHandling} '
+        'isDrawing=${provider.isDrawing} '
+        'isEditing=${provider.isEditingVertices} '
+        'isCycleMod=$_isCycleModifierHeld '
+        'infoOpen=${provider.infoWindowData?.elementId}');
+    // Ignore element taps when gestures are disabled (user is over a UI overlay)
+    if (ref.read(mapGestureRiverpod).gestureHandling ==
+        WebGestureHandling.none) {
+      debugPrint('[PolyTap] BAIL — gestures disabled');
       return;
     }
     if (provider.isDrawing || provider.isEditingVertices) return;
+    // Shift/Ctrl/Meta+click: cycle through overlapping elements.
+    if (_isCycleModifierHeld) {
+      debugPrint('[PolyTap] cycleModifier held → cycling');
+      _dismissInfoWindow();
+      _cycleElementsAtTap(context, provider);
+      return;
+    }
+    // Re-tapping while an info window is open cycles to the next overlapping
+    // element rather than closing — lets the user reach polygons below.
+    if (provider.infoWindowData != null) {
+      debugPrint('[PolyTap] infoWindow open → cycling');
+      _cycleElementsAtTap(context, provider);
+      return;
+    }
+    debugPrint('[PolyTap] opening info window for $polygonId');
 
     final match = RegExp(r'^(.+)_polygon_(\d+)$').firstMatch(polygonId);
     if (match == null) return;
@@ -1846,7 +2350,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       return;
     }
     if (provider.infoWindowData != null) {
-      _dismissInfoWindow();
+      _cycleElementsAtTap(context, provider);
       return;
     }
 
@@ -1874,11 +2378,18 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         WebGestureHandling.none) {
       return;
     }
-    if (provider.infoWindowData != null) {
+    if (provider.isDrawing || provider.isEditingVertices) return;
+    // Shift/Ctrl/Meta+click: cycle through overlapping elements.
+    if (_isCycleModifierHeld) {
       _dismissInfoWindow();
+      _cycleElementsAtTap(context, provider);
       return;
     }
-    if (provider.isDrawing || provider.isEditingVertices) return;
+    // Re-tapping while an info window is open cycles to next overlapping element.
+    if (provider.infoWindowData != null) {
+      _cycleElementsAtTap(context, provider);
+      return;
+    }
 
     for (final layer in provider.layers) {
       final found =
@@ -1918,6 +2429,12 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       BuildContext context, ShareableMapProvider provider, String pointId) {
     if (ref.read(mapGestureRiverpod).gestureHandling ==
         WebGestureHandling.none) {
+      return;
+    }
+    // Shift/Ctrl/Meta+click: cycle through overlapping elements.
+    if (_isCycleModifierHeld) {
+      _dismissInfoWindow();
+      _cycleElementsAtTap(context, provider);
       return;
     }
     if (provider.infoWindowData != null) {
@@ -2033,6 +2550,38 @@ class _WorkAreaTableSidebar extends riverpod.ConsumerWidget {
           onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
           onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
           child: const WorkAreaTablePanel(),
+        ),
+      ),
+    );
+  }
+}
+
+/// Left sidebar for the work-suburbs editor: table of polygons with name + estimate.
+class _WorkSuburbsTableSidebar extends riverpod.ConsumerWidget {
+  const _WorkSuburbsTableSidebar();
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    return Positioned(
+      left: 0,
+      top: 0,
+      bottom: 0,
+      child: Container(
+        width: 320,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.1),
+              blurRadius: 8,
+              offset: const Offset(2, 0),
+            ),
+          ],
+        ),
+        child: MouseRegion(
+          onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+          onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+          child: const WorkSuburbsTablePanel(),
         ),
       ),
     );
@@ -2187,21 +2736,40 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                             ? () {
                                 if (isLasso) {
                                   // Perform the lasso selection — find all
-                                  // work areas whose centroid falls inside
-                                  // the drawn polygon, then import them.
+                                  // work areas (and/or suburbs, depending on
+                                  // which picker layers are visible) whose
+                                  // centroid falls inside the drawn polygon.
                                   final workAreas =
                                       ref.read(scheduleRiverpod).workAreas;
-                                  final matched =
-                                      provider.completeLassoSelect(workAreas);
-                                  if (matched.isNotEmpty) {
-                                    provider.addWorkAreasToMap(matched);
+                                  final suburbs =
+                                      ref.read(scheduleRiverpod).workSuburbs;
+
+                                  int addedCount = 0;
+
+                                  if (provider.pickerWorkAreasVisible) {
+                                    final matched =
+                                        provider.completeLassoSelect(workAreas);
+                                    if (matched.isNotEmpty) {
+                                      provider.addWorkAreasToMap(matched);
+                                      addedCount += matched.length;
+                                    }
                                   }
+
+                                  if (provider.pickerSuburbsVisible) {
+                                    final matchedSuburbs = provider
+                                        .completeLassoSelectSuburbs(suburbs);
+                                    if (matchedSuburbs.isNotEmpty) {
+                                      provider.addSuburbsToMap(matchedSuburbs);
+                                      addedCount += matchedSuburbs.length;
+                                    }
+                                  }
+
                                   provider.finishLassoSelect();
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     SnackBar(
-                                      content: Text(matched.isEmpty
-                                          ? 'No work areas found inside the lasso'
-                                          : 'Added ${matched.length} work ${matched.length == 1 ? 'area' : 'areas'}'),
+                                      content: Text(addedCount == 0
+                                          ? 'No areas found inside the lasso'
+                                          : 'Added $addedCount ${addedCount == 1 ? 'area' : 'areas'}'),
                                       duration: const Duration(seconds: 3),
                                     ),
                                   );
@@ -3461,7 +4029,10 @@ class _InfoWindowOverlayState
     int letterBoxEstimate,
     int? letterBoxesReached,
   ) {
-    if (type == 'polygon' || type == 'preview_work_area') {
+    if (type == 'polygon' ||
+        type == 'preview_work_area' ||
+        type == 'overlay_work_area' ||
+        type == 'overlay_suburb') {
       // subtitle format: "X.XX km²  ·  X.XX km"
       final parts = subtitle.split('·');
       final areaPart = parts.isNotEmpty ? parts[0].trim() : subtitle;
@@ -3497,12 +4068,14 @@ class _InfoWindowOverlayState
                     '$letterBoxesReached letter box${letterBoxesReached == 1 ? '' : 'es'} reached',
               ),
             ],
-          ] else if (letterBoxEstimate > 0) ...[
+          ] else ...[
             const SizedBox(height: 4),
             _StatItem(
               icon: const Icon(Icons.markunread_mailbox_outlined,
                   size: 14, color: Color(0xFF5F6368)),
-              label: '~$letterBoxEstimate letter boxes',
+              label: letterBoxEstimate > 0
+                  ? '~$letterBoxEstimate letter boxes'
+                  : '~ letter boxes (not set)',
             ),
           ],
         ],

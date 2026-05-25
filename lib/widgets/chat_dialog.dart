@@ -548,7 +548,7 @@ class _ChatDialogState extends riverpod.ConsumerState<ChatDialog> {
                               borderRadius: BorderRadius.circular(8),
                               boxShadow: [
                                 BoxShadow(
-                                  color: Colors.grey.withOpacity(0.3),
+                                  color: Colors.grey.withValues(alpha: 0.3),
                                   blurRadius: 8,
                                   offset: const Offset(0, -2),
                                 ),
@@ -741,7 +741,7 @@ class MessageBubble extends riverpod.ConsumerWidget {
                         padding: const EdgeInsets.all(8),
                         margin: const EdgeInsets.only(bottom: 8),
                         decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.1),
+                          color: Colors.black.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: _buildReplyPreview(

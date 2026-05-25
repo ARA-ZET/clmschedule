@@ -207,7 +207,9 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
     );
   }
 
-  Widget _buildLayersList(BuildContext context, ShareableMapProvider provider) {
+  Widget _buildLayersList(
+      BuildContext context,
+      ShareableMapProvider provider) {
     final layers = provider.layers;
 
     return CustomScrollView(

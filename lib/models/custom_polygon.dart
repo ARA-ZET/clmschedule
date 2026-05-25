@@ -213,7 +213,8 @@ class CustomPolygon {
       fillColor = Colors.red.withValues(alpha: 0.1);
       sw = 5;
     } else if (isSelected) {
-      sw = 5;
+      strokeColor = color;
+      sw = 6;
     }
 
     return Polygon(

@@ -348,7 +348,9 @@ class EditableDateCell extends StatelessWidget {
                                         .containsKey('quantity')) {
                                       // Fallback: get vehicle type from quantity
                                       final quantity =
-                                          (jobData!['quantity'] as num?)?.toInt() ?? 1;
+                                          (jobData!['quantity'] as num?)
+                                                  ?.toInt() ??
+                                              1;
                                       if (quantity >= 1 && quantity <= 3) {
                                         vehicleType = VehicleType.hyundai;
                                       } else if (quantity >= 4 &&
@@ -412,13 +414,13 @@ class EditableDateCell extends StatelessWidget {
                                 return Container(
                                   decoration: BoxDecoration(
                                     color: isOccupied
-                                        ? conflictColor.withOpacity(0.1)
+                                        ? conflictColor.withValues(alpha: 0.1)
                                         : null,
                                     borderRadius: BorderRadius.circular(4),
                                     border: isOccupied
                                         ? Border.all(
-                                            color:
-                                                conflictColor.withOpacity(0.3))
+                                            color: conflictColor.withValues(
+                                                alpha: 0.3))
                                         : null,
                                   ),
                                   child: ListTile(

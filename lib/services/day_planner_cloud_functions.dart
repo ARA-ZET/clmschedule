@@ -10,7 +10,6 @@ import '../models/route_data.dart';
 ///
 ///   - getRouteSegment            (shared Distance Matrix cache)
 ///   - optimizeDropsheetRoute     (server-side route optimisation)
-///   - syncDropsheetFromSchedule  (callable dropsheet sync)
 ///
 /// Each function is exposed as an opt-in entry point so existing
 /// client-side code keeps working unchanged. Callers who want the
@@ -97,23 +96,6 @@ class DayPlannerCloudFunctions {
     } catch (e) {
       debugPrint('optimizeDropsheetRoute cloud call failed: $e');
       return null;
-    }
-  }
-
-  /// Trigger a server-side dropsheet sync for the given date. The
-  /// dropsheet doc is rewritten in Firestore; the existing client
-  /// stream listener will pick up the change automatically.
-  Future<bool> syncDropsheetFromSchedule(DateTime date) async {
-    final dateId =
-        '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
-    try {
-      await _functions
-          .httpsCallable('syncDropsheetFromSchedule')
-          .call<Map<String, dynamic>>({'dateId': dateId});
-      return true;
-    } catch (e) {
-      debugPrint('syncDropsheetFromSchedule cloud call failed: $e');
-      return false;
     }
   }
 

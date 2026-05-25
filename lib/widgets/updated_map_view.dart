@@ -517,10 +517,10 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
             polygonId: PolygonId('custom_polygon_$i'),
             points: polygonPoints,
             fillColor: isCurrentlyEditing
-                ? Colors.red.withOpacity(0.1)
+                ? Colors.red.withValues(alpha: 0.1)
                 : isSelected
-                    ? Colors.red.withOpacity(0.1)
-                    : customPolygon.color.withOpacity(0.2),
+                    ? Colors.red.withValues(alpha: 0.1)
+                    : customPolygon.color.withValues(alpha: 0.2),
             strokeColor: isCurrentlyEditing
                 ? Colors.red
                 : isSelected
@@ -560,8 +560,8 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                 ? mapViewProvider.editingPoints
                 : area.polygonPoints,
             fillColor: isSelected
-                ? Colors.red.withOpacity(0.1)
-                : Colors.orange.withOpacity(0.05),
+                ? Colors.red.withValues(alpha: 0.1)
+                : Colors.orange.withValues(alpha: 0.05),
             strokeColor: isCurrentlyEditing
                 ? Colors.red
                 : isSelected
@@ -590,7 +590,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
         Polygon(
           polygonId: const PolygonId('new_polygon'),
           points: newPolygonPoints,
-          fillColor: Colors.blue.withOpacity(0.2),
+          fillColor: Colors.blue.withValues(alpha: 0.2),
           strokeColor: Colors.blue,
           strokeWidth: 3,
         ),
@@ -952,7 +952,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
           height: 40,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: (color ?? Colors.grey.shade600).withOpacity(0.1),
+            color: (color ?? Colors.grey.shade600).withValues(alpha: 0.1),
           ),
           child: Icon(
             icon,
@@ -1599,7 +1599,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.1),
+                        color: Colors.black.withValues(alpha: 0.1),
                         blurRadius: 4,
                         offset: const Offset(2, 0),
                       ),
@@ -1800,7 +1800,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                         child: Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
-                            color: Colors.green.withOpacity(0.9),
+                            color: Colors.green.withValues(alpha: 0.9),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: const Text(

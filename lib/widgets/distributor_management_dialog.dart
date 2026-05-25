@@ -78,7 +78,7 @@ class _DistributorManagementDialogState
                     padding:
                         const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
-                      color: Colors.orange.withOpacity(0.2),
+                      color: Colors.orange.withValues(alpha: 0.2),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Text(
@@ -144,7 +144,7 @@ class _DistributorManagementDialogState
                                   backgroundColor: Theme.of(context)
                                       .colorScheme
                                       .primary
-                                      .withOpacity(0.1),
+                                      .withValues(alpha: 0.1),
                                   child: Text(
                                     distributor.index.toString(),
                                     style: TextStyle(

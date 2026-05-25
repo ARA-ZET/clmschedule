@@ -1,6 +1,6 @@
-// shareable_maps/widgets/work_area_table_panel.dart
+// shareable_maps/widgets/work_suburbs_table_panel.dart
 //
-// Left-side panel for the work-areas editor showing a table of all polygons
+// Left-side panel for the work-suburbs editor showing a table of all polygons
 // with editable letter-box estimate fields.
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
@@ -10,18 +10,18 @@ import '../../models/custom_polygon.dart';
 import '../providers/shareable_map_provider.dart';
 import '../providers/map_gesture_provider.dart';
 
-/// A sidebar table that lists all work-area polygons with inline editing
+/// A sidebar table that lists all work-suburb polygons with inline editing
 /// for name and letter-box estimate.
-class WorkAreaTablePanel extends riverpod.ConsumerStatefulWidget {
-  const WorkAreaTablePanel({super.key});
+class WorkSuburbsTablePanel extends riverpod.ConsumerStatefulWidget {
+  const WorkSuburbsTablePanel({super.key});
 
   @override
-  riverpod.ConsumerState<WorkAreaTablePanel> createState() =>
-      _WorkAreaTablePanelState();
+  riverpod.ConsumerState<WorkSuburbsTablePanel> createState() =>
+      _WorkSuburbsTablePanelState();
 }
 
-class _WorkAreaTablePanelState
-    extends riverpod.ConsumerState<WorkAreaTablePanel> {
+class _WorkSuburbsTablePanelState
+    extends riverpod.ConsumerState<WorkSuburbsTablePanel> {
   final TextEditingController _searchCtrl = TextEditingController();
   String _searchQuery = '';
   bool _ascending = true;
@@ -37,7 +37,6 @@ class _WorkAreaTablePanelState
     final provider = ref.watch(shareableMapRiverpod);
     final layers = provider.layers;
 
-    // Collect all polygons across all layers.
     final entries = <_PolyEntry>[];
     for (final layer in layers) {
       for (int i = 0; i < layer.polygons.length; i++) {
@@ -46,14 +45,11 @@ class _WorkAreaTablePanelState
       }
     }
 
-    // Compute total estimate across ALL entries (pre-filter) so the footer
-    // still shows the grand total regardless of search.
     int totalEstimate = 0;
     for (final e in entries) {
       totalEstimate += e.poly.letterBoxEstimate;
     }
 
-    // Filter by search query (case-insensitive substring match on name).
     final query = _searchQuery.trim().toLowerCase();
     final filtered = query.isEmpty
         ? List<_PolyEntry>.from(entries)
@@ -61,7 +57,6 @@ class _WorkAreaTablePanelState
             .where((e) => e.poly.name.toLowerCase().contains(query))
             .toList();
 
-    // Sort alphabetically A–Z or Z–A.
     filtered.sort((a, b) {
       final cmp =
           a.poly.name.toLowerCase().compareTo(b.poly.name.toLowerCase());
@@ -74,15 +69,15 @@ class _WorkAreaTablePanelState
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
-            color: Colors.blueGrey.shade50,
+            color: Colors.blue.shade50,
             border: const Border(bottom: BorderSide(color: Color(0xFFE0E0E0))),
           ),
           child: Row(
             children: [
-              const Icon(Icons.table_chart, size: 18, color: Colors.blueGrey),
+              const Icon(Icons.map_outlined, size: 18, color: Colors.blue),
               const SizedBox(width: 8),
               const Expanded(
-                child: Text('Work Areas',
+                child: Text('Work Suburbs',
                     style:
                         TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
               ),
@@ -146,9 +141,7 @@ class _WorkAreaTablePanelState
                 IconButton(
                   tooltip: _ascending ? 'Sort Z–A' : 'Sort A–Z',
                   icon: Icon(
-                    _ascending
-                        ? Icons.arrow_downward
-                        : Icons.arrow_upward,
+                    _ascending ? Icons.arrow_downward : Icons.arrow_upward,
                     size: 16,
                   ),
                   padding: EdgeInsets.zero,
@@ -200,7 +193,7 @@ class _WorkAreaTablePanelState
               ? Center(
                   child: Text(
                       query.isEmpty
-                          ? 'No work areas'
+                          ? 'No work suburbs'
                           : 'No matches for "$query"',
                       style:
                           TextStyle(fontSize: 13, color: Colors.grey.shade500)),
@@ -221,7 +214,7 @@ class _WorkAreaTablePanelState
         const Divider(height: 1),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          color: Colors.blueGrey.shade50,
+          color: Colors.blue.shade50,
           child: Row(
             children: [
               const Expanded(
@@ -247,7 +240,7 @@ class _WorkAreaTablePanelState
   }
 }
 
-// ── Data class for a polygon entry ──────────────────────────────────────────
+// ── Data class ──────────────────────────────────────────────────────────────
 
 class _PolyEntry {
   final String layerId;

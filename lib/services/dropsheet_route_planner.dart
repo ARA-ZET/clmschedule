@@ -556,6 +556,7 @@ class DropsheetRoutePlanner {
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
+      case DropsheetTaskType.arrive:
         return const [];
     }
   }

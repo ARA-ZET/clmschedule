@@ -3592,16 +3592,17 @@ exports.duplicateMapForJobCopy = onCall(
 //
 //   getRouteSegment            – shared Distance Matrix cache
 //   optimizeDropsheetRoute     – server-side route optimisation
-//   syncDropsheetFromSchedule  – callable dropsheet sync
-//   onScheduleDayChanged       – auto-sync trigger on schedule writes
+//
+// Dropsheet ⇄ schedule sync is now handled entirely client-side in
+// `DropsheetProvider` (see `lib/providers/dropsheet_provider.dart`) to
+// avoid race conditions between the cloud trigger, client edits, and
+// the day-planner map. The previous `syncDropsheetFromSchedule` /
+// `onScheduleDayChanged` exports were removed in May 2026.
 //
 // API key is supplied by the GOOGLE_MAPS_API_KEY secret. Set it once via
 //   firebase functions:secrets:set GOOGLE_MAPS_API_KEY
 const distanceMatrixCache = require("./lib/distance_matrix_cache");
 const routeOptimizer = require("./lib/route_optimizer");
-const dropsheetSync = require("./lib/dropsheet_sync");
 
 exports.getRouteSegment = distanceMatrixCache.getRouteSegment;
 exports.optimizeDropsheetRoute = routeOptimizer.optimizeDropsheetRoute;
-exports.syncDropsheetFromSchedule = dropsheetSync.syncDropsheetFromSchedule;
-exports.onScheduleDayChanged = dropsheetSync.onScheduleDayChanged;

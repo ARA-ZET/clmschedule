@@ -60,16 +60,35 @@ class DropsheetDriverSection {
         }
       }
     }
+    final rawTasks = (data['tasks'] as List<dynamic>?)
+            ?.map((e) =>
+                DropsheetTask.fromMap(Map<String, dynamic>.from(e as Map)))
+            .toList() ??
+        const <DropsheetTask>[];
+    // Backward compatibility: older sections were created before the
+    // trailing "Arrive at office" mandatory task existed. Append it on
+    // read so every section always has it pinned at the bottom.
+    final hasArrive =
+        rawTasks.any((t) => t.type == DropsheetTaskType.arrive);
+    final id = data['id'] as String;
+    final tasks = hasArrive
+        ? rawTasks
+        : [
+            ...rawTasks,
+            DropsheetTask(
+              id: '${id}_m4',
+              type: DropsheetTaskType.arrive,
+              job: 'Arrive',
+              isMandatory: true,
+            ),
+          ];
     return DropsheetDriverSection(
-      id: data['id'] as String,
+      id: id,
       driverId: data['driverId'] as String? ?? '',
       driverName: data['driverName'] as String? ?? '',
       vehicle: vehicle,
       trailer: trailer,
-      tasks: (data['tasks'] as List<dynamic>?)
-              ?.map((e) => DropsheetTask.fromMap(Map<String, dynamic>.from(e as Map)))
-              .toList() ??
-          const [],
+      tasks: tasks,
       routePolyline: (data['routePolyline'] as List<dynamic>?)
               ?.whereType<Map>()
               .map((m) => LatLng(

@@ -372,7 +372,7 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
                       return TableViewCell(
                         child: Card(
                           color: isToday
-                              ? Theme.of(context).primaryColor.withOpacity(0.2)
+                              ? Theme.of(context).primaryColor.withValues(alpha: 0.2)
                               : null,
                           child: FittedBox(
                             fit: BoxFit.scaleDown,

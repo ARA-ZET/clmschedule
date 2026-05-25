@@ -245,7 +245,7 @@ class _AddressPointSearchDialogState extends State<AddressPointSearchDialog> {
                     '${_selectedLatLng!.longitude.toStringAsFixed(4)})',
                     style: const TextStyle(fontSize: 11),
                   ),
-                  backgroundColor: widget.category.color.withOpacity(0.1),
+                  backgroundColor: widget.category.color.withValues(alpha: 0.1),
                 ),
               ],
 

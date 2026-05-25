@@ -287,7 +287,7 @@ class _ProjectToolsDialogState extends State<ProjectToolsDialog>
           children: [
             // Tool icon
             CircleAvatar(
-              backgroundColor: accentColor.withOpacity(0.2),
+              backgroundColor: accentColor.withValues(alpha: 0.2),
               child: Icon(Icons.construction, color: accentColor),
             ),
             const SizedBox(width: 16),

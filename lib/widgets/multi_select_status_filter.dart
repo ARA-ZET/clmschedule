@@ -96,7 +96,7 @@ class MultiSelectStatusFilter extends riverpod.ConsumerWidget {
                       height: 20,
                       decoration: BoxDecoration(
                         color: isSelected
-                            ? status.color.withOpacity(0.2)
+                            ? status.color.withValues(alpha: 0.2)
                             : Colors.transparent,
                         border: Border.all(
                           color: isSelected ? status.color : Colors.grey,

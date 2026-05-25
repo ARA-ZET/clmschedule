@@ -27,6 +27,7 @@ import 'providers/job_type_provider.dart'
     show JobTypeProvider; // static accessor only
 import 'providers/unfinished_work_areas_provider.dart';
 import 'shareable_maps/providers/shareable_map_provider.dart';
+import 'shareable_maps/services/map_bitmap_cache.dart';
 import 'shareable_maps/widgets/shareable_maps_gallery.dart';
 import 'models/happy_sun_project.dart';
 import 'models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
@@ -49,6 +50,7 @@ import 'widgets/happy_sun_inventory_view.dart';
 import 'widgets/happy_sun_job_projects_screen.dart';
 import 'shareable_maps/widgets/shareable_map_editor.dart';
 import 'shareable_maps/adapters/work_area_adapter.dart';
+import 'shareable_maps/adapters/work_suburbs_adapter.dart';
 import 'shareable_maps/adapters/firestore_adapter.dart';
 import 'shareable_maps/services/shareable_maps_firestore_service.dart';
 import 'shareable_maps/services/map_link_service.dart';
@@ -109,17 +111,28 @@ void main() async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   // Enable offline persistence for non-web platforms
-  // Web platform has different persistence handling
+  // Enable offline persistence on all platforms (web uses IndexedDB via WASM-compatible JS interop)
   try {
-    if (!kIsWeb) {
-      FirebaseFirestore.instance.settings = const Settings(
-        persistenceEnabled: true,
-        cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
-      );
-    }
+    FirebaseFirestore.instance.settings = const Settings(
+      persistenceEnabled: true,
+      cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+    );
   } catch (e) {
     // Settings may have already been applied, continue silently
-    print('Firestore settings already configured: $e');
+    debugPrint('Firestore settings already configured: $e');
+  }
+
+  // Preload shareable-map BitmapDescriptors (vertex, midpoint, firstVertex,
+  // category icons, cluster icons, waypoint) before the first frame. The
+  // editor consumes these synchronously when building markers, so any
+  // mid-load mount caused a visible race where only some icons rendered.
+  // Awaiting here adds <100ms to startup and is fully reused across all
+  // shareable-map widgets for the rest of the session.
+  try {
+    await MapBitmapCache.instance.ensureLoaded();
+    debugPrint('[WASM-DEBUG] MapBitmapCache preloaded at startup');
+  } catch (e) {
+    debugPrint('[WASM-DEBUG] MapBitmapCache preload failed: $e');
   }
 
   // All providers migrated to Riverpod - no more MultiProvider needed
@@ -455,11 +468,24 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
       initializations.add(ref.read(unfinishedWorkAreasRiverpod).initialize());
     }
 
-    // Run all provider initializations in parallel for fast startup
-    await Future.wait(initializations);
+    // Run all provider initializations in parallel for fast startup.
+    // Wrap in try/catch + timeout so a hanging network call (common on first
+    // web load) never freezes the splash screen indefinitely.
+    try {
+      await Future.wait(initializations)
+          .timeout(const Duration(seconds: 20));
+    } catch (e) {
+      debugPrint('⚠️ Provider initialization error or timeout: $e');
+      // Continue — the app can still function with partial initialization.
+    }
 
     // Ensure lastCheckedTime is loaded now that auth is guaranteed ready
-    await ref.read(jobListRiverpod).ensureLastCheckedTimeLoaded();
+    try {
+      await ref.read(jobListRiverpod).ensureLastCheckedTimeLoaded()
+          .timeout(const Duration(seconds: 10));
+    } catch (e) {
+      debugPrint('⚠️ ensureLastCheckedTimeLoaded error or timeout: $e');
+    }
 
     // CollectionScheduleProvider loads lazily when tab opens (depends on JobListProvider data)
 
@@ -947,6 +973,37 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
                               content: Text('Failed to load work areas: $e'),
+                              backgroundColor: Colors.red.shade800,
+                            ),
+                          );
+                        }
+                      }
+                    },
+                  ),
+
+                  // Work Suburbs - open map editor with single-document suburb polygons
+                  _actionBtn(
+                    icon: Icons.layers_outlined,
+                    label: 'Suburbs',
+                    onPressed: () async {
+                      final provider =
+                          riverpod.ProviderScope.containerOf(context)
+                              .read(shareableMapRiverpod);
+                      try {
+                        await provider.loadFromAdapter(WorkSuburbsAdapter());
+                        if (context.mounted) {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const ShareableMapEditor(),
+                            ),
+                          );
+                        }
+                      } catch (e) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Failed to load work suburbs: $e'),
                               backgroundColor: Colors.red.shade800,
                             ),
                           );

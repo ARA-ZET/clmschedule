@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/work_area.dart';
+import '../../models/work_suburb.dart';
 import '../../config/flavor_config.dart';
 import '../../services/gpx_storage_service.dart';
 import '../../services/kml_parser_service.dart';
@@ -246,6 +247,13 @@ class ShareableMapProvider extends ChangeNotifier {
   bool _isSidebarVisible = true;
   bool _isWorkAreaPickerVisible = false;
   bool _isLassoSelectActive = false;
+  bool _showWorkAreasOverlay = false;
+  bool _showSuburbsOverlay = false;
+  bool _workAreasOverlayExpanded = false;
+  bool _suburbsOverlayExpanded = false;
+  // Picker panel layer visibility
+  bool _pickerWorkAreasVisible = true;
+  bool _pickerSuburbsVisible = false;
   final List<LatLng> _lassoPoints = [];
   GoogleMapController? _mapController;
   bool _pendingFitBounds = false;
@@ -276,6 +284,12 @@ class ShareableMapProvider extends ChangeNotifier {
   bool get hasUnsavedChanges => _hasUnsavedChanges;
   bool get isSidebarVisible => _isSidebarVisible;
   bool get isWorkAreaPickerVisible => _isWorkAreaPickerVisible;
+  bool get showWorkAreasOverlay => _showWorkAreasOverlay;
+  bool get showSuburbsOverlay => _showSuburbsOverlay;
+  bool get workAreasOverlayExpanded => _workAreasOverlayExpanded;
+  bool get suburbsOverlayExpanded => _suburbsOverlayExpanded;
+  bool get pickerWorkAreasVisible => _pickerWorkAreasVisible;
+  bool get pickerSuburbsVisible => _pickerSuburbsVisible;
   bool get isLassoSelectActive => _isLassoSelectActive;
   List<LatLng> get lassoPoints => List.unmodifiable(_lassoPoints);
   bool get isEditingVertices => _isEditingVertices;
@@ -1662,6 +1676,84 @@ class ShareableMapProvider extends ChangeNotifier {
     return layer.polygons.any((p) => p.name == workAreaName);
   }
 
+  // === SUBURB IMPORT ===
+
+  static const _suburbLayerId = 'imported_suburbs';
+
+  /// Add a suburb polygon to the map as a new polygon in a dedicated
+  /// "Suburbs" layer. Creates the layer if it doesn't exist yet.
+  void addSuburbToMap(WorkSuburb suburb) {
+    if (_currentMap == null) return;
+
+    var layer = _currentMap!.getLayer(_suburbLayerId);
+    if (layer == null) {
+      layer = MapLayer(
+        id: _suburbLayerId,
+        name: 'Suburbs',
+        description: 'Imported from suburb collection',
+        order: _currentMap!.layers.length,
+        defaultColor: Colors.green,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      _currentMap = _currentMap!.addLayer(layer);
+    }
+
+    final alreadyExists = layer.polygons.any((p) => p.name == suburb.name);
+    if (alreadyExists) return;
+
+    final polygon = CustomPolygon(
+      name: suburb.name,
+      description: suburb.description,
+      points: List<LatLng>.from(suburb.polygonPoints),
+      color: Colors.green,
+      fillOpacity: 0.25,
+      strokeWidth: 2,
+      letterBoxEstimate: suburb.letterBoxEstimate,
+    );
+
+    final updatedLayer = layer.addPolygon(polygon);
+    _currentMap = _currentMap!.updateLayer(_suburbLayerId, updatedLayer);
+    debugPrint('Added suburb to map: ${suburb.name}');
+    _notifyAndSave();
+  }
+
+  /// Remove a previously imported suburb polygon by name.
+  void removeSuburbFromMap(String suburbName) {
+    if (_currentMap == null) return;
+
+    final layer = _currentMap!.getLayer(_suburbLayerId);
+    if (layer == null) return;
+
+    final index = layer.polygons.indexWhere((p) => p.name == suburbName);
+    if (index == -1) return;
+
+    final updatedLayer = layer.removePolygon(index);
+    _currentMap = _currentMap!.updateLayer(_suburbLayerId, updatedLayer);
+
+    if (updatedLayer.polygons.isEmpty) {
+      _currentMap = _currentMap!.removeLayer(_suburbLayerId);
+    }
+
+    debugPrint('Removed suburb from map: $suburbName');
+    _notifyAndSave();
+  }
+
+  /// Check whether a suburb (by name) has been imported.
+  bool isSuburbImported(String suburbName) {
+    if (_currentMap == null) return false;
+    final layer = _currentMap!.getLayer(_suburbLayerId);
+    if (layer == null) return false;
+    return layer.polygons.any((p) => p.name == suburbName);
+  }
+
+  /// Add multiple suburbs to the map at once.
+  void addSuburbsToMap(List<WorkSuburb> suburbs) {
+    for (final s in suburbs) {
+      addSuburbToMap(s);
+    }
+  }
+
   // === LAYER OPERATIONS ===
 
   /// Create a new layer
@@ -1906,21 +1998,37 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Adds a point to the current drawing. The polygon is only completed
   /// when the user taps the first marker or presses the Complete button.
   void addDrawingPoint(LatLng point) {
-    if (!_isDrawing) return;
+    debugPrint('[WASM-DEBUG] addDrawingPoint called: '
+        'isDrawing=$_isDrawing isDialogOpen=$_isDialogOpen '
+        'mode=$_drawingMode currentPoints=${_drawingPoints.length} '
+        'point=(${point.latitude.toStringAsFixed(5)},'
+        '${point.longitude.toStringAsFixed(5)})');
+    if (!_isDrawing) {
+      debugPrint('[WASM-DEBUG] addDrawingPoint BAIL — isDrawing=false');
+      return;
+    }
     if (_isDialogOpen) {
       debugPrint('⛔ Blocked drawing point - dialog is open');
       return;
     }
 
     _drawingPoints.add(point);
-    debugPrint('Added drawing point: ${_drawingPoints.length}');
+    debugPrint(
+        '[WASM-DEBUG] Added drawing point: total=${_drawingPoints.length}');
     notifyListeners();
   }
 
   /// Set dialog open state to block drawing
   void setDialogOpen(bool isOpen) {
+    if (_isDialogOpen == isOpen) return;
     _isDialogOpen = isOpen;
     debugPrint('📝 Dialog open state: $isOpen');
+    // Notify so any widget gated on this flag (e.g. drawing-marker tap
+    // handlers, toolbars) rebuilds. Previously omitted, which left the
+    // UI subtly out-of-sync after closing the element-name dialog —
+    // especially noticeable under WASM where state propagation differs
+    // from the JS build.
+    notifyListeners();
   }
 
   /// Complete drawing and create element
@@ -2731,8 +2839,7 @@ class ShareableMapProvider extends ChangeNotifier {
 
   /// Animate the camera to fit a polyline, select it, and open its info
   /// window — mirrors [focusOnPolygon] for track/route elements.
-  Future<void> focusOnPolyline(
-      String layerId, String polylineId) async {
+  Future<void> focusOnPolyline(String layerId, String polylineId) async {
     if (_currentMap == null) return;
 
     // Search persisted layers first, then cloud overlay layers.
@@ -2987,6 +3094,40 @@ class ShareableMapProvider extends ChangeNotifier {
     }
   }
 
+  // === AREA OVERLAYS ===
+
+  void toggleWorkAreasOverlay() {
+    _showWorkAreasOverlay = !_showWorkAreasOverlay;
+    notifyListeners();
+  }
+
+  void toggleSuburbsOverlay() {
+    _showSuburbsOverlay = !_showSuburbsOverlay;
+    notifyListeners();
+  }
+
+  void toggleWorkAreasOverlayExpanded() {
+    _workAreasOverlayExpanded = !_workAreasOverlayExpanded;
+    notifyListeners();
+  }
+
+  void toggleSuburbsOverlayExpanded() {
+    _suburbsOverlayExpanded = !_suburbsOverlayExpanded;
+    notifyListeners();
+  }
+
+  // === PICKER LAYER VISIBILITY ===
+
+  void togglePickerWorkAreasVisible() {
+    _pickerWorkAreasVisible = !_pickerWorkAreasVisible;
+    notifyListeners();
+  }
+
+  void togglePickerSuburbsVisible() {
+    _pickerSuburbsVisible = !_pickerSuburbsVisible;
+    notifyListeners();
+  }
+
   // === LASSO SELECT FOR WORK AREAS ===
 
   /// Start lasso selection mode — the user draws a polygon on the map
@@ -3037,6 +3178,40 @@ class ShareableMapProvider extends ChangeNotifier {
     }
 
     debugPrint('Lasso select found ${matched.length} work areas');
+    return matched;
+  }
+
+  /// Same as [completeLassoSelect] but for suburbs.
+  List<WorkSuburb> completeLassoSelectSuburbs(List<WorkSuburb> allSuburbs) {
+    if (_lassoPoints.length < 3) return [];
+
+    final matched = <WorkSuburb>[];
+    for (final suburb in allSuburbs) {
+      if (suburb.polygonPoints.length < 3) continue;
+      if (isSuburbImported(suburb.name)) continue;
+
+      // Centroid check
+      double lat = 0, lng = 0;
+      for (final p in suburb.polygonPoints) {
+        lat += p.latitude;
+        lng += p.longitude;
+      }
+      final centroid = LatLng(
+          lat / suburb.polygonPoints.length, lng / suburb.polygonPoints.length);
+      if (_pointInPolygon(centroid, _lassoPoints)) {
+        matched.add(suburb);
+        continue;
+      }
+      // Fallback: any vertex inside
+      for (final pt in suburb.polygonPoints) {
+        if (_pointInPolygon(pt, _lassoPoints)) {
+          matched.add(suburb);
+          break;
+        }
+      }
+    }
+
+    debugPrint('Lasso select found ${matched.length} suburbs');
     return matched;
   }
 

@@ -43,7 +43,7 @@ class _SimpleDateFilterState extends State<SimpleDateFilter> {
           border: Border.all(color: Colors.grey.shade400),
           borderRadius: BorderRadius.circular(4),
           color: (_tempStartDate != null)
-              ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.05)
+              ? Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.05)
               : null,
         ),
         child: Row(

@@ -69,6 +69,7 @@ class DropsheetMaps {
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
+      case DropsheetTaskType.arrive:
         return const [];
     }
   }
@@ -97,6 +98,7 @@ class DropsheetMaps {
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
+      case DropsheetTaskType.arrive:
       case DropsheetTaskType.custom:
         final addr = (task.typeData['address'] as String?)?.trim() ?? '';
         if (addr.isNotEmpty) {

@@ -115,7 +115,7 @@ class WorkArea {
       polygonId: PolygonId(id),
       points: polygonPoints,
       fillColor:
-          color?.withOpacity(0.3) ?? const Color(0xFFFF0000).withOpacity(0.3),
+          color?.withValues(alpha: 0.3) ?? const Color(0xFFFF0000).withValues(alpha: 0.3),
       strokeColor: color ?? const Color(0xFFFF0000),
       strokeWidth: 2,
     );

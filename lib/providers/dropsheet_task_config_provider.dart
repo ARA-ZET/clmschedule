@@ -18,6 +18,7 @@ const configurableDropsheetTaskTypes = [
   DropsheetTaskType.inspect,
   DropsheetTaskType.pack,
   DropsheetTaskType.leave,
+  DropsheetTaskType.arrive,
   // Auto-populated from the schedule
   DropsheetTaskType.dropOff,
   DropsheetTaskType.pickUp,

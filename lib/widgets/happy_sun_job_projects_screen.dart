@@ -248,7 +248,7 @@ class _HappySunJobProjectsScreenState
           color: Colors.orange.shade700,
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.1),
+              color: Colors.black.withValues(alpha: 0.1),
               blurRadius: 4,
               offset: const Offset(0, 2),
             ),
@@ -284,7 +284,7 @@ class _HappySunJobProjectsScreenState
           color: Colors.blue.shade700,
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.1),
+              color: Colors.black.withValues(alpha: 0.1),
               blurRadius: 4,
               offset: const Offset(0, 2),
             ),
@@ -642,7 +642,7 @@ class _HappySunJobProjectsScreenState
         // Tab bar
         Container(
           decoration: BoxDecoration(
-            color: borderColor.withOpacity(0.1),
+            color: borderColor.withValues(alpha: 0.1),
             border: Border(
               bottom: BorderSide(color: Colors.grey.shade200),
             ),
@@ -1297,7 +1297,7 @@ class _HappySunJobProjectsScreenState
                       Container(
                         padding: EdgeInsets.all(isMobile ? 8 : 10),
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.2),
+                          color: Colors.white.withValues(alpha: 0.2),
                           borderRadius:
                               BorderRadius.circular(isMobile ? 8 : 10),
                         ),
@@ -1766,7 +1766,7 @@ class _HappySunJobProjectsScreenState
               padding: EdgeInsets.symmetric(
                   horizontal: isMobile ? 6 : 8, vertical: isMobile ? 1 : 2),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.2),
+                color: color.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(isMobile ? 10 : 12),
               ),
               child: Text(
@@ -1823,11 +1823,11 @@ class _HappySunJobProjectsScreenState
                                   vertical: isMobile ? 3 : 4,
                                 ),
                                 decoration: BoxDecoration(
-                                  color: Colors.green.withOpacity(0.1),
+                                  color: Colors.green.withValues(alpha: 0.1),
                                   borderRadius:
                                       BorderRadius.circular(isMobile ? 10 : 12),
                                   border: Border.all(
-                                    color: Colors.green.withOpacity(0.3),
+                                    color: Colors.green.withValues(alpha: 0.3),
                                   ),
                                 ),
                                 child: Row(
@@ -1869,7 +1869,7 @@ class _HappySunJobProjectsScreenState
                         vertical: isMobile ? 4 : 6,
                       ),
                       decoration: BoxDecoration(
-                        color: Colors.green.withOpacity(0.1),
+                        color: Colors.green.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(isMobile ? 10 : 12),
                       ),
                       child: Text(
@@ -1944,7 +1944,7 @@ class _HappySunJobProjectsScreenState
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.2),
+                color: color.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
@@ -2023,16 +2023,16 @@ class _HappySunJobProjectsScreenState
                             decoration: BoxDecoration(
                               color: hasIssue
                                   ? (checklistItem.status == 'broken'
-                                      ? Colors.orange.withOpacity(0.2)
-                                      : Colors.red.withOpacity(0.2))
-                                  : color.withOpacity(0.1),
+                                      ? Colors.orange.withValues(alpha: 0.2)
+                                      : Colors.red.withValues(alpha: 0.2))
+                                  : color.withValues(alpha: 0.1),
                               borderRadius: BorderRadius.circular(12),
                               border: Border.all(
                                 color: hasIssue
                                     ? (checklistItem.status == 'broken'
                                         ? Colors.orange
                                         : Colors.red)
-                                    : color.withOpacity(0.3),
+                                    : color.withValues(alpha: 0.3),
                               ),
                             ),
                             child: Row(
@@ -3827,7 +3827,7 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.2),
+        color: color.withValues(alpha: 0.2),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(
@@ -3879,7 +3879,7 @@ class _InlineToolsDialogState extends State<_InlineToolsDialog>
               width: 40,
               height: 40,
               decoration: BoxDecoration(
-                color: accentColor.withOpacity(0.1),
+                color: accentColor.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Icon(

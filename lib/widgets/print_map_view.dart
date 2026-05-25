@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:math' show atan, cos, exp, log, max, min, pi, sin;
+import 'dart:math' show atan, cos, exp, log, max, min, pi, pow, sin;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
@@ -28,6 +28,19 @@ class PolygonOverride {
     required this.strokeColor,
     required this.strokeWidth,
   });
+}
+
+/// Editable client-name label attached to a polygon, used in the printed map.
+///
+/// [anchor] is the geographic position the label is pinned to so it stays
+/// fixed as the user pans/zooms the map. [text] is plain editable text and
+/// the rendered label is drawn with a transparent background so the map
+/// underneath remains visible in the printout.
+class _PolygonLabel {
+  String text;
+  LatLng anchor;
+
+  _PolygonLabel({required this.text, required this.anchor});
 }
 
 enum _PrintSelectionHandle {
@@ -210,6 +223,23 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
   Size _printSelectionSize = Size.zero;
   Size _lastMapSize = Size.zero;
   _PrintSelectionHandle? _activePrintSelectionHandle;
+
+  // Editable polygon labels (client names) overlaid on each polygon.
+  // Keyed by the polygon's index in `_job.workMaps`. Created lazily so that
+  // existing anchor/text edits are preserved across rebuilds.
+  final Map<int, _PolygonLabel> _polygonLabels = {};
+  bool _showPolygonLabels = true;
+  int? _editingLabelIndex;
+  int? _draggingLabelIndex;
+  TextEditingController? _labelEditController;
+  FocusNode? _labelEditFocus;
+  // Tracks the current camera so labels can be projected to screen
+  // synchronously (matches the track-editor pattern – avoids async lag on
+  // every camera frame).
+  CameraPosition _currentCamera = const CameraPosition(
+    target: LatLng(-33.925, 18.425),
+    zoom: 12,
+  );
 
   @override
   void initState() {
@@ -421,6 +451,9 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
     _polylines.clear();
     _customPointMarkers.clear();
 
+    // Refresh editable polygon labels for the current polygon set.
+    _ensurePolygonLabels();
+
     // Show all work maps with their respective colors
     if (_job.workMaps.isNotEmpty) {
       for (int i = 0; i < _job.workMaps.length; i++) {
@@ -555,6 +588,124 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
         }
       }
     }
+  }
+
+  // ── Polygon label helpers ─────────────────────────────────────────
+
+  /// Default label text for a polygon. Prefers the first non-empty client
+  /// name, falling back to the work-map's own name.
+  String _defaultLabelText(CustomPolygon workMap) {
+    for (final c in _job.clients) {
+      if (c.trim().isNotEmpty) return c.trim();
+    }
+    return workMap.name;
+  }
+
+  /// Geometric centroid (average of vertices) – good enough for label
+  /// placement on the convex shapes used here.
+  LatLng _polygonCentroid(List<LatLng> pts) {
+    if (pts.isEmpty) return _center;
+    double lat = 0, lng = 0;
+    for (final p in pts) {
+      lat += p.latitude;
+      lng += p.longitude;
+    }
+    return LatLng(lat / pts.length, lng / pts.length);
+  }
+
+  /// Make sure `_polygonLabels` has an entry for every polygon currently
+  /// shown. Existing entries (with user edits) are preserved; stale entries
+  /// for removed/non-polygon indices are dropped.
+  void _ensurePolygonLabels() {
+    final validIndices = <int>{};
+    for (var i = 0; i < _job.workMaps.length; i++) {
+      final wm = _job.workMaps[i];
+      if (!wm.isPolygon || wm.points.length < 3) continue;
+      validIndices.add(i);
+      _polygonLabels.putIfAbsent(
+        i,
+        () => _PolygonLabel(
+          text: _defaultLabelText(wm),
+          anchor: _polygonCentroid(wm.points),
+        ),
+      );
+    }
+    _polygonLabels.removeWhere((k, _) => !validIndices.contains(k));
+  }
+
+  /// Project a LatLng to a screen pixel offset using the current camera.
+  /// Matches the synchronous Web-Mercator math used in the track-editor
+  /// page so labels stay glued to their anchor without async lag.
+  Offset _labelLatLngToScreen(LatLng point, Size screen) {
+    double worldX(double lng) => (lng + 180) / 360 * 256;
+    double worldY(double lat) {
+      final s = sin(lat * pi / 180).clamp(-0.9999, 0.9999);
+      return (0.5 - log((1 + s) / (1 - s)) / (4 * pi)) * 256;
+    }
+
+    final scale = pow(2, _currentCamera.zoom).toDouble();
+    final cx = worldX(_currentCamera.target.longitude) * scale;
+    final cy = worldY(_currentCamera.target.latitude) * scale;
+    final px = worldX(point.longitude) * scale;
+    final py = worldY(point.latitude) * scale;
+    return Offset(
+      screen.width / 2 + (px - cx),
+      screen.height / 2 + (py - cy),
+    );
+  }
+
+  /// Inverse of [_labelLatLngToScreen] – converts a screen offset back to
+  /// the geographic anchor (used while dragging a label around).
+  LatLng _labelScreenToLatLng(Offset offset, Size screen) {
+    final scale = pow(2, _currentCamera.zoom).toDouble();
+    double worldX(double lng) => (lng + 180) / 360 * 256;
+    double worldY(double lat) {
+      final s = sin(lat * pi / 180).clamp(-0.9999, 0.9999);
+      return (0.5 - log((1 + s) / (1 - s)) / (4 * pi)) * 256;
+    }
+
+    final cx = worldX(_currentCamera.target.longitude) * scale;
+    final cy = worldY(_currentCamera.target.latitude) * scale;
+    final px = cx + (offset.dx - screen.width / 2);
+    final py = cy + (offset.dy - screen.height / 2);
+
+    final lng = (px / scale) / 256 * 360 - 180;
+    final n = pi - 2 * pi * (py / scale) / 256;
+    final lat = (180 / pi) * atan((exp(n) - exp(-n)) / 2);
+    return LatLng(lat, lng);
+  }
+
+  void _commitLabelTextEdit() {
+    final idx = _editingLabelIndex;
+    final ctrl = _labelEditController;
+    if (idx != null && ctrl != null && _polygonLabels.containsKey(idx)) {
+      _polygonLabels[idx]!.text = ctrl.text;
+    }
+    _labelEditController?.dispose();
+    _labelEditFocus?.dispose();
+    _labelEditController = null;
+    _labelEditFocus = null;
+    _editingLabelIndex = null;
+  }
+
+  void _beginLabelTextEdit(int index) {
+    final label = _polygonLabels[index];
+    if (label == null) return;
+    // If another label was being edited, commit it first.
+    if (_editingLabelIndex != null && _editingLabelIndex != index) {
+      _commitLabelTextEdit();
+    }
+    _labelEditController = TextEditingController(text: label.text);
+    _labelEditFocus = FocusNode();
+    _editingLabelIndex = index;
+    setState(() {});
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _labelEditFocus?.requestFocus();
+      _labelEditController?.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _labelEditController!.text.length,
+      );
+    });
   }
 
   // ── Vertex editing helpers ────────────────────────────────────────
@@ -1497,6 +1648,26 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
             onPressed: _isPrintingMap ? null : _togglePrintSelection,
           ),
 
+          // Toggle polygon-name labels (editable client name shown on each
+          // polygon; included in the printed map).
+          IconButton(
+            icon: Icon(
+              _showPolygonLabels ? Icons.label : Icons.label_off_outlined,
+              color: _showPolygonLabels ? const Color(0xFF1967D2) : null,
+            ),
+            tooltip: _showPolygonLabels
+                ? 'Hide polygon labels'
+                : 'Show polygon labels',
+            onPressed: () {
+              setState(() {
+                if (_showPolygonLabels && _editingLabelIndex != null) {
+                  _commitLabelTextEdit();
+                }
+                _showPolygonLabels = !_showPolygonLabels;
+              });
+            },
+          ),
+
           // Print button
           IconButton(
             icon: const Icon(Icons.print),
@@ -1533,6 +1704,16 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                       },
                       initialCameraPosition:
                           CameraPosition(target: _center, zoom: 12),
+                      onCameraMove: (pos) {
+                        // Track the camera so polygon labels stay glued to
+                        // their geographic anchors on pan/zoom.
+                        _currentCamera = pos;
+                        if (mounted &&
+                            _polygonLabels.isNotEmpty &&
+                            _showPolygonLabels) {
+                          setState(() {});
+                        }
+                      },
                       polygons: _polygons,
                       polylines: _polylines,
                       markers: {
@@ -1549,11 +1730,13 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                           !_isResizingInfoBox &&
                           !_isDraggingWorkAreasBox &&
                           !_isResizingWorkAreasBox &&
+                          _draggingLabelIndex == null &&
                           !selectionIsInteracting,
                       zoomGesturesEnabled: !_isDraggingInfoBox &&
                           !_isResizingInfoBox &&
                           !_isDraggingWorkAreasBox &&
                           !_isResizingWorkAreasBox &&
+                          _draggingLabelIndex == null &&
                           !selectionIsInteracting,
                       rotateGesturesEnabled: false,
                       tiltGesturesEnabled: false,
@@ -1564,6 +1747,11 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                         color: Colors.white.withValues(alpha: 0.8),
                         child: const Center(child: CircularProgressIndicator()),
                       ),
+                    // Editable client-name labels on each polygon. Drawn on
+                    // top of the map (so they're included in the captured
+                    // screenshot) but below other moveable info boxes.
+                    if (_showPolygonLabels)
+                      ..._buildPolygonLabelOverlays(currentMapSize),
                     // Information Box (rendered as part of the screenshot)
                     if (!hideMapChrome)
                       Positioned(
@@ -1976,6 +2164,158 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
     );
   }
 
+  /// Build one Positioned widget per polygon label. Each label is rendered
+  /// with a transparent background so the map underneath stays visible in
+  /// the printout. Tapping a label switches it into a TextField for inline
+  /// editing; dragging moves the label and re-anchors it to a new LatLng.
+  List<Widget> _buildPolygonLabelOverlays(Size mapSize) {
+    if (_polygonLabels.isEmpty || mapSize.width <= 0 || mapSize.height <= 0) {
+      return const [];
+    }
+    final widgets = <Widget>[];
+    final entries = _polygonLabels.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    for (final entry in entries) {
+      final index = entry.key;
+      final label = entry.value;
+      final screen = _labelLatLngToScreen(label.anchor, mapSize);
+      // Skip labels that have been panned off-screen entirely.
+      if (screen.dx < -200 ||
+          screen.dy < -100 ||
+          screen.dx > mapSize.width + 200 ||
+          screen.dy > mapSize.height + 100) {
+        continue;
+      }
+
+      final isEditing = _editingLabelIndex == index;
+      // Approximate dimensions used to centre the label on its anchor.
+      const double approxWidth = 180;
+      const double approxHeight = 36;
+      final left = (screen.dx - approxWidth / 2).clamp(
+        -approxWidth / 2,
+        mapSize.width - approxWidth / 2,
+      );
+      final top = (screen.dy - approxHeight / 2).clamp(
+        -approxHeight / 2,
+        mapSize.height - approxHeight / 2,
+      );
+
+      widgets.add(
+        Positioned(
+          left: left,
+          top: top,
+          width: approxWidth,
+          height: approxHeight,
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: isEditing ? null : () => _beginLabelTextEdit(index),
+            onPanStart: isEditing
+                ? null
+                : (_) {
+                    setState(() => _draggingLabelIndex = index);
+                  },
+            onPanUpdate: isEditing
+                ? null
+                : (details) {
+                    final current =
+                        _labelLatLngToScreen(label.anchor, mapSize);
+                    final next = current + details.delta;
+                    setState(() {
+                      label.anchor = _labelScreenToLatLng(next, mapSize);
+                    });
+                  },
+            onPanEnd: isEditing
+                ? null
+                : (_) {
+                    setState(() => _draggingLabelIndex = null);
+                  },
+            child: Center(
+              child: isEditing
+                  ? _buildLabelEditor(index)
+                  : _buildLabelText(label.text),
+            ),
+          ),
+        ),
+      );
+    }
+    return widgets;
+  }
+
+  /// Outlined text used for the label – the stroke keeps it readable on any
+  /// background while the fill stays opaque so the colours print cleanly.
+  Widget _buildLabelText(String text) {
+    if (text.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+    const fontSize = 13.0;
+    final style = const TextStyle(
+      fontSize: fontSize,
+      fontWeight: FontWeight.w700,
+      height: 1.1,
+    );
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        // White outline for readability over varied map backgrounds.
+        Text(
+          text,
+          textAlign: TextAlign.center,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: style.copyWith(
+            foreground: Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 3
+              ..color = Colors.white,
+          ),
+        ),
+        Text(
+          text,
+          textAlign: TextAlign.center,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: style.copyWith(color: Colors.black),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLabelEditor(int index) {
+    return Material(
+      color: Colors.white.withValues(alpha: 0.85),
+      elevation: 2,
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        child: TextField(
+          controller: _labelEditController,
+          focusNode: _labelEditFocus,
+          autofocus: true,
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+          ),
+          decoration: const InputDecoration(
+            isDense: true,
+            border: InputBorder.none,
+            contentPadding: EdgeInsets.zero,
+            hintText: 'Label…',
+          ),
+          onSubmitted: (_) {
+            setState(_commitLabelTextEdit);
+          },
+          onTapOutside: (_) {
+            if (_editingLabelIndex == index) {
+              setState(_commitLabelTextEdit);
+            }
+          },
+        ),
+      ),
+    );
+  }
+
   Widget _buildInfoBox() {
     final dateFormatter = DateFormat('dd MMM yyyy');
 
@@ -2187,6 +2527,8 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handlePrintSelectionKey);
+    _labelEditController?.dispose();
+    _labelEditFocus?.dispose();
     try {
       _controller?.dispose();
     } catch (e) {

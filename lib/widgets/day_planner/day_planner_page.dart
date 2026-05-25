@@ -1099,6 +1099,8 @@ class _MarkerInfoCard extends StatelessWidget {
         return Icons.inventory_outlined;
       case DropsheetTaskType.leave:
         return Icons.logout_outlined;
+      case DropsheetTaskType.arrive:
+        return Icons.home_outlined;
       case DropsheetTaskType.dropOff:
         return Icons.local_shipping_outlined;
       case DropsheetTaskType.pickUp:

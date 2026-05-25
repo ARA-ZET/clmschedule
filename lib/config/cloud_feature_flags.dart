@@ -17,16 +17,6 @@ class CloudFeatureFlags {
     defaultValue: true,
   );
 
-  /// When true, the day planner triggers the
-  /// `syncDropsheetFromSchedule` Cloud Function instead of computing
-  /// the Pass 1 / Pass 2 sync diff client-side. Off by default because
-  /// the `onScheduleDayChanged` Firestore trigger already auto-syncs
-  /// on schedule writes — this flag is for manual force-sync paths.
-  static const bool useCloudDropsheetSync = bool.fromEnvironment(
-    'USE_CLOUD_DROPSHEET_SYNC',
-    defaultValue: false,
-  );
-
   /// When true, [DistanceMatrixService] one-off lookups go through the
   /// `getRouteSegment` Cloud Function (shared org-wide cache).
   /// Currently only the route optimiser uses Distance Matrix in bulk,

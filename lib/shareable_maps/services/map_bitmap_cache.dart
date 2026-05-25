@@ -87,6 +87,7 @@ class MapBitmapCache {
     // bitmap (e.g. a missing asset on web) doesn't prevent the others from
     // loading. Callers fall back to `BitmapDescriptor.default*` for any
     // descriptor that ends up null.
+    debugPrint('[WASM-DEBUG] MapBitmapCache._load() starting');
 
     try {
       _vertex = await _renderCircle(
@@ -95,13 +96,22 @@ class MapBitmapCache {
         border: Colors.red,
         borderWidth: 1.5,
       );
-    } catch (_) {
+      debugPrint('[WASM-DEBUG] _vertex loaded from Canvas PNG');
+    } catch (e) {
+      debugPrint('[WASM-DEBUG] _vertex FALLBACK due to: $e');
       _vertex = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
     }
 
     try {
-      _midpoint = await _renderMidpoint();
-    } catch (_) {
+      _midpoint = await _renderCircle(
+        size: 14.0,
+        fill: Colors.orange,
+        border: Colors.white,
+        borderWidth: 1.5,
+      );
+      debugPrint('[WASM-DEBUG] _midpoint loaded from Canvas PNG');
+    } catch (e) {
+      debugPrint('[WASM-DEBUG] _midpoint FALLBACK due to: $e');
       _midpoint =
           BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
     }
@@ -113,7 +123,9 @@ class MapBitmapCache {
         border: Colors.white,
         borderWidth: 2.0,
       );
-    } catch (_) {
+      debugPrint('[WASM-DEBUG] _firstVertex loaded from Canvas PNG');
+    } catch (e) {
+      debugPrint('[WASM-DEBUG] _firstVertex FALLBACK due to: $e');
       _firstVertex =
           BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen);
     }
@@ -143,6 +155,27 @@ class MapBitmapCache {
 
   // ── Internal raster helpers (moved out of _MapViewWidgetState) ────────
 
+  /// PNG magic bytes: 0x89 'P' 'N' 'G' 0x0D 0x0A 0x1A 0x0A
+  static bool _isValidPng(Uint8List b) {
+    if (b.length < 8) return false;
+    return b[0] == 0x89 &&
+        b[1] == 0x50 &&
+        b[2] == 0x4E &&
+        b[3] == 0x47 &&
+        b[4] == 0x0D &&
+        b[5] == 0x0A &&
+        b[6] == 0x1A &&
+        b[7] == 0x0A;
+  }
+
+  /// Render a small filled circle with a border directly at [size]×[size].
+  ///
+  /// Note: in earlier Flutter/skwasm builds (pre-update), rendering tiny
+  /// canvases under `flutter run --wasm` produced oversized/mis-anchored
+  /// PNGs, so we previously rendered at 64×64 and clamped. With the
+  /// current Flutter toolchain the small-canvas path works again, so we
+  /// raster directly at the target size for sharper output. The PNG magic
+  /// check and `width`/`height` clamp remain as cheap safety nets.
   static Future<BitmapDescriptor> _renderCircle({
     required double size,
     required Color fill,
@@ -154,10 +187,12 @@ class MapBitmapCache {
     final radius = size / 2;
     final fillPaint = Paint()
       ..color = fill
+      ..isAntiAlias = true
       ..style = PaintingStyle.fill;
     canvas.drawCircle(Offset(radius, radius), radius - borderWidth, fillPaint);
     final borderPaint = Paint()
       ..color = border
+      ..isAntiAlias = true
       ..style = PaintingStyle.stroke
       ..strokeWidth = borderWidth;
     canvas.drawCircle(
@@ -166,34 +201,23 @@ class MapBitmapCache {
     final picture = recorder.endRecording();
     final img = await picture.toImage(size.toInt(), size.toInt());
     final png = await img.toByteData(format: ui.ImageByteFormat.png);
+    debugPrint('[WASM-DEBUG] _renderCircle: ${size}px '
+        'raster=${img.width}x${img.height} '
+        'png=${png?.lengthInBytes ?? 0} bytes');
     if (png == null) {
       throw StateError('toByteData returned null for circle marker');
     }
-    return BitmapDescriptor.bytes(png.buffer.asUint8List());
-  }
-
-  static Future<BitmapDescriptor> _renderMidpoint() async {
-    const size = 12.0;
-    const radius = size / 2;
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final fillPaint = Paint()
-      ..color = Colors.orange
-      ..style = PaintingStyle.fill;
-    canvas.drawCircle(const Offset(radius, radius), radius - 1.0, fillPaint);
-    final borderPaint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.0;
-    canvas.drawCircle(const Offset(radius, radius), radius - 1.0, borderPaint);
-
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(size.toInt(), size.toInt());
-    final png = await img.toByteData(format: ui.ImageByteFormat.png);
-    if (png == null) {
-      throw StateError('toByteData returned null for midpoint marker');
+    final bytes = png.buffer.asUint8List();
+    if (!_isValidPng(bytes)) {
+      debugPrint('[WASM-DEBUG] _renderCircle: \u26a0\ufe0f INVALID PNG magic '
+          '\u2014 falling back to defaultMarker');
+      throw StateError('Invalid PNG bytes produced for circle marker');
     }
-    return BitmapDescriptor.bytes(png.buffer.asUint8List());
+    return BitmapDescriptor.bytes(
+      bytes,
+      width: size,
+      height: size,
+    );
   }
 
   static Future<BitmapDescriptor?> _loadAssetBitmap(

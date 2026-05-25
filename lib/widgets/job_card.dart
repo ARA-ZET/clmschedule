@@ -315,7 +315,7 @@ class _JobStatusButton extends riverpod.ConsumerWidget {
               return ListTile(
                 dense: true,
                 title: Text(status.label),
-                tileColor: isSelected ? status.color.withOpacity(0.3) : null,
+                tileColor: isSelected ? status.color.withValues(alpha: 0.3) : null,
                 leading: Container(
                   width: 20,
                   height: 20,

@@ -771,7 +771,7 @@ class _HappySunCheckoutScreenState extends riverpod
                         width: 36,
                         height: 36,
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.2),
+                          color: Colors.white.withValues(alpha: 0.2),
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Icon(
@@ -982,7 +982,7 @@ class _HappySunCheckoutScreenState extends riverpod
                               width: 36,
                               height: 36,
                               decoration: BoxDecoration(
-                                color: entry.color.withOpacity(0.1),
+                                color: entry.color.withValues(alpha: 0.1),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Icon(
@@ -1013,7 +1013,7 @@ class _HappySunCheckoutScreenState extends riverpod
                                           vertical: 2,
                                         ),
                                         decoration: BoxDecoration(
-                                          color: entry.color.withOpacity(0.2),
+                                          color: entry.color.withValues(alpha: 0.2),
                                           borderRadius:
                                               BorderRadius.circular(10),
                                         ),
@@ -1383,7 +1383,7 @@ class _HappySunCheckoutScreenState extends riverpod
         color: Colors.white,
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
+            color: Colors.black.withValues(alpha: 0.1),
             blurRadius: 8,
             offset: const Offset(0, -2),
           ),

@@ -451,7 +451,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
       builder: (context, candidateData, rejectedData) {
         return Card(
           color: candidateData.isNotEmpty
-              ? Theme.of(context).primaryColor.withOpacity(0.1)
+              ? Theme.of(context).primaryColor.withValues(alpha: 0.1)
               : null,
           child: jobs.isEmpty
               ? _AddJobButton(

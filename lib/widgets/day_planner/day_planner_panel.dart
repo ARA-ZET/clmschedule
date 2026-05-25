@@ -1067,6 +1067,7 @@ class _StopRow extends riverpod.ConsumerWidget {
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
+      case DropsheetTaskType.arrive:
         return t.type.displayName;
     }
   }
@@ -1130,6 +1131,7 @@ class _TypeChip extends StatelessWidget {
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
+      case DropsheetTaskType.arrive:
         return (bg: const Color(0xFFEEEEEE), fg: const Color(0xFF424242));
     }
   }

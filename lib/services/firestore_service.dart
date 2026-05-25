@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
+import '../models/work_suburb.dart';
 import '../models/collection_job.dart';
 import 'daily_service.dart';
 
@@ -16,6 +17,10 @@ class FirestoreService {
   CollectionReference get _distributors =>
       _firestore.collection('distributors');
   CollectionReference get _workAreas => _firestore.collection('workAreas');
+
+  /// Single document that holds all work suburb polygons as an array.
+  DocumentReference get _workSuburbsDoc =>
+      _firestore.collection('workSuburbs').doc('main');
 
   /// Lightweight existence check: does the month have any schedule data?
   ///
@@ -702,6 +707,46 @@ class FirestoreService {
   Future<void> deleteWorkArea(String workAreaId, [DateTime? date]) {
     // Date parameter is ignored for work areas since they're in root collection
     return _workAreas.doc(workAreaId).delete();
+  }
+
+  // ── Work Suburbs (single-document pattern) ──────────────────────────
+
+  /// Real-time stream of all suburb polygons from the single
+  /// `workSuburbs/main` document.
+  Stream<List<WorkSuburb>> streamWorkSuburbs() {
+    return _workSuburbsDoc.snapshots().map((snap) {
+      if (!snap.exists) return <WorkSuburb>[];
+      final data = snap.data() as Map<String, dynamic>;
+      final List<dynamic> raw = data['suburbs'] ?? [];
+      return raw
+          .map((e) => WorkSuburb.fromMap(Map<String, dynamic>.from(e as Map)))
+          .toList();
+    });
+  }
+
+  /// Cache-first one-shot fetch of work suburbs.
+  Future<List<WorkSuburb>> fetchWorkSuburbsOnce() async {
+    DocumentSnapshot snap;
+    try {
+      snap = await _workSuburbsDoc.get(const GetOptions(source: Source.cache));
+      if (!snap.exists) snap = await _workSuburbsDoc.get();
+    } catch (_) {
+      snap = await _workSuburbsDoc.get();
+    }
+    if (!snap.exists) return [];
+    final data = snap.data() as Map<String, dynamic>;
+    final List<dynamic> raw = data['suburbs'] ?? [];
+    return raw
+        .map((e) => WorkSuburb.fromMap(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  /// Overwrites the entire suburbs array in the single document.
+  Future<void> saveWorkSuburbs(List<WorkSuburb> suburbs) {
+    return _workSuburbsDoc.set({
+      'suburbs': suburbs.map((s) => s.toMap()).toList(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   // UTILITY METHODS

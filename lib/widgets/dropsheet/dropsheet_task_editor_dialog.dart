@@ -11,6 +11,7 @@ import '../../providers/dropsheet_task_config_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../services/geocoding_service.dart';
+import '../../shareable_maps/services/places_autocomplete_service.dart';
 import '../../utils/dropsheet_maps.dart';
 
 /// Type-aware editor for a [DropsheetTask].
@@ -207,6 +208,7 @@ class _DropsheetTaskEditorDialogState
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
+      case DropsheetTaskType.arrive:
       case DropsheetTaskType.custom:
         return _genericFields();
       case DropsheetTaskType.dropOff:
@@ -298,12 +300,10 @@ class _DropsheetTaskEditorDialogState
         label: Text(client.isEmpty ? 'Choose $typeLabel' : 'Client: $client'),
       ),
       const SizedBox(height: 8),
-      TextField(
+      _GeoAddressField(
         controller: _collectionAddress,
-        decoration: const InputDecoration(
-          labelText: 'Collection address',
-          helperText: '"Western Cape, South Africa" appended automatically',
-        ),
+        label: 'Collection address',
+        helperText: '"Western Cape, South Africa" appended automatically',
       ),
       const SizedBox(height: 8),
       TextField(
@@ -329,17 +329,15 @@ class _DropsheetTaskEditorDialogState
             Text(client.isEmpty ? 'Choose furniture move' : 'Client: $client'),
       ),
       const SizedBox(height: 8),
-      TextField(
+      _GeoAddressField(
         controller: _loadingAddress,
-        decoration: const InputDecoration(
-          labelText: 'Loading address',
-          helperText: 'Auto-filled from job list — edit if needed',
-        ),
+        label: 'Loading address',
+        helperText: 'Auto-filled from job list — edit if needed',
       ),
       const SizedBox(height: 8),
-      TextField(
+      _GeoAddressField(
         controller: _offloadAddress,
-        decoration: const InputDecoration(labelText: 'Offload address'),
+        label: 'Offload address',
       ),
       const SizedBox(height: 8),
       TextField(
@@ -892,6 +890,7 @@ class _DropsheetTaskEditorDialogState
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
+      case DropsheetTaskType.arrive:
       case DropsheetTaskType.custom:
         if (dynamicTypeId != null && dynamicTypeId.isNotEmpty) {
           final addr = _collectionAddress.text.trim();
@@ -1062,7 +1061,133 @@ class DropsheetTaskTypePicker extends riverpod.ConsumerWidget {
         return Icons.backpack_outlined;
       case DropsheetTaskType.leave:
         return Icons.directions_car_outlined;
+      case DropsheetTaskType.arrive:
+        return Icons.home_outlined;
     }
+  }
+}
+
+/// An address text field that shows Google Places autocomplete suggestions.
+/// Uses [PlacesAutocompleteService] which handles CORS on web via JS interop.
+class _GeoAddressField extends StatefulWidget {
+  final TextEditingController controller;
+  final String label;
+  final String? helperText;
+
+  const _GeoAddressField({
+    required this.controller,
+    required this.label,
+    this.helperText,
+  });
+
+  @override
+  State<_GeoAddressField> createState() => _GeoAddressFieldState();
+}
+
+class _GeoAddressFieldState extends State<_GeoAddressField> {
+  late final FocusNode _focusNode;
+  final _places = PlacesAutocompleteService();
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode = FocusNode();
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  Future<Iterable<PlaceSuggestion>> _optionsBuilder(
+      TextEditingValue value) async {
+    final query = value.text.trim();
+    if (query.length < 3) return const [];
+    // Debounce: wait 350 ms then bail if the field text has changed.
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    if (!mounted) return const [];
+    if (query != widget.controller.text.trim()) return const [];
+    return _places.getSuggestions(query);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RawAutocomplete<PlaceSuggestion>(
+      textEditingController: widget.controller,
+      focusNode: _focusNode,
+      optionsBuilder: _optionsBuilder,
+      displayStringForOption: (s) => s.description,
+      onSelected: (suggestion) {
+        widget.controller.text = suggestion.description;
+        _focusNode.unfocus();
+      },
+      fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
+        return TextField(
+          controller: controller,
+          focusNode: focusNode,
+          decoration: InputDecoration(
+            labelText: widget.label,
+            helperText: widget.helperText,
+            suffixIcon: const Icon(Icons.location_searching, size: 18),
+          ),
+          onSubmitted: (_) => onFieldSubmitted(),
+        );
+      },
+      optionsViewBuilder: (context, onSelected, options) {
+        return Align(
+          alignment: Alignment.topLeft,
+          child: Material(
+            elevation: 4,
+            borderRadius: BorderRadius.circular(4),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 220, maxWidth: 460),
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: options.length,
+                itemBuilder: (context, index) {
+                  final s = options.elementAt(index);
+                  return InkWell(
+                    onTap: () => onSelected(s),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 10),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.location_on_outlined,
+                              size: 16, color: Colors.black54),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  s.mainText.isNotEmpty
+                                      ? s.mainText
+                                      : s.description,
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                                if (s.secondaryText.isNotEmpty)
+                                  Text(
+                                    s.secondaryText,
+                                    style: const TextStyle(
+                                        fontSize: 11, color: Colors.black45),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 }
 

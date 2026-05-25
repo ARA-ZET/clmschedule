@@ -13,6 +13,11 @@ enum DropsheetTaskType {
   /// Mandatory: leave time. Free-text details.
   leave,
 
+  /// Mandatory: arrive back at the office at the end of the day.
+  /// Pinned at the bottom of every driver section. Uses the configured
+  /// depot/office address (see [DepotConfig]) for its Maps link.
+  arrive,
+
   /// Drop off flyers/material at a distributor's work area.
   /// One task = one distributor. Pulls from `/schedule/daily/{date}` and
   /// uses the distributor's `Job.dropOffPoint` for the Maps link.
@@ -48,6 +53,8 @@ enum DropsheetTaskType {
         return 'Pack';
       case DropsheetTaskType.leave:
         return 'Leave';
+      case DropsheetTaskType.arrive:
+        return 'Arrive';
       case DropsheetTaskType.dropOff:
         return 'Drop off';
       case DropsheetTaskType.pickUp:
@@ -141,6 +148,8 @@ class DropsheetTask {
         inferredType = DropsheetTaskType.pack;
       } else if (id.endsWith('_m3')) {
         inferredType = DropsheetTaskType.leave;
+      } else if (id.endsWith('_m4')) {
+        inferredType = DropsheetTaskType.arrive;
       } else {
         inferredType = DropsheetTaskType.custom;
       }
@@ -148,7 +157,8 @@ class DropsheetTask {
 
     final isLeadingType = inferredType == DropsheetTaskType.inspect ||
         inferredType == DropsheetTaskType.pack ||
-        inferredType == DropsheetTaskType.leave;
+        inferredType == DropsheetTaskType.leave ||
+        inferredType == DropsheetTaskType.arrive;
 
     return DropsheetTask(
       id: data['id'] as String,
@@ -250,5 +260,17 @@ class DropsheetTask {
           startTime: '07:30',
           isMandatory: true,
         ),
+        DropsheetTask(
+          id: '${idPrefix}_m4',
+          type: DropsheetTaskType.arrive,
+          job: 'Arrive',
+          isMandatory: true,
+        ),
       ];
+
+  /// Returns true if [task] is the trailing mandatory "Arrive at office"
+  /// task. Used by reorder / add-task logic to keep it pinned to the
+  /// bottom of every driver section.
+  static bool isTrailing(DropsheetTask task) =>
+      task.type == DropsheetTaskType.arrive;
 }
