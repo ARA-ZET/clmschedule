@@ -3,28 +3,30 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../models/custom_polygon.dart';
 import '../../models/work_suburb.dart';
-import '../../services/firestore_service.dart';
 import '../models/map_layer.dart';
 import '../models/shareable_map.dart';
+import '../services/suburb_data_service.dart';
 import 'map_data_adapter.dart';
 
-/// Adapter that bridges the ShareableMapEditor to the single
-/// `workSuburbs/main` Firestore document.
+/// Adapter that bridges the ShareableMapEditor to the suburb polygon dataset.
 ///
-/// **Load**: Reads the `suburbs` array from the single document and converts
-/// each entry into a [CustomPolygon] on a single layer called "Work Suburbs".
+/// **Load**: Downloads the KML from Firebase Storage (with in-memory session
+/// cache and bundled-asset fallback), parses it, then merges any user
+/// overrides from `workSuburbs/overrides`.
 ///
-/// **Save**: Overwrites the entire `suburbs` array with the current polygons.
+/// **Save**: Persists only the user-editable fields (letterBoxEstimate,
+/// description) to `workSuburbs/overrides`. Polygon coordinates are never
+/// written back — they live exclusively in the KML.
 class WorkSuburbsAdapter extends MapDataAdapter {
-  final FirestoreService _firestoreService;
+  final SuburbDataService _suburbService;
 
   /// Optional center to focus the map on initially.
   final LatLng? initialCenter;
 
   WorkSuburbsAdapter({
-    FirestoreService? firestoreService,
+    SuburbDataService? suburbService,
     this.initialCenter,
-  }) : _firestoreService = firestoreService ?? FirestoreService();
+  }) : _suburbService = suburbService ?? SuburbDataService();
 
   @override
   String get adapterId => 'work_suburbs';
@@ -38,7 +40,7 @@ class WorkSuburbsAdapter extends MapDataAdapter {
 
   @override
   Future<ShareableMap> load() async {
-    final suburbs = await _firestoreService.fetchWorkSuburbsOnce();
+    final suburbs = await _suburbService.loadSuburbs();
 
     final polygons = suburbs.map(_suburbToPolygon).toList();
 
@@ -46,7 +48,7 @@ class WorkSuburbsAdapter extends MapDataAdapter {
     final layer = MapLayer(
       id: 'work_suburbs_layer',
       name: 'Work Suburbs',
-      description: 'Polygons from the workSuburbs/main document',
+      description: 'Cape Town suburb polygons',
       order: 0,
       defaultColor: Colors.blue,
       polygons: polygons,
@@ -86,24 +88,26 @@ class WorkSuburbsAdapter extends MapDataAdapter {
   Future<void> save(ShareableMap map) async {
     final allPolygons = map.layers.expand((l) => l.polygons).toList();
 
-    // Convert each polygon back to a WorkSuburb, preserving id by name match.
-    // Polygons added in the editor that have no matching id get a new uuid-like
-    // id derived from their name and timestamp.
-    final existing = await _firestoreService.fetchWorkSuburbsOnce();
-    final existingByName = {for (final s in existing) s.name: s};
+    // Build a name→suburb lookup from the cached base KML suburbs so we can
+    // resolve the canonical id (SL_OFC_SBRB_KEY) for each polygon.
+    final base = _suburbService.baseSuburbs ?? [];
+    final baseByName = {for (final s in base) s.name: s};
 
-    final updated = allPolygons.map((polygon) {
-      final match = existingByName[polygon.name];
+    final suburbs = allPolygons.map((polygon) {
+      final match = baseByName[polygon.name];
       return WorkSuburb(
-        id: match?.id ?? '${polygon.name}_${DateTime.now().millisecondsSinceEpoch}',
+        // Use the original KML id when available; generate a stable id for new
+        // user-drawn polygons so they survive a save/reload cycle.
+        id: match?.id ??
+            'usr_${polygon.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_')}',
         name: polygon.name,
         description: polygon.description,
-        polygonPoints: polygon.points,
+        polygonPoints: polygon.points, // pass real points so delta can detect edits
         letterBoxEstimate: polygon.letterBoxEstimate,
       );
     }).toList();
 
-    await _firestoreService.saveWorkSuburbs(updated);
+    await _suburbService.saveDelta(suburbs);
   }
 
   // ── Conversion helpers ──────────────────────────────────────────────

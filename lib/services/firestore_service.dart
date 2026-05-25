@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
@@ -742,9 +743,90 @@ class FirestoreService {
   }
 
   /// Overwrites the entire suburbs array in the single document.
+  ///
+  /// Deprecated: prefer [saveSuburbOverrides] when using [SuburbDataService].
   Future<void> saveWorkSuburbs(List<WorkSuburb> suburbs) {
     return _workSuburbsDoc.set({
       'suburbs': suburbs.map((s) => s.toMap()).toList(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // ── Work Suburbs — Cloud Storage meta / overrides ─────────────────────────
+
+  DocumentReference get _suburbMetaDoc =>
+      _firestore.collection('workSuburbs').doc('meta');
+
+  DocumentReference get _suburbOverridesDoc =>
+      _firestore.collection('workSuburbs').doc('overrides');
+
+  /// Fetch the KML version metadata stored at `workSuburbs/meta`.
+  ///
+  /// Returns a map with at least `version` (String) and `storagePath` (String).
+  Future<Map<String, dynamic>?> fetchSuburbMeta() async {
+    try {
+      final snap = await _suburbMetaDoc.get();
+      if (!snap.exists) return null;
+      return snap.data() as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('FirestoreService.fetchSuburbMeta: $e');
+      return null;
+    }
+  }
+
+  /// Fetch user-editable overrides for individual suburbs (letterBoxEstimate,
+  /// description).  Returns a map keyed by suburb id.
+  Future<Map<String, Map<String, dynamic>>> fetchSuburbOverrides() async {
+    try {
+      DocumentSnapshot snap;
+      try {
+        snap = await _suburbOverridesDoc
+            .get(const GetOptions(source: Source.cache));
+        if (!snap.exists) snap = await _suburbOverridesDoc.get();
+      } catch (_) {
+        snap = await _suburbOverridesDoc.get();
+      }
+      if (!snap.exists) return {};
+      final data = snap.data() as Map<String, dynamic>;
+      final rawList = data['overrides'] as List<dynamic>? ?? [];
+      return {
+        for (final o in rawList.cast<Map<String, dynamic>>())
+          o['id'] as String: o,
+      };
+    } catch (e) {
+      debugPrint('FirestoreService.fetchSuburbOverrides: $e');
+      return {};
+    }
+  }
+
+  /// Persist user-editable suburb fields.  Only [letterBoxEstimate] and
+  /// [description] are saved — coordinates stay in the KML.
+  Future<void> saveSuburbOverrides(List<WorkSuburb> suburbs) {
+    final overrides = suburbs
+        .where((s) => s.letterBoxEstimate != 0 || s.description.isNotEmpty)
+        .map((s) => {
+              'id': s.id,
+              'letterBoxEstimate': s.letterBoxEstimate,
+              'description': s.description,
+            })
+        .toList();
+
+    return _suburbOverridesDoc.set({
+      'overrides': overrides,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Write (or update) the KML version metadata at `workSuburbs/meta`.
+  ///
+  /// Typically called from the seeder script after uploading a new KML.
+  Future<void> setSuburbMeta({
+    required String version,
+    required String storagePath,
+  }) {
+    return _suburbMetaDoc.set({
+      'version': version,
+      'storagePath': storagePath,
       'updatedAt': FieldValue.serverTimestamp(),
     });
   }

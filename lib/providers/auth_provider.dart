@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -19,6 +21,8 @@ class AuthProvider extends ChangeNotifier {
   bool _isLoading = false;
   String? _errorMessage;
   bool _isInitialized = false;
+  Future<void>? _initializationFuture;
+  StreamSubscription<User?>? _authStateSubscription;
 
   // Public getters
   User? get user => _user;
@@ -32,41 +36,44 @@ class AuthProvider extends ChangeNotifier {
   Future<void> initialize() async {
     if (_isInitialized) return;
 
+    final existingInitialization = _initializationFuture;
+    if (existingInitialization != null) {
+      return existingInitialization;
+    }
+
+    _initializationFuture = _initializeInternal();
+    return _initializationFuture!;
+  }
+
+  Future<void> _initializeInternal() async {
     _setLoading(true);
 
     try {
       // Initialize the auth service
       await _authService.initialize();
 
-      // Set initial user state
-      _user = _authService.currentUser;
+      final firstAuthState = Completer<void>();
 
-      // Load app user data if authenticated
-      if (_user != null) {
-        _appUser = await _authService.getCurrentUserFromDatabase();
-      }
-
-      // Listen to authentication state changes
-      _authService.authStateChanges.listen((User? user) async {
-        _user = user;
-
-        // Load or clear app user data
-        if (user != null) {
-          try {
-            _appUser = await _authService.getCurrentUserFromDatabase();
-          } catch (e) {
-            debugPrint('Error loading app user data: $e');
-            _appUser = null;
+      await _authStateSubscription?.cancel();
+      _authStateSubscription = _authService.authStateChanges.listen(
+        (User? user) async {
+          await _applyAuthState(user);
+          if (!firstAuthState.isCompleted) {
+            firstAuthState.complete();
           }
-        } else {
-          _appUser = null;
-        }
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          if (!firstAuthState.isCompleted) {
+            firstAuthState.completeError(error, stackTrace);
+          }
+        },
+      );
 
-        _clearError();
-        notifyListeners();
-
-        debugPrint('Auth state changed. User: ${user?.email ?? 'None'}');
-      });
+      try {
+        await firstAuthState.future.timeout(const Duration(seconds: 5));
+      } on TimeoutException {
+        await _applyAuthState(_authService.currentUser);
+      }
 
       _isInitialized = true;
       debugPrint(
@@ -77,6 +84,26 @@ class AuthProvider extends ChangeNotifier {
     } finally {
       _setLoading(false);
     }
+  }
+
+  Future<void> _applyAuthState(User? user) async {
+    _user = user;
+
+    if (user != null) {
+      try {
+        _appUser = await _authService.getCurrentUserFromDatabase();
+      } catch (e) {
+        debugPrint('Error loading app user data: $e');
+        _appUser = null;
+      }
+    } else {
+      _appUser = null;
+    }
+
+    _clearError();
+    notifyListeners();
+
+    debugPrint('Auth state changed. User: ${user?.email ?? 'None'}');
   }
 
   /// Sign in with email and password
@@ -299,7 +326,7 @@ class AuthProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    // Clean up any subscriptions if needed
+    _authStateSubscription?.cancel();
     super.dispose();
   }
 }

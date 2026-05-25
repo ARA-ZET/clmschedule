@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -110,12 +112,16 @@ void main() async {
   usePathUrlStrategy();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  // Enable offline persistence for non-web platforms
-  // Enable offline persistence on all platforms (web uses IndexedDB via WASM-compatible JS interop)
+  // Enable offline persistence on all platforms (web uses IndexedDB via WASM-compatible JS interop).
+  // cloud_firestore_web 4.2.0 serializes long-polling options whenever web
+  // settings are applied, so keep timeoutDuration non-null for Firebase JS.
   try {
     FirebaseFirestore.instance.settings = const Settings(
       persistenceEnabled: true,
       cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+      webExperimentalLongPollingOptions: WebExperimentalLongPollingOptions(
+        timeoutDuration: Duration(seconds: 30),
+      ),
     );
   } catch (e) {
     // Settings may have already been applied, continue silently
@@ -159,6 +165,9 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
   InventoryLocalStorage? _inventoryLocalStorage;
   ImageCacheService? _imageCacheService;
   InventorySyncService? _inventorySyncService;
+  AuthProvider? _authProviderForListener;
+  bool _authenticatedProvidersInitialized = false;
+  bool _authenticatedProvidersInitializing = false;
 
   @override
   void initState() {
@@ -167,9 +176,14 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
     // Initialize all providers asynchronously in parallel
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _initializeProvidersAsync();
-      // Set up Happy Sun sync for both flavors (both have Happy Sun features)
-      _setupHappySunSync();
     });
+  }
+
+  void _handleAuthStateForProviderInit() {
+    final authProvider = _authProviderForListener;
+    if (authProvider == null || !authProvider.isAuthenticated) return;
+
+    unawaited(_initializeAuthenticatedProviders());
   }
 
   void _setupHappySunSync() {
@@ -454,9 +468,46 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
       }
     }
 
+    final authProvider = ref.read(authRiverpod);
+    await authProvider.initialize();
+    _authProviderForListener = authProvider;
+    authProvider.addListener(_handleAuthStateForProviderInit);
+
+    if (authProvider.isAuthenticated) {
+      await _initializeAuthenticatedProviders();
+    } else {
+      debugPrint('Skipping Firestore provider initialization until sign-in.');
+    }
+
+    // CollectionScheduleProvider loads lazily when tab opens (depends on JobListProvider data)
+
+    // Initialize version checking for web only
+    if (kIsWeb && mounted) {
+      _initializeVersionCheck();
+      _setupVersionListener();
+    }
+
+    if (mounted) {
+      setState(() {
+        _isInitialized = true;
+      });
+    }
+  }
+
+  Future<void> _initializeAuthenticatedProviders() async {
+    if (_authenticatedProvidersInitialized ||
+        _authenticatedProvidersInitializing) {
+      return;
+    }
+
+    _authenticatedProvidersInitializing = true;
+
+    // Set up Happy Sun sync for both flavors (both have Happy Sun features).
+    // This reads HappySunProjectProvider, whose constructor opens Firestore streams.
+    _setupHappySunSync();
+
     // Build initialization list based on flavor
     final List<Future<void>> initializations = [
-      ref.read(authRiverpod).initialize(),
       ref.read(jobListRiverpod).initialize(),
       ref.read(inventoryRiverpod).initialize(),
       ref.read(toolSettingsRiverpod).loadSettings(),
@@ -476,6 +527,9 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
     } catch (e) {
       debugPrint('⚠️ Provider initialization error or timeout: $e');
       // Continue — the app can still function with partial initialization.
+    } finally {
+      _authenticatedProvidersInitialized = true;
+      _authenticatedProvidersInitializing = false;
     }
 
     // Ensure lastCheckedTime is loaded now that auth is guaranteed ready
@@ -486,20 +540,6 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
           .timeout(const Duration(seconds: 10));
     } catch (e) {
       debugPrint('⚠️ ensureLastCheckedTimeLoaded error or timeout: $e');
-    }
-
-    // CollectionScheduleProvider loads lazily when tab opens (depends on JobListProvider data)
-
-    // Initialize version checking for web only
-    if (kIsWeb && mounted) {
-      _initializeVersionCheck();
-      _setupVersionListener();
-    }
-
-    if (mounted) {
-      setState(() {
-        _isInitialized = true;
-      });
     }
   }
 
@@ -564,6 +604,7 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
 
   @override
   void dispose() {
+    _authProviderForListener?.removeListener(_handleAuthStateForProviderInit);
     if (kIsWeb) {
       _versionService.dispose();
     }
