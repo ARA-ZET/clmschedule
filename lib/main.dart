@@ -472,8 +472,7 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
     // Wrap in try/catch + timeout so a hanging network call (common on first
     // web load) never freezes the splash screen indefinitely.
     try {
-      await Future.wait(initializations)
-          .timeout(const Duration(seconds: 20));
+      await Future.wait(initializations).timeout(const Duration(seconds: 20));
     } catch (e) {
       debugPrint('⚠️ Provider initialization error or timeout: $e');
       // Continue — the app can still function with partial initialization.
@@ -481,7 +480,9 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
 
     // Ensure lastCheckedTime is loaded now that auth is guaranteed ready
     try {
-      await ref.read(jobListRiverpod).ensureLastCheckedTimeLoaded()
+      await ref
+          .read(jobListRiverpod)
+          .ensureLastCheckedTimeLoaded()
           .timeout(const Duration(seconds: 10));
     } catch (e) {
       debugPrint('⚠️ ensureLastCheckedTimeLoaded error or timeout: $e');
