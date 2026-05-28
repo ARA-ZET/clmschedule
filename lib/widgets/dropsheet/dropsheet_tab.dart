@@ -75,7 +75,33 @@ class DropsheetTab extends riverpod.ConsumerWidget {
             }
           },
           onSyncPickups: () async {
-            final result = await dropsheet.syncPickupsFromDropOffs();
+            // Ask the user which pickup order to use.
+            final reversed = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('Pickup order'),
+                content: const Text(
+                  'How should the pickup tasks be ordered?',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(null),
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(false),
+                    child: const Text('Same as drop-off'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.of(ctx).pop(true),
+                    child: const Text('Reverse drop-off'),
+                  ),
+                ],
+              ),
+            );
+            if (reversed == null || !context.mounted) return;
+            final result =
+                await dropsheet.syncPickupsFromDropOffs(reversed: reversed);
             if (!context.mounted) return;
 
             final message = switch (result.dropOffs) {

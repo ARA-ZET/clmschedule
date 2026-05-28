@@ -156,6 +156,9 @@ class DropsheetRoutePlanner {
   }) async {
     final stops = <RouteStop>[];
     final skipped = <String>[];
+    // Accumulate service minutes for unrouted tasks (no coordinates) so the
+    // total route duration and ETA remain realistic.
+    var unroutedServiceMinutes = 0;
 
     for (final task in section.tasks) {
       // The 3 mandatory tasks happen at the depot before leaving — they
@@ -163,6 +166,7 @@ class DropsheetRoutePlanner {
       if (task.isMandatory) continue;
       final taskStops = _stopsForTask(task);
       if (taskStops.isEmpty) {
+        unroutedServiceMinutes += _config.serviceMinutesFor(task);
         skipped.add(task.id);
         continue;
       }
@@ -170,7 +174,8 @@ class DropsheetRoutePlanner {
     }
 
     debugPrint(
-        '[DropsheetRoute] section=${section.id} stops=${stops.length} skipped=${skipped.length}');
+        '[DropsheetRoute] section=${section.id} stops=${stops.length} '
+        'skipped=${skipped.length} unroutedMin=$unroutedServiceMinutes');
 
     if (stops.isEmpty) return null;
     if (depot.lat == null || depot.lng == null) {
@@ -323,6 +328,15 @@ class DropsheetRoutePlanner {
     // Stops we never reached (e.g. Directions API failures) become
     // skipped so the UI can flag them.
     skipped.addAll(remaining.map((s) => s.taskId).toSet());
+
+    // Add accumulated service time for tasks that had no coordinates (and
+    // therefore no routing stop). We apply this before the return leg so it
+    // inflates both the total duration and the final depot arrival ETA.
+    if (unroutedServiceMinutes > 0) {
+      clock = clock.add(Duration(minutes: unroutedServiceMinutes));
+      debugPrint(
+          '[DropsheetRoute] applied ${unroutedServiceMinutes}min unrouted overhead');
+    }
 
     // Return leg: last stop → depot so the total is a full round trip.
     if (ordered.isNotEmpty) {
@@ -597,27 +611,24 @@ class DropsheetRoutePlanner {
     required DateTime baseDate,
     String? startTime,
   }) async {
-    final stops = <RouteStop>[];
-    final skipped = <String>[];
-
-    for (final task in section.tasks) {
-      if (task.isMandatory) continue;
-      final taskStops = _stopsForTask(task);
-      if (taskStops.isEmpty) {
-        skipped.add(task.id);
-        continue;
-      }
-      stops.addAll(taskStops);
-    }
-
-    debugPrint(
-        '[DropsheetRoute] section=${section.id} stops=${stops.length} skipped=${skipped.length}');
-
-    if (stops.isEmpty) return null;
     if (depot.lat == null || depot.lng == null) {
       debugPrint('[DropsheetRoute] depot not geocoded — aborting');
       return null;
     }
+
+    // Collect per-task routing data up-front (all synchronous).
+    final taskData = <({DropsheetTask task, List<RouteStop> stops})>[];
+    for (final task in section.tasks) {
+      if (task.isMandatory) continue;
+      taskData.add((task: task, stops: _stopsForTask(task)));
+    }
+
+    final routableCount = taskData.fold(0, (s, d) => s + d.stops.length);
+    final unroutedCount = taskData.where((d) => d.stops.isEmpty).length;
+    debugPrint(
+        '[DropsheetRoute] section=${section.id} routable=$routableCount '
+        'unrouted=$unroutedCount');
+    if (routableCount == 0) return null;
 
     final depotAddr =
         _addressFor(id: '__depot', lat: depot.lat!, lng: depot.lng!);
@@ -630,45 +641,62 @@ class DropsheetRoutePlanner {
     final ordered = <RouteStop>[];
     final legs = <RouteLeg>[];
     final arrivalTimes = <String, String>{};
+    final skipped = <String>[];
 
     String? currentId;
     double currentLat = depot.lat!;
     double currentLng = depot.lng!;
 
-    for (final stop in stops) {
-      final candAddr =
-          _addressFor(id: stop.stopKey, lat: stop.lat, lng: stop.lng);
-      final fromAddr = currentId == null
-          ? depotAddr
-          : _addressFor(id: currentId, lat: currentLat, lng: currentLng);
-
-      final seg = await _matrix.getRouteSegment(fromAddr, candAddr,
-          departureTime: clock);
-      if (seg == null) {
-        debugPrint(
-            '[DropsheetRoute] no segment ${fromAddr.id} -> ${candAddr.id}');
-        skipped.add(stop.taskId);
+    for (final d in taskData) {
+      if (d.stops.isEmpty) {
+        // Task has no routing stop (no coordinates). Still advance the clock
+        // by its configured service time so downstream ETAs remain realistic.
+        final serviceMin = _config.serviceMinutesFor(d.task);
+        if (serviceMin > 0) {
+          clock = clock.add(Duration(minutes: serviceMin));
+          debugPrint(
+              '[DropsheetRoute] task=${d.task.id} (${d.task.type.name}) '
+              'no coords — +${serviceMin}min to clock');
+        }
+        skipped.add(d.task.id);
         continue;
       }
 
-      final legDuration = seg.durationInTrafficSeconds;
-      final leg = RouteLeg(
-        fromStopKey: currentId,
-        toStopKey: stop.stopKey,
-        distanceMeters: seg.distanceMeters,
-        durationSeconds: legDuration,
-        polyline: seg.polylinePoints,
-      );
+      for (final stop in d.stops) {
+        final candAddr =
+            _addressFor(id: stop.stopKey, lat: stop.lat, lng: stop.lng);
+        final fromAddr = currentId == null
+            ? depotAddr
+            : _addressFor(id: currentId, lat: currentLat, lng: currentLng);
 
-      ordered.add(stop);
-      legs.add(leg);
-      clock = clock.add(Duration(seconds: legDuration));
-      arrivalTimes[stop.stopKey] = _fmtHHmm(clock);
-      clock = clock.add(Duration(minutes: stop.serviceMinutes));
+        final seg = await _matrix.getRouteSegment(fromAddr, candAddr,
+            departureTime: clock);
+        if (seg == null) {
+          debugPrint(
+              '[DropsheetRoute] no segment ${fromAddr.id} -> ${candAddr.id}');
+          skipped.add(stop.taskId);
+          continue;
+        }
 
-      currentId = stop.stopKey;
-      currentLat = stop.lat;
-      currentLng = stop.lng;
+        final legDuration = seg.durationInTrafficSeconds;
+        final leg = RouteLeg(
+          fromStopKey: currentId,
+          toStopKey: stop.stopKey,
+          distanceMeters: seg.distanceMeters,
+          durationSeconds: legDuration,
+          polyline: seg.polylinePoints,
+        );
+
+        ordered.add(stop);
+        legs.add(leg);
+        clock = clock.add(Duration(seconds: legDuration));
+        arrivalTimes[stop.stopKey] = _fmtHHmm(clock);
+        clock = clock.add(Duration(minutes: stop.serviceMinutes));
+
+        currentId = stop.stopKey;
+        currentLat = stop.lat;
+        currentLng = stop.lng;
+      }
     }
 
     // Return leg: last stop → depot so the total is a full round trip.

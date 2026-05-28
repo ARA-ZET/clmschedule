@@ -11,23 +11,31 @@ enum JobStatus { standby, scheduled, done, urgent }
 class Job {
   final String id;
   final List<String> clients;
+
+  /// Per-client instructions (parallel list to [clients]). Backward-compatible:
+  /// defaults to empty strings for jobs stored before this field was added.
+  final List<String> clientInstructions;
   final List<String> workingAreas; // Names of the work areas for display
   final List<CustomPolygon>
       workMaps; // Custom polygons with name, description, points, color
   final String distributorId;
   final DateTime date;
   final String statusId; // Changed from JobStatus enum to String
+  /// Driver-facing map/access instructions for the whole job.
+  final String mapInstructions;
   final LatLng? dropOffPoint;
   final LatLng? pickUpPoint;
 
   Job({
     required this.id,
     required this.clients,
+    this.clientInstructions = const [],
     required this.workingAreas,
     required this.workMaps,
     required this.distributorId,
     required this.date,
     required this.statusId,
+    this.mapInstructions = '',
     this.dropOffPoint,
     this.pickUpPoint,
   });
@@ -78,6 +86,8 @@ class Job {
           (data['client'] != null
               ? [data['client'] as String]
               : ['']), // Backwards compatibility
+      clientInstructions:
+          (data['clientInstructions'] as List<dynamic>?)?.cast<String>() ?? [],
       workingAreas: (data['workingAreas'] as List<dynamic>?)?.cast<String>() ??
           (data['workingArea'] != null
               ? [data['workingArea'] as String]
@@ -92,6 +102,7 @@ class Job {
           ? (data['date'] as Timestamp).toDate()
           : DateTime.now(),
       statusId: statusId,
+      mapInstructions: data['mapInstructions'] as String? ?? '',
       dropOffPoint: dropOffPoint,
       pickUpPoint: pickUpPoint,
     );
@@ -102,6 +113,8 @@ class Job {
     final map = {
       'id': id, // Include ID for array storage
       'clients': clients,
+      'clientInstructions': clientInstructions,
+      'mapInstructions': mapInstructions,
       'workingAreas': workingAreas,
       'workMaps': workMaps.map((workMap) => workMap.toMap()).toList(),
       'distributorId': distributorId,
@@ -136,11 +149,13 @@ class Job {
   // Deep copies lists to prevent mutation issues
   Job copyWith({
     List<String>? clients,
+    List<String>? clientInstructions,
     List<String>? workingAreas,
     List<CustomPolygon>? workMaps,
     String? distributorId,
     DateTime? date,
     String? statusId,
+    String? mapInstructions,
     Object? dropOffPoint = _dropOffPointUnchanged,
     Object? pickUpPoint = _pickUpPointUnchanged,
   }) {
@@ -155,6 +170,9 @@ class Job {
       clients: clients != null
           ? List<String>.from(clients)
           : List<String>.from(this.clients),
+      clientInstructions: clientInstructions != null
+          ? List<String>.from(clientInstructions)
+          : List<String>.from(this.clientInstructions),
       workingAreas: workingAreas != null
           ? List<String>.from(workingAreas)
           : List<String>.from(this.workingAreas),
@@ -162,6 +180,7 @@ class Job {
       distributorId: distributorId ?? this.distributorId,
       date: date ?? this.date,
       statusId: statusId ?? this.statusId,
+      mapInstructions: mapInstructions ?? this.mapInstructions,
       dropOffPoint: identical(dropOffPoint, _dropOffPointUnchanged)
           ? this.dropOffPoint
           : dropOffPoint as LatLng?,

@@ -124,17 +124,22 @@ Future<({Uint8List bytes, Offset anchor})> _renderPinBytes({
   String secondaryLabel = '',
   bool isPickUp = false,
 }) async {
-  const double outerR = 26.0; // white ring radius
-  const double fillR = 22.0; // coloured fill radius
-  const double tipH = 20.0; // tip length below circle-bottom
-  const double pad = 6.0; // outer bleed / shadow padding
-  const double gap = 8.0; // space between circle and label badge
-  const double primaryFontSz = 20.0;
-  const double secondaryFontSz = 14.0;
-  const double innerLineGap = 3.0; // gap between primary and secondary
-  const double labelPadH = 9.0; // badge horizontal inner padding
-  const double labelPadV = 5.0; // badge vertical inner padding
-  const double maxBadgeTextW = 160.0; // max text width — keeps badge compact
+  // All dimensions are scaled to 40% of the original (reduced by 60%).
+  const double _s = 0.6;
+  const double outerR = 26.0 * _s; // white ring radius
+  const double fillR = 22.0 * _s; // coloured fill radius
+  const double tipH = 20.0 * _s; // tip length below circle-bottom
+  const double pad = 6.0 * _s; // outer bleed / shadow padding
+  const double gap = 8.0 * _s; // space between circle and label badge
+  const double primaryFontSz = 20.0 * _s;
+  const double secondaryFontSz = 14.0 * _s;
+  const double innerLineGap = 3.0 * _s; // gap between primary and secondary
+  const double labelPadH = 9.0 * _s; // badge horizontal inner padding
+  const double labelPadV = 5.0 * _s; // badge vertical inner padding
+  const double maxBadgeTextW = 160.0 * _s; // max text width
+  const double numFontSz = 26.0 * _s; // order number font size
+  const double tipHalfW = 10.0 * _s;
+  const double textMeasureBuffer = 12.0 * _s;
 
   // ── Measure labels ────────────────────────────────────────────────
   final effectivePrimary = primaryLabel.isNotEmpty
@@ -189,7 +194,6 @@ Future<({Uint8List bytes, Offset anchor})> _renderPinBytes({
   // this buffer the right edge of the badge (and the last 1–2 characters)
   // gets cropped when the PNG is encoded. Buffer is generous enough to
   // cover the worst-case wasm font-fallback discrepancy.
-  const double textMeasureBuffer = 12.0;
   // Uniform badge width: every labelled marker is rendered at exactly
   // [maxBadgeTextW] regardless of the actual measured text width, so all
   // markers on the day planner share the same footprint. Text longer
@@ -220,7 +224,6 @@ Future<({Uint8List bytes, Offset anchor})> _renderPinBytes({
   // This places a standalone pointer between the two separate elements.
   final double tipX = hasLabel ? (cx - outerR + badgeR) / 2 : cx;
   // Tip triangle geometry.
-  const double tipHalfW = 10.0;
   final double tipBaseY = cy + outerR; // base at circle bottom
   // Anchor maps the exact tip pixel to the map coordinate.
   final anchor = Offset(tipX / w, 1.0);
@@ -290,9 +293,9 @@ Future<({Uint8List bytes, Offset anchor})> _renderPinBytes({
   final numTp = TextPainter(
     text: TextSpan(
       text: '$number',
-      style: const TextStyle(
+      style: TextStyle(
         color: Colors.white,
-        fontSize: 26,
+        fontSize: numFontSz,
         fontWeight: FontWeight.w700,
       ),
     ),

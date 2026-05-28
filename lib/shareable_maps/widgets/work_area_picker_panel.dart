@@ -133,13 +133,13 @@ class _WorkAreaPickerPanelState
                 style: const TextStyle(fontSize: 13, color: Color(0xFF202124)),
                 decoration: InputDecoration(
                   hintText: 'Search work areas & suburbs...',
-                  hintStyle: const TextStyle(
-                      fontSize: 13, color: Color(0xFF9AA0A6)),
+                  hintStyle:
+                      const TextStyle(fontSize: 13, color: Color(0xFF9AA0A6)),
                   prefixIcon: const Icon(Icons.search,
                       size: 18, color: Color(0xFF9AA0A6)),
                   isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(
-                      vertical: 8, horizontal: 12),
+                  contentPadding:
+                      const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
                   filled: true,
                   fillColor: const Color(0xFFF1F3F4),
                   border: OutlineInputBorder(
@@ -162,16 +162,12 @@ class _WorkAreaPickerPanelState
                     onTap: () {
                       if (showWorkAreas) {
                         for (final wa in filteredWorkAreas) {
-                          if (!mapProvider.isWorkAreaImported(wa.name)) {
-                            mapProvider.addWorkAreaToMap(wa);
-                          }
+                          mapProvider.addWorkAreaToMap(wa);
                         }
                       }
                       if (showSuburbs) {
                         for (final s in filteredSuburbs) {
-                          if (!mapProvider.isSuburbImported(s.name)) {
-                            mapProvider.addSuburbToMap(s);
-                          }
+                          mapProvider.addSuburbToMap(s);
                         }
                       }
                     },
@@ -225,15 +221,15 @@ class _WorkAreaPickerPanelState
                   _LayerHeader(
                     label: 'Work Areas',
                     icon: Icons.crop_square,
-                    color: Colors.orange,
+                    color: WorkArea.defaultColor,
                     count: workAreas.length,
                     importedCount: importedWorkAreaCount,
                     isVisible: showWorkAreas,
                     isExpanded: _workAreasExpanded,
                     onToggleVisible: () =>
                         mapProvider.togglePickerWorkAreasVisible(),
-                    onToggleExpanded: () =>
-                        setState(() => _workAreasExpanded = !_workAreasExpanded),
+                    onToggleExpanded: () => setState(
+                        () => _workAreasExpanded = !_workAreasExpanded),
                   ),
                   if (showWorkAreas && _workAreasExpanded) ...[
                     if (filteredWorkAreas.isEmpty)
@@ -249,8 +245,8 @@ class _WorkAreaPickerPanelState
                         ),
                       )
                     else
-                      ...filteredWorkAreas.map(
-                          (wa) => _WorkAreaTile(workArea: wa)),
+                      ...filteredWorkAreas
+                          .map((wa) => _WorkAreaTile(workArea: wa)),
                   ],
 
                   const Divider(height: 1, indent: 16, endIndent: 16),
@@ -259,7 +255,7 @@ class _WorkAreaPickerPanelState
                   _LayerHeader(
                     label: 'Suburbs',
                     icon: Icons.location_city,
-                    color: Colors.green,
+                    color: WorkSuburb.defaultColor,
                     count: suburbs.length,
                     importedCount: importedSuburbCount,
                     isVisible: showSuburbs,
@@ -342,7 +338,8 @@ class _LayerHeader extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 6),
-            Icon(icon, size: 16, color: isVisible ? color : const Color(0xFFDADCE0)),
+            Icon(icon,
+                size: 16, color: isVisible ? color : const Color(0xFFDADCE0)),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -359,8 +356,7 @@ class _LayerHeader extends StatelessWidget {
             if (importedCount > 0)
               Container(
                 margin: const EdgeInsets.only(right: 6),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
                   color: color.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(10),
@@ -379,14 +375,12 @@ class _LayerHeader extends StatelessWidget {
                 padding: const EdgeInsets.only(right: 6),
                 child: Text(
                   '$count',
-                  style: const TextStyle(
-                      fontSize: 12, color: Color(0xFF9AA0A6)),
+                  style:
+                      const TextStyle(fontSize: 12, color: Color(0xFF9AA0A6)),
                 ),
               ),
             Icon(
-              isExpanded && isVisible
-                  ? Icons.expand_less
-                  : Icons.expand_more,
+              isExpanded && isVisible ? Icons.expand_less : Icons.expand_more,
               size: 18,
               color: const Color(0xFF9AA0A6),
             ),
@@ -407,6 +401,7 @@ class _WorkAreaTile extends riverpod.ConsumerWidget {
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final mapProvider = ref.watch(shareableMapRiverpod);
     final isImported = mapProvider.isWorkAreaImported(workArea.name);
+    final color = workArea.color;
 
     return InkWell(
       onTap: () {
@@ -425,13 +420,10 @@ class _WorkAreaTile extends riverpod.ConsumerWidget {
               width: 22,
               height: 22,
               decoration: BoxDecoration(
-                color:
-                    isImported ? const Color(0xFF1967D2) : Colors.transparent,
+                color: isImported ? color : Colors.transparent,
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(
-                  color: isImported
-                      ? const Color(0xFF1967D2)
-                      : const Color(0xFFDADCE0),
+                  color: isImported ? color : const Color(0xFFDADCE0),
                   width: 1.5,
                 ),
               ),
@@ -444,8 +436,8 @@ class _WorkAreaTile extends riverpod.ConsumerWidget {
               width: 14,
               height: 14,
               decoration: BoxDecoration(
-                color: Colors.orange.withValues(alpha: 0.3),
-                border: Border.all(color: Colors.orange, width: 1.5),
+                color: color.withValues(alpha: 0.3),
+                border: Border.all(color: color, width: 1.5),
                 borderRadius: BorderRadius.circular(3),
               ),
             ),
@@ -467,8 +459,8 @@ class _WorkAreaTile extends riverpod.ConsumerWidget {
                   ),
                   Text(
                     '${workArea.polygonPoints.length} points',
-                    style: const TextStyle(
-                        fontSize: 11, color: Color(0xFF9AA0A6)),
+                    style:
+                        const TextStyle(fontSize: 11, color: Color(0xFF9AA0A6)),
                   ),
                 ],
               ),
@@ -490,6 +482,7 @@ class _SuburbTile extends riverpod.ConsumerWidget {
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final mapProvider = ref.watch(shareableMapRiverpod);
     final isImported = mapProvider.isSuburbImported(suburb.name);
+    final color = suburb.color;
 
     return InkWell(
       onTap: () {
@@ -508,10 +501,10 @@ class _SuburbTile extends riverpod.ConsumerWidget {
               width: 22,
               height: 22,
               decoration: BoxDecoration(
-                color: isImported ? Colors.green : Colors.transparent,
+                color: isImported ? color : Colors.transparent,
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(
-                  color: isImported ? Colors.green : const Color(0xFFDADCE0),
+                  color: isImported ? color : const Color(0xFFDADCE0),
                   width: 1.5,
                 ),
               ),
@@ -524,8 +517,8 @@ class _SuburbTile extends riverpod.ConsumerWidget {
               width: 14,
               height: 14,
               decoration: BoxDecoration(
-                color: Colors.green.withValues(alpha: 0.3),
-                border: Border.all(color: Colors.green, width: 1.5),
+                color: color.withValues(alpha: 0.3),
+                border: Border.all(color: color, width: 1.5),
                 borderRadius: BorderRadius.circular(3),
               ),
             ),
@@ -547,8 +540,8 @@ class _SuburbTile extends riverpod.ConsumerWidget {
                   ),
                   Text(
                     '${suburb.polygonPoints.length} points',
-                    style: const TextStyle(
-                        fontSize: 11, color: Color(0xFF9AA0A6)),
+                    style:
+                        const TextStyle(fontSize: 11, color: Color(0xFF9AA0A6)),
                   ),
                 ],
               ),
@@ -610,4 +603,3 @@ class _ActionChip extends StatelessWidget {
     );
   }
 }
-

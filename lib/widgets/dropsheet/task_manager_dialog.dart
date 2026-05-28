@@ -27,6 +27,8 @@ class _TaskManagerDialogState
   late List<_DynamicWorking> _dynamicTypes;
   // Working copy for global depot/start-of-day settings.
   late _DepotWorking _depot;
+  // Collapsed section keys: 'depot', 'mandatory', 'distributor', 'additional', 'custom'
+  final Set<String> _collapsed = {};
 
   @override
   void initState() {
@@ -71,20 +73,41 @@ class _TaskManagerDialogState
     if (mounted) Navigator.pop(context);
   }
 
-  void _addDynamicType() {
+  void _addDynamicType(
+      [DynamicTaskSection section = DynamicTaskSection.custom]) {
+    final newItem = _DynamicWorking(
+      id: 'dyn_${DateTime.now().millisecondsSinceEpoch}',
+      label: '',
+      selectedJobTypeIds: [],
+      section: section,
+      isNew: true,
+    );
     setState(() {
-      _dynamicTypes.add(_DynamicWorking(
-        id: 'dyn_${DateTime.now().millisecondsSinceEpoch}',
-        label: '',
-        selectedJobTypeIds: [],
-        section: DynamicTaskSection.custom,
-        isNew: true,
-      ));
+      // Insert before the first existing item of the same section so it
+      // appears at the top of its group, visible immediately.
+      final firstIdx = _dynamicTypes.indexWhere((d) => d.section == section);
+      if (firstIdx >= 0) {
+        _dynamicTypes.insert(firstIdx, newItem);
+      } else {
+        _dynamicTypes.add(newItem);
+      }
+      // Auto-expand the target section so the new form is visible.
+      _collapsed.remove(section.storageKey);
     });
   }
 
   void _removeDynamicType(int index) {
     setState(() => _dynamicTypes.removeAt(index));
+  }
+
+  void _toggleSection(String key) {
+    setState(() {
+      if (_collapsed.contains(key)) {
+        _collapsed.remove(key);
+      } else {
+        _collapsed.add(key);
+      }
+    });
   }
 
   @override
@@ -140,117 +163,155 @@ class _TaskManagerDialogState
                 padding: const EdgeInsets.symmetric(vertical: 8),
                 children: [
                   // ── Depot / start-of-day ─────────────────────
-                  _DepotRow(
-                    working: _depot,
-                    onChanged: (updated) => setState(() => _depot = updated),
+                  _GroupHeader(
+                    label: 'Office · Start of day',
+                    subtitle: 'Default depot address and departure time.',
+                    expanded: !_collapsed.contains('depot'),
+                    onToggle: () => _toggleSection('depot'),
                   ),
+                  if (!_collapsed.contains('depot'))
+                    _DepotRow(
+                      working: _depot,
+                      onChanged: (updated) => setState(() => _depot = updated),
+                    ),
                   const Divider(height: 24),
-                  // ── Mandatory tasks (pinned to every section) ─────
-                  const _GroupHeader(
+                  // ── Mandatory tasks ───────────────────────────
+                  _GroupHeader(
                     label: 'Mandatory tasks',
                     subtitle: 'Pinned at the top of every driver section.',
+                    expanded: !_collapsed.contains('mandatory'),
+                    onToggle: () => _toggleSection('mandatory'),
+                    onAddCustom: () =>
+                        _addDynamicType(DynamicTaskSection.mandatory),
                   ),
-                  for (final type in [
-                    DropsheetTaskType.inspect,
-                    DropsheetTaskType.pack,
-                    DropsheetTaskType.leave,
-                    DropsheetTaskType.arrive,
-                  ])
-                    _TaskTypeRow(
-                      type: type,
-                      working: _working[type]!,
-                      allJobTypes: allJobTypes,
-                      onChanged: (updated) =>
-                          setState(() => _working[type] = updated),
-                    ),
+                  if (!_collapsed.contains('mandatory')) ...[
+                    for (final type in [
+                      DropsheetTaskType.inspect,
+                      DropsheetTaskType.pack,
+                      DropsheetTaskType.leave,
+                      DropsheetTaskType.arrive,
+                    ])
+                      _TaskTypeRow(
+                        type: type,
+                        working: _working[type]!,
+                        allJobTypes: allJobTypes,
+                        onChanged: (updated) =>
+                            setState(() => _working[type] = updated),
+                      ),
+                    for (var i = 0; i < _dynamicTypes.length; i++)
+                      if (_dynamicTypes[i].section ==
+                          DynamicTaskSection.mandatory)
+                        _DynamicTypeRow(
+                          working: _dynamicTypes[i],
+                          allJobTypes: allJobTypes,
+                          onChanged: (updated) =>
+                              setState(() => _dynamicTypes[i] = updated),
+                          onDelete: () => _removeDynamicType(i),
+                        ),
+                  ],
                   const Divider(height: 24),
-                  // ── Distributor tasks (auto from schedule) ───────────
-                  const _GroupHeader(
+                  // ── Distributor tasks ─────────────────────────
+                  _GroupHeader(
                     label: 'Distributor tasks',
                     subtitle: 'Auto-populated from the daily schedule.',
+                    expanded: !_collapsed.contains('distributor'),
+                    onToggle: () => _toggleSection('distributor'),
+                    onAddCustom: () =>
+                        _addDynamicType(DynamicTaskSection.distributor),
                   ),
-                  for (final type in [
-                    DropsheetTaskType.dropOff,
-                    DropsheetTaskType.pickUp,
-                  ])
-                    _TaskTypeRow(
-                      type: type,
-                      working: _working[type]!,
-                      allJobTypes: allJobTypes,
-                      onChanged: (updated) =>
-                          setState(() => _working[type] = updated),
-                    ),
+                  if (!_collapsed.contains('distributor')) ...[
+                    for (final type in [
+                      DropsheetTaskType.dropOff,
+                      DropsheetTaskType.pickUp,
+                    ])
+                      _TaskTypeRow(
+                        type: type,
+                        working: _working[type]!,
+                        allJobTypes: allJobTypes,
+                        onChanged: (updated) =>
+                            setState(() => _working[type] = updated),
+                      ),
+                    for (var i = 0; i < _dynamicTypes.length; i++)
+                      if (_dynamicTypes[i].section ==
+                          DynamicTaskSection.distributor)
+                        _DynamicTypeRow(
+                          working: _dynamicTypes[i],
+                          allJobTypes: allJobTypes,
+                          onChanged: (updated) =>
+                              setState(() => _dynamicTypes[i] = updated),
+                          onDelete: () => _removeDynamicType(i),
+                        ),
+                  ],
                   const Divider(height: 24),
-                  // ── Additional tasks (manually added) ────────────────
-                  const _GroupHeader(
+                  // ── Additional tasks ──────────────────────────
+                  _GroupHeader(
                     label: 'Additional tasks',
                     subtitle: 'Manually added by the dispatcher.',
+                    expanded: !_collapsed.contains('additional'),
+                    onToggle: () => _toggleSection('additional'),
+                    onAddCustom: () =>
+                        _addDynamicType(DynamicTaskSection.additional),
                   ),
-                  for (final type in [
-                    DropsheetTaskType.collection,
-                    DropsheetTaskType.jobReturn,
-                    DropsheetTaskType.pickFlyers,
-                    DropsheetTaskType.furnitureMove,
-                    DropsheetTaskType.custom,
-                  ])
-                    _TaskTypeRow(
-                      type: type,
-                      working: _working[type]!,
-                      allJobTypes: allJobTypes,
-                      onChanged: (updated) =>
-                          setState(() => _working[type] = updated),
-                    ),
-                  const Divider(height: 24),
-                  // ── Custom (user-defined) types ───────────────────
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                    child: Row(
-                      children: [
-                        const Text(
-                          'Custom task types',
-                          style: TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 14),
-                        ),
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 7, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.blue.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Text(
-                            '${_dynamicTypes.length}',
-                            style: const TextStyle(
-                                fontSize: 11, color: Colors.blue),
-                          ),
-                        ),
-                        const Spacer(),
-                        TextButton.icon(
-                          onPressed: _addDynamicType,
-                          icon: const Icon(Icons.add, size: 18),
-                          label: const Text('Add type'),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (_dynamicTypes.isEmpty)
-                    const Padding(
-                      padding:
-                          EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                      child: Text(
-                        'No custom types yet. Tap "Add type" to create one.',
-                        style: TextStyle(fontSize: 12, color: Colors.black45),
+                  if (!_collapsed.contains('additional')) ...[
+                    for (final type in [
+                      DropsheetTaskType.collection,
+                      DropsheetTaskType.jobReturn,
+                      DropsheetTaskType.pickFlyers,
+                      DropsheetTaskType.furnitureMove,
+                      DropsheetTaskType.custom,
+                    ])
+                      _TaskTypeRow(
+                        type: type,
+                        working: _working[type]!,
+                        allJobTypes: allJobTypes,
+                        onChanged: (updated) =>
+                            setState(() => _working[type] = updated),
                       ),
-                    ),
-                  for (var i = 0; i < _dynamicTypes.length; i++)
-                    _DynamicTypeRow(
-                      working: _dynamicTypes[i],
-                      allJobTypes: allJobTypes,
-                      onChanged: (updated) =>
-                          setState(() => _dynamicTypes[i] = updated),
-                      onDelete: () => _removeDynamicType(i),
-                    ),
+                    for (var i = 0; i < _dynamicTypes.length; i++)
+                      if (_dynamicTypes[i].section ==
+                          DynamicTaskSection.additional)
+                        _DynamicTypeRow(
+                          working: _dynamicTypes[i],
+                          allJobTypes: allJobTypes,
+                          onChanged: (updated) =>
+                              setState(() => _dynamicTypes[i] = updated),
+                          onDelete: () => _removeDynamicType(i),
+                        ),
+                  ],
+                  const Divider(height: 24),
+                  // ── Custom (user-defined, free-form) types ────
+                  _GroupHeader(
+                    label: 'Custom task types',
+                    subtitle: 'Free-form — all fields entered manually.',
+                    count: _dynamicTypes
+                        .where((d) => d.section == DynamicTaskSection.custom)
+                        .length,
+                    expanded: !_collapsed.contains('custom'),
+                    onToggle: () => _toggleSection('custom'),
+                    onAddCustom: () =>
+                        _addDynamicType(DynamicTaskSection.custom),
+                  ),
+                  if (!_collapsed.contains('custom')) ...[
+                    for (var i = 0; i < _dynamicTypes.length; i++)
+                      if (_dynamicTypes[i].section == DynamicTaskSection.custom)
+                        _DynamicTypeRow(
+                          working: _dynamicTypes[i],
+                          allJobTypes: allJobTypes,
+                          onChanged: (updated) =>
+                              setState(() => _dynamicTypes[i] = updated),
+                          onDelete: () => _removeDynamicType(i),
+                        ),
+                    if (!_dynamicTypes
+                        .any((d) => d.section == DynamicTaskSection.custom))
+                      const Padding(
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                        child: Text(
+                          'No custom types yet. Tap "+ Add" to create one.',
+                          style: TextStyle(fontSize: 12, color: Colors.black45),
+                        ),
+                      ),
+                  ],
                 ],
               ),
             ),
@@ -305,6 +366,10 @@ class _TaskTypeRow extends StatefulWidget {
 class _TaskTypeRowState extends State<_TaskTypeRow> {
   late final TextEditingController _labelCtrl;
   late final TextEditingController _serviceCtrl;
+  late final TextEditingController _defaultDetailsCtrl;
+  late final TextEditingController _defaultStartTimeCtrl;
+  late final TextEditingController _defaultContactCtrl;
+  late final TextEditingController _defaultTelCtrl;
 
   @override
   void initState() {
@@ -314,12 +379,23 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
         text: widget.working.serviceTimeMinutes == 0
             ? ''
             : '${widget.working.serviceTimeMinutes}');
+    _defaultDetailsCtrl =
+        TextEditingController(text: widget.working.defaultDetails);
+    _defaultStartTimeCtrl =
+        TextEditingController(text: widget.working.defaultStartTime);
+    _defaultContactCtrl =
+        TextEditingController(text: widget.working.defaultContact);
+    _defaultTelCtrl = TextEditingController(text: widget.working.defaultTel);
   }
 
   @override
   void dispose() {
     _labelCtrl.dispose();
     _serviceCtrl.dispose();
+    _defaultDetailsCtrl.dispose();
+    _defaultStartTimeCtrl.dispose();
+    _defaultContactCtrl.dispose();
+    _defaultTelCtrl.dispose();
     super.dispose();
   }
 
@@ -407,14 +483,35 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
           secondary: widget.working.markerSecondaryField,
           onPrimaryChanged: (v) =>
               widget.onChanged(widget.working.copyWith(markerPrimaryField: v)),
-          onSecondaryChanged: (v) =>
-              widget.onChanged(widget.working.copyWith(markerSecondaryField: v)),
+          onSecondaryChanged: (v) => widget
+              .onChanged(widget.working.copyWith(markerSecondaryField: v)),
         ),
+        if (_showsDefaultFields) ...[
+          const SizedBox(height: 16),
+          _DefaultFieldsSection(
+            detailsCtrl: _defaultDetailsCtrl,
+            startTimeCtrl: _defaultStartTimeCtrl,
+            contactCtrl: _defaultContactCtrl,
+            telCtrl: _defaultTelCtrl,
+            onDetailsChanged: (v) =>
+                widget.onChanged(widget.working.copyWith(defaultDetails: v)),
+            onStartTimeChanged: (v) =>
+                widget.onChanged(widget.working.copyWith(defaultStartTime: v)),
+            onContactChanged: (v) =>
+                widget.onChanged(widget.working.copyWith(defaultContact: v)),
+            onTelChanged: (v) =>
+                widget.onChanged(widget.working.copyWith(defaultTel: v)),
+          ),
+        ],
       ],
     );
   }
 
-  /// Types that let the user filter which job-list types are suggested.
+  /// Types that expose free-text default fields.
+  bool get _showsDefaultFields => !const {
+        DropsheetTaskType.dropOff,
+        DropsheetTaskType.pickUp,
+      }.contains(widget.type);
   bool get _showsJobList => !const {
         DropsheetTaskType.inspect,
         DropsheetTaskType.pack,
@@ -531,6 +628,10 @@ class _DynamicTypeRow extends StatefulWidget {
 class _DynamicTypeRowState extends State<_DynamicTypeRow> {
   late final TextEditingController _labelCtrl;
   late final TextEditingController _serviceCtrl;
+  late final TextEditingController _defaultDetailsCtrl;
+  late final TextEditingController _defaultStartTimeCtrl;
+  late final TextEditingController _defaultContactCtrl;
+  late final TextEditingController _defaultTelCtrl;
 
   @override
   void initState() {
@@ -540,12 +641,23 @@ class _DynamicTypeRowState extends State<_DynamicTypeRow> {
         text: widget.working.serviceTimeMinutes == 0
             ? ''
             : '${widget.working.serviceTimeMinutes}');
+    _defaultDetailsCtrl =
+        TextEditingController(text: widget.working.defaultDetails);
+    _defaultStartTimeCtrl =
+        TextEditingController(text: widget.working.defaultStartTime);
+    _defaultContactCtrl =
+        TextEditingController(text: widget.working.defaultContact);
+    _defaultTelCtrl = TextEditingController(text: widget.working.defaultTel);
   }
 
   @override
   void dispose() {
     _labelCtrl.dispose();
     _serviceCtrl.dispose();
+    _defaultDetailsCtrl.dispose();
+    _defaultStartTimeCtrl.dispose();
+    _defaultContactCtrl.dispose();
+    _defaultTelCtrl.dispose();
     super.dispose();
   }
 
@@ -647,8 +759,8 @@ class _DynamicTypeRowState extends State<_DynamicTypeRow> {
                     label: Text(s.displayName,
                         style: const TextStyle(fontSize: 12)),
                     selected: widget.working.section == s,
-                    onSelected: (_) => widget
-                        .onChanged(widget.working.copyWith(section: s)),
+                    onSelected: (_) =>
+                        widget.onChanged(widget.working.copyWith(section: s)),
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     visualDensity: VisualDensity.compact,
                   ),
@@ -690,8 +802,121 @@ class _DynamicTypeRowState extends State<_DynamicTypeRow> {
           secondary: widget.working.markerSecondaryField,
           onPrimaryChanged: (v) =>
               widget.onChanged(widget.working.copyWith(markerPrimaryField: v)),
-          onSecondaryChanged: (v) =>
-              widget.onChanged(widget.working.copyWith(markerSecondaryField: v)),
+          onSecondaryChanged: (v) => widget
+              .onChanged(widget.working.copyWith(markerSecondaryField: v)),
+        ),
+        const SizedBox(height: 16),
+        _DefaultFieldsSection(
+          detailsCtrl: _defaultDetailsCtrl,
+          startTimeCtrl: _defaultStartTimeCtrl,
+          contactCtrl: _defaultContactCtrl,
+          telCtrl: _defaultTelCtrl,
+          onDetailsChanged: (v) =>
+              widget.onChanged(widget.working.copyWith(defaultDetails: v)),
+          onStartTimeChanged: (v) =>
+              widget.onChanged(widget.working.copyWith(defaultStartTime: v)),
+          onContactChanged: (v) =>
+              widget.onChanged(widget.working.copyWith(defaultContact: v)),
+          onTelChanged: (v) =>
+              widget.onChanged(widget.working.copyWith(defaultTel: v)),
+        ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared default-field-values editor (used by both built-in and dynamic rows)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _DefaultFieldsSection extends StatelessWidget {
+  final TextEditingController detailsCtrl;
+  final TextEditingController startTimeCtrl;
+  final TextEditingController contactCtrl;
+  final TextEditingController telCtrl;
+  final ValueChanged<String> onDetailsChanged;
+  final ValueChanged<String> onStartTimeChanged;
+  final ValueChanged<String> onContactChanged;
+  final ValueChanged<String> onTelChanged;
+
+  const _DefaultFieldsSection({
+    required this.detailsCtrl,
+    required this.startTimeCtrl,
+    required this.contactCtrl,
+    required this.telCtrl,
+    required this.onDetailsChanged,
+    required this.onStartTimeChanged,
+    required this.onContactChanged,
+    required this.onTelChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Default field values',
+          style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Colors.grey.shade700),
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Pre-filled when creating a new task of this type. Leave blank for no default.',
+          style: TextStyle(fontSize: 11, color: Colors.black45),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: detailsCtrl,
+          maxLines: 2,
+          decoration: const InputDecoration(
+            labelText: 'Default notes / details',
+            isDense: true,
+            border: OutlineInputBorder(),
+          ),
+          onChanged: onDetailsChanged,
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: startTimeCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Default start time',
+            hintText: 'HH:mm',
+            isDense: true,
+            border: OutlineInputBorder(),
+          ),
+          onChanged: onStartTimeChanged,
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: contactCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Default contact',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: onContactChanged,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: telCtrl,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(
+                  labelText: 'Default tel',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: onTelChanged,
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -837,6 +1062,10 @@ class _WorkingConfig {
   final int serviceTimeMinutes;
   final MarkerLabelField markerPrimaryField;
   final MarkerLabelField markerSecondaryField;
+  final String defaultDetails;
+  final String defaultStartTime;
+  final String defaultContact;
+  final String defaultTel;
 
   const _WorkingConfig({
     required this.customLabel,
@@ -844,6 +1073,10 @@ class _WorkingConfig {
     this.serviceTimeMinutes = 0,
     this.markerPrimaryField = MarkerLabelField.taskLabel,
     this.markerSecondaryField = MarkerLabelField.none,
+    this.defaultDetails = '',
+    this.defaultStartTime = '',
+    this.defaultContact = '',
+    this.defaultTel = '',
   });
 
   factory _WorkingConfig.from(DropsheetTaskTypeConfig config) => _WorkingConfig(
@@ -852,6 +1085,10 @@ class _WorkingConfig {
         serviceTimeMinutes: config.serviceTimeMinutes,
         markerPrimaryField: config.markerPrimaryField,
         markerSecondaryField: config.markerSecondaryField,
+        defaultDetails: config.defaultDetails,
+        defaultStartTime: config.defaultStartTime,
+        defaultContact: config.defaultContact,
+        defaultTel: config.defaultTel,
       );
 
   _WorkingConfig copyWith({
@@ -860,6 +1097,10 @@ class _WorkingConfig {
     int? serviceTimeMinutes,
     MarkerLabelField? markerPrimaryField,
     MarkerLabelField? markerSecondaryField,
+    String? defaultDetails,
+    String? defaultStartTime,
+    String? defaultContact,
+    String? defaultTel,
   }) =>
       _WorkingConfig(
         customLabel: customLabel ?? this.customLabel,
@@ -867,6 +1108,10 @@ class _WorkingConfig {
         serviceTimeMinutes: serviceTimeMinutes ?? this.serviceTimeMinutes,
         markerPrimaryField: markerPrimaryField ?? this.markerPrimaryField,
         markerSecondaryField: markerSecondaryField ?? this.markerSecondaryField,
+        defaultDetails: defaultDetails ?? this.defaultDetails,
+        defaultStartTime: defaultStartTime ?? this.defaultStartTime,
+        defaultContact: defaultContact ?? this.defaultContact,
+        defaultTel: defaultTel ?? this.defaultTel,
       );
 
   DropsheetTaskTypeConfig toConfig(DropsheetTaskType type) =>
@@ -877,6 +1122,10 @@ class _WorkingConfig {
         serviceTimeMinutes: serviceTimeMinutes,
         markerPrimaryField: markerPrimaryField,
         markerSecondaryField: markerSecondaryField,
+        defaultDetails: defaultDetails,
+        defaultStartTime: defaultStartTime,
+        defaultContact: defaultContact,
+        defaultTel: defaultTel,
       );
 }
 
@@ -889,6 +1138,10 @@ class _DynamicWorking {
   final DynamicTaskSection section;
   final MarkerLabelField markerPrimaryField;
   final MarkerLabelField markerSecondaryField;
+  final String defaultDetails;
+  final String defaultStartTime;
+  final String defaultContact;
+  final String defaultTel;
 
   const _DynamicWorking({
     required this.id,
@@ -899,6 +1152,10 @@ class _DynamicWorking {
     this.section = DynamicTaskSection.custom,
     this.markerPrimaryField = MarkerLabelField.taskLabel,
     this.markerSecondaryField = MarkerLabelField.none,
+    this.defaultDetails = '',
+    this.defaultStartTime = '',
+    this.defaultContact = '',
+    this.defaultTel = '',
   });
 
   factory _DynamicWorking.from(DynamicTaskTypeDef def) => _DynamicWorking(
@@ -909,6 +1166,10 @@ class _DynamicWorking {
         section: def.section,
         markerPrimaryField: def.markerPrimaryField,
         markerSecondaryField: def.markerSecondaryField,
+        defaultDetails: def.defaultDetails,
+        defaultStartTime: def.defaultStartTime,
+        defaultContact: def.defaultContact,
+        defaultTel: def.defaultTel,
       );
 
   _DynamicWorking copyWith({
@@ -918,6 +1179,10 @@ class _DynamicWorking {
     DynamicTaskSection? section,
     MarkerLabelField? markerPrimaryField,
     MarkerLabelField? markerSecondaryField,
+    String? defaultDetails,
+    String? defaultStartTime,
+    String? defaultContact,
+    String? defaultTel,
   }) =>
       _DynamicWorking(
         id: id,
@@ -927,6 +1192,10 @@ class _DynamicWorking {
         section: section ?? this.section,
         markerPrimaryField: markerPrimaryField ?? this.markerPrimaryField,
         markerSecondaryField: markerSecondaryField ?? this.markerSecondaryField,
+        defaultDetails: defaultDetails ?? this.defaultDetails,
+        defaultStartTime: defaultStartTime ?? this.defaultStartTime,
+        defaultContact: defaultContact ?? this.defaultContact,
+        defaultTel: defaultTel ?? this.defaultTel,
         isNew: false,
       );
 
@@ -938,6 +1207,10 @@ class _DynamicWorking {
         section: section,
         markerPrimaryField: markerPrimaryField,
         markerSecondaryField: markerSecondaryField,
+        defaultDetails: defaultDetails,
+        defaultStartTime: defaultStartTime,
+        defaultContact: defaultContact,
+        defaultTel: defaultTel,
       );
 }
 
@@ -1121,24 +1394,83 @@ class _DepotRowState extends State<_DepotRow> {
 class _GroupHeader extends StatelessWidget {
   final String label;
   final String subtitle;
-  const _GroupHeader({required this.label, required this.subtitle});
+  final int? count;
+  final bool expanded;
+  final VoidCallback onToggle;
+  final VoidCallback? onAddCustom;
+
+  const _GroupHeader({
+    required this.label,
+    required this.subtitle,
+    required this.expanded,
+    required this.onToggle,
+    this.count,
+    this.onAddCustom,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 4, 20, 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-          ),
-          Text(
-            subtitle,
-            style: const TextStyle(fontSize: 11, color: Colors.black45),
-          ),
-        ],
+    return InkWell(
+      onTap: onToggle,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 6, 12, 6),
+        child: Row(
+          children: [
+            AnimatedRotation(
+              turns: expanded ? 0.0 : -0.25,
+              duration: const Duration(milliseconds: 150),
+              child: const Icon(Icons.expand_more,
+                  size: 18, color: Colors.black54),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        label,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 13),
+                      ),
+                      if (count != null && count! > 0) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text('$count',
+                              style: const TextStyle(
+                                  fontSize: 10, color: Colors.blue)),
+                        ),
+                      ],
+                    ],
+                  ),
+                  if (expanded)
+                    Text(
+                      subtitle,
+                      style:
+                          const TextStyle(fontSize: 11, color: Colors.black45),
+                    ),
+                ],
+              ),
+            ),
+            if (onAddCustom != null && expanded)
+              TextButton.icon(
+                onPressed: onAddCustom,
+                icon: const Icon(Icons.add, size: 16),
+                label: const Text('Add', style: TextStyle(fontSize: 12)),
+                style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4)),
+              ),
+          ],
+        ),
       ),
     );
   }

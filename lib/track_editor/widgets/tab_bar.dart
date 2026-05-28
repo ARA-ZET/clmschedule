@@ -90,10 +90,56 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                               ),
                               GestureDetector(
                                 behavior: HitTestBehavior.opaque,
-                                onTap: () {
+                                onTap: () async {
                                   final tabsP = ref.read(teTabsRiverpod);
                                   final tabIndex = tabsP.tabs.indexOf(tab);
                                   final mode = tabsP.activeMode;
+                                  // In processing mode, warn if any clients
+                                  // haven't been saved yet.
+                                  if (mode == TEMode.processing) {
+                                    final saveState =
+                                        ref.read(teCloudSaveRiverpod);
+                                    final clients = saveState.clientsFor(tab);
+                                    final unsaved = clients
+                                        .where((c) =>
+                                            !c.savedAsIs && !c.trimmedSaved)
+                                        .toList();
+                                    if (unsaved.isNotEmpty && context.mounted) {
+                                      final clientNames = unsaved
+                                          .map((c) => c.clientName)
+                                          .join(', ');
+                                      final confirmed = await showDialog<bool>(
+                                        context: context,
+                                        builder: (ctx) => AlertDialog(
+                                          title: const Text('Unsaved clients'),
+                                          content: Text(
+                                            unsaved.length == clients.length
+                                                ? 'No clients have been saved yet.\n\n$clientNames'
+                                                : '${unsaved.length} of ${clients.length} '
+                                                    '${unsaved.length == 1 ? 'client has' : 'clients have'} '
+                                                    'not been saved:\n\n$clientNames',
+                                          ),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () =>
+                                                  Navigator.of(ctx).pop(false),
+                                              child: const Text('Cancel'),
+                                            ),
+                                            TextButton(
+                                              onPressed: () =>
+                                                  Navigator.of(ctx).pop(true),
+                                              style: TextButton.styleFrom(
+                                                foregroundColor:
+                                                    Colors.red.shade700,
+                                              ),
+                                              child: const Text('Close anyway'),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                      if (confirmed != true) return;
+                                    }
+                                  }
                                   // Clear cloud-save UI state for the closing
                                   // tab and drop its undo/redo stack so the
                                   // next tab in this slot starts fresh.

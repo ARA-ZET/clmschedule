@@ -10,6 +10,7 @@ import '../models/distributor.dart';
 import '../models/job.dart';
 import '../services/dropsheet_service.dart';
 import '../services/firestore_service.dart';
+import 'dropsheet_task_config_provider.dart';
 import 'schedule_provider.dart';
 
 /// Synthetic section id used for distributors auto-imported from the
@@ -350,7 +351,8 @@ class DropsheetProvider extends ChangeNotifier {
   /// Creates one pick-up task for each assigned drop-off task that does not
   /// already have a matching pick-up anywhere on the current day's dropsheet.
   /// The unassigned bucket is ignored until those stops are placed on drivers.
-  Future<DropsheetPickupSyncResult> syncPickupsFromDropOffs() async {
+  Future<DropsheetPickupSyncResult> syncPickupsFromDropOffs(
+      {bool reversed = true}) async {
     final existingPickupKeys = <String>{};
     for (final section in _day.sections) {
       for (final task in section.tasks) {
@@ -381,7 +383,9 @@ class DropsheetProvider extends ChangeNotifier {
       final orderedPickups = <DropsheetTask>[];
       final movedPickupIds = <String>{};
       final processedDropOffKeys = <String>{};
-      for (final task in section.tasks.reversed) {
+      final taskIter =
+          reversed ? section.tasks.reversed.toList() : section.tasks.toList();
+      for (final task in taskIter) {
         if (task.type != DropsheetTaskType.dropOff) continue;
 
         dropOffCount++;
@@ -416,9 +420,35 @@ class DropsheetProvider extends ChangeNotifier {
 
       if (orderedPickups.isEmpty) return section;
 
+      // Split existing tasks: everything before the trailing "Arrive" task, and
+      // the trailing task itself (kept pinned at the bottom).
+      final nonTrailing = section.tasks
+          .where((t) =>
+              !movedPickupIds.contains(t.id) && !DropsheetTask.isTrailing(t))
+          .toList();
+      final trailing =
+          section.tasks.where(DropsheetTask.isTrailing).toList();
+
+      // Insert a "Leave (start pickups)" divider once, just before the pickups.
+      // Recognised by typeData['isPickupDivider'] == true; only one per section.
+      final hasDivider = nonTrailing.any((t) =>
+          t.type == DropsheetTaskType.leave &&
+          t.typeData['isPickupDivider'] == true);
+      final divider = hasDivider
+          ? null
+          : DropsheetTask(
+              id: '${section.id}_pickup_div_$timestamp',
+              type: DropsheetTaskType.leave,
+              job: 'Leave',
+              isMandatory: false,
+              typeData: const {'isPickupDivider': true},
+            );
+
       final updatedTasks = [
-        ...section.tasks.where((task) => !movedPickupIds.contains(task.id)),
+        ...nonTrailing,
+        if (divider != null) divider,
         ...orderedPickups,
+        ...trailing,
       ];
       if (_sameTaskOrder(section.tasks, updatedTasks)) return section;
 
@@ -566,7 +596,8 @@ class DropsheetProvider extends ChangeNotifier {
 
   Future<void> _save(DropsheetDay updated,
       {bool skipIfUnchanged = false}) async {
-    if (skipIfUnchanged && _sectionsEquivalent(_day.sections, updated.sections)) {
+    if (skipIfUnchanged &&
+        _sectionsEquivalent(_day.sections, updated.sections)) {
       return;
     }
     _day = updated;
@@ -646,11 +677,13 @@ class DropsheetProvider extends ChangeNotifier {
     TrailerType? trailer,
   }) async {
     if (_day.sections.any((s) => s.driverId == driver.id)) return;
+    final depot = _ref?.read(dropsheetTaskConfigRiverpod).depot;
     final section = DropsheetDriverSection.create(
       driverId: driver.id,
       driverName: driver.name,
       vehicle: vehicle ?? driver.defaultVehicle,
       trailer: trailer ?? driver.defaultTrailer,
+      depot: depot,
     );
     await _save(_day.copyWith(sections: [..._day.sections, section]));
   }
@@ -677,8 +710,7 @@ class DropsheetProvider extends ChangeNotifier {
       if (s.id != sectionId) return s;
       // Keep the trailing "Arrive at office" task pinned to the bottom
       // — new tasks are inserted just before it.
-      final trailingIdx =
-          s.tasks.indexWhere(DropsheetTask.isTrailing);
+      final trailingIdx = s.tasks.indexWhere(DropsheetTask.isTrailing);
       if (trailingIdx == -1) {
         return s.copyWith(tasks: [...s.tasks, newTask]);
       }
@@ -985,8 +1017,7 @@ class DropsheetProvider extends ChangeNotifier {
     if (fromSectionId == toSectionId) {
       // Cap the insert position so nothing can land after a trailing task.
       final trailingIdx = fromTasks.indexWhere(DropsheetTask.isTrailing);
-      final maxIdx =
-          trailingIdx == -1 ? fromTasks.length : trailingIdx;
+      final maxIdx = trailingIdx == -1 ? fromTasks.length : trailingIdx;
       final clamped = toIndex.clamp(0, maxIdx);
       fromTasks.insert(clamped, task);
       sections[fromIdx] = sections[fromIdx].copyWith(tasks: fromTasks);

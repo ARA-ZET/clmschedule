@@ -36,6 +36,10 @@ enum PointCategory {
 }
 
 class CustomPolygon {
+  /// Stable domain identifier for data sets that need one, such as work suburbs.
+  /// Regular shareable map polygons can leave this null.
+  final String? id;
+
   final String name;
   final String description;
   final List<LatLng> points;
@@ -60,6 +64,7 @@ class CustomPolygon {
   final int letterBoxEstimate;
 
   const CustomPolygon({
+    this.id,
     required this.name,
     required this.description,
     required this.points,
@@ -106,10 +111,11 @@ class CustomPolygon {
     }
 
     return CustomPolygon(
+      id: data['id'] as String?,
       name: data['name'] as String? ?? '',
       description: data['description'] as String? ?? '',
       points: points,
-      color: Color((data['color'] as num?)?.toInt() ?? Colors.blue.value),
+      color: Color((data['color'] as num?)?.toInt() ?? Colors.blue.toARGB32()),
       fillOpacity: (data['fillOpacity'] as num?)?.toDouble() ?? 0.35,
       strokeWidth: (data['strokeWidth'] as num?)?.toInt() ?? 2,
       isDashed: data['isDashed'] as bool? ?? false,
@@ -136,6 +142,7 @@ class CustomPolygon {
   // Convert to Map (for Firestore)
   Map<String, dynamic> toMap() {
     final map = {
+      if (id != null && id!.isNotEmpty) 'id': id,
       'name': name,
       'description': description,
       'points': points
@@ -170,6 +177,7 @@ class CustomPolygon {
 
   // Create a copy with some fields updated
   CustomPolygon copyWith({
+    String? id,
     String? name,
     String? description,
     List<LatLng>? points,
@@ -182,6 +190,7 @@ class CustomPolygon {
     int? letterBoxEstimate,
   }) {
     return CustomPolygon(
+      id: id ?? this.id,
       name: name ?? this.name,
       description: description ?? this.description,
       points: points != null
@@ -295,6 +304,7 @@ class CustomPolygon {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
     return other is CustomPolygon &&
+        other.id == id &&
         other.name == name &&
         other.description == description &&
         _samePoints(other.points, points) &&
@@ -310,6 +320,7 @@ class CustomPolygon {
   @override
   int get hashCode {
     return Object.hash(
+      id,
       name,
       description,
       Object.hashAll(points.map((p) => Object.hash(p.latitude, p.longitude))),

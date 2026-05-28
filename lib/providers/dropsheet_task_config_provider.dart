@@ -165,4 +165,61 @@ class DropsheetTaskConfigProvider extends ChangeNotifier {
     }
     return configFor(task.type).serviceTimeMinutes;
   }
+
+  /// Seeds sensible built-in defaults for all [configurableDropsheetTaskTypes]
+  /// to Firestore. Overwrites any existing enum-type configs but preserves
+  /// custom types and depot settings.
+  Future<void> seedBuiltinDefaults() async {
+    final seeded = <DropsheetTaskType, DropsheetTaskTypeConfig>{
+      DropsheetTaskType.inspect: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.inspect,
+        serviceTimeMinutes: 10,
+      ),
+      DropsheetTaskType.pack: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.pack,
+        serviceTimeMinutes: 30,
+      ),
+      DropsheetTaskType.leave: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.leave,
+        serviceTimeMinutes: 15,
+      ),
+      DropsheetTaskType.arrive: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.arrive,
+        serviceTimeMinutes: 10,
+      ),
+      DropsheetTaskType.dropOff: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.dropOff,
+        serviceTimeMinutes: 15,
+      ),
+      DropsheetTaskType.pickUp: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.pickUp,
+        serviceTimeMinutes: 15,
+      ),
+      DropsheetTaskType.collection: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.collection,
+        serviceTimeMinutes: 20,
+      ),
+      DropsheetTaskType.jobReturn: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.jobReturn,
+        serviceTimeMinutes: 15,
+      ),
+      DropsheetTaskType.pickFlyers: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.pickFlyers,
+        serviceTimeMinutes: 10,
+      ),
+      DropsheetTaskType.furnitureMove: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.furnitureMove,
+        serviceTimeMinutes: 60,
+      ),
+      DropsheetTaskType.custom: DropsheetTaskTypeConfig(
+        type: DropsheetTaskType.custom,
+        serviceTimeMinutes: 0,
+      ),
+    };
+    await saveAll(
+      configs: seeded,
+      customTypes: _customTypes,
+      depot: _depot,
+    );
+  }
 }

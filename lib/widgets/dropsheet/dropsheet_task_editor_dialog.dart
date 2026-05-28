@@ -62,14 +62,47 @@ class _DropsheetTaskEditorDialogState
   void initState() {
     super.initState();
     final t = widget.initial;
+    final configProvider = ref.read(dropsheetTaskConfigRiverpod);
+    final dynId = t.typeData['dynamicTypeId'] as String?;
+    final dynDef = dynId != null ? configProvider.dynamicTypeById(dynId) : null;
+    final cfg = configProvider.configFor(t.type);
+
     _job = TextEditingController(
-      text: t.job.isNotEmpty ? t.job : DropsheetMaps.defaultJobLabel(t.type),
+      text: t.job.isNotEmpty
+          ? t.job
+          : (dynDef?.label.isNotEmpty == true
+              ? dynDef!.label
+              : cfg.effectiveLabel),
     );
-    _details = TextEditingController(text: t.details);
-    _startTime = TextEditingController(text: t.startTime);
+    _details = TextEditingController(
+      text: t.details.isNotEmpty
+          ? t.details
+          : (dynDef?.defaultDetails.isNotEmpty == true
+              ? dynDef!.defaultDetails
+              : cfg.defaultDetails),
+    );
+    _startTime = TextEditingController(
+      text: t.startTime.isNotEmpty
+          ? t.startTime
+          : (dynDef?.defaultStartTime.isNotEmpty == true
+              ? dynDef!.defaultStartTime
+              : cfg.defaultStartTime),
+    );
     _location = TextEditingController(text: t.location);
-    _contact = TextEditingController(text: t.contact);
-    _tel = TextEditingController(text: t.tel);
+    _contact = TextEditingController(
+      text: t.contact.isNotEmpty
+          ? t.contact
+          : (dynDef?.defaultContact.isNotEmpty == true
+              ? dynDef!.defaultContact
+              : cfg.defaultContact),
+    );
+    _tel = TextEditingController(
+      text: t.tel.isNotEmpty
+          ? t.tel
+          : (dynDef?.defaultTel.isNotEmpty == true
+              ? dynDef!.defaultTel
+              : cfg.defaultTel),
+    );
     _typeData = Map<String, dynamic>.from(t.typeData);
 
     _loadingAddress.text = (_typeData['loadingAddress'] as String?) ?? '';
@@ -379,9 +412,9 @@ class _DropsheetTaskEditorDialogState
         if (showLocation) ...[
           const SizedBox(width: 8),
           Expanded(
-            child: TextField(
+            child: _GeoAddressField(
               controller: _location,
-              decoration: const InputDecoration(labelText: 'Location'),
+              label: 'Location',
             ),
           ),
         ],
@@ -905,6 +938,20 @@ class _DropsheetTaskEditorDialogState
             newTypeData.remove('lat');
             newTypeData.remove('lng');
           }
+        } else if (t.type != DropsheetTaskType.dropOff &&
+            t.type != DropsheetTaskType.pickUp) {
+          // Generic task — geocode the location field so the route planner
+          // (custom type) and future consumers can use the coordinates.
+          final loc = _location.text.trim();
+          if (_addressChanged(
+              previous: t.location,
+              current: loc,
+              currentLat: newTypeData['lat'],
+              currentLng: newTypeData['lng'])) {
+            addressesToGeocode['location'] = loc;
+            newTypeData.remove('lat');
+            newTypeData.remove('lng');
+          }
         }
         break;
     }
@@ -922,6 +969,7 @@ class _DropsheetTaskEditorDialogState
       if (res != null) {
         switch (entry.key) {
           case 'address':
+          case 'location':
             newTypeData['lat'] = res['lat'];
             newTypeData['lng'] = res['lng'];
             break;

@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../models/custom_polygon.dart';
@@ -58,7 +57,7 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
       name: 'Work Areas',
       description: 'Polygons from the /workAreas/ collection',
       order: 0,
-      defaultColor: Colors.red,
+      defaultColor: WorkArea.defaultColor,
       polygons: polygons,
       createdAt: now,
       updatedAt: now,
@@ -98,9 +97,11 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
     // Extract all polygons from the map (there should be exactly one layer)
     final allPolygons = map.layers.expand((l) => l.polygons).toList();
 
-    // Build a lookup of original work areas by name for matching
+    // Build lookups of original work areas for stable identity across renames.
+    final originalById = <String, WorkArea>{};
     final originalByName = <String, WorkArea>{};
     for (final wa in _loadedWorkAreas) {
+      originalById[wa.id] = wa;
       originalByName[wa.name] = wa;
     }
 
@@ -108,7 +109,9 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
     final matchedOriginalIds = <String>{};
 
     for (final polygon in allPolygons) {
-      final existing = originalByName[polygon.name];
+      final existing = polygon.id == null
+          ? originalByName[polygon.name]
+          : originalById[polygon.id] ?? originalByName[polygon.name];
 
       if (existing != null) {
         // UPDATE — polygon still has matching original work area
@@ -121,13 +124,19 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
         final nameChanged = existing.name != polygon.name;
         final estimateChanged =
             existing.letterBoxEstimate != polygon.letterBoxEstimate;
+        final colorChanged = existing.color != polygon.color;
 
-        if (pointsChanged || descChanged || nameChanged || estimateChanged) {
+        if (pointsChanged ||
+            descChanged ||
+            nameChanged ||
+            estimateChanged ||
+            colorChanged) {
           final updated = existing.copyWith(
             name: polygon.name,
             description: polygon.description,
             polygonPoints: polygon.points,
             letterBoxEstimate: polygon.letterBoxEstimate,
+            color: polygon.color,
           );
           await _firestoreService.updateWorkArea(updated);
         }
@@ -139,6 +148,7 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
           description: polygon.description,
           polygonPoints: polygon.points,
           letterBoxEstimate: polygon.letterBoxEstimate,
+          color: polygon.color,
           kmlFileName: '',
           createdAt: DateTime.now(),
           updatedAt: DateTime.now(),
@@ -163,10 +173,11 @@ class WorkAreaCollectionAdapter extends MapDataAdapter {
   /// Convert a [WorkArea] to a [CustomPolygon] for use in the map editor.
   static CustomPolygon _workAreaToPolygon(WorkArea wa) {
     return CustomPolygon(
+      id: wa.id,
       name: wa.name,
       description: wa.description,
       points: List<LatLng>.from(wa.polygonPoints),
-      color: Colors.red,
+      color: wa.color,
       letterBoxEstimate: wa.letterBoxEstimate,
     );
   }

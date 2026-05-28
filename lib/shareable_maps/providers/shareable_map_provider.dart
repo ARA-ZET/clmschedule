@@ -1616,27 +1616,37 @@ class ShareableMapProvider extends ChangeNotifier {
         name: 'Work Areas',
         description: 'Imported from work area collection',
         order: _currentMap!.layers.length,
-        defaultColor: Colors.orange,
+        defaultColor: WorkArea.defaultColor,
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
       );
       _currentMap = _currentMap!.addLayer(layer);
     }
 
-    // Check if this work area was already added (by name match)
-    final alreadyExists = layer.polygons.any((p) => p.name == workArea.name);
-    if (alreadyExists) return;
-
     // Convert WorkArea to CustomPolygon and add it
     final polygon = CustomPolygon(
+      id: workArea.id,
       name: workArea.name,
       description: workArea.description,
       points: List<LatLng>.from(workArea.polygonPoints),
-      color: color ?? Colors.orange,
+      color: color ?? workArea.color,
       fillOpacity: 0.25,
       strokeWidth: 2,
       letterBoxEstimate: workArea.letterBoxEstimate,
     );
+
+    final existingIndex = layer.polygons.indexWhere(
+      (p) =>
+          (workArea.id.isNotEmpty && p.id == workArea.id) ||
+          p.name == workArea.name,
+    );
+    if (existingIndex != -1) {
+      final updatedLayer = layer.updatePolygon(existingIndex, polygon);
+      _currentMap = _currentMap!.updateLayer(workAreaLayerId, updatedLayer);
+      debugPrint('Updated imported work area on map: ${workArea.name}');
+      _notifyAndSave();
+      return;
+    }
 
     final updatedLayer = layer.addPolygon(polygon);
     _currentMap = _currentMap!.updateLayer(workAreaLayerId, updatedLayer);
@@ -1692,25 +1702,35 @@ class ShareableMapProvider extends ChangeNotifier {
         name: 'Suburbs',
         description: 'Imported from suburb collection',
         order: _currentMap!.layers.length,
-        defaultColor: Colors.green,
+        defaultColor: WorkSuburb.defaultColor,
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
       );
       _currentMap = _currentMap!.addLayer(layer);
     }
 
-    final alreadyExists = layer.polygons.any((p) => p.name == suburb.name);
-    if (alreadyExists) return;
-
     final polygon = CustomPolygon(
+      id: suburb.id,
       name: suburb.name,
       description: suburb.description,
       points: List<LatLng>.from(suburb.polygonPoints),
-      color: Colors.green,
+      color: suburb.color,
       fillOpacity: 0.25,
       strokeWidth: 2,
       letterBoxEstimate: suburb.letterBoxEstimate,
     );
+
+    final existingIndex = layer.polygons.indexWhere(
+      (p) =>
+          (suburb.id.isNotEmpty && p.id == suburb.id) || p.name == suburb.name,
+    );
+    if (existingIndex != -1) {
+      final updatedLayer = layer.updatePolygon(existingIndex, polygon);
+      _currentMap = _currentMap!.updateLayer(_suburbLayerId, updatedLayer);
+      debugPrint('Updated imported suburb on map: ${suburb.name}');
+      _notifyAndSave();
+      return;
+    }
 
     final updatedLayer = layer.addPolygon(polygon);
     _currentMap = _currentMap!.updateLayer(_suburbLayerId, updatedLayer);
@@ -3083,6 +3103,9 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Toggle the work area picker panel
   void toggleWorkAreaPicker() {
     _isWorkAreaPickerVisible = !_isWorkAreaPickerVisible;
+    if (_isWorkAreaPickerVisible) {
+      _pickerWorkAreasVisible = true;
+    }
     notifyListeners();
   }
 
@@ -3377,27 +3400,6 @@ class ShareableMapProvider extends ChangeNotifier {
     {"featureType":"transit","elementType":"labels.text.fill","stylers":[{"color":"#757575"}]},
     {"featureType":"water","elementType":"geometry","stylers":[{"color":"#000000"}]},
     {"featureType":"water","elementType":"labels.text.fill","stylers":[{"color":"#3d3d3d"}]}
-  ]''';
-
-  static const String _silverMapStyle = '''[
-    {"elementType":"geometry","stylers":[{"color":"#f5f5f5"}]},
-    {"elementType":"labels.icon","stylers":[{"visibility":"off"}]},
-    {"elementType":"labels.text.fill","stylers":[{"color":"#616161"}]},
-    {"elementType":"labels.text.stroke","stylers":[{"color":"#f5f5f5"}]},
-    {"featureType":"administrative.land_parcel","elementType":"labels.text.fill","stylers":[{"color":"#bdbdbd"}]},
-    {"featureType":"poi","elementType":"geometry","stylers":[{"color":"#eeeeee"}]},
-    {"featureType":"poi","elementType":"labels.text.fill","stylers":[{"color":"#757575"}]},
-    {"featureType":"poi.park","elementType":"geometry","stylers":[{"color":"#e5e5e5"}]},
-    {"featureType":"poi.park","elementType":"labels.text.fill","stylers":[{"color":"#9e9e9e"}]},
-    {"featureType":"road","elementType":"geometry","stylers":[{"color":"#ffffff"}]},
-    {"featureType":"road.arterial","elementType":"labels.text.fill","stylers":[{"color":"#757575"}]},
-    {"featureType":"road.highway","elementType":"geometry","stylers":[{"color":"#dadada"}]},
-    {"featureType":"road.highway","elementType":"labels.text.fill","stylers":[{"color":"#616161"}]},
-    {"featureType":"road.local","elementType":"labels.text.fill","stylers":[{"color":"#9e9e9e"}]},
-    {"featureType":"transit.line","elementType":"geometry","stylers":[{"color":"#e5e5e5"}]},
-    {"featureType":"transit.station","elementType":"geometry","stylers":[{"color":"#eeeeee"}]},
-    {"featureType":"water","elementType":"geometry","stylers":[{"color":"#c9c9c9"}]},
-    {"featureType":"water","elementType":"labels.text.fill","stylers":[{"color":"#9e9e9e"}]}
   ]''';
 
   static const String _retroMapStyle = '''[

@@ -2,6 +2,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'collection_job.dart';
 import 'dropsheet_task.dart';
+import 'dropsheet_task_type_config.dart';
 
 /// One driver's section inside a daily dropsheet:
 ///   - which driver
@@ -142,11 +143,16 @@ class DropsheetDriverSection {
       );
 
   /// Build a fresh section seeded with the 3 mandatory tasks.
+  ///
+  /// When [depot] is supplied, the Leave and Arrive tasks are pre-filled
+  /// with the office address and coordinates so drivers always see their
+  /// start/end location.
   factory DropsheetDriverSection.create({
     required String driverId,
     required String driverName,
     VehicleType? vehicle,
     TrailerType? trailer,
+    DepotConfig? depot,
   }) {
     return DropsheetDriverSection(
       id: driverId,
@@ -158,6 +164,10 @@ class DropsheetDriverSection {
         idPrefix: driverId,
         vehicleLabel: vehicle?.displayName,
         vehicleKey: vehicle?.name,
+        depotAddress: depot?.address.isNotEmpty == true ? depot!.address : null,
+        depotLat: depot?.lat,
+        depotLng: depot?.lng,
+        depotStartTime: depot?.startTime,
       ),
     );
   }

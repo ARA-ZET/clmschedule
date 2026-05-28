@@ -1548,12 +1548,31 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       ..write('|')
       ..write(provider.isWorkAreaPickerVisible)
       ..write('|')
+      ..write(provider.pickerWorkAreasVisible)
+      ..write('|')
+      ..write(provider.pickerSuburbsVisible)
+      ..write('|')
       ..write(provider.showWorkAreasOverlay)
       ..write('|')
       ..write(provider.showSuburbsOverlay)
       ..write('|wa${overlayWorkAreas.length}|sub${overlaySuburbs.length}|');
+    for (final wa in overlayWorkAreas) {
+      polyKeyBuf.write(
+        'wa:${wa.id}:${wa.polygonPoints.length}:${wa.color.toARGB32()};',
+      );
+    }
+    for (final suburb in overlaySuburbs) {
+      polyKeyBuf.write(
+        'sub:${suburb.id}:${suburb.polygonPoints.length}:${suburb.color.toARGB32()};',
+      );
+    }
     for (final l in visibleLayers) {
-      polyKeyBuf.write('${l.id}:${l.polygons.length},');
+      polyKeyBuf.write('${l.id}:${l.polygons.length}:');
+      for (final polygon in l.polygons) {
+        polyKeyBuf.write(
+          '${polygon.id ?? polygon.name}:${polygon.points.length}:${polygon.color.toARGB32()};',
+        );
+      }
     }
     final polyKey = polyKeyBuf.toString();
 
@@ -1574,18 +1593,36 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
           provider.getEditingPolygon()!,
       };
       // Preview work areas (import picker).
-      if (provider.isWorkAreaPickerVisible) {
+      if (provider.isWorkAreaPickerVisible && provider.pickerWorkAreasVisible) {
         for (final wa in overlayWorkAreas) {
           if (provider.isWorkAreaImported(wa.name)) continue;
           if (wa.polygonPoints.length < 3) continue;
+          final color = wa.color;
           polys.add(Polygon(
             polygonId: PolygonId('preview_wa_${wa.name}'),
             points: wa.polygonPoints,
-            strokeColor: Colors.blue.withValues(alpha: 0.7),
+            strokeColor: color.withValues(alpha: 0.7),
             strokeWidth: 2,
-            fillColor: Colors.blue.withValues(alpha: 0.10),
+            fillColor: color.withValues(alpha: 0.10),
             consumeTapEvents: true,
             onTap: () => _handlePreviewWorkAreaTap(context, provider, wa),
+          ));
+        }
+      }
+      // Preview suburbs (import picker).
+      if (provider.isWorkAreaPickerVisible && provider.pickerSuburbsVisible) {
+        for (final suburb in overlaySuburbs) {
+          if (provider.isSuburbImported(suburb.name)) continue;
+          if (suburb.polygonPoints.length < 3) continue;
+          final color = suburb.color;
+          polys.add(Polygon(
+            polygonId: PolygonId('preview_suburb_${suburb.id}'),
+            points: suburb.polygonPoints,
+            strokeColor: color.withValues(alpha: 0.7),
+            strokeWidth: 2,
+            fillColor: color.withValues(alpha: 0.10),
+            consumeTapEvents: true,
+            onTap: () => _handleSuburbOverlayTap(context, provider, suburb),
           ));
         }
       }
@@ -1593,12 +1630,13 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       if (provider.showWorkAreasOverlay) {
         for (final wa in overlayWorkAreas) {
           if (wa.polygonPoints.length < 3) continue;
+          final color = wa.color;
           polys.add(Polygon(
             polygonId: PolygonId('overlay_wa_${wa.name}'),
             points: wa.polygonPoints,
-            strokeColor: Colors.blue.withValues(alpha: 0.85),
+            strokeColor: color.withValues(alpha: 0.85),
             strokeWidth: 2,
-            fillColor: Colors.blue.withValues(alpha: 0.08),
+            fillColor: color.withValues(alpha: 0.08),
             consumeTapEvents: true,
             onTap: () => _handleWorkAreaOverlayTap(context, provider, wa),
           ));
@@ -1608,12 +1646,13 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       if (provider.showSuburbsOverlay) {
         for (final suburb in overlaySuburbs) {
           if (suburb.polygonPoints.length < 3) continue;
+          final color = suburb.color;
           polys.add(Polygon(
             polygonId: PolygonId('overlay_suburb_${suburb.id}'),
             points: suburb.polygonPoints,
-            strokeColor: Colors.green.withValues(alpha: 0.85),
+            strokeColor: color.withValues(alpha: 0.85),
             strokeWidth: 2,
-            fillColor: Colors.green.withValues(alpha: 0.08),
+            fillColor: color.withValues(alpha: 0.08),
             consumeTapEvents: true,
             onTap: () => _handleSuburbOverlayTap(context, provider, suburb),
           ));

@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
+import '../../config/cloud_feature_flags.dart';
 import '../../models/collection_job.dart';
 import '../../models/dropsheet_day.dart';
 import '../../models/dropsheet_task.dart';
 import '../../models/dropsheet_task_type_config.dart';
 import '../../providers/dropsheet_provider.dart';
 import '../../providers/dropsheet_task_config_provider.dart';
+import '../../services/dropsheet_route_planner.dart';
 import 'dropsheet_tab.dart' show TaskDragPayload;
 import 'dropsheet_task_editor_dialog.dart';
 import 'dropsheet_task_row.dart';
@@ -14,7 +16,7 @@ import 'dropsheet_task_row.dart';
 /// One driver's section: header (name + vehicle/trailer) and a reorderable
 /// list of tasks. Tasks may be reordered within the section; cross-section
 /// moves use the "Move to..." popup on each task row.
-class DriverSectionWidget extends riverpod.ConsumerWidget {
+class DriverSectionWidget extends riverpod.ConsumerStatefulWidget {
   final DropsheetDriverSection section;
   final List<DropsheetDriverSection> allSections;
   final ValueChanged<TaskDragPayload>? onAcceptCrossSectionDrop;
@@ -27,117 +29,125 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, riverpod.WidgetRef ref) {
-    final dropsheet = ref.read(dropsheetRiverpod);
-    // Compute once per build instead of inside the itemBuilder where it
-    // would allocate a new filtered list per row.
-    final otherSections = _otherSections();
-    final hasOtherSections = otherSections.isNotEmpty;
+  riverpod.ConsumerState<DriverSectionWidget> createState() =>
+      _DriverSectionWidgetState();
+}
 
-    return DragTarget<TaskDragPayload>(
-      onWillAcceptWithDetails: (details) =>
-          details.data.fromSectionId != section.id,
-      onAcceptWithDetails: (details) async {
-        await dropsheet.moveTask(
-          fromSectionId: details.data.fromSectionId,
-          fromIndex: details.data.fromIndex,
-          toSectionId: section.id,
-          toIndex: section.tasks.length,
-        );
-      },
-      builder: (context, candidate, rejected) {
-        final isHover = candidate.isNotEmpty;
-        return Card(
-          clipBehavior: Clip.antiAlias,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-            side: BorderSide(
-              color: isHover ? Colors.blue : Colors.transparent,
-              width: 2,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _Header(section: section),
-              const _ColumnHeaders(),
-              ReorderableListView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                buildDefaultDragHandles: false,
-                itemCount: section.tasks.length,
-                onReorder: (oldIndex, newIndex) async {
-                  // Compensate for the standard Flutter quirk where
-                  // newIndex is shifted when moving down within the same list.
-                  final adjusted =
-                      newIndex > oldIndex ? newIndex - 1 : newIndex;
-                  await dropsheet.moveTask(
-                    fromSectionId: section.id,
-                    fromIndex: oldIndex,
-                    toSectionId: section.id,
-                    toIndex: adjusted,
-                  );
-                },
-                itemBuilder: (context, index) {
-                  final task = section.tasks[index];
-                  return DropsheetTaskRow(
-                    key: ValueKey(task.id),
-                    task: task,
-                    taskNumber: index + 1,
-                    dragIndex: index,
-                    sectionId: section.id,
-                    onEdit: () => _editTask(context, ref, task),
-                    onDelete: _isLeadingTask(task)
-                        ? null
-                        : () => dropsheet.removeTask(section.id, task.id),
-                    onMoveToSection: !hasOtherSections
-                        ? null
-                        : (targetSectionId) async {
-                            await dropsheet.moveTask(
-                              fromSectionId: section.id,
-                              fromIndex: index,
-                              toSectionId: targetSectionId,
-                              toIndex: 0,
-                            );
-                          },
-                    otherSections: otherSections,
-                  );
-                },
-              ),
-              if (section.tasks.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Center(
-                    child: Text(
-                      isHover
-                          ? 'Drop here'
-                          : 'No tasks yet — drag stops here or tap “Add task”',
-                      style: TextStyle(
-                        color: isHover ? Colors.blue : Colors.grey,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ),
-                ),
-              _Footer(section: section),
-            ],
-          ),
-        );
-      },
-    );
+class _DriverSectionWidgetState
+    extends riverpod.ConsumerState<DriverSectionWidget> {
+  bool _collapsed = false;
+  bool _calculating = false;
+
+  // ── ETA calculation (mirrors day-planner _SectionCardState logic) ─────────
+
+  String _leaveTime(DepotConfig depot) {
+    try {
+      final leave = widget.section.tasks.firstWhere(
+          (t) => t.type == DropsheetTaskType.leave && t.startTime.isNotEmpty);
+      return leave.startTime;
+    } catch (_) {
+      return depot.startTime;
+    }
   }
 
+  Future<void> _calculateETAs() async {
+    if (_calculating) return;
+    final config = ref.read(dropsheetTaskConfigRiverpod);
+    final dropsheet = ref.read(dropsheetRiverpod);
+    final messenger = ScaffoldMessenger.of(context);
+
+    if (config.depot.lat == null || config.depot.lng == null) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Office is not yet geocoded. Open Task manager and save the office address first.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _calculating = true);
+    final leaveTime = _leaveTime(config.depot);
+    debugPrint('[Dropsheet] calculate ETAs '
+        'section=${widget.section.id} '
+        'tasks=${widget.section.tasks.where((t) => !t.isMandatory).length} '
+        'leaveTime=$leaveTime');
+    try {
+      final planner = DropsheetRoutePlanner(
+        config: config,
+        useCloud: CloudFeatureFlags.useCloudRouteOptimizer,
+      );
+      final route = await planner.calculateInPlace(
+        section: widget.section,
+        depot: config.depot,
+        baseDate: dropsheet.date,
+        startTime: leaveTime,
+      );
+
+      if (!mounted) return;
+      if (route == null) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text(
+                'No routable stops in this section (need geocoded addresses).'),
+          ),
+        );
+        return;
+      }
+
+      final legByKey = <String, Map<String, dynamic>>{};
+      route.legBeforeStop.forEach((key, leg) {
+        legByKey[key] = {
+          'distanceMeters': leg.distanceMeters,
+          'durationSeconds': leg.durationSeconds,
+        };
+      });
+
+      await dropsheet.applyOptimizedRoute(
+        sectionId: widget.section.id,
+        taskOrder: route.taskOrder,
+        arrivalByTaskKey: route.arrivalTimes,
+        legByTaskKey: legByKey,
+        polyline: route.fullPolyline,
+        totalDistanceMeters: route.totalDistanceMeters,
+        totalDurationSeconds: route.totalDurationSeconds,
+      );
+
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            'ETAs calculated: ${route.taskOrder.length} stops · '
+            '${(route.totalDistanceMeters / 1000).toStringAsFixed(1)} km · '
+            '${(route.totalDurationSeconds / 60).round()} min'
+            '${route.skippedTaskIds.isEmpty ? '' : ' (${route.skippedTaskIds.length} skipped — missing coords)'}',
+
+          ),
+        ),
+      );
+    } catch (e, st) {
+      debugPrint('[Dropsheet] ETA calculation FAILED: $e\n$st');
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('ETA calculation failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _calculating = false);
+    }
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
   List<DropsheetDriverSection> _otherSections() =>
-      allSections.where((s) => s.id != section.id).toList();
+      widget.allSections.where((s) => s.id != widget.section.id).toList();
 
   bool _isLeadingTask(DropsheetTask task) =>
       task.isMandatory ||
       task.type == DropsheetTaskType.inspect ||
-      task.type == DropsheetTaskType.pack ||
-      task.type == DropsheetTaskType.leave;
+      task.type == DropsheetTaskType.pack;
 
-  Future<void> _editTask(
-      BuildContext context, riverpod.WidgetRef ref, DropsheetTask task) async {
+  Future<void> _editTask(BuildContext context, DropsheetTask task) async {
     final sheetDate = ref.read(dropsheetRiverpod).date;
     final updated = await showDialog<DropsheetTask>(
       context: context,
@@ -147,7 +157,7 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
       ),
     );
     if (updated == null) return;
-    await ref.read(dropsheetRiverpod).updateTask(section.id, updated);
+    await ref.read(dropsheetRiverpod).updateTask(widget.section.id, updated);
 
     // When the Leave task's departure time changes and the section already
     // has a computed route, propagate new ETAs offline using stored leg data.
@@ -156,7 +166,7 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
         updated.startTime != task.startTime) {
       final config = ref.read(dropsheetTaskConfigRiverpod);
       await ref.read(dropsheetRiverpod).recalculateETAsFromLegs(
-            section.id,
+            widget.section.id,
             updated.startTime,
             config.serviceMinutesFor,
           );
@@ -173,7 +183,7 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
           _hhmToMinutes(updated.startTime) - _hhmToMinutes(task.startTime);
       if (delta != 0) {
         await ref.read(dropsheetRiverpod).shiftStartTimesAfter(
-              sectionId: section.id,
+              sectionId: widget.section.id,
               taskId: updated.id,
               deltaMinutes: delta,
             );
@@ -186,11 +196,136 @@ class DriverSectionWidget extends riverpod.ConsumerWidget {
     if (p.length != 2) return 0;
     return (int.tryParse(p[0]) ?? 0) * 60 + (int.tryParse(p[1]) ?? 0);
   }
+
+  @override
+  Widget build(BuildContext context) {
+    final dropsheet = ref.read(dropsheetRiverpod);
+    final otherSections = _otherSections();
+    final hasOtherSections = otherSections.isNotEmpty;
+    final isUnassigned = widget.section.id == kUnassignedSectionId;
+    final nonMandatoryCount =
+        widget.section.tasks.where((t) => !t.isMandatory).length;
+
+    return DragTarget<TaskDragPayload>(
+      onWillAcceptWithDetails: (details) =>
+          details.data.fromSectionId != widget.section.id,
+      onAcceptWithDetails: (details) async {
+        await dropsheet.moveTask(
+          fromSectionId: details.data.fromSectionId,
+          fromIndex: details.data.fromIndex,
+          toSectionId: widget.section.id,
+          toIndex: widget.section.tasks.length,
+        );
+      },
+      builder: (context, candidate, rejected) {
+        final isHover = candidate.isNotEmpty;
+        return Card(
+          clipBehavior: Clip.antiAlias,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: BorderSide(
+              color: isHover ? Colors.blue : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _Header(
+                section: widget.section,
+                isCollapsed: _collapsed,
+                isCalculating: _calculating,
+                onToggleCollapse: () =>
+                    setState(() => _collapsed = !_collapsed),
+                onCalculate: isUnassigned || nonMandatoryCount == 0
+                    ? null
+                    : _calculateETAs,
+              ),
+              if (!_collapsed) ...[
+                const _ColumnHeaders(),
+                ReorderableListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  buildDefaultDragHandles: false,
+                  itemCount: widget.section.tasks.length,
+                  onReorder: (oldIndex, newIndex) async {
+                    // Compensate for the standard Flutter quirk where
+                    // newIndex is shifted when moving down within the same list.
+                    final adjusted =
+                        newIndex > oldIndex ? newIndex - 1 : newIndex;
+                    await dropsheet.moveTask(
+                      fromSectionId: widget.section.id,
+                      fromIndex: oldIndex,
+                      toSectionId: widget.section.id,
+                      toIndex: adjusted,
+                    );
+                  },
+                  itemBuilder: (context, index) {
+                    final task = widget.section.tasks[index];
+                    return DropsheetTaskRow(
+                      key: ValueKey(task.id),
+                      task: task,
+                      taskNumber: index + 1,
+                      dragIndex: index,
+                      sectionId: widget.section.id,
+                      onEdit: () => _editTask(context, task),
+                      onDelete: _isLeadingTask(task)
+                          ? null
+                          : () => dropsheet.removeTask(
+                              widget.section.id, task.id),
+                      onMoveToSection: !hasOtherSections
+                          ? null
+                          : (targetSectionId) async {
+                              await dropsheet.moveTask(
+                                fromSectionId: widget.section.id,
+                                fromIndex: index,
+                                toSectionId: targetSectionId,
+                                toIndex: 0,
+                              );
+                            },
+                      otherSections: otherSections,
+                    );
+                  },
+                ),
+                if (widget.section.tasks.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Center(
+                      child: Text(
+                        isHover
+                            ? 'Drop here'
+                            : 'No tasks yet — drag stops here or tap "Add task"',
+                        style: TextStyle(
+                          color: isHover ? Colors.blue : Colors.grey,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ),
+                  ),
+                _Footer(section: widget.section),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _Header extends riverpod.ConsumerWidget {
   final DropsheetDriverSection section;
-  const _Header({required this.section});
+  final bool isCollapsed;
+  final bool isCalculating;
+  final VoidCallback onToggleCollapse;
+  final VoidCallback? onCalculate;
+
+  const _Header({
+    required this.section,
+    required this.isCollapsed,
+    required this.isCalculating,
+    required this.onToggleCollapse,
+    this.onCalculate,
+  });
 
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
@@ -200,6 +335,20 @@ class _Header extends riverpod.ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Row(
         children: [
+          // Collapse chevron
+          InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: onToggleCollapse,
+            child: Padding(
+              padding: const EdgeInsets.all(4),
+              child: AnimatedRotation(
+                turns: isCollapsed ? -0.25 : 0,
+                duration: const Duration(milliseconds: 200),
+                child: const Icon(Icons.expand_more, size: 20),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
           if (isUnassigned)
             const Padding(
               padding: EdgeInsets.only(right: 8),
@@ -232,6 +381,25 @@ class _Header extends riverpod.ConsumerWidget {
               ),
             ),
           const Spacer(),
+          // Calculate ETAs button (not shown for Unassigned)
+          if (onCalculate != null)
+            Tooltip(
+              message: 'Calculate ETAs (keep order)',
+              child: isCalculating
+                  ? const SizedBox(
+                      width: 36,
+                      height: 36,
+                      child: Padding(
+                        padding: EdgeInsets.all(8),
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  : IconButton(
+                      icon: const Icon(Icons.schedule),
+                      iconSize: 20,
+                      onPressed: onCalculate,
+                    ),
+            ),
           if (!isUnassigned)
             PopupMenuButton<String>(
               icon: const Icon(Icons.more_vert),

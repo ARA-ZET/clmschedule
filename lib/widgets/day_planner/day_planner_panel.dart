@@ -21,6 +21,11 @@ import 'day_planner_palette.dart';
 final sectionPickUpViewProvider =
     riverpod.StateProvider<Map<String, bool>>((ref) => {});
 
+/// Whether map markers should show their label badges. Toggled from the
+/// 'Plan drivers' header and watched by the day-planner map page.
+final markerLabelsProvider =
+    riverpod.StateProvider<bool>((ref) => true);
+
 /// Compact dropsheet panel used inside the day planner split screen.
 ///
 /// Lists the day's distributor drop-off stops grouped by driver section
@@ -172,7 +177,7 @@ class _DayPlannerPanelState extends riverpod.ConsumerState<DayPlannerPanel> {
   }
 }
 
-class _PanelHeader extends StatelessWidget {
+class _PanelHeader extends riverpod.ConsumerWidget {
   final DateTime date;
   final VoidCallback onAddDriver;
   final VoidCallback onSyncFromSchedule;
@@ -184,7 +189,8 @@ class _PanelHeader extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final showLabels = ref.watch(markerLabelsProvider);
     return Container(
       color: const Color(0xFF202124),
       padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
@@ -204,6 +210,44 @@ class _PanelHeader extends StatelessWidget {
             tooltip: 'Sync new stops from schedule',
             icon: const Icon(Icons.sync, color: Colors.white70),
             onPressed: onSyncFromSchedule,
+          ),
+          // Marker label toggle.
+          Tooltip(
+            message: showLabels ? 'Hide labels' : 'Show labels',
+            child: GestureDetector(
+              onTap: () => ref
+                  .read(markerLabelsProvider.notifier)
+                  .state = !showLabels,
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: showLabels
+                      ? const Color(0xFF00897B)
+                      : const Color(0xFF424242),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      showLabels ? Icons.label : Icons.label_off,
+                      color: Colors.white,
+                      size: 14,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      showLabels ? 'Labels' : 'Numbers',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
           FilledButton.tonalIcon(
             onPressed: onAddDriver,

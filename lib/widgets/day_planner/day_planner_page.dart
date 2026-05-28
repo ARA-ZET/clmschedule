@@ -47,6 +47,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
 
   Set<Marker> _markers = const {};
   String _markersSignature = '';
+  bool _markersLoading = false;
 
   /// Tracks the set of job IDs from the last schedule update.
   /// Used to detect real changes and skip the initial load so we don't
@@ -64,6 +65,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
   riverpod.ProviderSubscription<ScheduleProvider>? _scheduleSub;
   riverpod.ProviderSubscription<DropsheetTaskConfigProvider>? _configSub;
   riverpod.ProviderSubscription<Map<String, bool>>? _viewSub;
+  riverpod.ProviderSubscription<bool>? _labelsSub;
 
   // Memoised derived data — recomputed only when the relevant input
   // signature changes, not on every build.
@@ -80,8 +82,9 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     // Make sure the global dropsheet provider is showing the same date
     // as the planner page. setDate is idempotent if already set.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      // Reset per-section view toggles for this navigation.
+      // Reset per-session toggles for this navigation.
       ref.read(sectionPickUpViewProvider.notifier).state = {};
+      ref.read(markerLabelsProvider.notifier).state = true;
       ref.read(dropsheetRiverpod).setDate(widget.date);
       _scheduleMarkerRefresh();
     });
@@ -144,6 +147,17 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
         });
       },
     );
+    // When the label-toggle changes, force a full marker rebuild.
+    _labelsSub = ref.listenManual<bool>(
+      markerLabelsProvider,
+      (_, __) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _markersSignature = '';
+          _scheduleMarkerRefresh();
+        });
+      },
+    );
   }
 
   @override
@@ -152,6 +166,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     _scheduleSub?.close();
     _configSub?.close();
     _viewSub?.close();
+    _labelsSub?.close();
     super.dispose();
   }
 
@@ -160,13 +175,16 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     final schedule = ref.read(scheduleRiverpod);
     final config = ref.read(dropsheetTaskConfigRiverpod);
     final pickUpView = ref.read(sectionPickUpViewProvider);
+    final showLabels = ref.read(markerLabelsProvider);
     final jobs = schedule.getJobsForDate(widget.date);
     final signature = _signatureOf(dropsheet.day, jobs, config, pickUpView);
-    if (signature == _markersSignature) return;
-    _markersSignature = signature;
+    final fullSignature = '$signature|labels:$showLabels';
+    if (fullSignature == _markersSignature) return;
+    _markersSignature = fullSignature;
     final mySeq = ++_rebuildSeq;
+    setState(() => _markersLoading = true);
     _rebuildMarkers(dropsheet.day, {for (final j in jobs) j.id: j}, config,
-        pickUpView, mySeq);
+        pickUpView, mySeq, showLabels);
   }
 
   @override
@@ -290,6 +308,34 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
             ),
             if (_selectedMarker != null && _infoWindowOffset != null)
               _buildInfoOverlay(constraints, day),
+            // Show a small indicator while bitmaps are being generated so the
+            // map never partially shows markers.
+            if (_markersLoading)
+              Positioned(
+                right: 12,
+                bottom: 12,
+                child: Card(
+                  elevation: 3,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 13,
+                          height: 13,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        SizedBox(width: 8),
+                        Text('Loading markers…',
+                            style: TextStyle(fontSize: 12)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
           ],
         );
       },
@@ -462,6 +508,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     DropsheetTaskConfigProvider config,
     Map<String, bool> pickUpViewBySectionId,
     int seq,
+    bool showLabels,
   ) async {
     final pending = <_MarkerSpec>[];
     for (final section in day.sections) {
@@ -526,8 +573,8 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       (spec) => _markerCache.get(
         color: spec.color,
         number: spec.number,
-        primaryLabel: spec.primaryLabel,
-        secondaryLabel: spec.secondaryLabel,
+        primaryLabel: showLabels ? spec.primaryLabel : '',
+        secondaryLabel: showLabels ? spec.secondaryLabel : '',
         isPickUp: spec.isPickUp,
       ),
     ));
@@ -559,7 +606,10 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     if (!mounted) return;
     // Drop stale results if a newer rebuild has been queued.
     if (seq != _rebuildSeq) return;
-    setState(() => _markers = markers);
+    setState(() {
+      _markers = markers;
+      _markersLoading = false;
+    });
   }
 
   Future<void> _onMarkerTap(_MarkerSpec spec) async {

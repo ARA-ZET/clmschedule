@@ -7,6 +7,7 @@
 //      boundaries, then upload trimmed data to the client folder.
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:gpx/gpx.dart';
 import 'package:intl/intl.dart';
 import '../../providers/cloud_file_manager_provider.dart';
@@ -558,9 +559,20 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
     if (!await _ensureFolderPicked()) return;
     setState(() => _trimming = true);
     try {
-      final selectedPolys = widget.entry.selectedPolyIndices
-          .map((i) => widget.entry.polygons[i])
-          .toList();
+      // Build a name→points lookup from the current tab polygons so that
+      // any vertex edits the user made are used for trimming rather than
+      // the original points fetched from the schedule.
+      final tabPolyByName = <String, List<LatLng>>{
+        for (final tp in widget.tab.polygons)
+          if (tp.name.isNotEmpty) tp.name: tp.points,
+      };
+      final selectedPolys = widget.entry.selectedPolyIndices.map((i) {
+        final orig = widget.entry.polygons[i];
+        final editedPoints = tabPolyByName[orig.name];
+        return editedPoints != null
+            ? orig.copyWith(points: editedPoints)
+            : orig;
+      }).toList();
 
       final trimmedTracks = trimTracksToPolygons(widget.tracks, selectedPolys);
       final trimmedWpts =

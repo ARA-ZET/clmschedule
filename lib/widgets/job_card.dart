@@ -139,7 +139,8 @@ class _JobClientSection extends StatelessWidget {
             flex: 2,
             child: _ClientListEditor(
               job: job,
-              onClientsChanged: (List<String> updatedClients) {
+              onClientsChanged: (List<String> updatedClients,
+                  List<String> updatedInstructions) {
                 // Get fresh job data from provider to avoid stale state
                 final scheduleProvider =
                     riverpod.ProviderScope.containerOf(context)
@@ -149,7 +150,10 @@ class _JobClientSection extends StatelessWidget {
                   orElse: () => job,
                 );
                 final originalJob = freshJob;
-                final modifiedJob = freshJob.copyWith(clients: updatedClients);
+                final modifiedJob = freshJob.copyWith(
+                  clients: updatedClients,
+                  clientInstructions: updatedInstructions,
+                );
                 scheduleProvider.updateJobWithUndo(
                   originalJob,
                   modifiedJob,
@@ -222,6 +226,61 @@ class _JobActionsSection extends riverpod.ConsumerWidget {
     required this.onPrintMap,
   });
 
+  void _showMapInstructionsDialog(BuildContext context) {
+    final controller = TextEditingController(text: job.mapInstructions);
+    // Capture the provider reference NOW while context is definitely mounted,
+    // not inside the dialog callback where the outer context may be stale.
+    final scheduleProvider =
+        riverpod.ProviderScope.containerOf(context).read(scheduleRiverpod);
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Map Instructions'),
+          content: SizedBox(
+            width: 360,
+            child: TextField(
+              controller: controller,
+              maxLines: 5,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText:
+                    'Enter driver notes: access codes, landmarks, parking…',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                controller.dispose();
+              },
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final newInstructions = controller.text.trim();
+                final freshJob = scheduleProvider.jobs.firstWhere(
+                  (j) => j.id == job.id,
+                  orElse: () => job,
+                );
+                final modifiedJob =
+                    freshJob.copyWith(mapInstructions: newInstructions);
+                scheduleProvider.updateJobWithUndo(
+                    freshJob, modifiedJob, freshJob.date);
+                Navigator.of(ctx).pop();
+                controller.dispose();
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final scaleProvider = ref.read(scaleRiverpod);
@@ -249,6 +308,27 @@ class _JobActionsSection extends riverpod.ConsumerWidget {
                 textScaler: const TextScaler.linear(1),
                 maxLines: 1,
               ),
+            ),
+          ),
+          // Map instructions button
+          Tooltip(
+            message: job.mapInstructions.isNotEmpty
+                ? 'Instructions: ${job.mapInstructions}'
+                : 'Add map instructions',
+            child: IconButton(
+              icon: Icon(
+                job.mapInstructions.isNotEmpty
+                    ? Icons.info
+                    : Icons.info_outline,
+                color: job.mapInstructions.isNotEmpty
+                    ? Colors.amber
+                    : Colors.white54,
+                size: scaleProvider.smallIconSize,
+              ),
+              constraints: const BoxConstraints(),
+              padding: EdgeInsets.zero,
+              iconSize: scaleProvider.smallIconSize,
+              onPressed: () => _showMapInstructionsDialog(context),
             ),
           ),
           // Status button
@@ -315,7 +395,8 @@ class _JobStatusButton extends riverpod.ConsumerWidget {
               return ListTile(
                 dense: true,
                 title: Text(status.label),
-                tileColor: isSelected ? status.color.withValues(alpha: 0.3) : null,
+                tileColor:
+                    isSelected ? status.color.withValues(alpha: 0.3) : null,
                 leading: Container(
                   width: 20,
                   height: 20,
@@ -353,7 +434,8 @@ class _JobStatusButton extends riverpod.ConsumerWidget {
 
 class _ClientListEditor extends StatefulWidget {
   final Job job;
-  final Function(List<String>) onClientsChanged;
+  final Function(List<String> clients, List<String> instructions)
+      onClientsChanged;
 
   const _ClientListEditor({
     required this.job,
@@ -397,13 +479,14 @@ class _ClientListEditorState extends State<_ClientListEditor> {
       context: context,
       builder: (context) => _ClientListDialog(
         clients: _localClients,
+        clientInstructions: widget.job.clientInstructions,
         jobId: widget.job.id,
-        onClientsChanged: (updatedClients) {
+        onClientsChanged: (updatedClients, updatedInstructions) {
           setState(() {
             _localClients = updatedClients;
             _controller.text = updatedClients.join(', ');
           });
-          widget.onClientsChanged(updatedClients);
+          widget.onClientsChanged(updatedClients, updatedInstructions);
         },
       ),
     );
@@ -456,11 +539,14 @@ class _ClientListEditorState extends State<_ClientListEditor> {
 
 class _ClientListDialog extends StatefulWidget {
   final List<String> clients;
-  final Function(List<String>) onClientsChanged;
+  final List<String> clientInstructions;
+  final Function(List<String> clients, List<String> instructions)
+      onClientsChanged;
   final String jobId;
 
   const _ClientListDialog({
     required this.clients,
+    required this.clientInstructions,
     required this.onClientsChanged,
     required this.jobId,
   });
@@ -471,6 +557,7 @@ class _ClientListDialog extends StatefulWidget {
 
 class _ClientListDialogState extends State<_ClientListDialog> {
   late List<TextEditingController> _controllers;
+  late List<TextEditingController> _instructionControllers;
   late List<String> _clients;
 
   @override
@@ -480,11 +567,22 @@ class _ClientListDialogState extends State<_ClientListDialog> {
     if (_clients.isEmpty) _clients.add('');
     _controllers =
         _clients.map((client) => TextEditingController(text: client)).toList();
+    // Pad instructions to match client count (backward compat with old jobs).
+    final instructions = List<String>.from(widget.clientInstructions);
+    while (instructions.length < _clients.length) {
+      instructions.add('');
+    }
+    _instructionControllers = instructions
+        .map((instr) => TextEditingController(text: instr))
+        .toList();
   }
 
   @override
   void dispose() {
     for (final controller in _controllers) {
+      controller.dispose();
+    }
+    for (final controller in _instructionControllers) {
       controller.dispose();
     }
     super.dispose();
@@ -494,6 +592,7 @@ class _ClientListDialogState extends State<_ClientListDialog> {
     setState(() {
       _clients.add('');
       _controllers.add(TextEditingController());
+      _instructionControllers.add(TextEditingController());
     });
   }
 
@@ -503,17 +602,24 @@ class _ClientListDialogState extends State<_ClientListDialog> {
         _clients.removeAt(index);
         _controllers[index].dispose();
         _controllers.removeAt(index);
+        _instructionControllers[index].dispose();
+        _instructionControllers.removeAt(index);
       });
     }
   }
 
   void _saveClients() {
-    final validClients = _controllers
-        .map((controller) => controller.text.trim())
-        .where((client) => client.isNotEmpty)
-        .toList();
+    final validPairs = List.generate(_controllers.length, (i) {
+      return (
+        client: _controllers[i].text.trim(),
+        instruction: _instructionControllers[i].text.trim(),
+      );
+    }).where((p) => p.client.isNotEmpty).toList();
 
-    widget.onClientsChanged(validClients);
+    widget.onClientsChanged(
+      validPairs.map((p) => p.client).toList(),
+      validPairs.map((p) => p.instruction).toList(),
+    );
     Navigator.of(context).pop();
   }
 
@@ -576,121 +682,173 @@ class _ClientListDialogState extends State<_ClientListDialog> {
                     itemCount: _controllers.length,
                     itemBuilder: (context, index) {
                       return Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Row(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Expanded(
-                              child: Autocomplete<String>(
-                                initialValue: TextEditingValue(
-                                  text: _controllers[index].text,
-                                ),
-                                optionsBuilder:
-                                    (TextEditingValue textEditingValue) {
-                                  if (textEditingValue.text.isEmpty) {
-                                    return uniqueClients.take(10);
-                                  }
-                                  return uniqueClients.where((String client) {
-                                    return client.toLowerCase().contains(
-                                          textEditingValue.text.toLowerCase(),
-                                        );
-                                  }).take(10);
-                                },
-                                onSelected: (String selectedClient) {
-                                  _controllers[index].text = selectedClient;
-                                  _clients[index] = selectedClient;
-                                },
-                                fieldViewBuilder: (
-                                  BuildContext context,
-                                  TextEditingController controller,
-                                  FocusNode focusNode,
-                                  VoidCallback onFieldSubmitted,
-                                ) {
-                                  // Sync the autocomplete controller with our local controller
-                                  if (controller.text !=
-                                      _controllers[index].text) {
-                                    controller.text = _controllers[index].text;
-                                    controller.selection =
-                                        TextSelection.collapsed(
-                                      offset: controller.text.length,
-                                    );
-                                  }
-
-                                  return TextFormField(
-                                    controller: controller,
-                                    focusNode: focusNode,
-                                    decoration: InputDecoration(
-                                      labelText: 'Client ${index + 1}',
-                                      border: const OutlineInputBorder(),
-                                      contentPadding:
-                                          const EdgeInsets.symmetric(
-                                        horizontal: 12,
-                                        vertical: 8,
-                                      ),
+                            // ── Client name row ──────────────────────
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Autocomplete<String>(
+                                    initialValue: TextEditingValue(
+                                      text: _controllers[index].text,
                                     ),
-                                    onChanged: (value) {
-                                      _controllers[index].text = value;
-                                      _clients[index] = value;
-                                    },
-                                    onFieldSubmitted: (String value) {
-                                      onFieldSubmitted();
-                                    },
-                                  );
-                                },
-                                optionsViewBuilder: (
-                                  BuildContext context,
-                                  void Function(String) onSelected,
-                                  Iterable<String> options,
-                                ) {
-                                  return Align(
-                                    alignment: Alignment.topLeft,
-                                    child: Material(
-                                      elevation: 4.0,
-                                      child: Container(
-                                        width: 300,
-                                        constraints: const BoxConstraints(
-                                          maxHeight: 200,
-                                        ),
-                                        child: ListView.builder(
-                                          padding: EdgeInsets.zero,
-                                          shrinkWrap: true,
-                                          itemCount: options.length,
-                                          itemBuilder: (BuildContext context,
-                                              int index) {
-                                            final String option =
-                                                options.elementAt(index);
-                                            return InkWell(
-                                              onTap: () {
-                                                onSelected(option);
-                                              },
-                                              child: ListTile(
-                                                dense: true,
-                                                title: Text(
-                                                  option,
-                                                  style: TextStyle(
-                                                    color: Theme.of(context)
-                                                        .textTheme
-                                                        .bodyMedium
-                                                        ?.color,
-                                                  ),
-                                                ),
-                                              ),
+                                    optionsBuilder:
+                                        (TextEditingValue textEditingValue) {
+                                      if (textEditingValue.text.isEmpty) {
+                                        return uniqueClients.take(10);
+                                      }
+                                      return uniqueClients
+                                          .where((String client) {
+                                        return client.toLowerCase().contains(
+                                              textEditingValue.text
+                                                  .toLowerCase(),
                                             );
-                                          },
+                                      }).take(10);
+                                    },
+                                    onSelected: (String selectedClient) {
+                                      _controllers[index].text = selectedClient;
+                                      _clients[index] = selectedClient;
+                                    },
+                                    fieldViewBuilder: (
+                                      BuildContext context,
+                                      TextEditingController controller,
+                                      FocusNode focusNode,
+                                      VoidCallback onFieldSubmitted,
+                                    ) {
+                                      // Sync the autocomplete controller with our local controller
+                                      if (controller.text !=
+                                          _controllers[index].text) {
+                                        controller.text =
+                                            _controllers[index].text;
+                                        controller.selection =
+                                            TextSelection.collapsed(
+                                          offset: controller.text.length,
+                                        );
+                                      }
+
+                                      return TextFormField(
+                                        controller: controller,
+                                        focusNode: focusNode,
+                                        decoration: InputDecoration(
+                                          labelText: 'Client ${index + 1}',
+                                          border: const OutlineInputBorder(),
+                                          contentPadding:
+                                              const EdgeInsets.symmetric(
+                                            horizontal: 12,
+                                            vertical: 8,
+                                          ),
                                         ),
-                                      ),
-                                    ),
-                                  );
-                                },
+                                        onChanged: (value) {
+                                          _controllers[index].text = value;
+                                          _clients[index] = value;
+                                        },
+                                        onFieldSubmitted: (String value) {
+                                          onFieldSubmitted();
+                                        },
+                                      );
+                                    },
+                                    optionsViewBuilder: (
+                                      BuildContext context,
+                                      void Function(String) onSelected,
+                                      Iterable<String> options,
+                                    ) {
+                                      return Align(
+                                        alignment: Alignment.topLeft,
+                                        child: Material(
+                                          elevation: 4.0,
+                                          child: Container(
+                                            width: 300,
+                                            constraints: const BoxConstraints(
+                                              maxHeight: 200,
+                                            ),
+                                            child: ListView.builder(
+                                              padding: EdgeInsets.zero,
+                                              shrinkWrap: true,
+                                              itemCount: options.length,
+                                              itemBuilder:
+                                                  (BuildContext context,
+                                                      int index) {
+                                                final String option =
+                                                    options.elementAt(index);
+                                                return InkWell(
+                                                  onTap: () {
+                                                    onSelected(option);
+                                                  },
+                                                  child: ListTile(
+                                                    dense: true,
+                                                    title: Text(
+                                                      option,
+                                                      style: TextStyle(
+                                                        color: Theme.of(context)
+                                                            .textTheme
+                                                            .bodyMedium
+                                                            ?.color,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                if (_controllers.length > 1)
+                                  IconButton(
+                                    icon: Icon(Icons.remove_circle_outline,
+                                        size: scaleProvider.mediumIconSize),
+                                    onPressed: () => _removeClient(index),
+                                    tooltip: 'Remove client',
+                                  ),
+                              ],
+                            ),
+                            // ── Per-client instructions ──────────────
+                            const SizedBox(height: 6),
+                            TextField(
+                              controller: _instructionControllers[index],
+                              maxLines: 2,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontStyle: FontStyle.italic,
+                                color: Colors.grey.shade800,
+                              ),
+                              decoration: InputDecoration(
+                                labelText:
+                                    'Instructions for client ${index + 1}',
+                                hintText:
+                                    'Access code, landmark, special notes…',
+                                border: OutlineInputBorder(
+                                  borderSide:
+                                      BorderSide(color: Colors.teal.shade300),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderSide:
+                                      BorderSide(color: Colors.teal.shade300),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderSide:
+                                      BorderSide(color: Colors.teal, width: 2),
+                                ),
+                                labelStyle: TextStyle(
+                                  color: Colors.teal.shade700,
+                                  fontSize: 11,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                                hintStyle: TextStyle(
+                                  fontSize: 11,
+                                  fontStyle: FontStyle.italic,
+                                  color: Colors.grey.shade400,
+                                ),
+                                contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 8),
+                                isDense: true,
                               ),
                             ),
-                            const SizedBox(width: 8),
-                            if (_controllers.length > 1)
-                              IconButton(
-                                icon: Icon(Icons.remove_circle_outline,
-                                    size: scaleProvider.mediumIconSize),
-                                onPressed: () => _removeClient(index),
-                                tooltip: 'Remove client',
-                              ),
                           ],
                         ),
                       );
@@ -790,10 +948,12 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
   }
 
   String _getDisplayText() {
-    if (_localWorkMaps.isEmpty) {
+    // Exclude point-type entries (dropoff, pickup, etc.) from the label.
+    final polygonMaps = _localWorkMaps.where((w) => !w.isPoint).toList();
+    if (polygonMaps.isEmpty) {
       return 'add work area';
     }
-    final names = _localWorkMaps.map((w) => w.name).where((n) => n.isNotEmpty);
+    final names = polygonMaps.map((w) => w.name).where((n) => n.isNotEmpty);
     return names.join(', ');
   }
 
@@ -953,14 +1113,21 @@ class _WorkAreaListDialog extends riverpod.ConsumerStatefulWidget {
 
 class _WorkAreaListDialogState
     extends riverpod.ConsumerState<_WorkAreaListDialog> {
-  late List<CustomPolygon> _workMaps;
+  late List<CustomPolygon> _workMaps; // polygon/polyline only
+  late List<CustomPolygon> _pointWorkMaps; // preserved: dropoff, pickup, etc.
   bool _hasUnsavedChanges = false;
 
   @override
   void initState() {
     super.initState();
-    _workMaps = List.from(widget.workMaps);
+    // Separate point-type entries (dropoff, pickup) from editable polygon maps
+    // so they are never accidentally removed from the job via this dialog.
+    _pointWorkMaps = widget.workMaps.where((wm) => wm.isPoint).toList();
+    _workMaps = widget.workMaps.where((wm) => !wm.isPoint).toList();
   }
+
+  /// Returns the full work-map list (polygons + preserved point entries).
+  List<CustomPolygon> get _mergedWorkMaps => [..._workMaps, ..._pointWorkMaps];
 
   void _addWorkArea(WorkArea workArea) {
     // Generate a unique color for the new work area
@@ -985,7 +1152,7 @@ class _WorkAreaListDialogState
       _hasUnsavedChanges = true;
     });
 
-    widget.onWorkAreasChanged(_workMaps, _hasUnsavedChanges);
+    widget.onWorkAreasChanged(_mergedWorkMaps, _hasUnsavedChanges);
   }
 
   void _removeWorkArea(int index) {
@@ -994,10 +1161,13 @@ class _WorkAreaListDialogState
       _hasUnsavedChanges = true;
     });
 
-    widget.onWorkAreasChanged(_workMaps, _hasUnsavedChanges);
+    widget.onWorkAreasChanged(_mergedWorkMaps, _hasUnsavedChanges);
   }
 
   void _saveChanges() {
+    // Sync the merged list to the parent before triggering the save so
+    // point-type entries (dropoff, pickup) are not lost.
+    widget.onWorkAreasChanged(_mergedWorkMaps, false);
     widget.onSaveChanges();
     setState(() {
       _hasUnsavedChanges = false;

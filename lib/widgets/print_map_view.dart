@@ -187,12 +187,12 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
 
   // Position and size of the movable info box
   Offset _infoBoxPosition = const Offset(20, 20);
-  Size _infoBoxSize = const Size(250, 160); // Default size
+  Size _infoBoxSize = const Size(250, 300); // Default size
   double _fontScale = 1.0; // Font scale factor
 
   // Position and size of the work areas box (when multiple areas exist)
-  Offset _workAreasBoxPosition = const Offset(20, 200);
-  Size _workAreasBoxSize = const Size(250, 100); // Default size
+  Offset _workAreasBoxPosition = const Offset(20, 220);
+  Size _workAreasBoxSize = const Size(250, 160); // Default size
   double _workAreasFontScale = 1.0; // Font scale factor
   bool _isDraggingWorkAreasBox = false; // Track when dragging work areas box
   bool _isResizingWorkAreasBox = false; // Track when resizing work areas box
@@ -1757,7 +1757,79 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                       Positioned(
                         left: _infoBoxPosition.dx,
                         top: _infoBoxPosition.dy,
-                        child: _buildInfoBox(),
+                        child: GestureDetector(
+                          onPanStart: (_) =>
+                              setState(() => _isDraggingInfoBox = true),
+                          onPanUpdate: (details) {
+                            setState(() {
+                              final newX =
+                                  _infoBoxPosition.dx + details.delta.dx;
+                              final newY =
+                                  _infoBoxPosition.dy + details.delta.dy;
+                              _infoBoxPosition = Offset(
+                                newX.clamp(0, mapWidth - _infoBoxSize.width),
+                                newY.clamp(0, mapHeight - 60),
+                              );
+                            });
+                          },
+                          onPanEnd: (_) =>
+                              setState(() => _isDraggingInfoBox = false),
+                          child: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              _buildInfoBox(),
+                              // Resize handle (width only — height is content-driven)
+                              Positioned(
+                                right: 0,
+                                bottom: 0,
+                                child: GestureDetector(
+                                  onPanStart: (_) =>
+                                      setState(() => _isResizingInfoBox = true),
+                                  onPanUpdate: (details) {
+                                    setState(() {
+                                      final newWidth =
+                                          _infoBoxSize.width + details.delta.dx;
+                                      const minWidth = 150.0;
+                                      final maxWidth = mapWidth * 0.45;
+                                      _infoBoxSize = Size(
+                                        newWidth.clamp(minWidth, maxWidth),
+                                        _infoBoxSize.height,
+                                      );
+                                      final sizeRatio =
+                                          _infoBoxSize.width / 250;
+                                      _fontScale = sizeRatio.clamp(0.6, 2.0);
+                                      _infoBoxPosition = Offset(
+                                        _infoBoxPosition.dx.clamp(
+                                            0, mapWidth - _infoBoxSize.width),
+                                        _infoBoxPosition.dy,
+                                      );
+                                    });
+                                  },
+                                  onPanEnd: (_) => setState(
+                                      () => _isResizingInfoBox = false),
+                                  child: Container(
+                                    width: 20,
+                                    height: 20,
+                                    decoration: BoxDecoration(
+                                      color: _isResizingInfoBox
+                                          ? Colors.red.withValues(alpha: 0.8)
+                                          : Colors.blue.withValues(
+                                              alpha: _isDraggingInfoBox
+                                                  ? 0.6
+                                                  : 0.25),
+                                      borderRadius: BorderRadius.circular(2),
+                                    ),
+                                    child: const Icon(
+                                      Icons.drag_handle,
+                                      color: Colors.white,
+                                      size: 12,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     // Work Areas Box (only when multiple areas exist)
                     if (!hideMapChrome && _job.workMaps.length > 1)
@@ -1858,131 +1930,6 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
               ),
             ),
           ),
-
-          // Movable Information Box (for positioning only - invisible)
-          if (!hideMapChrome)
-            Positioned(
-              left: mapLeft + _infoBoxPosition.dx,
-              top: mapTop + _infoBoxPosition.dy,
-              child: GestureDetector(
-                onPanStart: (details) {
-                  setState(() {
-                    _isDraggingInfoBox = true;
-                  });
-                },
-                onPanUpdate: (details) {
-                  setState(() {
-                    final newX = _infoBoxPosition.dx + details.delta.dx;
-                    final newY = _infoBoxPosition.dy + details.delta.dy;
-
-                    // Keep the box within the map bounds using dynamic size
-                    _infoBoxPosition = Offset(
-                      newX.clamp(0, mapWidth - _infoBoxSize.width),
-                      newY.clamp(0, mapHeight - _infoBoxSize.height),
-                    );
-                  });
-                },
-                onPanEnd: (details) {
-                  setState(() {
-                    _isDraggingInfoBox = false;
-                  });
-                },
-                child: Stack(
-                  children: [
-                    // Main draggable container
-                    Container(
-                      width: _infoBoxSize.width,
-                      height: _infoBoxSize.height,
-                      decoration: BoxDecoration(
-                        color: Colors.transparent,
-                        border: Border.all(
-                          color: (_isDraggingInfoBox || _isResizingInfoBox)
-                              ? Colors.red.withValues(alpha: 0.8)
-                              : Colors.blue.withValues(alpha: 0),
-                          width: (_isDraggingInfoBox || _isResizingInfoBox)
-                              ? 2
-                              : 1,
-                        ),
-                      ),
-                      child: Center(
-                        child: Icon(
-                          Icons.drag_handle,
-                          color: (_isDraggingInfoBox || _isResizingInfoBox)
-                              ? Colors.red.withValues(alpha: 0.7)
-                              : Colors.blue.withValues(alpha: 0),
-                          size: 24 * _fontScale,
-                        ),
-                      ),
-                    ),
-                    // Resize handle in bottom-right corner
-                    Positioned(
-                      right: 0,
-                      bottom: 0,
-                      child: GestureDetector(
-                        onPanStart: (details) {
-                          setState(() {
-                            _isResizingInfoBox = true;
-                          });
-                        },
-                        onPanUpdate: (details) {
-                          setState(() {
-                            final newWidth =
-                                _infoBoxSize.width + details.delta.dx;
-                            final newHeight =
-                                _infoBoxSize.height + details.delta.dy;
-
-                            // Min and max constraints for size
-                            const minSize = Size(150, 100);
-                            final maxSize =
-                                Size(mapWidth * 0.4, mapHeight * 0.4);
-
-                            _infoBoxSize = Size(
-                              newWidth.clamp(minSize.width, maxSize.width),
-                              newHeight.clamp(minSize.height, maxSize.height),
-                            );
-
-                            // Update font scale based on size
-                            final sizeRatio = (_infoBoxSize.width / 250 +
-                                    _infoBoxSize.height / 160) /
-                                2;
-                            _fontScale = sizeRatio.clamp(0.6, 2.0);
-
-                            // Adjust position if needed to stay within bounds
-                            _infoBoxPosition = Offset(
-                              _infoBoxPosition.dx
-                                  .clamp(0, mapWidth - _infoBoxSize.width),
-                              _infoBoxPosition.dy
-                                  .clamp(0, mapHeight - _infoBoxSize.height),
-                            );
-                          });
-                        },
-                        onPanEnd: (details) {
-                          setState(() {
-                            _isResizingInfoBox = false;
-                          });
-                        },
-                        child: Container(
-                          width: 20,
-                          height: 20,
-                          decoration: BoxDecoration(
-                            color: _isResizingInfoBox
-                                ? Colors.red.withValues(alpha: 0.8)
-                                : Colors.blue.withValues(
-                                    alpha: _isDraggingInfoBox ? 0.6 : 0),
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                          child: const Icon(
-                            Icons.drag_handle,
-                            color: Colors.white,
-                            size: 12,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
 
           // Movable Work Areas Box (for positioning only - invisible, only when multiple areas exist)
           if (!hideMapChrome && _job.workMaps.length > 1)
@@ -2217,8 +2164,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
             onPanUpdate: isEditing
                 ? null
                 : (details) {
-                    final current =
-                        _labelLatLngToScreen(label.anchor, mapSize);
+                    final current = _labelLatLngToScreen(label.anchor, mapSize);
                     final next = current + details.delta;
                     setState(() {
                       label.anchor = _labelScreenToLatLng(next, mapSize);
@@ -2321,8 +2267,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
 
     return Container(
       width: _infoBoxSize.width,
-      height: _infoBoxSize.height,
-      padding: EdgeInsets.all(12 * _fontScale),
+      padding: EdgeInsets.all(8 * _fontScale),
       decoration: BoxDecoration(
         color: Colors.white,
         border: Border.all(color: Colors.black, width: 1),
@@ -2334,85 +2279,135 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
           ),
         ],
       ),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Header with drag handle
-            Row(
-              children: [
-                Icon(Icons.drag_handle,
-                    size: 14 * _fontScale, color: Colors.grey),
-                SizedBox(width: 6 * _fontScale),
-                Expanded(
-                  child: Text(
-                    'Distribution Details',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Name (Distributor)
+          _buildInfoRow('Name:', widget.distributorName ?? '.'),
+
+          // Map (Working Area) - show single area or indicate multiple
+          //   Exclude point-type entries (dropoff, pickup) from the label.
+          Builder(builder: (context) {
+            final displayMaps =
+                _job.workMaps.where((wm) => !wm.isPoint).toList();
+            return _buildInfoRow(
+                'Map:',
+                displayMaps.isEmpty
+                    ? '.'
+                    : displayMaps.length == 1
+                        ? displayMaps.first.name
+                        : '${displayMaps.length} work areas');
+          }),
+
+          // Date
+          _buildInfoRow('Date:', dateFormatter.format(_job.date)),
+
+          // Clients (numbered list)
+          SizedBox(height: 6 * _fontScale),
+          Text(
+            'Clients:',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 11 * _fontScale,
+            ),
+          ),
+          SizedBox(height: 3 * _fontScale),
+          ..._job.clients.asMap().entries.map((entry) {
+            final i = entry.key;
+            final client = entry.value;
+            final instruction = i < _job.clientInstructions.length
+                ? _job.clientInstructions[i].trim()
+                : '';
+            return Padding(
+              padding:
+                  EdgeInsets.only(left: 8 * _fontScale, bottom: 2 * _fontScale),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${i + 1}. ',
                     style: TextStyle(
+                      fontSize: 10 * _fontScale,
                       fontWeight: FontWeight.bold,
-                      fontSize: 13 * _fontScale,
                     ),
                   ),
+                  Expanded(
+                    child: Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: client,
+                            style: TextStyle(
+                              fontSize: 10 * _fontScale,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          if (instruction.isNotEmpty)
+                            TextSpan(
+                              text: '  — $instruction',
+                              style: TextStyle(
+                                fontSize: 8.5 * _fontScale,
+                                fontStyle: FontStyle.italic,
+                                fontWeight: FontWeight.normal,
+                                color: Colors.black87,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+
+          if (_job.clients.isEmpty)
+            Padding(
+              padding: EdgeInsets.only(left: 12 * _fontScale),
+              child: Text(
+                '.',
+                style: TextStyle(
+                  fontSize: 10 * _fontScale,
+                  fontStyle: FontStyle.italic,
+                  fontWeight: FontWeight.bold,
                 ),
-              ],
-            ),
-            Divider(thickness: 1 * _fontScale),
-
-            // Name (Distributor)
-            _buildInfoRow('Name:', widget.distributorName ?? '.'),
-
-            // Map (Working Area) - show single area or indicate multiple
-            _buildInfoRow(
-                'Map:',
-                _job.workMaps.isEmpty
-                    ? '.'
-                    : _job.workMaps.length == 1
-                        ? _job.workMaps.first.name
-                        : '${_job.workMaps.length} work areas'),
-
-            // Date
-            _buildInfoRow('Date:', dateFormatter.format(_job.date)),
-
-            // Clients (numbered list)
-            SizedBox(height: 6 * _fontScale),
-            Text(
-              'Clients:',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 11 * _fontScale,
               ),
             ),
-            SizedBox(height: 3 * _fontScale),
-            ..._job.clients.asMap().entries.map((entry) {
-              final index = entry.key + 1;
-              final client = entry.value;
-              return Padding(
-                padding: EdgeInsets.only(
-                    left: 12 * _fontScale, bottom: 1 * _fontScale),
-                child: Text(
-                  '$index. $client',
-                  style: TextStyle(
-                    fontSize: 10 * _fontScale,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              );
-            }),
 
-            if (_job.clients.isEmpty)
-              Padding(
-                padding: EdgeInsets.only(left: 12 * _fontScale),
-                child: Text(
-                  '.',
-                  style: TextStyle(
-                    fontSize: 10 * _fontScale,
-                    fontStyle: FontStyle.italic,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+          // Map instructions (if set)
+          if (_job.mapInstructions.trim().isNotEmpty) ...[
+            SizedBox(height: 5 * _fontScale),
+            Container(
+              width: double.infinity,
+              padding: EdgeInsets.symmetric(
+                  horizontal: 6 * _fontScale, vertical: 5 * _fontScale),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                border: Border.all(color: Colors.black, width: 1),
               ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Instructions:',
+                    style: TextStyle(
+                      fontSize: 10 * _fontScale,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 3 * _fontScale),
+                  Text(
+                    _job.mapInstructions.trim(),
+                    style: TextStyle(
+                      fontSize: 9.5 * _fontScale,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -2457,37 +2452,41 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
             ),
             Divider(thickness: 1 * _workAreasFontScale),
 
-            // Work areas in a single line format
-            Wrap(
-              spacing: 8 * _workAreasFontScale,
-              runSpacing: 4 * _workAreasFontScale,
-              children: _job.workMaps.asMap().entries.map((entry) {
-                final index = entry.key + 1;
-                final workMap = entry.value;
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 10 * _workAreasFontScale,
-                      height: 10 * _workAreasFontScale,
-                      decoration: BoxDecoration(
-                        color: workMap.color,
-                        border: Border.all(color: Colors.black, width: 0.5),
-                        borderRadius: BorderRadius.circular(2),
+            // Work areas in a single line format (points like dropoff excluded)
+            Builder(builder: (context) {
+              final displayMaps =
+                  _job.workMaps.where((wm) => !wm.isPoint).toList();
+              return Wrap(
+                spacing: 8 * _workAreasFontScale,
+                runSpacing: 4 * _workAreasFontScale,
+                children: displayMaps.asMap().entries.map((entry) {
+                  final index = entry.key + 1;
+                  final workMap = entry.value;
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 10 * _workAreasFontScale,
+                        height: 10 * _workAreasFontScale,
+                        decoration: BoxDecoration(
+                          color: workMap.color,
+                          border: Border.all(color: Colors.black, width: 0.5),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
                       ),
-                    ),
-                    SizedBox(width: 4 * _workAreasFontScale),
-                    Text(
-                      '$index. ${workMap.name}',
-                      style: TextStyle(
-                        fontSize: 9 * _workAreasFontScale,
-                        fontWeight: FontWeight.bold,
+                      SizedBox(width: 4 * _workAreasFontScale),
+                      Text(
+                        '$index. ${workMap.name}',
+                        style: TextStyle(
+                          fontSize: 9 * _workAreasFontScale,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                    ),
-                  ],
-                );
-              }).toList(),
-            ),
+                    ],
+                  );
+                }).toList(),
+              );
+            }),
           ],
         ),
       ),

@@ -133,8 +133,8 @@ enum MarkerLabelField {
 }
 
 /// Returns the sensible default marker label fields for a built-in task type.
-({MarkerLabelField primary, MarkerLabelField secondary})
-    defaultMarkerFieldsFor(DropsheetTaskType type) {
+({MarkerLabelField primary, MarkerLabelField secondary}) defaultMarkerFieldsFor(
+    DropsheetTaskType type) {
   switch (type) {
     case DropsheetTaskType.dropOff:
     case DropsheetTaskType.pickUp:
@@ -227,6 +227,18 @@ class DynamicTaskTypeDef {
   /// in the editor (distributor picker, job-list picker, or free-form).
   final DynamicTaskSection section;
 
+  /// Pre-filled `details` text when creating a new task of this type.
+  final String defaultDetails;
+
+  /// Pre-filled `startTime` ("HH:mm") when creating a new task of this type.
+  final String defaultStartTime;
+
+  /// Pre-filled `contact` when creating a new task of this type.
+  final String defaultContact;
+
+  /// Pre-filled `tel` when creating a new task of this type.
+  final String defaultTel;
+
   const DynamicTaskTypeDef({
     required this.id,
     required this.label,
@@ -235,6 +247,10 @@ class DynamicTaskTypeDef {
     this.section = DynamicTaskSection.custom,
     this.markerPrimaryField = MarkerLabelField.taskLabel,
     this.markerSecondaryField = MarkerLabelField.none,
+    this.defaultDetails = '',
+    this.defaultStartTime = '',
+    this.defaultContact = '',
+    this.defaultTel = '',
   });
 
   DynamicTaskTypeDef copyWith({
@@ -244,6 +260,10 @@ class DynamicTaskTypeDef {
     DynamicTaskSection? section,
     MarkerLabelField? markerPrimaryField,
     MarkerLabelField? markerSecondaryField,
+    String? defaultDetails,
+    String? defaultStartTime,
+    String? defaultContact,
+    String? defaultTel,
   }) =>
       DynamicTaskTypeDef(
         id: id,
@@ -253,6 +273,10 @@ class DynamicTaskTypeDef {
         section: section ?? this.section,
         markerPrimaryField: markerPrimaryField ?? this.markerPrimaryField,
         markerSecondaryField: markerSecondaryField ?? this.markerSecondaryField,
+        defaultDetails: defaultDetails ?? this.defaultDetails,
+        defaultStartTime: defaultStartTime ?? this.defaultStartTime,
+        defaultContact: defaultContact ?? this.defaultContact,
+        defaultTel: defaultTel ?? this.defaultTel,
       );
 
   /// Which task field to show as the large title on the map marker bitmap.
@@ -269,6 +293,10 @@ class DynamicTaskTypeDef {
         'section': section.storageKey,
         'markerPrimaryField': markerPrimaryField.storageKey,
         'markerSecondaryField': markerSecondaryField.storageKey,
+        if (defaultDetails.isNotEmpty) 'defaultDetails': defaultDetails,
+        if (defaultStartTime.isNotEmpty) 'defaultStartTime': defaultStartTime,
+        if (defaultContact.isNotEmpty) 'defaultContact': defaultContact,
+        if (defaultTel.isNotEmpty) 'defaultTel': defaultTel,
       };
 
   factory DynamicTaskTypeDef.fromMap(Map<String, dynamic> data) =>
@@ -285,6 +313,10 @@ class DynamicTaskTypeDef {
             MarkerLabelField.fromKey(data['markerPrimaryField'] as String?),
         markerSecondaryField:
             MarkerLabelField.fromKey(data['markerSecondaryField'] as String?),
+        defaultDetails: data['defaultDetails'] as String? ?? '',
+        defaultStartTime: data['defaultStartTime'] as String? ?? '',
+        defaultContact: data['defaultContact'] as String? ?? '',
+        defaultTel: data['defaultTel'] as String? ?? '',
       );
 }
 
@@ -326,6 +358,18 @@ class DropsheetTaskTypeConfig {
   /// Which task field to show as the small subtitle on the map marker bitmap.
   final MarkerLabelField markerSecondaryField;
 
+  /// Pre-filled `details` text when creating a new task of this type.
+  final String defaultDetails;
+
+  /// Pre-filled `startTime` ("HH:mm") when creating a new task of this type.
+  final String defaultStartTime;
+
+  /// Pre-filled `contact` when creating a new task of this type.
+  final String defaultContact;
+
+  /// Pre-filled `tel` when creating a new task of this type.
+  final String defaultTel;
+
   DropsheetTaskTypeConfig({
     required this.type,
     this.customLabel = '',
@@ -333,6 +377,10 @@ class DropsheetTaskTypeConfig {
     this.serviceTimeMinutes = 0,
     MarkerLabelField? markerPrimaryField,
     MarkerLabelField? markerSecondaryField,
+    this.defaultDetails = '',
+    this.defaultStartTime = '',
+    this.defaultContact = '',
+    this.defaultTel = '',
   })  : markerPrimaryField =
             markerPrimaryField ?? defaultMarkerFieldsFor(type).primary,
         markerSecondaryField =
@@ -347,6 +395,10 @@ class DropsheetTaskTypeConfig {
     int? serviceTimeMinutes,
     MarkerLabelField? markerPrimaryField,
     MarkerLabelField? markerSecondaryField,
+    String? defaultDetails,
+    String? defaultStartTime,
+    String? defaultContact,
+    String? defaultTel,
   }) =>
       DropsheetTaskTypeConfig(
         type: type,
@@ -355,6 +407,10 @@ class DropsheetTaskTypeConfig {
         serviceTimeMinutes: serviceTimeMinutes ?? this.serviceTimeMinutes,
         markerPrimaryField: markerPrimaryField ?? this.markerPrimaryField,
         markerSecondaryField: markerSecondaryField ?? this.markerSecondaryField,
+        defaultDetails: defaultDetails ?? this.defaultDetails,
+        defaultStartTime: defaultStartTime ?? this.defaultStartTime,
+        defaultContact: defaultContact ?? this.defaultContact,
+        defaultTel: defaultTel ?? this.defaultTel,
       );
 
   Map<String, dynamic> toMap() => {
@@ -363,6 +419,10 @@ class DropsheetTaskTypeConfig {
         'serviceTimeMinutes': serviceTimeMinutes,
         'markerPrimaryField': markerPrimaryField.storageKey,
         'markerSecondaryField': markerSecondaryField.storageKey,
+        if (defaultDetails.isNotEmpty) 'defaultDetails': defaultDetails,
+        if (defaultStartTime.isNotEmpty) 'defaultStartTime': defaultStartTime,
+        if (defaultContact.isNotEmpty) 'defaultContact': defaultContact,
+        if (defaultTel.isNotEmpty) 'defaultTel': defaultTel,
       };
 
   factory DropsheetTaskTypeConfig.fromMap(
@@ -379,6 +439,10 @@ class DropsheetTaskTypeConfig {
           MarkerLabelField.fromKey(data['markerPrimaryField'] as String?),
       markerSecondaryField:
           MarkerLabelField.fromKey(data['markerSecondaryField'] as String?),
+      defaultDetails: data['defaultDetails'] as String? ?? '',
+      defaultStartTime: data['defaultStartTime'] as String? ?? '',
+      defaultContact: data['defaultContact'] as String? ?? '',
+      defaultTel: data['defaultTel'] as String? ?? '',
     );
   }
 }

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
@@ -57,7 +56,8 @@ class FirestoreService {
     // Date parameter is ignored for distributors since they're in root collection
     return _distributors.orderBy('index').snapshots().map((snapshot) {
       return snapshot.docs.map((doc) {
-        return Distributor.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
+        return Distributor.fromMap(
+            doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList();
     });
   }
@@ -77,7 +77,8 @@ class FirestoreService {
       snapshot = await _distributors.orderBy('index').get();
     }
     return snapshot.docs.map((doc) {
-      return Distributor.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
+      return Distributor.fromMap(
+          doc.id, Map<String, dynamic>.from(doc.data() as Map));
     }).toList();
   }
 
@@ -115,7 +116,8 @@ class FirestoreService {
     // Get all distributors to manage indices
     final snapshot = await _distributors.orderBy('index').get();
     final distributors = snapshot.docs.map((doc) {
-      return Distributor.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
+      return Distributor.fromMap(
+          doc.id, Map<String, dynamic>.from(doc.data() as Map));
     }).toList();
 
     final newIndex = updatedDistributor.index;
@@ -252,7 +254,8 @@ class FirestoreService {
         final jobsArray = data['jobs'] as List<dynamic>?;
         if (jobsArray != null) {
           for (final jobData in jobsArray) {
-            allJobs.add(Job.fromArrayElement(Map<String, dynamic>.from(jobData as Map)));
+            allJobs.add(Job.fromArrayElement(
+                Map<String, dynamic>.from(jobData as Map)));
           }
         }
       }
@@ -465,13 +468,15 @@ class FirestoreService {
     final destSnapshot = await destDoc.get();
 
     // Build updated source array (remove the job)
-    final sourceData = Map<String, dynamic>.from((sourceSnapshot.data() as Map?) ?? <String, dynamic>{});
+    final sourceData = Map<String, dynamic>.from(
+        (sourceSnapshot.data() as Map?) ?? <String, dynamic>{});
     final sourceJobs =
         List<Map<String, dynamic>>.from(sourceData['jobs'] ?? []);
     sourceJobs.removeWhere((j) => j['id'] == originalJob.id);
 
     // Build updated destination array (add the job)
-    final destData = Map<String, dynamic>.from((destSnapshot.data() as Map?) ?? <String, dynamic>{});
+    final destData = Map<String, dynamic>.from(
+        (destSnapshot.data() as Map?) ?? <String, dynamic>{});
     final destJobs = List<Map<String, dynamic>>.from(destData['jobs'] ?? []);
     destJobs.add(updatedJob.toMap());
 
@@ -492,7 +497,8 @@ class FirestoreService {
     final snapshot = await doc.get();
     if (!snapshot.exists) return;
 
-    final data = Map<String, dynamic>.from((snapshot.data() as Map?) ?? <String, dynamic>{});
+    final data = Map<String, dynamic>.from(
+        (snapshot.data() as Map?) ?? <String, dynamic>{});
     final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
 
     for (int i = 0; i < jobsArray.length; i++) {
@@ -519,10 +525,12 @@ class FirestoreService {
     final snapshotA = await docA.get();
     final snapshotB = await docB.get();
 
-    final dataA = Map<String, dynamic>.from((snapshotA.data() as Map?) ?? <String, dynamic>{});
+    final dataA = Map<String, dynamic>.from(
+        (snapshotA.data() as Map?) ?? <String, dynamic>{});
     final jobsA = List<Map<String, dynamic>>.from(dataA['jobs'] ?? []);
 
-    final dataB = Map<String, dynamic>.from((snapshotB.data() as Map?) ?? <String, dynamic>{});
+    final dataB = Map<String, dynamic>.from(
+        (snapshotB.data() as Map?) ?? <String, dynamic>{});
     final jobsB = List<Map<String, dynamic>>.from(dataB['jobs'] ?? []);
 
     // Remove Job A from dateA, add modified Job B to dateA
@@ -549,7 +557,8 @@ class FirestoreService {
     final snapshot = await doc.get();
     if (!snapshot.exists) return;
 
-    final data = Map<String, dynamic>.from((snapshot.data() as Map?) ?? <String, dynamic>{});
+    final data = Map<String, dynamic>.from(
+        (snapshot.data() as Map?) ?? <String, dynamic>{});
     final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
 
     // Remove the dragged job
@@ -578,13 +587,15 @@ class FirestoreService {
     final targetSnapshot = await targetDoc.get();
 
     // Remove from source
-    final sourceData = Map<String, dynamic>.from((sourceSnapshot.data() as Map?) ?? <String, dynamic>{});
+    final sourceData = Map<String, dynamic>.from(
+        (sourceSnapshot.data() as Map?) ?? <String, dynamic>{});
     final sourceJobs =
         List<Map<String, dynamic>>.from(sourceData['jobs'] ?? []);
     sourceJobs.removeWhere((j) => j['id'] == removeJobId);
 
     // Update in target
-    final targetData = Map<String, dynamic>.from((targetSnapshot.data() as Map?) ?? <String, dynamic>{});
+    final targetData = Map<String, dynamic>.from(
+        (targetSnapshot.data() as Map?) ?? <String, dynamic>{});
     final targetJobs =
         List<Map<String, dynamic>>.from(targetData['jobs'] ?? []);
     final idx = targetJobs.indexWhere((j) => j['id'] == combinedJob.id);
@@ -743,92 +754,11 @@ class FirestoreService {
   }
 
   /// Overwrites the entire suburbs array in the single document.
-  ///
-  /// Deprecated: prefer [saveSuburbOverrides] when using [SuburbDataService].
   Future<void> saveWorkSuburbs(List<WorkSuburb> suburbs) {
     return _workSuburbsDoc.set({
       'suburbs': suburbs.map((s) => s.toMap()).toList(),
       'updatedAt': FieldValue.serverTimestamp(),
-    });
-  }
-
-  // ── Work Suburbs — Cloud Storage meta / overrides ─────────────────────────
-
-  DocumentReference get _suburbMetaDoc =>
-      _firestore.collection('workSuburbs').doc('meta');
-
-  DocumentReference get _suburbOverridesDoc =>
-      _firestore.collection('workSuburbs').doc('overrides');
-
-  /// Fetch the KML version metadata stored at `workSuburbs/meta`.
-  ///
-  /// Returns a map with at least `version` (String) and `storagePath` (String).
-  Future<Map<String, dynamic>?> fetchSuburbMeta() async {
-    try {
-      final snap = await _suburbMetaDoc.get();
-      if (!snap.exists) return null;
-      return snap.data() as Map<String, dynamic>;
-    } catch (e) {
-      debugPrint('FirestoreService.fetchSuburbMeta: $e');
-      return null;
-    }
-  }
-
-  /// Fetch user-editable overrides for individual suburbs (letterBoxEstimate,
-  /// description).  Returns a map keyed by suburb id.
-  Future<Map<String, Map<String, dynamic>>> fetchSuburbOverrides() async {
-    try {
-      DocumentSnapshot snap;
-      try {
-        snap = await _suburbOverridesDoc
-            .get(const GetOptions(source: Source.cache));
-        if (!snap.exists) snap = await _suburbOverridesDoc.get();
-      } catch (_) {
-        snap = await _suburbOverridesDoc.get();
-      }
-      if (!snap.exists) return {};
-      final data = snap.data() as Map<String, dynamic>;
-      final rawList = data['overrides'] as List<dynamic>? ?? [];
-      return {
-        for (final o in rawList.cast<Map<String, dynamic>>())
-          o['id'] as String: o,
-      };
-    } catch (e) {
-      debugPrint('FirestoreService.fetchSuburbOverrides: $e');
-      return {};
-    }
-  }
-
-  /// Persist user-editable suburb fields.  Only [letterBoxEstimate] and
-  /// [description] are saved — coordinates stay in the KML.
-  Future<void> saveSuburbOverrides(List<WorkSuburb> suburbs) {
-    final overrides = suburbs
-        .where((s) => s.letterBoxEstimate != 0 || s.description.isNotEmpty)
-        .map((s) => {
-              'id': s.id,
-              'letterBoxEstimate': s.letterBoxEstimate,
-              'description': s.description,
-            })
-        .toList();
-
-    return _suburbOverridesDoc.set({
-      'overrides': overrides,
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
-  }
-
-  /// Write (or update) the KML version metadata at `workSuburbs/meta`.
-  ///
-  /// Typically called from the seeder script after uploading a new KML.
-  Future<void> setSuburbMeta({
-    required String version,
-    required String storagePath,
-  }) {
-    return _suburbMetaDoc.set({
-      'version': version,
-      'storagePath': storagePath,
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+    }, SetOptions(merge: true));
   }
 
   // UTILITY METHODS

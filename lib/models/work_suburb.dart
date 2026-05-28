@@ -1,14 +1,18 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 /// A suburb polygon stored inside a single Firestore document at
 /// `workSuburbs/main` as an array entry.
 class WorkSuburb {
+  static const Color defaultColor = Color(0xFF2E7D32);
+
   final String id;
   final String name;
   final String description;
   final List<LatLng> polygonPoints;
   final int letterBoxEstimate;
+  final Color color;
 
   WorkSuburb({
     required this.id,
@@ -16,6 +20,7 @@ class WorkSuburb {
     required this.description,
     required this.polygonPoints,
     this.letterBoxEstimate = 0,
+    this.color = defaultColor,
   });
 
   /// Deserialise from a map entry inside the `suburbs` array of the
@@ -27,13 +32,16 @@ class WorkSuburb {
       name: data['name'] as String? ?? '',
       description: data['description'] as String? ?? '',
       letterBoxEstimate: (data['letterBoxEstimate'] as num?)?.toInt() ?? 0,
+      color: Color((data['color'] as num?)?.toInt() ?? defaultColor.toARGB32()),
       polygonPoints: points.map((point) {
         if (point is GeoPoint) {
           return LatLng(point.latitude, point.longitude);
         } else if (point is Map) {
+          final lat = point['latitude'] ?? point['lat'];
+          final lng = point['longitude'] ?? point['lng'];
           return LatLng(
-            (point['latitude'] as num).toDouble(),
-            (point['longitude'] as num).toDouble(),
+            (lat as num).toDouble(),
+            (lng as num).toDouble(),
           );
         }
         throw ArgumentError('Invalid point format: $point');
@@ -48,9 +56,9 @@ class WorkSuburb {
       'name': name,
       'description': description,
       'letterBoxEstimate': letterBoxEstimate,
-      'polygonPoints': polygonPoints
-          .map((p) => GeoPoint(p.latitude, p.longitude))
-          .toList(),
+      'color': color.toARGB32(),
+      'polygonPoints':
+          polygonPoints.map((p) => GeoPoint(p.latitude, p.longitude)).toList(),
     };
   }
 
@@ -60,6 +68,7 @@ class WorkSuburb {
     String? description,
     List<LatLng>? polygonPoints,
     int? letterBoxEstimate,
+    Color? color,
   }) {
     return WorkSuburb(
       id: id ?? this.id,
@@ -67,6 +76,7 @@ class WorkSuburb {
       description: description ?? this.description,
       polygonPoints: polygonPoints ?? this.polygonPoints,
       letterBoxEstimate: letterBoxEstimate ?? this.letterBoxEstimate,
+      color: color ?? this.color,
     );
   }
 }

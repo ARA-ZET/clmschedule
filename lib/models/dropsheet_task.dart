@@ -155,9 +155,18 @@ class DropsheetTask {
       }
     }
 
+    // Parse typeData early so isLeadingType can check the pickup-divider
+    // marker — that leave task is intentionally non-mandatory.
+    final typeData = (data['typeData'] == null
+            ? null
+            : Map<String, dynamic>.from(data['typeData'] as Map)) ??
+        const <String, dynamic>{};
+
     final isLeadingType = inferredType == DropsheetTaskType.inspect ||
         inferredType == DropsheetTaskType.pack ||
-        inferredType == DropsheetTaskType.leave ||
+        // Leave tasks that are the pickup-divider separator are NOT mandatory.
+        (inferredType == DropsheetTaskType.leave &&
+            typeData['isPickupDivider'] != true) ||
         inferredType == DropsheetTaskType.arrive;
 
     return DropsheetTask(
@@ -170,7 +179,7 @@ class DropsheetTask {
       contact: data['contact'] as String? ?? '',
       tel: data['tel'] as String? ?? '',
       isMandatory: (data['isMandatory'] as bool?) == true || isLeadingType,
-      typeData: ((data['typeData'] == null ? null : Map<String, dynamic>.from(data['typeData'] as Map))) ?? const {},
+      typeData: typeData,
       sourceJobListItemId: data['sourceJobListItemId'] as String?,
       serviceTimeMinutes: (data['serviceTimeMinutes'] as num?)?.toInt(),
     );
@@ -234,39 +243,55 @@ class DropsheetTask {
     required String idPrefix,
     String? vehicleLabel,
     String? vehicleKey,
-  }) =>
-      [
-        DropsheetTask(
-          id: '${idPrefix}_m1',
-          type: DropsheetTaskType.inspect,
-          job: 'Inspect',
-          details: vehicleLabel ?? '',
-          startTime: '07:00',
-          isMandatory: true,
-          typeData: vehicleKey != null ? {'vehicle': vehicleKey} : const {},
-        ),
-        DropsheetTask(
-          id: '${idPrefix}_m2',
-          type: DropsheetTaskType.pack,
-          job: 'Pack',
-          details: 'Raincoats; bank card',
-          startTime: '07:15',
-          isMandatory: true,
-        ),
-        DropsheetTask(
-          id: '${idPrefix}_m3',
-          type: DropsheetTaskType.leave,
-          job: 'Leave',
-          startTime: '07:30',
-          isMandatory: true,
-        ),
-        DropsheetTask(
-          id: '${idPrefix}_m4',
-          type: DropsheetTaskType.arrive,
-          job: 'Arrive',
-          isMandatory: true,
-        ),
-      ];
+    // Office/depot details — when supplied, both Leave and Arrive tasks are
+    // pre-filled with the office address so drivers always see where they're
+    // departing from and returning to.
+    String? depotAddress,
+    double? depotLat,
+    double? depotLng,
+    String? depotStartTime,
+  }) {
+    final depotTypeData = <String, dynamic>{
+      if (depotLat != null) 'lat': depotLat,
+      if (depotLng != null) 'lng': depotLng,
+    };
+    return [
+      DropsheetTask(
+        id: '${idPrefix}_m1',
+        type: DropsheetTaskType.inspect,
+        job: 'Inspect',
+        details: vehicleLabel ?? '',
+        startTime: '07:00',
+        isMandatory: true,
+        typeData: vehicleKey != null ? {'vehicle': vehicleKey} : const {},
+      ),
+      DropsheetTask(
+        id: '${idPrefix}_m2',
+        type: DropsheetTaskType.pack,
+        job: 'Pack',
+        details: 'Raincoats; bank card',
+        startTime: '07:15',
+        isMandatory: true,
+      ),
+      DropsheetTask(
+        id: '${idPrefix}_m3',
+        type: DropsheetTaskType.leave,
+        job: 'Leave',
+        startTime: depotStartTime ?? '07:30',
+        location: depotAddress ?? '',
+        isMandatory: true,
+        typeData: depotTypeData,
+      ),
+      DropsheetTask(
+        id: '${idPrefix}_m4',
+        type: DropsheetTaskType.arrive,
+        job: 'Arrive',
+        location: depotAddress ?? '',
+        isMandatory: true,
+        typeData: depotTypeData,
+      ),
+    ];
+  }
 
   /// Returns true if [task] is the trailing mandatory "Arrive at office"
   /// task. Used by reorder / add-task logic to keep it pinned to the

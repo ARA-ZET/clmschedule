@@ -3,12 +3,15 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 class WorkArea {
+  static const Color defaultColor = Color(0xFFC62828);
+
   final String id;
   final String name;
   final String description;
   final List<LatLng> polygonPoints;
   final String kmlFileName;
   final int letterBoxEstimate;
+  final Color color;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -19,6 +22,7 @@ class WorkArea {
     required this.polygonPoints,
     required this.kmlFileName,
     this.letterBoxEstimate = 0,
+    this.color = defaultColor,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -40,6 +44,7 @@ class WorkArea {
       }).toList(),
       createdAt: (data['createdAt'] as Timestamp).toDate(),
       updatedAt: (data['updatedAt'] as Timestamp).toDate(),
+      color: Color((data['color'] as num?)?.toInt() ?? defaultColor.toARGB32()),
     );
   }
 
@@ -50,6 +55,7 @@ class WorkArea {
       'description': description,
       'kmlFileName': kmlFileName,
       'letterBoxEstimate': letterBoxEstimate,
+      'color': color.toARGB32(),
       'polygonPoints': polygonPoints.map((point) {
         return GeoPoint(point.latitude, point.longitude);
       }).toList(),
@@ -72,9 +78,11 @@ class WorkArea {
         if (point is GeoPoint) {
           return LatLng(point.latitude, point.longitude);
         } else if (point is Map) {
+          final lat = point['latitude'] ?? point['lat'];
+          final lng = point['longitude'] ?? point['lng'];
           return LatLng(
-            (point['latitude'] as num).toDouble(),
-            (point['longitude'] as num).toDouble(),
+            (lat as num).toDouble(),
+            (lng as num).toDouble(),
           );
         }
         throw ArgumentError('Invalid point format');
@@ -85,6 +93,7 @@ class WorkArea {
       updatedAt: data['updatedAt'] != null
           ? (data['updatedAt'] as Timestamp).toDate()
           : DateTime.now(),
+      color: Color((data['color'] as num?)?.toInt() ?? defaultColor.toARGB32()),
     );
   }
 
@@ -106,17 +115,18 @@ class WorkArea {
           .toList(),
       'createdAt': Timestamp.fromDate(createdAt),
       'updatedAt': Timestamp.fromDate(updatedAt),
+      'color': color.toARGB32(),
     };
   }
 
   // Create a polygon for Google Maps
   Polygon toMapPolygon({Color? color}) {
+    final polygonColor = color ?? this.color;
     return Polygon(
       polygonId: PolygonId(id),
       points: polygonPoints,
-      fillColor:
-          color?.withValues(alpha: 0.3) ?? const Color(0xFFFF0000).withValues(alpha: 0.3),
-      strokeColor: color ?? const Color(0xFFFF0000),
+      fillColor: polygonColor.withValues(alpha: 0.3),
+      strokeColor: polygonColor,
       strokeWidth: 2,
     );
   }
@@ -129,6 +139,7 @@ class WorkArea {
     List<LatLng>? polygonPoints,
     String? kmlFileName,
     int? letterBoxEstimate,
+    Color? color,
   }) {
     return WorkArea(
       id: id ?? this.id,
@@ -137,6 +148,7 @@ class WorkArea {
       polygonPoints: polygonPoints ?? this.polygonPoints,
       kmlFileName: kmlFileName ?? this.kmlFileName,
       letterBoxEstimate: letterBoxEstimate ?? this.letterBoxEstimate,
+      color: color ?? this.color,
       createdAt: createdAt,
       updatedAt: DateTime.now(),
     );

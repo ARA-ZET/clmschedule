@@ -53,7 +53,11 @@ class DropsheetTaskRow extends StatelessWidget {
       onTap: onEdit,
       child: Container(
         decoration: BoxDecoration(
-          color: task.isMandatory ? Colors.amber.withValues(alpha: 0.08) : null,
+          color: task.typeData['isPickupDivider'] == true
+              ? Colors.grey.shade300
+              : (task.isMandatory
+                  ? Colors.amber.withValues(alpha: 0.08)
+                  : null),
           border: Border(
             bottom: BorderSide(color: Colors.grey.shade200),
           ),
