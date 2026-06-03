@@ -1,3 +1,38 @@
+// Distributor role enum (shown on the digital ID card)
+enum DistributorRole {
+  distributor,
+  supervisor,
+  teamLeader,
+  driver;
+
+  String get displayName {
+    switch (this) {
+      case DistributorRole.distributor:
+        return 'Distributor';
+      case DistributorRole.supervisor:
+        return 'Supervisor';
+      case DistributorRole.teamLeader:
+        return 'Team Leader';
+      case DistributorRole.driver:
+        return 'Driver';
+    }
+  }
+
+  static DistributorRole fromString(String? value) {
+    switch (value?.toLowerCase()) {
+      case 'supervisor':
+        return DistributorRole.supervisor;
+      case 'teamleader':
+      case 'team_leader':
+        return DistributorRole.teamLeader;
+      case 'driver':
+        return DistributorRole.driver;
+      default:
+        return DistributorRole.distributor;
+    }
+  }
+}
+
 // Distributor status enum
 enum DistributorStatus {
   active,
@@ -41,6 +76,8 @@ class Distributor {
   final String? phone1; // Primary phone number
   final String? phone2; // Secondary phone number
   final DistributorStatus status; // Current status
+  final String? imageUrl; // Profile photo URL (Firebase Storage)
+  final DistributorRole role; // Role shown on the digital ID card
 
   Distributor({
     required this.id,
@@ -49,6 +86,8 @@ class Distributor {
     this.phone1,
     this.phone2,
     this.status = DistributorStatus.active,
+    this.imageUrl,
+    this.role = DistributorRole.distributor,
   });
 
   // Create from Firestore
@@ -60,6 +99,8 @@ class Distributor {
       phone1: data['phone1'] as String?,
       phone2: data['phone2'] as String?,
       status: DistributorStatus.fromString(data['status'] as String?),
+      imageUrl: data['imageUrl'] as String?,
+      role: DistributorRole.fromString(data['role'] as String?),
     );
   }
 
@@ -71,6 +112,8 @@ class Distributor {
       'phone1': phone1,
       'phone2': phone2,
       'status': status.name,
+      'imageUrl': imageUrl,
+      'role': role.name,
     };
   }
 
@@ -82,6 +125,9 @@ class Distributor {
     String? phone1,
     String? phone2,
     DistributorStatus? status,
+    String? imageUrl,
+    bool clearImageUrl = false,
+    DistributorRole? role,
   }) {
     return Distributor(
       id: id ?? this.id,
@@ -90,10 +136,12 @@ class Distributor {
       phone1: phone1 ?? this.phone1,
       phone2: phone2 ?? this.phone2,
       status: status ?? this.status,
+      imageUrl: clearImageUrl ? null : (imageUrl ?? this.imageUrl),
+      role: role ?? this.role,
     );
   }
 
   @override
   String toString() =>
-      'Distributor(id: $id, name: $name, index: $index, phone1: $phone1, phone2: $phone2, status: ${status.displayName})';
+      'Distributor(id: $id, name: $name, index: $index, phone1: $phone1, phone2: $phone2, status: ${status.displayName}, role: ${role.displayName})';
 }

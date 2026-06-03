@@ -86,9 +86,10 @@ class NumberedMarkerCache {
     String primaryLabel = '',
     String secondaryLabel = '',
     bool isPickUp = false,
+    int? iconCodePoint,
   }) async {
     final key =
-        '${color.toString()}_${number}_${primaryLabel}_${secondaryLabel}_$isPickUp';
+        '${color.toString()}_${number}_${primaryLabel}_${secondaryLabel}_${isPickUp}_${iconCodePoint ?? ''}';
     final existing = _cache[key];
     if (existing != null) return existing;
     final result = await _renderPinBytes(
@@ -97,6 +98,32 @@ class NumberedMarkerCache {
       primaryLabel: primaryLabel,
       secondaryLabel: secondaryLabel,
       isPickUp: isPickUp,
+      iconCodePoint: iconCodePoint,
+    );
+    // ignore: deprecated_member_use
+    final desc = BitmapDescriptor.fromBytes(result.bytes);
+    final entry = (icon: desc, anchor: result.anchor);
+    _cache[key] = entry;
+    return entry;
+  }
+
+  /// Like [get] but renders a Material icon glyph in the circle instead of
+  /// an order number. Used for special pins (e.g. the Office depot marker).
+  Future<MarkerBitmap> getIconMarker({
+    required Color color,
+    required int iconCodePoint,
+    String primaryLabel = '',
+    String secondaryLabel = '',
+  }) async {
+    final key =
+        '${color.toString()}_ico_${iconCodePoint}_${primaryLabel}_$secondaryLabel';
+    final existing = _cache[key];
+    if (existing != null) return existing;
+    final result = await _renderIconPinBytes(
+      color: color,
+      iconCodePoint: iconCodePoint,
+      primaryLabel: primaryLabel,
+      secondaryLabel: secondaryLabel,
     );
     // ignore: deprecated_member_use
     final desc = BitmapDescriptor.fromBytes(result.bytes);
@@ -123,23 +150,24 @@ Future<({Uint8List bytes, Offset anchor})> _renderPinBytes({
   String primaryLabel = '',
   String secondaryLabel = '',
   bool isPickUp = false,
+  int? iconCodePoint,
 }) async {
   // All dimensions are scaled to 40% of the original (reduced by 60%).
-  const double _s = 0.6;
-  const double outerR = 26.0 * _s; // white ring radius
-  const double fillR = 22.0 * _s; // coloured fill radius
-  const double tipH = 20.0 * _s; // tip length below circle-bottom
-  const double pad = 6.0 * _s; // outer bleed / shadow padding
-  const double gap = 8.0 * _s; // space between circle and label badge
-  const double primaryFontSz = 20.0 * _s;
-  const double secondaryFontSz = 14.0 * _s;
-  const double innerLineGap = 3.0 * _s; // gap between primary and secondary
-  const double labelPadH = 9.0 * _s; // badge horizontal inner padding
-  const double labelPadV = 5.0 * _s; // badge vertical inner padding
-  const double maxBadgeTextW = 160.0 * _s; // max text width
-  const double numFontSz = 26.0 * _s; // order number font size
-  const double tipHalfW = 10.0 * _s;
-  const double textMeasureBuffer = 12.0 * _s;
+  const double s = 0.6;
+  const double outerR = 26.0 * s; // white ring radius
+  const double fillR = 22.0 * s; // coloured fill radius
+  const double tipH = 20.0 * s; // tip length below circle-bottom
+  const double pad = 6.0 * s; // outer bleed / shadow padding
+  const double gap = 8.0 * s; // space between circle and label badge
+  const double primaryFontSz = 20.0 * s;
+  const double secondaryFontSz = 14.0 * s;
+  const double innerLineGap = 3.0 * s; // gap between primary and secondary
+  const double labelPadH = 9.0 * s; // badge horizontal inner padding
+  const double labelPadV = 5.0 * s; // badge vertical inner padding
+  const double maxBadgeTextW = 160.0 * s; // max text width
+  const double numFontSz = 26.0 * s; // order number font size
+  const double tipHalfW = 10.0 * s;
+  const double textMeasureBuffer = 12.0 * s;
 
   // ── Measure labels ────────────────────────────────────────────────
   final effectivePrimary = primaryLabel.isNotEmpty
@@ -289,19 +317,185 @@ Future<({Uint8List bytes, Offset anchor})> _renderPinBytes({
   // ── Coloured circle fill (standalone, no teardrop tail) ──────────────
   canvas.drawCircle(Offset(cx, cy), fillR, Paint()..color = color);
 
-  // ── Order number ──────────────────────────────────────────────────
-  final numTp = TextPainter(
+  // ── Order number / icon glyph ─────────────────────────────────────
+  if (iconCodePoint != null) {
+    final iconTp = TextPainter(
+      text: TextSpan(
+        text: String.fromCharCode(iconCodePoint),
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: numFontSz,
+          fontFamily: 'MaterialIcons',
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    iconTp.paint(canvas, Offset(cx - iconTp.width / 2, cy - iconTp.height / 2));
+  } else {
+    final numTp = TextPainter(
+      text: TextSpan(
+        text: '$number',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: numFontSz,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    numTp.paint(canvas, Offset(cx - numTp.width / 2, cy - numTp.height / 2));
+  }
+
+  final picture = recorder.endRecording();
+  final image = await picture.toImage(w.toInt(), h.toInt());
+  final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+  return (bytes: byteData!.buffer.asUint8List(), anchor: anchor);
+}
+
+/// Same teardrop layout as [_renderPinBytes] but draws a Material icon glyph
+/// inside the circle instead of an order number.
+Future<({Uint8List bytes, Offset anchor})> _renderIconPinBytes({
+  required Color color,
+  required int iconCodePoint,
+  String primaryLabel = '',
+  String secondaryLabel = '',
+}) async {
+  const double s = 0.6;
+  const double outerR = 26.0 * s;
+  const double fillR = 22.0 * s;
+  const double tipH = 20.0 * s;
+  const double pad = 6.0 * s;
+  const double gap = 8.0 * s;
+  const double primaryFontSz = 20.0 * s;
+  const double secondaryFontSz = 14.0 * s;
+  const double innerLineGap = 3.0 * s;
+  const double labelPadH = 9.0 * s;
+  const double labelPadV = 5.0 * s;
+  const double maxBadgeTextW = 160.0 * s;
+  const double iconFontSz = 24.0 * s;
+  const double tipHalfW = 10.0 * s;
+  const double textMeasureBuffer = 12.0 * s;
+
+  TextPainter? primaryTp;
+  if (primaryLabel.isNotEmpty) {
+    primaryTp = TextPainter(
+      text: TextSpan(
+        text: primaryLabel,
+        style: const TextStyle(
+          color: Color(0xFF202124),
+          fontSize: primaryFontSz,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+      ellipsis: '…',
+    )..layout(maxWidth: maxBadgeTextW);
+  }
+
+  TextPainter? secondaryTp;
+  if (secondaryLabel.isNotEmpty) {
+    secondaryTp = TextPainter(
+      text: TextSpan(
+        text: secondaryLabel,
+        style: const TextStyle(
+          color: Color(0xFF5F6368),
+          fontSize: secondaryFontSz,
+          fontWeight: FontWeight.w400,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+      ellipsis: '…',
+    )..layout(maxWidth: maxBadgeTextW);
+  }
+
+  final hasLabel = primaryTp != null;
+  final double textBlockH = primaryTp == null
+      ? 0.0
+      : (primaryTp.height +
+          (secondaryTp != null ? innerLineGap + secondaryTp.height : 0.0));
+  final double badgeInnerW =
+      primaryTp == null ? 0.0 : maxBadgeTextW + textMeasureBuffer;
+  final double badgeW = hasLabel ? (labelPadH * 2 + badgeInnerW) : 0.0;
+  final double sideExt = hasLabel ? (outerR - 2) + gap + badgeW : 0.0;
+  final double cx = outerR + pad;
+  final double rightHalf =
+      math.max(outerR + pad, hasLabel ? sideExt + pad : outerR + pad);
+  final double w = cx + rightHalf;
+  final double cy = outerR + pad;
+  final double tipY = cy + outerR + tipH;
+  final double h = tipY;
+  final double badgeL = cx + outerR - 2;
+  final double badgeR = badgeL + (hasLabel ? gap + badgeW : 0.0);
+  final double tipX = hasLabel ? (cx - outerR + badgeR) / 2 : cx;
+  final double tipBaseY = cy + outerR;
+  final anchor = Offset(tipX / w, 1.0);
+
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(recorder);
+
+  // Drop shadow
+  final shadowPaint = Paint()
+    // ignore: deprecated_member_use
+    ..color = Colors.black.withOpacity(0.28)
+    ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+  canvas.drawCircle(Offset(cx, cy + 2), outerR - 1, shadowPaint);
+  final shadowTipPath = Path()
+    ..moveTo(tipX - tipHalfW, tipBaseY + 2)
+    ..lineTo(tipX + tipHalfW, tipBaseY + 2)
+    ..lineTo(tipX, tipY + 3)
+    ..close();
+  canvas.drawPath(shadowTipPath, shadowPaint);
+
+  // Label badge
+  if (primaryTp != null) {
+    final badgeT = cy - textBlockH / 2 - labelPadV;
+    final badgeB = cy + textBlockH / 2 + labelPadV;
+    final badgeRect = RRect.fromLTRBR(
+        badgeL, badgeT, badgeR, badgeB, const Radius.circular(6));
+    canvas.drawRRect(badgeRect, Paint()..color = Colors.white);
+    canvas.drawRRect(
+      badgeRect,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0,
+    );
+    final textX = badgeL + gap + labelPadH;
+    final primaryY = cy - textBlockH / 2;
+    primaryTp.paint(canvas, Offset(textX, primaryY));
+    if (secondaryTp != null) {
+      secondaryTp.paint(
+          canvas, Offset(textX, primaryY + primaryTp.height + innerLineGap));
+    }
+  }
+
+  // Tip triangle
+  final tipPath = Path()
+    ..moveTo(tipX - tipHalfW, tipBaseY)
+    ..lineTo(tipX + tipHalfW, tipBaseY)
+    ..lineTo(tipX, tipY)
+    ..close();
+  canvas.drawPath(tipPath, Paint()..color = color);
+
+  // White ring + coloured fill
+  canvas.drawCircle(Offset(cx, cy), outerR, Paint()..color = Colors.white);
+  canvas.drawCircle(Offset(cx, cy), fillR, Paint()..color = color);
+
+  // Icon glyph
+  final iconTp = TextPainter(
     text: TextSpan(
-      text: '$number',
+      text: String.fromCharCode(iconCodePoint),
       style: TextStyle(
+        fontFamily: 'MaterialIcons',
         color: Colors.white,
-        fontSize: numFontSz,
-        fontWeight: FontWeight.w700,
+        fontSize: iconFontSz,
       ),
     ),
     textDirection: TextDirection.ltr,
   )..layout();
-  numTp.paint(canvas, Offset(cx - numTp.width / 2, cy - numTp.height / 2));
+  iconTp.paint(canvas, Offset(cx - iconTp.width / 2, cy - iconTp.height / 2));
 
   final picture = recorder.endRecording();
   final image = await picture.toImage(w.toInt(), h.toInt());

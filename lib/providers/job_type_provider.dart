@@ -81,21 +81,39 @@ class JobTypeProvider extends ChangeNotifier {
     for (final jt in _jobTypes) {
       final seed = seedsById[jt.id];
       if (seed == null || !jt.isDefault) continue;
+
+      // Generic check: type is completely at constructor defaults and the seed
+      // has non-default flags (handles brand-new installs that skipped a
+      // previous migration cycle).
       final atConstructorDefaults = !jt.isHappySunService &&
           !jt.needsTimeSlot &&
           !jt.appearsOnCollectionSchedule &&
+          !jt.appearsOnDropsheet &&
           jt.tracksQuantity &&
           jt.quantityLabel == 'Quantity' &&
           jt.defaultTools.isEmpty;
       final seedHasNonDefault = seed.isHappySunService ||
           seed.needsTimeSlot ||
           seed.appearsOnCollectionSchedule ||
+          seed.appearsOnDropsheet ||
           !seed.tracksQuantity ||
           seed.quantityLabel != 'Quantity' ||
           seed.defaultTools.isNotEmpty;
       if (atConstructorDefaults && seedHasNonDefault) {
         // Preserve the user's current label (may have been renamed).
         toBackfill.add(seed.copyWith(label: jt.label, order: jt.order));
+        continue;
+      }
+
+      // Targeted check: existing types that already have other flags set but
+      // are missing newly introduced flags. Only patch the new fields so we
+      // never overwrite values the user may have customised.
+      if (!jt.appearsOnDropsheet && seed.appearsOnDropsheet) {
+        toBackfill.add(jt.copyWith(
+          appearsOnDropsheet: seed.appearsOnDropsheet,
+          dropsheetTaskTypeKey: seed.dropsheetTaskTypeKey,
+        ));
+        continue;
       }
     }
     if (toBackfill.isEmpty) return;
@@ -183,6 +201,9 @@ class JobTypeProvider extends ChangeNotifier {
     bool? isHappySunService,
     bool? needsTimeSlot,
     bool? appearsOnCollectionSchedule,
+    bool? appearsOnDropsheet,
+    String? dropsheetTaskTypeKey,
+    bool clearDropsheetTaskTypeKey = false,
     bool? tracksQuantity,
     String? quantityLabel,
     bool? createsCloudFolder,
@@ -200,6 +221,9 @@ class JobTypeProvider extends ChangeNotifier {
       isHappySunService: isHappySunService,
       needsTimeSlot: needsTimeSlot,
       appearsOnCollectionSchedule: appearsOnCollectionSchedule,
+      appearsOnDropsheet: appearsOnDropsheet,
+      dropsheetTaskTypeKey: dropsheetTaskTypeKey,
+      clearDropsheetTaskTypeKey: clearDropsheetTaskTypeKey,
       tracksQuantity: tracksQuantity,
       quantityLabel: quantityLabel,
       createsCloudFolder: createsCloudFolder,
@@ -254,6 +278,12 @@ class JobTypeProvider extends ChangeNotifier {
   bool appearsOnCollectionSchedule(String id) =>
       getJobTypeById(id)?.appearsOnCollectionSchedule ?? false;
 
+  bool appearsOnDropsheet(String id) =>
+      getJobTypeById(id)?.appearsOnDropsheet ?? false;
+
+  String? dropsheetTaskTypeKey(String id) =>
+      getJobTypeById(id)?.dropsheetTaskTypeKey;
+
   bool tracksQuantity(String id) => getJobTypeById(id)?.tracksQuantity ?? true;
 
   String quantityLabel(String id) =>
@@ -266,10 +296,16 @@ class JobTypeProvider extends ChangeNotifier {
   List<String> defaultTools(String id) =>
       getJobTypeById(id)?.defaultTools ?? const [];
 
-  /// Convenience: ids of every type currently configured to appear on the
+  /// Convenience: ids of every type configured to appear on the
   /// Collection Schedule. Used by providers that need to filter job lists.
   List<String> get collectionScheduleTypeIds => _jobTypes
       .where((jt) => jt.appearsOnCollectionSchedule)
+      .map((jt) => jt.id)
+      .toList(growable: false);
+
+  /// Convenience: ids of every type that auto-syncs to the Dropsheet.
+  List<String> get dropsheetTypeIds => _jobTypes
+      .where((jt) => jt.appearsOnDropsheet)
       .map((jt) => jt.id)
       .toList(growable: false);
 

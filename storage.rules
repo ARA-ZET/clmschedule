@@ -26,6 +26,18 @@ service firebase.storage {
       allow write: if request.auth != null;
     }
 
+    // Suburb KML data: anyone can download; only authenticated users can upload
+    match /suburbs/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Allow authenticated users to upload/read distributor profile photos
+    match /distributor_photos/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
     // Deny access to all other paths
     match /{allPaths=**} {
       allow read, write: if false;

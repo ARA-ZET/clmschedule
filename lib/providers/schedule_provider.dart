@@ -16,6 +16,7 @@ final scheduleRiverpod = riverpod.ChangeNotifierProvider<ScheduleProvider>(
 
 class ScheduleProvider extends ChangeNotifier {
   final FirestoreService _firestoreService;
+  bool _isInitialized = false;
 
   List<Distributor> _distributors = [];
   List<Job> _currentMonthJobs = [];
@@ -226,6 +227,8 @@ class ScheduleProvider extends ChangeNotifier {
 
   // Initialize streams asynchronously without blocking (full app)
   Future<void> initialize() async {
+    if (_isInitialized) return;
+    _isInitialized = true;
     await _initStreamsAsync();
   }
 
@@ -573,6 +576,14 @@ class ScheduleProvider extends ChangeNotifier {
       final job = jobs.where((j) => j.id == jobId).firstOrNull;
       final jobDate = targetDate ?? job?.date ?? _currentMonth;
       await _firestoreService.deleteJob(jobId, jobDate);
+      // Scrub any orphaned dropoff task from the affected date's
+      // dropsheet — the live `DropsheetProvider` only auto-syncs for
+      // today + next planning day, so this catches every other date.
+      unawaited(DropsheetProvider.syncDateOneShot(
+        jobDate,
+        firestoreService: _firestoreService,
+        distributors: _distributors.isNotEmpty ? _distributors : null,
+      ));
       debugPrint('Successfully deleted job $jobId');
     } catch (e) {
       debugPrint('Error deleting job: $e');
@@ -588,6 +599,22 @@ class ScheduleProvider extends ChangeNotifier {
         originalJob.date,
         movedJob.date,
       );
+      // Sync the dropsheets for BOTH the source and destination dates so
+      // the dropoff task moves with the job — even when neither date is
+      // inside the auto-sync window of the live DropsheetProvider.
+      final dists = _distributors.isNotEmpty ? _distributors : null;
+      unawaited(DropsheetProvider.syncDateOneShot(
+        originalJob.date,
+        firestoreService: _firestoreService,
+        distributors: dists,
+      ));
+      if (!_isSameDay(originalJob.date, movedJob.date)) {
+        unawaited(DropsheetProvider.syncDateOneShot(
+          movedJob.date,
+          firestoreService: _firestoreService,
+          distributors: dists,
+        ));
+      }
       debugPrint('Successfully moved job ${originalJob.id}');
     } catch (e) {
       debugPrint('Error moving job: $e');
@@ -781,6 +808,7 @@ class ScheduleProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _isInitialized = false;
     _distributorsSubscription?.cancel();
     _currentMonthJobsSubscription?.cancel();
     _nextMonthJobsSubscription?.cancel();

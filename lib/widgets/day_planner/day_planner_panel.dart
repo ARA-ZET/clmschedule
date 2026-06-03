@@ -354,7 +354,9 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
   String _leaveTime(DepotConfig depot) {
     try {
       final leave = widget.section.tasks.firstWhere(
-          (t) => t.type == DropsheetTaskType.leave && t.startTime.isNotEmpty);
+          (t) => t.type == DropsheetTaskType.leave &&
+              t.typeData['isPickupDivider'] != true &&
+              t.startTime.isNotEmpty);
       return leave.startTime;
     } catch (_) {
       return depot.startTime;
@@ -482,7 +484,9 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
     final leaveTask = isUnassigned
         ? null
         : section.tasks
-            .where((t) => t.type == DropsheetTaskType.leave)
+            .where((t) =>
+                t.type == DropsheetTaskType.leave &&
+                t.typeData['isPickupDivider'] != true)
             .firstOrNull;
 
     // Filtered visible stops, but we still need their absolute index in

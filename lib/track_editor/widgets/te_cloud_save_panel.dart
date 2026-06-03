@@ -19,6 +19,7 @@ import '../models/tab_item.dart';
 import '../providers/te_cloud_save_state_provider.dart';
 import '../providers/te_processing_provider.dart';
 import '../providers/te_tabs_provider.dart';
+import '../../shareable_maps/providers/map_gesture_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
 
@@ -211,6 +212,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
       builder: (ctx) => _FolderPickerDialog(
         initialPath: monthPath,
         clientSuggestions: _joblistClientSuggestions(),
+        mapGestureProvider: ref.read(mapGestureRiverpod),
       ),
     );
     if (picked == null || !mounted) return;
@@ -475,10 +477,11 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
     return names.join('   ');
   }
 
-  /// Build filename: Type   DD MMM YYYY   Distributor   Client   WorkAreas   WptCount.gpx
-  String _fileName(String type, int wptCount, {String? polyNamesOverride}) {
+  /// Build filename: Track   DD MMM YYYY   Distributor   Client   [WorkAreas   ]WptCount fulltrack.gpx
+  String _fileName(int wptCount,
+      {String type = 'Track', String? polyNamesOverride}) {
     final parts = <String>[
-      type,
+      if (type.isNotEmpty) type,
       _dateStr,
       widget.entry.distributorName,
       widget.entry.clientName,
@@ -486,7 +489,8 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
     final polyNames = polyNamesOverride ?? _polyNames;
     if (polyNames.isNotEmpty) parts.add(polyNames);
     parts.add(wptCount.toString());
-    return GpxStorageService.sanitizeFileName('${parts.join('   ')}.gpx');
+    return GpxStorageService.sanitizeFileName(
+        '${parts.join('   ')} fulltrack.gpx');
   }
 
   // ── Save As-Is ──────────────────────────────────────────────────────────
@@ -505,25 +509,18 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
       int uploaded = 0;
       int skipped = 0;
 
-      if (widget.tracks.isNotEmpty) {
-        final trackFile = _fileName('Track', wptCount);
-        if (existingNames.contains(trackFile)) {
+      if (widget.tracks.isNotEmpty || widget.waypoints.isNotEmpty) {
+        // Prefer selected-polygon names if the user has highlighted any;
+        // otherwise fall back to all entry polygon names.
+        final areaOverride =
+            _selectedPolyNames.isNotEmpty ? _selectedPolyNames : null;
+        final gpxFile = _fileName(wptCount, polyNamesOverride: areaOverride);
+        if (existingNames.contains(gpxFile)) {
           skipped++;
         } else {
-          final trackContent = await fm.toGpxTracksString(widget.tracks);
-          await gpxStorage.uploadGpxFile(_folderPath, trackFile, trackContent);
-          uploaded++;
-        }
-      }
-      final shouldSaveWaypointFile =
-          widget.waypoints.isNotEmpty || widget.tracks.isNotEmpty;
-      if (shouldSaveWaypointFile) {
-        final wptFile = _fileName('Waypoints', wptCount);
-        if (existingNames.contains(wptFile)) {
-          skipped++;
-        } else {
-          final wptContent = await fm.toGpxWaypointsString(widget.waypoints);
-          await gpxStorage.uploadGpxFile(_folderPath, wptFile, wptContent);
+          final gpxContent =
+              await fm.toGpxCombinedString(widget.tracks, widget.waypoints);
+          await gpxStorage.uploadGpxFile(_folderPath, gpxFile, gpxContent);
           uploaded++;
         }
       }
@@ -602,27 +599,15 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
       int uploaded = 0;
       int skipped = 0;
 
-      if (trimmedTracks.isNotEmpty) {
-        final trackFile = _fileName('Track Trimmed', trimmedWptCount,
-            polyNamesOverride: _selectedPolyNames);
-        if (existingNames.contains(trackFile)) {
+      if (trimmedTracks.isNotEmpty || trimmedWpts.isNotEmpty) {
+        final gpxFile = _fileName(trimmedWptCount,
+            type: 'Track Trimmed', polyNamesOverride: _selectedPolyNames);
+        if (existingNames.contains(gpxFile)) {
           skipped++;
         } else {
-          final trackContent = await fm.toGpxTracksString(trimmedTracks);
-          await gpxStorage.uploadGpxFile(_folderPath, trackFile, trackContent);
-          uploaded++;
-        }
-      }
-      final shouldSaveTrimmedWaypointFile =
-          trimmedWpts.isNotEmpty || trimmedTracks.isNotEmpty;
-      if (shouldSaveTrimmedWaypointFile) {
-        final wptFile = _fileName('Waypoints Trimmed', trimmedWptCount,
-            polyNamesOverride: _selectedPolyNames);
-        if (existingNames.contains(wptFile)) {
-          skipped++;
-        } else {
-          final wptContent = await fm.toGpxWaypointsString(trimmedWpts);
-          await gpxStorage.uploadGpxFile(_folderPath, wptFile, wptContent);
+          final gpxContent =
+              await fm.toGpxCombinedString(trimmedTracks, trimmedWpts);
+          await gpxStorage.uploadGpxFile(_folderPath, gpxFile, gpxContent);
           uploaded++;
         }
       }
@@ -661,6 +646,7 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
         initialPath: _folderPath,
         clientName: widget.entry.clientName,
         clientSuggestions: widget.clientSuggestionsBuilder?.call() ?? const [],
+        mapGestureProvider: ref.read(mapGestureRiverpod),
       ),
     );
     if (picked != null && picked != _folderPath && mounted) {
@@ -1036,10 +1022,12 @@ class _FolderPickerDialog extends StatefulWidget {
   final String initialPath;
   final String? clientName;
   final List<String> clientSuggestions;
+  final MapGestureProvider? mapGestureProvider;
   const _FolderPickerDialog({
     required this.initialPath,
     this.clientName,
     this.clientSuggestions = const [],
+    this.mapGestureProvider,
   });
 
   @override
@@ -1097,57 +1085,87 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
 
     final folderName = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('New $levelLabel Folder',
-            style: const TextStyle(fontSize: 15)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            TextField(
-              controller: ctrl,
-              autofocus: true,
-              decoration: InputDecoration(
-                labelText: '$levelLabel name',
-                isDense: true,
-                border: const OutlineInputBorder(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final query = ctrl.text.toLowerCase();
+          final filtered = suggestions.isEmpty
+              ? <String>[]
+              : query.isEmpty
+                  ? suggestions
+                  : suggestions
+                      .where((s) => s.toLowerCase().contains(query))
+                      .toList();
+
+          return MouseRegion(
+            onEnter: (_) => widget.mapGestureProvider?.disableMapGestures(),
+            onExit: (_) => widget.mapGestureProvider?.enableMapGestures(),
+            child: AlertDialog(
+            title: Text('New $levelLabel Folder',
+                style: const TextStyle(fontSize: 15)),
+            content: ConstrainedBox(
+              constraints: const BoxConstraints(
+                minWidth: 360,
+                maxWidth: 360,
+                minHeight: 120,
+                maxHeight: 400,
               ),
-              onSubmitted: (v) {
-                if (v.trim().isNotEmpty) Navigator.pop(ctx, v.trim());
-              },
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      controller: ctrl,
+                      autofocus: true,
+                      decoration: InputDecoration(
+                        labelText: '$levelLabel name',
+                        isDense: true,
+                        border: const OutlineInputBorder(),
+                      ),
+                      onChanged: (_) => setDialogState(() {}),
+                      onSubmitted: (v) {
+                        if (v.trim().isNotEmpty) Navigator.pop(ctx, v.trim());
+                      },
+                    ),
+                    if (filtered.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Text('Suggestions:',
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey.shade600)),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: filtered.map((s) {
+                          return ActionChip(
+                            label:
+                                Text(s, style: const TextStyle(fontSize: 11)),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => Navigator.pop(ctx, s),
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ),
-            if (suggestions.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Text('Suggestions:',
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
-              const SizedBox(height: 4),
-              Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                children: suggestions.map((s) {
-                  return ActionChip(
-                    label: Text(s, style: const TextStyle(fontSize: 11)),
-                    visualDensity: VisualDensity.compact,
-                    onPressed: () => Navigator.pop(ctx, s),
-                  );
-                }).toList(),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final name = ctrl.text.trim();
+                  if (name.isNotEmpty) Navigator.pop(ctx, name);
+                },
+                child: const Text('Create'),
               ),
             ],
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
           ),
-          FilledButton(
-            onPressed: () {
-              final name = ctrl.text.trim();
-              if (name.isNotEmpty) Navigator.pop(ctx, name);
-            },
-            child: const Text('Create'),
-          ),
-        ],
+          );
+        },
       ),
     );
 
@@ -1185,252 +1203,266 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
 
     return Dialog(
       insetPadding: const EdgeInsets.all(24),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 420, maxHeight: 520),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // ── Title bar ──────────────────────────────────────────────
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: Colors.blueGrey.shade50,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(12)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.folder_open, size: 20),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text('Choose Folder',
-                        style: TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w600)),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 18),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                ],
-              ),
-            ),
-
-            // ── Breadcrumb ─────────────────────────────────────────────
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              color: Colors.grey.shade100,
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    for (int i = 0; i < _provider.breadcrumbs.length; i++) ...[
-                      if (i > 0)
-                        Icon(Icons.chevron_right,
-                            size: 16, color: Colors.grey.shade400),
-                      InkWell(
-                        onTap: () => _provider.goToBreadcrumb(i),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 4, vertical: 2),
-                          child: Text(
-                            _provider.breadcrumbs[i].name,
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: i == _provider.breadcrumbs.length - 1
-                                  ? Colors.blueGrey.shade800
-                                  : Colors.blue.shade700,
-                              fontWeight: i == _provider.breadcrumbs.length - 1
-                                  ? FontWeight.w600
-                                  : FontWeight.normal,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-
-            const Divider(height: 1),
-
-            // ── No exact client match warning ──────────────────────────
-            if (atClientLevel && !hasExactClientMatch)
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => widget.mapGestureProvider?.disableMapGestures(),
+        onExit: (_) => widget.mapGestureProvider?.enableMapGestures(),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420, maxHeight: 520),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // ── Title bar ──────────────────────────────────────────────
               Container(
-                width: double.infinity,
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                color: Colors.red.shade50,
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.blueGrey.shade50,
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(12)),
+                ),
                 child: Row(
                   children: [
-                    Icon(Icons.warning_amber,
-                        size: 16, color: Colors.red.shade700),
+                    const Icon(Icons.folder_open, size: 20),
                     const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'No exact match for "${widget.clientName}". '
-                        'Select the right folder or create a new one.',
-                        style:
-                            TextStyle(fontSize: 11, color: Colors.red.shade700),
-                      ),
+                    const Expanded(
+                      child: Text('Choose Folder',
+                          style: TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w600)),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      onPressed: () => Navigator.pop(context),
                     ),
                   ],
                 ),
               ),
 
-            // ── Folder list ────────────────────────────────────────────
-            Expanded(
-              child: _provider.isLoading || _creatingFolder
-                  ? Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const CircularProgressIndicator(strokeWidth: 2),
-                          if (_creatingFolder) ...[
-                            const SizedBox(height: 8),
-                            Text('Creating folder...',
-                                style: TextStyle(
-                                    fontSize: 11, color: Colors.grey.shade600)),
-                          ],
-                        ],
-                      ),
-                    )
-                  : _provider.error != null
-                      ? Center(
-                          child: Padding(
-                            padding: const EdgeInsets.all(16),
-                            child: Text(_provider.error!,
-                                style: const TextStyle(color: Colors.red)),
-                          ),
-                        )
-                      : _provider.folders.isEmpty
-                          ? Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text('No sub-folders',
-                                      style: TextStyle(
-                                          fontSize: 13,
-                                          color: Colors.grey.shade500)),
-                                  const SizedBox(height: 8),
-                                  TextButton.icon(
-                                    onPressed: _showCreateFolderDialog,
-                                    icon: const Icon(Icons.create_new_folder,
-                                        size: 16),
-                                    label: Text(
-                                        'Create ${_provider.newFolderLabel}'),
-                                    style: TextButton.styleFrom(
-                                        textStyle:
-                                            const TextStyle(fontSize: 12)),
-                                  ),
-                                ],
-                              ),
-                            )
-                          : ListView.separated(
-                              padding: const EdgeInsets.symmetric(vertical: 4),
-                              itemCount: _provider.folders.length,
-                              separatorBuilder: (_, __) =>
-                                  const Divider(height: 1),
-                              itemBuilder: (_, i) {
-                                final folder = _provider.folders[i];
-                                // Show in red if at client level and name
-                                // doesn't match the expected client.
-                                final mismatch = atClientLevel &&
-                                    widget.clientName != null &&
-                                    widget.clientName!.isNotEmpty &&
-                                    !_isClientMatch(folder.name);
-                                return ListTile(
-                                  dense: true,
-                                  leading: Icon(
-                                    Icons.folder,
-                                    color: mismatch
-                                        ? Colors.red.shade400
-                                        : Colors.amber.shade700,
-                                    size: 22,
-                                  ),
-                                  title: Text(
-                                    folder.name,
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      color:
-                                          mismatch ? Colors.red.shade700 : null,
-                                      fontWeight: (!mismatch &&
-                                              atClientLevel &&
-                                              _isClientMatch(folder.name) &&
-                                              widget.clientName != null &&
-                                              widget.clientName!.isNotEmpty)
-                                          ? FontWeight.w600
-                                          : null,
-                                    ),
-                                  ),
-                                  trailing:
-                                      const Icon(Icons.chevron_right, size: 18),
-                                  onTap: () => _provider.openFolder(folder),
-                                );
-                              },
-                            ),
-            ),
-
-            const Divider(height: 1),
-
-            // ── Action buttons ─────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
+              // ── Breadcrumb ─────────────────────────────────────────────
+              Container(
+                width: double.infinity,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                color: Colors.grey.shade100,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
                     children: [
+                      for (int i = 0;
+                          i < _provider.breadcrumbs.length;
+                          i++) ...[
+                        if (i > 0)
+                          Icon(Icons.chevron_right,
+                              size: 16, color: Colors.grey.shade400),
+                        InkWell(
+                          onTap: () => _provider.goToBreadcrumb(i),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 4, vertical: 2),
+                            child: Text(
+                              _provider.breadcrumbs[i].name,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: i == _provider.breadcrumbs.length - 1
+                                    ? Colors.blueGrey.shade800
+                                    : Colors.blue.shade700,
+                                fontWeight:
+                                    i == _provider.breadcrumbs.length - 1
+                                        ? FontWeight.w600
+                                        : FontWeight.normal,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+
+              const Divider(height: 1),
+
+              // ── No exact client match warning ──────────────────────────
+              if (atClientLevel && !hasExactClientMatch)
+                Container(
+                  width: double.infinity,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  color: Colors.red.shade50,
+                  child: Row(
+                    children: [
+                      Icon(Icons.warning_amber,
+                          size: 16, color: Colors.red.shade700),
+                      const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          _provider.currentPath,
+                          'No exact match for "${widget.clientName}". '
+                          'Select the right folder or create a new one.',
                           style: TextStyle(
-                              fontSize: 10, color: Colors.grey.shade600),
-                          overflow: TextOverflow.ellipsis,
+                              fontSize: 11, color: Colors.red.shade700),
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      OutlinedButton.icon(
-                        onPressed:
-                            _creatingFolder ? null : _showCreateFolderDialog,
-                        icon: const Icon(Icons.create_new_folder, size: 16),
-                        label: Text('New ${_provider.newFolderLabel}'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.blueGrey.shade700,
-                          side: BorderSide(color: Colors.blueGrey.shade300),
-                          textStyle: const TextStyle(fontSize: 12),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 8),
+                ),
+
+              // ── Folder list ────────────────────────────────────────────
+              Expanded(
+                child: _provider.isLoading || _creatingFolder
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const CircularProgressIndicator(strokeWidth: 2),
+                            if (_creatingFolder) ...[
+                              const SizedBox(height: 8),
+                              Text('Creating folder...',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600)),
+                            ],
+                          ],
                         ),
-                      ),
-                      const Spacer(),
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('Cancel'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: () =>
-                            Navigator.pop(context, _provider.currentPath),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue.shade700,
-                          foregroundColor: Colors.white,
-                        ),
-                        child: const Text('Select This Folder'),
-                      ),
-                    ],
-                  ),
-                ],
+                      )
+                    : _provider.error != null
+                        ? Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Text(_provider.error!,
+                                  style: const TextStyle(color: Colors.red)),
+                            ),
+                          )
+                        : _provider.folders.isEmpty
+                            ? Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text('No sub-folders',
+                                        style: TextStyle(
+                                            fontSize: 13,
+                                            color: Colors.grey.shade500)),
+                                    const SizedBox(height: 8),
+                                    TextButton.icon(
+                                      onPressed: _showCreateFolderDialog,
+                                      icon: const Icon(Icons.create_new_folder,
+                                          size: 16),
+                                      label: Text(
+                                          'Create ${_provider.newFolderLabel}'),
+                                      style: TextButton.styleFrom(
+                                          textStyle:
+                                              const TextStyle(fontSize: 12)),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : ListView.separated(
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 4),
+                                itemCount: _provider.folders.length,
+                                separatorBuilder: (_, __) =>
+                                    const Divider(height: 1),
+                                itemBuilder: (_, i) {
+                                  final folder = _provider.folders[i];
+                                  // Show in red if at client level and name
+                                  // doesn't match the expected client.
+                                  final mismatch = atClientLevel &&
+                                      widget.clientName != null &&
+                                      widget.clientName!.isNotEmpty &&
+                                      !_isClientMatch(folder.name);
+                                  return ListTile(
+                                    dense: true,
+                                    leading: Icon(
+                                      Icons.folder,
+                                      color: mismatch
+                                          ? Colors.red.shade400
+                                          : Colors.amber.shade700,
+                                      size: 22,
+                                    ),
+                                    title: Text(
+                                      folder.name,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: mismatch
+                                            ? Colors.red.shade700
+                                            : null,
+                                        fontWeight: (!mismatch &&
+                                                atClientLevel &&
+                                                _isClientMatch(folder.name) &&
+                                                widget.clientName != null &&
+                                                widget.clientName!.isNotEmpty)
+                                            ? FontWeight.w600
+                                            : null,
+                                      ),
+                                    ),
+                                    trailing: const Icon(Icons.chevron_right,
+                                        size: 18),
+                                    onTap: () => _provider.openFolder(folder),
+                                  );
+                                },
+                              ),
               ),
-            ),
-          ],
+
+              const Divider(height: 1),
+
+              // ── Action buttons ─────────────────────────────────────────
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _provider.currentPath,
+                            style: TextStyle(
+                                fontSize: 10, color: Colors.grey.shade600),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed:
+                              _creatingFolder ? null : _showCreateFolderDialog,
+                          icon: const Icon(Icons.create_new_folder, size: 16),
+                          label: Text('New ${_provider.newFolderLabel}'),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.blueGrey.shade700,
+                            side: BorderSide(color: Colors.blueGrey.shade300),
+                            textStyle: const TextStyle(fontSize: 12),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 8),
+                          ),
+                        ),
+                        const Spacer(),
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('Cancel'),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          onPressed: () =>
+                              Navigator.pop(context, _provider.currentPath),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue.shade700,
+                            foregroundColor: Colors.white,
+                          ),
+                          child: const Text('Select This Folder'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

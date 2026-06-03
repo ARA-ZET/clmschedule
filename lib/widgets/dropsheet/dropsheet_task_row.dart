@@ -36,6 +36,10 @@ class DropsheetTaskRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (task.typeData['isPickupDivider'] == true) {
+      return _buildPickupSeparator(context);
+    }
+
     final mapLinks = DropsheetMaps.linksFor(task);
     final locationLabel = DropsheetMaps.locationLabel(task);
     final jobLabel = task.job.isNotEmpty
@@ -53,11 +57,9 @@ class DropsheetTaskRow extends StatelessWidget {
       onTap: onEdit,
       child: Container(
         decoration: BoxDecoration(
-          color: task.typeData['isPickupDivider'] == true
-              ? Colors.grey.shade300
-              : (task.isMandatory
-                  ? Colors.amber.withValues(alpha: 0.08)
-                  : null),
+          color: task.isMandatory
+              ? Colors.amber.withValues(alpha: 0.08)
+              : null,
           border: Border(
             bottom: BorderSide(color: Colors.grey.shade200),
           ),
@@ -104,6 +106,102 @@ class DropsheetTaskRow extends StatelessWidget {
       ),
       childWhenDragging: Opacity(opacity: 0.4, child: rowContent),
       child: rowContent,
+    );
+  }
+
+  /// Renders the "Leave and start pickups" separator row.
+  Widget _buildPickupSeparator(BuildContext context) {
+    const sepColor = Color(0xFF1565C0);
+    final timeLabel = task.startTime.isNotEmpty ? task.startTime : '17:30';
+
+    final payload = TaskDragPayload(
+      fromSectionId: sectionId,
+      fromIndex: dragIndex,
+      toIndex: 0,
+      task: task,
+    );
+
+    final content = InkWell(
+      onTap: onEdit,
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFFE3F2FD),
+          border: Border.symmetric(
+            horizontal: BorderSide(color: sepColor, width: 1.5),
+          ),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        child: Row(
+          children: [
+            // Drag handle for in-section reorder.
+            ReorderableDragStartListener(
+              index: dragIndex,
+              child: const SizedBox(
+                width: 24,
+                child: Icon(Icons.drag_indicator, size: 16, color: Colors.grey),
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Icon(Icons.keyboard_return, size: 15, color: sepColor),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                task.job.isNotEmpty ? task.job : 'Leave and start pickups',
+                style: const TextStyle(
+                  color: sepColor,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            // Departure time badge.
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: sepColor,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                timeLabel,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            _buildMenuButton(context),
+          ],
+        ),
+      ),
+    );
+
+    return LongPressDraggable<TaskDragPayload>(
+      data: payload,
+      delay: const Duration(milliseconds: 300),
+      feedback: Material(
+        elevation: 6,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          color: const Color(0xFFE3F2FD),
+          width: 280,
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.drag_indicator, color: sepColor),
+              SizedBox(width: 8),
+              Text(
+                'Leave and start pickups',
+                style: TextStyle(
+                    color: sepColor, fontWeight: FontWeight.w700, fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+      ),
+      childWhenDragging: Opacity(opacity: 0.4, child: content),
+      child: content,
     );
   }
 

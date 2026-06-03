@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/distributor.dart';
 import '../providers/schedule_provider.dart';
+import 'digital_id_card.dart';
 import 'edit_distributor_dialog.dart';
 
 class DistributorManagementDialog extends riverpod.ConsumerStatefulWidget {
@@ -254,6 +255,13 @@ class _DistributorManagementDialogState
                                                 _swapDistributorPositions(
                                                     distributor, false),
                                           ),
+                                        IconButton(
+                                          icon: const Icon(Icons.badge_outlined),
+                                          tooltip: 'View Digital ID Card',
+                                          onPressed: () =>
+                                              showDigitalIdCard(
+                                                  context, distributor),
+                                        ),
                                         IconButton(
                                           icon: const Icon(Icons.edit),
                                           tooltip: 'Edit Distributor',
@@ -529,7 +537,9 @@ class _DistributorManagementDialogState
             currentDistributor.index != localDistributor.index ||
             currentDistributor.phone1 != localDistributor.phone1 ||
             currentDistributor.phone2 != localDistributor.phone2 ||
-            currentDistributor.status != localDistributor.status) {
+            currentDistributor.status != localDistributor.status ||
+            currentDistributor.imageUrl != localDistributor.imageUrl ||
+            currentDistributor.role != localDistributor.role) {
           distributorsToUpdate.add(localDistributor);
         }
       }

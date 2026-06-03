@@ -2,11 +2,13 @@
 //
 // State management for browsing Cloud Storage folders and files.
 // Root: "Distribution/" — navigates year → month → client → round → files.
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/gpx_storage_service.dart';
+import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 
 /// Hierarchy depth constants for the folder structure:
 /// 0: Distribution (root)
@@ -318,7 +320,8 @@ class CloudFileManagerProvider with ChangeNotifier {
   /// Copy files into [destinationFolder] in parallel.
   /// Returns how many succeeded.
   /// The Cloud Function compiles `_compiled_*.json` in the destination
-  /// folder automatically as the new GPX files land there.
+  /// folder automatically as the new GPX files land there. We also trigger
+  /// a client-side rebuild for immediate feedback.
   Future<int> copyFiles(
     Iterable<StorageFileItem> files,
     String destinationFolder,
@@ -327,6 +330,7 @@ class CloudFileManagerProvider with ChangeNotifier {
     if (list.isEmpty) return 0;
     _beginTask('Copying to ${_shortFolder(destinationFolder)}', list.length);
     int ok = 0;
+    final copiedGpxFolders = <String>{};
     try {
       await _runWithLimit<StorageFileItem, bool>(list, 4, (f) async {
         final dst = '$destinationFolder/${f.name}';
@@ -335,6 +339,7 @@ class CloudFileManagerProvider with ChangeNotifier {
         try {
           await _storage.copyFile(f.fullPath, dst);
           ok++;
+          if (f.extension == 'gpx') copiedGpxFolders.add(destinationFolder);
           return true;
         } catch (e) {
           debugPrint('copyFiles: failed ${f.fullPath} \u2192 $dst: $e');
@@ -345,20 +350,26 @@ class CloudFileManagerProvider with ChangeNotifier {
       _endTask();
     }
     await loadCurrentFolder();
+    if (copiedGpxFolders.isNotEmpty) {
+      unawaited(_rebuildCompiledFor(copiedGpxFolders));
+    }
     return ok;
   }
 
   /// Move files into [destinationFolder] in parallel.
   /// Returns how many succeeded. The Cloud Function rebuilds compiled JSON
-  /// in both the source and destination folders automatically.
+  /// in both the source and destination folders automatically. We also
+  /// trigger a client-side rebuild for immediate feedback.
   Future<int> moveFiles(
     Iterable<StorageFileItem> files,
     String destinationFolder,
   ) async {
     final list = files.toList();
     if (list.isEmpty) return 0;
+    final sourceFolder = currentPath;
     _beginTask('Moving to ${_shortFolder(destinationFolder)}', list.length);
     int ok = 0;
+    final movedGpxFolders = <String>{};
     try {
       await _runWithLimit<StorageFileItem, bool>(list, 4, (f) async {
         final dst = '$destinationFolder/${f.name}';
@@ -367,6 +378,10 @@ class CloudFileManagerProvider with ChangeNotifier {
         try {
           await _storage.moveFile(f.fullPath, dst);
           ok++;
+          if (f.extension == 'gpx') {
+            movedGpxFolders.add(sourceFolder);
+            movedGpxFolders.add(destinationFolder);
+          }
           return true;
         } catch (e) {
           debugPrint('moveFiles: failed ${f.fullPath} \u2192 $dst: $e');
@@ -377,6 +392,9 @@ class CloudFileManagerProvider with ChangeNotifier {
       _endTask();
     }
     await loadCurrentFolder();
+    if (movedGpxFolders.isNotEmpty) {
+      unawaited(_rebuildCompiledFor(movedGpxFolders));
+    }
     return ok;
   }
 
@@ -409,6 +427,70 @@ class CloudFileManagerProvider with ChangeNotifier {
       } catch (e) {
         debugPrint('_rebuildCompiledFor($f): $e');
       }
+    }
+  }
+
+  /// Rename a folder by recursively copying its contents to a new name under
+  /// the same parent, then deleting the original. Also updates every Firestore
+  /// document (shareable maps, job list items) that referenced the old path so
+  /// links remain valid after the rename.
+  ///
+  /// Returns `({newPath, mapsUpdated, jobsUpdated})`. `newPath` is `null` on
+  /// failure.
+  Future<({String? newPath, int mapsUpdated, int jobsUpdated})> renameFolder(
+      StorageFolderItem folder, String newName) async {
+    final sanitized = newName.trim();
+    if (sanitized.isEmpty || sanitized == folder.name) {
+      return (newPath: null, mapsUpdated: 0, jobsUpdated: 0);
+    }
+    try {
+      final newPath = await _storage.renameFolder(folder.fullPath, sanitized);
+
+      // Update Firestore references to point to the new folder path so
+      // shareable maps and job list items keep loading their cloud data.
+      final refs = await ShareableMapsFirestoreService()
+          .updateFolderPathReference(folder.fullPath, newPath);
+
+      // Rebuild compiled tracks/waypoints in the new folder.
+      unawaited(_rebuildCompiledFor({newPath}));
+
+      await loadCurrentFolder();
+      return (
+        newPath: newPath,
+        mapsUpdated: refs.maps,
+        jobsUpdated: refs.jobs,
+      );
+    } catch (e) {
+      _error = 'Failed to rename folder: $e';
+      debugPrint(_error);
+      notifyListeners();
+      return (newPath: null, mapsUpdated: 0, jobsUpdated: 0);
+    }
+  }
+
+  /// Download the entire [folder] tree as a ZIP archive.
+  /// Returns the raw ZIP bytes, or `null` on failure.
+  /// Task progress is reported via [taskCompleted] / [taskTotal].
+  Future<Uint8List?> downloadFolderAsZip(StorageFolderItem folder) async {
+    _beginTask('Downloading \u201c${folder.name}\u201d\u2026', 0);
+    try {
+      final bytes = await _storage.downloadFolderAsZip(
+        folder.fullPath,
+        onProgress: (done, total) {
+          _taskTotal = total;
+          _taskCompleted = done;
+          _taskCurrentItem = '';
+          notifyListeners();
+        },
+      );
+      return bytes;
+    } catch (e) {
+      _error = 'Download failed: $e';
+      debugPrint(_error);
+      notifyListeners();
+      return null;
+    } finally {
+      _endTask();
     }
   }
 

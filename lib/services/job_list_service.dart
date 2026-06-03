@@ -19,6 +19,12 @@ class JobListService {
     return _monthlyService.getJobListItemsCollection(date);
   }
 
+  /// Public accessor used by duplicate-client checks that target a month
+  /// that may not be currently loaded into memory.
+  CollectionReference getJobListItemsCollectionForMonth(DateTime date) {
+    return _monthlyService.getJobListItemsCollection(date);
+  }
+
   // Get all job list items for current month
   // Optional jobTypes parameter to filter by specific job types at Firebase level
   Stream<List<JobListItem>> getJobListItems(
@@ -46,7 +52,8 @@ class JobListService {
 
     return query.snapshots().map((snapshot) {
       return snapshot.docs.map((doc) {
-        return JobListItem.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
+        return JobListItem.fromMap(
+            doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList();
     });
   }
@@ -125,7 +132,8 @@ class JobListService {
         .snapshots()
         .map((snapshot) {
       return snapshot.docs.map((doc) {
-        return JobListItem.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
+        return JobListItem.fromMap(
+            doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList();
     });
   }
@@ -144,7 +152,8 @@ class JobListService {
         .snapshots()
         .map((snapshot) {
       return snapshot.docs.map((doc) {
-        return JobListItem.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
+        return JobListItem.fromMap(
+            doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList();
     });
   }

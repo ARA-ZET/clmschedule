@@ -36,8 +36,8 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
     final hasTracks = tab.tracks.isNotEmpty;
     final hasWaypoints = tab.waypoints.isNotEmpty;
     final isUpdateMode = provider.activeMode == TEMode.update;
-    final showLegacySaveTrim = provider.activeMode != TEMode.processing &&
-        !isUpdateMode;
+    final showLegacySaveTrim =
+        provider.activeMode != TEMode.processing && !isUpdateMode;
     final hasSource = (tab.sourceStoragePath ?? '').isNotEmpty;
 
     if (!hasTracks && !hasWaypoints && tab.polygons.isEmpty) {
@@ -1357,23 +1357,27 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
   /// Today's date formatted as "09 Mar 2026".
   String get _dateStr => DateFormat('dd MMM yyyy').format(DateTime.now());
 
-  /// Build filename: Type   DD MMM YYYY   Client   WorkAreas  Count.gpx
-  String _buildFileName(String type, int count) {
-    final parts = <String>[type, _dateStr, _clientName];
+  /// Build filename: Track   DD MMM YYYY   Client   [WorkAreas   ]Count fulltrack.gpx
+  String _buildFileName(int count, {String type = 'Track'}) {
+    final parts = <String>[
+      if (type.isNotEmpty) type,
+      _dateStr,
+      _clientName,
+    ];
     if (_workAreas.isNotEmpty) parts.add(_workAreas);
     parts.add(count.toString());
     // Sanitize so '/' or other illegal chars in client/work-area names
     // don't get interpreted as folder separators on upload.
-    return GpxStorageService.sanitizeFileName('${parts.join('   ')}.gpx');
+    return GpxStorageService.sanitizeFileName(
+        '${parts.join('   ')} fulltrack.gpx');
   }
 
-  Future<void> _onSaveTracks(BuildContext context) async {
-    if (widget.tracks.isEmpty) return;
+  Future<void> _onSaveCombined(BuildContext context) async {
     setState(() => _saveBusy = true);
     try {
       final fm = TEFileManager();
-      final fileName = _buildFileName('Track', widget.waypoints.length);
-      await fm.saveGpxTracksFile(fileName, widget.tracks);
+      final fileName = _buildFileName(widget.waypoints.length);
+      await fm.saveGpxCombinedFile(fileName, widget.tracks, widget.waypoints);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1393,40 +1397,14 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
     if (mounted) setState(() => _saveBusy = false);
   }
 
-  Future<void> _onSaveWaypoints(BuildContext context) async {
-    if (widget.waypoints.isEmpty) return;
-    setState(() => _saveBusy = true);
-    try {
-      final fm = TEFileManager();
-      final fileName = _buildFileName('Waypoints', widget.waypoints.length);
-      await fm.saveGpxWaypointsFile(fileName, widget.waypoints);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Saved as $fileName'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Save failed: $e'), backgroundColor: Colors.red),
-        );
-      }
-    }
-    if (mounted) setState(() => _saveBusy = false);
-  }
-
-  Future<void> _onSaveTracksToCloud(BuildContext context) async {
-    if (widget.tracks.isEmpty) return;
+  Future<void> _onSaveCombinedToCloud(BuildContext context) async {
     setState(() => _cloudBusy = true);
     try {
       final fm = TEFileManager();
       final gpxStorage = GpxStorageService();
-      final fileName = _buildFileName('Track', widget.waypoints.length);
-      final gpxContent = await fm.toGpxTracksString(widget.tracks);
+      final fileName = _buildFileName(widget.waypoints.length);
+      final gpxContent =
+          await fm.toGpxCombinedString(widget.tracks, widget.waypoints);
 
       final folderPath = widget.storageFolderPath;
       if (folderPath == null || folderPath.isEmpty) {
@@ -1447,52 +1425,7 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Uploaded tracks to cloud: $fileName'),
-            backgroundColor: Colors.blue,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Cloud upload failed: $e'),
-              backgroundColor: Colors.red),
-        );
-      }
-    }
-    if (mounted) setState(() => _cloudBusy = false);
-  }
-
-  Future<void> _onSaveWaypointsToCloud(BuildContext context) async {
-    if (widget.waypoints.isEmpty) return;
-    setState(() => _cloudBusy = true);
-    try {
-      final fm = TEFileManager();
-      final gpxStorage = GpxStorageService();
-      final fileName = _buildFileName('Waypoints', widget.waypoints.length);
-      final gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
-
-      final folderPath = widget.storageFolderPath;
-      if (folderPath == null || folderPath.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                  'No cloud folder selected — pick a client folder via the processing panel first.'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-        if (mounted) setState(() => _cloudBusy = false);
-        return;
-      }
-
-      await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Uploaded waypoints to cloud: $fileName'),
+            content: Text('Uploaded to cloud: $fileName'),
             backgroundColor: Colors.blue,
           ),
         );
@@ -1520,8 +1453,6 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
     final folderPath = sourcePath.contains('/')
         ? sourcePath.substring(0, sourcePath.lastIndexOf('/'))
         : '';
-    final isWaypointFile = fileName.toLowerCase().contains('waypoint') ||
-        widget.waypoints.isNotEmpty;
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1551,14 +1482,11 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       final fm = TEFileManager();
       final gpxStorage = GpxStorageService();
 
-      // Pick serializer: waypoint-named file → waypoints, else tracks.
+      // Serialize as combined GPX (tracks + waypoints in one file).
       final String gpxContent;
-      if (isWaypointFile && widget.waypoints.isNotEmpty) {
-        gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
-      } else if (widget.tracks.isNotEmpty) {
-        gpxContent = await fm.toGpxTracksString(widget.tracks);
-      } else if (widget.waypoints.isNotEmpty) {
-        gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
+      if (widget.tracks.isNotEmpty || widget.waypoints.isNotEmpty) {
+        gpxContent =
+            await fm.toGpxCombinedString(widget.tracks, widget.waypoints);
       } else {
         throw StateError('Nothing to save: no tracks or waypoints.');
       }
@@ -1567,9 +1495,10 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       await gpxStorage.deleteFile(sourcePath);
       await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
 
-      // If the file carried waypoints, rebuild the compiled aggregate.
+      // Always rebuild the compiled waypoints aggregate since combined
+      // files contain waypoints.
       int? rebuiltCount;
-      if (isWaypointFile && folderPath.isNotEmpty) {
+      if (folderPath.isNotEmpty) {
         rebuiltCount = await gpxStorage.regenerateCompiledWaypoints(folderPath);
       }
 
@@ -1605,24 +1534,13 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       final trimmedWpts =
           filterWaypointsByPolygons(widget.waypoints, widget.polygons);
 
-      String? trackFileName;
-      String? trackGpxContent;
-      String? wptsFileName;
-      String? wptsGpxContent;
+      String? gpxFileName;
+      String? gpxContent;
 
-      if (trimmedTracks.isNotEmpty) {
-        final trimTrackPts = trimmedTracks.fold<int>(
-            0,
-            (s, t) =>
-                s + t.trksegs.fold<int>(0, (ss, sg) => ss + sg.trkpts.length));
-        trackFileName = _buildFileName('Track Trimmed', trimTrackPts);
-        trackGpxContent = await fm.toGpxTracksString(trimmedTracks);
-        await fm.saveGpxTracksFile(trackFileName, trimmedTracks);
-      }
-      if (trimmedWpts.isNotEmpty) {
-        wptsFileName = _buildFileName('Waypoints Trimmed', trimmedWpts.length);
-        wptsGpxContent = await fm.toGpxWaypointsString(trimmedWpts);
-        await fm.saveGpxWaypointsFile(wptsFileName, trimmedWpts);
+      if (trimmedTracks.isNotEmpty || trimmedWpts.isNotEmpty) {
+        gpxFileName = _buildFileName(trimmedWpts.length, type: 'Track Trimmed');
+        gpxContent = await fm.toGpxCombinedString(trimmedTracks, trimmedWpts);
+        await fm.saveGpxCombinedFile(gpxFileName, trimmedTracks, trimmedWpts);
       }
 
       // ── Upload to Cloud Storage ──────────────────────────────────────
@@ -1634,14 +1552,8 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       if (folderPath != null && folderPath.isNotEmpty) {
         try {
           final gpxStorage = GpxStorageService();
-          if (trackFileName != null && trackGpxContent != null) {
-            await gpxStorage.uploadGpxFile(
-                folderPath, trackFileName, trackGpxContent);
-            cloudUploaded++;
-          }
-          if (wptsFileName != null && wptsGpxContent != null) {
-            await gpxStorage.uploadGpxFile(
-                folderPath, wptsFileName, wptsGpxContent);
+          if (gpxFileName != null && gpxContent != null) {
+            await gpxStorage.uploadGpxFile(folderPath, gpxFileName, gpxContent);
             cloudUploaded++;
           }
         } catch (e) {
@@ -1721,107 +1633,57 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // ── Save row: separate tracks / waypoints ──────────────────
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: (busy || !hasTracks)
-                      ? null
-                      : () => _onSaveTracks(context),
-                  icon: _saveBusy
-                      ? spinnerIcon
-                      : const Icon(Icons.route, size: 15),
-                  label: const Text('Save Tracks'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        hasTracks ? Colors.blueGrey[700] : Colors.grey[500],
-                    foregroundColor: Colors.white,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
-                    textStyle: const TextStyle(fontSize: 11),
-                  ),
-                ),
+          // ── Save GPX (combined tracks + waypoints) ─────────────────
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: (busy || (!hasTracks && !hasWaypoints))
+                  ? null
+                  : () => _onSaveCombined(context),
+              icon: _saveBusy
+                  ? spinnerIcon
+                  : const Icon(Icons.download, size: 15),
+              label: const Text('Save GPX'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: (hasTracks || hasWaypoints)
+                    ? Colors.blueGrey[700]
+                    : Colors.grey[500],
+                foregroundColor: Colors.white,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                textStyle: const TextStyle(fontSize: 11),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: (busy || !hasWaypoints)
-                      ? null
-                      : () => _onSaveWaypoints(context),
-                  icon: _saveBusy
-                      ? spinnerIcon
-                      : const Icon(Icons.place, size: 15),
-                  label: const Text('Save Waypoints'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        hasWaypoints ? Colors.teal[700] : Colors.grey[500],
-                    foregroundColor: Colors.white,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
-                    textStyle: const TextStyle(fontSize: 11),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
           const SizedBox(height: 6),
-          // ── Save to Cloud row ──────────────────────────────────────
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: (busy || !hasTracks)
-                      ? null
-                      : () => _onSaveTracksToCloud(context),
-                  icon: _cloudBusy
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.cloud_upload, size: 15),
-                  label: const Text('Tracks → Cloud'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor:
-                        hasTracks ? Colors.blue[700] : Colors.grey[500],
-                    side: BorderSide(
-                        color:
-                            hasTracks ? Colors.blue[300]! : Colors.grey[300]!),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
-                    textStyle: const TextStyle(fontSize: 11),
-                  ),
-                ),
+          // ── Save to Cloud (combined) ───────────────────────────────
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: (busy || (!hasTracks && !hasWaypoints))
+                  ? null
+                  : () => _onSaveCombinedToCloud(context),
+              icon: _cloudBusy
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.cloud_upload, size: 15),
+              label: const Text('GPX → Cloud'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: (hasTracks || hasWaypoints)
+                    ? Colors.blue[700]
+                    : Colors.grey[500],
+                side: BorderSide(
+                    color: (hasTracks || hasWaypoints)
+                        ? Colors.blue[300]!
+                        : Colors.grey[300]!),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                textStyle: const TextStyle(fontSize: 11),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: (busy || !hasWaypoints)
-                      ? null
-                      : () => _onSaveWaypointsToCloud(context),
-                  icon: _cloudBusy
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.cloud_upload, size: 15),
-                  label: const Text('Waypoints → Cloud'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor:
-                        hasWaypoints ? Colors.blue[700] : Colors.grey[500],
-                    side: BorderSide(
-                        color: hasWaypoints
-                            ? Colors.blue[300]!
-                            : Colors.grey[300]!),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
-                    textStyle: const TextStyle(fontSize: 11),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
           const SizedBox(height: 6),
           // ── Overwrite original cloud file (only when opened from cloud) ──
@@ -1960,9 +1822,8 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
       }
 
       if (mounted) {
-        final suffix = rebuiltCount != null
-            ? ' · recompiled $rebuiltCount waypoints'
-            : '';
+        final suffix =
+            rebuiltCount != null ? ' · recompiled $rebuiltCount waypoints' : '';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Updated $_sourceFileName$suffix'),
@@ -1987,8 +1848,8 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
     if (_folderPath.isEmpty) return;
     setState(() => _recompileBusy = true);
     try {
-      final count = await GpxStorageService()
-          .regenerateCompiledWaypoints(_folderPath);
+      final count =
+          await GpxStorageService().regenerateCompiledWaypoints(_folderPath);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

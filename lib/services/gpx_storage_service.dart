@@ -5,6 +5,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:archive/archive.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:gpx/gpx.dart';
@@ -350,6 +351,123 @@ class GpxStorageService {
     return moveFile(fullPath, newPath);
   }
 
+  /// Rename a folder by recursively copying every file under [oldFolderPath]
+  /// to the equivalent path under the new folder (same parent, last segment
+  /// replaced with [newName]), then deleting the original folder tree.
+  ///
+  /// Returns the new folder path on success. Throws on failure.
+  Future<String> renameFolder(String oldFolderPath, String newName) async {
+    final slash = oldFolderPath.lastIndexOf('/');
+    final parent = slash > 0 ? oldFolderPath.substring(0, slash) : '';
+    final newFolderPath = parent.isEmpty ? newName : '$parent/$newName';
+
+    if (newFolderPath == oldFolderPath) return oldFolderPath;
+
+    // Collect every file in the source tree, preserving relative sub-paths.
+    final entries = <({String oldPath, String newPath})>[];
+    Future<void> walkCopy(String src, String dst) async {
+      final result = await _storage.ref(src).listAll();
+      for (final item in result.items) {
+        entries.add((
+          oldPath: item.fullPath,
+          newPath: '$dst/${item.name}',
+        ));
+      }
+      for (final prefix in result.prefixes) {
+        await walkCopy(prefix.fullPath, '$dst/${prefix.name}');
+      }
+    }
+
+    await walkCopy(oldFolderPath, newFolderPath);
+
+    // Copy all files in parallel.
+    await Future.wait(entries.map((e) => copyFile(e.oldPath, e.newPath)));
+
+    // Delete the original tree.
+    await deleteFolderRecursive(oldFolderPath);
+
+    return newFolderPath;
+  }
+
+  /// Download every file in [folderPath] (recursively including subfolders)
+  /// and bundle them into a ZIP archive, preserving the folder structure as
+  /// relative paths from [folderPath].
+  ///
+  /// [onProgress] is called after each file is downloaded with
+  /// (completedFiles, totalFiles).
+  ///
+  /// Returns the raw ZIP bytes, or `null` if the folder is empty or an error
+  /// occurs.
+  Future<Uint8List?> downloadFolderAsZip(
+    String folderPath, {
+    void Function(int done, int total)? onProgress,
+  }) async {
+    try {
+      // Collect all file refs with their relative paths inside the folder.
+      final entries = <({Reference ref, String relativePath})>[];
+
+      Future<void> walk(String path) async {
+        final result = await _storage.ref(path).listAll();
+        for (final item in result.items) {
+          // Strip the folderPath prefix (+ leading '/') to get relative path.
+          final rel = item.fullPath.length > folderPath.length + 1
+              ? item.fullPath.substring(folderPath.length + 1)
+              : item.name;
+          entries.add((ref: item, relativePath: rel));
+        }
+        for (final prefix in result.prefixes) {
+          await walk(prefix.fullPath);
+        }
+      }
+
+      await walk(folderPath);
+      if (entries.isEmpty) return null;
+
+      final total = entries.length;
+      int done = 0;
+
+      // Download all files in parallel (up to 6 concurrent).
+      final results = List<Uint8List?>.filled(total, null);
+      int next = 0;
+
+      Future<void> worker() async {
+        while (true) {
+          final idx = next++;
+          if (idx >= total) return;
+          try {
+            results[idx] = await entries[idx].ref.getData();
+          } catch (e) {
+            debugPrint(
+                'downloadFolderAsZip: failed ${entries[idx].ref.fullPath}: $e');
+          } finally {
+            done++;
+            onProgress?.call(done, total);
+          }
+        }
+      }
+
+      final workers = List.generate(6, (_) => worker());
+      await Future.wait(workers);
+
+      // Build ZIP archive.
+      final archive = Archive();
+      for (var i = 0; i < total; i++) {
+        final bytes = results[i];
+        if (bytes == null) continue;
+        archive.addFile(
+          ArchiveFile(entries[i].relativePath, bytes.length, bytes),
+        );
+      }
+
+      if (archive.isEmpty) return null;
+      final zipBytes = ZipEncoder().encode(archive);
+      return Uint8List.fromList(zipBytes);
+    } catch (e) {
+      debugPrint('downloadFolderAsZip error ($folderPath): $e');
+      return null;
+    }
+  }
+
   /// List every folder path that exists anywhere under [rootPath] (depth-first).
   /// The returned list is sorted alphabetically and includes [rootPath] itself.
   /// Useful as the source set for a "move/copy to folder" picker.
@@ -508,9 +626,8 @@ class GpxStorageService {
                   coords[i + 1][0], coords[i + 1][1]);
             }
             final segName = trkName.isEmpty ? 'Track ${ti + 1}' : trkName;
-            final name = trk.trksegs.length > 1
-                ? '$segName (seg ${si + 1})'
-                : segName;
+            final name =
+                trk.trksegs.length > 1 ? '$segName (seg ${si + 1})' : segName;
             tracksOut.add({
               'name': name,
               'desc': trkDesc,
@@ -535,8 +652,8 @@ class GpxStorageService {
           if (coords.length < 2) continue;
           double distance = 0;
           for (var i = 0; i < coords.length - 1; i++) {
-            distance += _haversine(coords[i][0], coords[i][1],
-                coords[i + 1][0], coords[i + 1][1]);
+            distance += _haversine(
+                coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
           }
           tracksOut.add({
             'name': rte.name ?? 'Route ${ri + 1}',
@@ -552,8 +669,7 @@ class GpxStorageService {
       }
 
       final tracksRef = _storage.ref('$folderPath/_compiled_tracks.json');
-      final waypointsRef =
-          _storage.ref('$folderPath/_compiled_waypoints.json');
+      final waypointsRef = _storage.ref('$folderPath/_compiled_waypoints.json');
 
       // Write or remove tracks.
       if (tracksOut.isEmpty) {
@@ -623,8 +739,7 @@ class GpxStorageService {
   }
 
   /// Haversine distance in meters between two (lat, lon) pairs in degrees.
-  static double _haversine(
-      double lat1, double lon1, double lat2, double lon2) {
+  static double _haversine(double lat1, double lon1, double lat2, double lon2) {
     const r = 6371000.0;
     double toRad(double d) => d * 3.141592653589793 / 180.0;
     final dLat = toRad(lat2 - lat1);

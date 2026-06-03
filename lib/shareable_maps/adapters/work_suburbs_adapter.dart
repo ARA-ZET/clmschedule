@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../models/custom_polygon.dart';
@@ -9,9 +10,13 @@ import 'map_data_adapter.dart';
 
 /// Adapter that bridges the ShareableMapEditor to the suburb polygon dataset.
 ///
-/// **Load**: Reads the canonical `workSuburbs/main.suburbs` array.
-/// **Save**: Overwrites that array so edited, added and deleted polygons are
-/// all persisted in Firestore.
+/// **Load**: Downloads the KML from Firebase Storage (with in-memory session
+/// cache and bundled-asset fallback), parses it, then merges any user
+/// overrides from `workSuburbs/overrides`.
+///
+/// **Save**: Persists only the user-editable fields (letterBoxEstimate,
+/// description) to `workSuburbs/overrides`. Polygon coordinates are never
+/// written back — they live exclusively in the KML.
 class WorkSuburbsAdapter extends MapDataAdapter {
   final SuburbDataService _suburbService;
 
@@ -45,7 +50,7 @@ class WorkSuburbsAdapter extends MapDataAdapter {
       name: 'Work Suburbs',
       description: 'Cape Town suburb polygons',
       order: 0,
-      defaultColor: WorkSuburb.defaultColor,
+      defaultColor: Colors.blue,
       polygons: polygons,
       createdAt: now,
       updatedAt: now,
@@ -82,45 +87,39 @@ class WorkSuburbsAdapter extends MapDataAdapter {
   @override
   Future<void> save(ShareableMap map) async {
     final allPolygons = map.layers.expand((l) => l.polygons).toList();
-    final suburbs = allPolygons.asMap().entries.map((entry) {
-      return _polygonToSuburb(entry.value, entry.key);
+
+    // Build a name→suburb lookup from the cached base KML suburbs so we can
+    // resolve the canonical id (SL_OFC_SBRB_KEY) for each polygon.
+    final base = _suburbService.baseSuburbs ?? [];
+    final baseByName = {for (final s in base) s.name: s};
+
+    final suburbs = allPolygons.map((polygon) {
+      final match = baseByName[polygon.name];
+      return WorkSuburb(
+        // Use the original KML id when available; generate a stable id for new
+        // user-drawn polygons so they survive a save/reload cycle.
+        id: match?.id ??
+            'usr_${polygon.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_')}',
+        name: polygon.name,
+        description: polygon.description,
+        polygonPoints:
+            polygon.points, // pass real points so delta can detect edits
+        letterBoxEstimate: polygon.letterBoxEstimate,
+      );
     }).toList();
 
-    await _suburbService.saveSuburbs(suburbs);
+    await _suburbService.saveDelta(suburbs);
   }
 
   // ── Conversion helpers ──────────────────────────────────────────────
 
   static CustomPolygon _suburbToPolygon(WorkSuburb s) {
     return CustomPolygon(
-      id: s.id,
       name: s.name,
       description: s.description,
       points: List<LatLng>.from(s.polygonPoints),
-      color: s.color,
+      color: Colors.blue,
       letterBoxEstimate: s.letterBoxEstimate,
     );
-  }
-
-  static WorkSuburb _polygonToSuburb(CustomPolygon polygon, int index) {
-    return WorkSuburb(
-      id: _polygonId(polygon, index),
-      name: polygon.name,
-      description: polygon.description,
-      polygonPoints: List<LatLng>.from(polygon.points),
-      letterBoxEstimate: polygon.letterBoxEstimate,
-      color: polygon.color,
-    );
-  }
-
-  static String _polygonId(CustomPolygon polygon, int index) {
-    final existing = polygon.id?.trim();
-    if (existing != null && existing.isNotEmpty) return existing;
-
-    final slug = polygon.name
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
-        .replaceAll(RegExp(r'^_+|_+$'), '');
-    return slug.isEmpty ? 'usr_suburb_$index' : 'usr_$slug';
   }
 }

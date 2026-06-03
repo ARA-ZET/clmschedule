@@ -122,6 +122,121 @@ class ShareableMapsFirestoreService {
     }
   }
 
+  /// When a Cloud Storage folder is renamed, update every Firestore document
+  /// that referenced the old path so cloud track / waypoint loading continues
+  /// to work after the rename.
+  ///
+  /// Fields updated on **shareable-map** documents:
+  ///   - `storageFolderPath` (exact-match string)
+  ///   - `cloudFolderPaths` array entry
+  ///   - keys in `cloudTrackColors` and `cloudLayerNames` maps
+  ///
+  /// Fields updated on **job-list-item** documents:
+  ///   - `storageFolderPath` (exact-match string)
+  ///
+  /// Returns how many documents were updated as
+  /// `({int maps, int jobs})`.
+  Future<({int maps, int jobs})> updateFolderPathReference(
+    String oldPath,
+    String newPath,
+  ) async {
+    if (oldPath.isEmpty || newPath.isEmpty || oldPath == newPath) {
+      return (maps: 0, jobs: 0);
+    }
+    int mapCount = 0;
+    int jobCount = 0;
+
+    try {
+      // ── Shareable Maps ──────────────────────────────────────────────────
+      // Two queries: legacy storageFolderPath field + cloudFolderPaths array.
+      final byLegacy = await _firestore
+          .collectionGroup('maps')
+          .where('storageFolderPath', isEqualTo: oldPath)
+          .get();
+      final byArray = await _firestore
+          .collectionGroup('maps')
+          .where('cloudFolderPaths', arrayContains: oldPath)
+          .get();
+
+      // Deduplicate by document reference path.
+      final mapDocs = <String, QueryDocumentSnapshot>{};
+      for (final doc in [...byLegacy.docs, ...byArray.docs]) {
+        mapDocs[doc.reference.path] = doc;
+      }
+
+      if (mapDocs.isNotEmpty) {
+        final batch = _firestore.batch();
+        for (final doc in mapDocs.values) {
+          final data = doc.data() as Map<String, dynamic>;
+          final update = <String, dynamic>{};
+
+          if (data['storageFolderPath'] == oldPath) {
+            update['storageFolderPath'] = newPath;
+          }
+
+          // Replace the old entry in cloudFolderPaths.
+          final rawFolders = data['cloudFolderPaths'] as List<dynamic>?;
+          if (rawFolders != null) {
+            final folders = rawFolders.map((e) => e as String).toList();
+            final idx = folders.indexOf(oldPath);
+            if (idx >= 0) {
+              folders[idx] = newPath;
+              update['cloudFolderPaths'] = folders;
+            }
+          }
+
+          // Rename the key in cloudTrackColors.
+          final rawColors = data['cloudTrackColors'] as Map<String, dynamic>?;
+          if (rawColors != null && rawColors.containsKey(oldPath)) {
+            final updated = Map<String, dynamic>.from(rawColors);
+            updated[newPath] = updated.remove(oldPath);
+            update['cloudTrackColors'] = updated;
+          }
+
+          // Rename the key in cloudLayerNames.
+          final rawNames = data['cloudLayerNames'] as Map<String, dynamic>?;
+          if (rawNames != null && rawNames.containsKey(oldPath)) {
+            final updated = Map<String, dynamic>.from(rawNames);
+            updated[newPath] = updated.remove(oldPath);
+            update['cloudLayerNames'] = updated;
+          }
+
+          if (update.isNotEmpty) {
+            batch.update(doc.reference, update);
+          }
+        }
+        await batch.commit();
+        mapCount = mapDocs.length;
+        debugPrint(
+            '[ShareableMapsFirestore] updateFolderPathReference: updated '
+            '$mapCount map doc(s) "$oldPath" → "$newPath"');
+      }
+
+      // ── Job List Items ──────────────────────────────────────────────────
+      final jobSnapshot = await _firestore
+          .collectionGroup('items')
+          .where('storageFolderPath', isEqualTo: oldPath)
+          .get();
+
+      if (jobSnapshot.docs.isNotEmpty) {
+        final batch = _firestore.batch();
+        for (final doc in jobSnapshot.docs) {
+          batch.update(doc.reference, {'storageFolderPath': newPath});
+        }
+        await batch.commit();
+        jobCount = jobSnapshot.docs.length;
+        debugPrint(
+            '[ShareableMapsFirestore] updateFolderPathReference: updated '
+            '$jobCount job item(s) "$oldPath" → "$newPath"');
+      }
+    } catch (e) {
+      debugPrint(
+          '[ShareableMapsFirestore] updateFolderPathReference failed: $e');
+    }
+
+    return (maps: mapCount, jobs: jobCount);
+  }
+
   /// Delete a map document.
   Future<void> deleteMap(String monthKey, String docId) async {
     await _mapsCollection(monthKey).doc(docId).delete();
@@ -132,7 +247,8 @@ class ShareableMapsFirestoreService {
   Future<ShareableMap?> getMap(String monthKey, String docId) async {
     final doc = await _mapsCollection(monthKey).doc(docId).get();
     if (!doc.exists) return null;
-    return ShareableMap.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
+    return ShareableMap.fromMap(
+        doc.id, Map<String, dynamic>.from(doc.data() as Map));
   }
 
   /// Stream a single map document for real-time updates.
@@ -142,7 +258,8 @@ class ShareableMapsFirestoreService {
   Stream<ShareableMap?> streamMap(String monthKey, String docId) {
     return _mapsCollection(monthKey).doc(docId).snapshots().map((doc) {
       if (!doc.exists) return null;
-      return ShareableMap.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
+      return ShareableMap.fromMap(
+          doc.id, Map<String, dynamic>.from(doc.data() as Map));
     });
   }
 
@@ -226,7 +343,8 @@ class ShareableMapsFirestoreService {
 
   List<ShareableMap> _snapshotToList(QuerySnapshot snapshot) {
     return snapshot.docs.map((doc) {
-      return ShareableMap.fromMap(doc.id, Map<String, dynamic>.from(doc.data() as Map));
+      return ShareableMap.fromMap(
+          doc.id, Map<String, dynamic>.from(doc.data() as Map));
     }).toList();
   }
 

@@ -644,6 +644,36 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                                 value.isEmpty) {
                                               return 'Client is required';
                                             }
+                                            final trimmed =
+                                                value.trim().toLowerCase();
+                                            final editingOwn = widget
+                                                    .jobToEdit?.client
+                                                    .trim()
+                                                    .toLowerCase() ==
+                                                trimmed;
+                                            if (!editingOwn) {
+                                              final jlp =
+                                                  ref.read(jobListRiverpod);
+                                              final jobDate = _selectedDate ??
+                                                  DateTime.now();
+                                              final sameMonth =
+                                                  jlp.currentMonth.year ==
+                                                          jobDate.year &&
+                                                      jlp.currentMonth.month ==
+                                                          jobDate.month;
+                                              if (sameMonth) {
+                                                final exists = jlp
+                                                    .allJobListItems
+                                                    .any((item) =>
+                                                        item.client
+                                                            .trim()
+                                                            .toLowerCase() ==
+                                                        trimmed);
+                                                if (exists) {
+                                                  return 'Client already exists this month — use a different name';
+                                                }
+                                              }
+                                            }
                                             return null;
                                           },
                                         ),
@@ -701,6 +731,37 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                               if (value == null ||
                                                   value.isEmpty) {
                                                 return 'Client is required';
+                                              }
+                                              final trimmed =
+                                                  value.trim().toLowerCase();
+                                              final editingOwn = widget
+                                                      .jobToEdit?.client
+                                                      .trim()
+                                                      .toLowerCase() ==
+                                                  trimmed;
+                                              if (!editingOwn) {
+                                                final jlp =
+                                                    ref.read(jobListRiverpod);
+                                                final jobDate = _selectedDate ??
+                                                    DateTime.now();
+                                                final sameMonth = jlp
+                                                            .currentMonth
+                                                            .year ==
+                                                        jobDate.year &&
+                                                    jlp.currentMonth.month ==
+                                                        jobDate.month;
+                                                if (sameMonth) {
+                                                  final exists = jlp
+                                                      .allJobListItems
+                                                      .any((item) =>
+                                                          item.client
+                                                              .trim()
+                                                              .toLowerCase() ==
+                                                          trimmed);
+                                                  if (exists) {
+                                                    return 'Client already exists this month — use a different name';
+                                                  }
+                                                }
                                               }
                                               return null;
                                             },
@@ -1033,8 +1094,8 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                                                     decoration:
                                                                         BoxDecoration(
                                                                       color: isOccupied
-                                                                          ? conflictColor
-                                                                              .withValues(alpha: 0.1)
+                                                                          ? conflictColor.withValues(
+                                                                              alpha: 0.1)
                                                                           : null,
                                                                       borderRadius:
                                                                           BorderRadius.circular(
@@ -1607,6 +1668,34 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     );
   }
 
+  /// Checks whether [clientName] already exists in the job list for the
+  /// month of [_selectedDate].
+  ///
+  /// • Loaded month  → in-memory set, 0 extra reads.
+  /// • Different month → single Firestore fetch (cached for the session).
+  ///
+  /// Returns an error message to show the user, or null if the name is free.
+  Future<String?> _checkDuplicateClient() async {
+    // Skip check when editing and the client name hasn't changed.
+    final clientName = _clientController.text.trim();
+    final editingOwn = widget.jobToEdit?.client.trim().toLowerCase() ==
+        clientName.toLowerCase();
+    if (editingOwn) return null;
+
+    final jobDate = _selectedDate ?? DateTime.now();
+    try {
+      final existingClients =
+          await ref.read(jobListRiverpod).fetchClientNamesForMonth(jobDate);
+      if (existingClients.contains(clientName.toLowerCase())) {
+        return 'Client "$clientName" already exists for that month — use a different name.';
+      }
+    } catch (e) {
+      // Non-fatal: if the check fails (e.g. offline), let the save proceed.
+      debugPrint('⚠️ Duplicate client check failed: $e');
+    }
+    return null;
+  }
+
   void _saveJob() async {
     debugPrint('\n💾 AddEditJobDialog._saveJob: Started');
     debugPrint('   Job Type: $_selectedJobType');
@@ -1615,6 +1704,17 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         '   Tools Needed: ${_toolsNeeded != null ? "Yes (${_toolsNeeded!.totalCount} tools)" : "No"}');
 
     if (_formKey.currentState!.validate()) {
+      // Async duplicate check — covers months not currently loaded in memory.
+      final dupError = await _checkDuplicateClient();
+      if (dupError != null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(dupError), backgroundColor: Colors.red),
+          );
+        }
+        return;
+      }
+
       setState(() {
         _isProcessing = true;
       });
@@ -1703,6 +1803,17 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     debugPrint('   Job Type: $_selectedJobType');
 
     if (_formKey.currentState!.validate()) {
+      // Async duplicate check — covers months not currently loaded in memory.
+      final dupError = await _checkDuplicateClient();
+      if (dupError != null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(dupError), backgroundColor: Colors.red),
+          );
+        }
+        return;
+      }
+
       setState(() {
         _isProcessing = true;
       });
@@ -1748,6 +1859,17 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
 
   void _saveJobWithAutomaticAllocation() async {
     if (_formKey.currentState!.validate()) {
+      // Async duplicate check — covers months not currently loaded in memory.
+      final dupError = await _checkDuplicateClient();
+      if (dupError != null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(dupError), backgroundColor: Colors.red),
+          );
+        }
+        return;
+      }
+
       setState(() {
         _isProcessing = true;
       });

@@ -42,8 +42,10 @@ class _DriverSectionWidgetState
 
   String _leaveTime(DepotConfig depot) {
     try {
-      final leave = widget.section.tasks.firstWhere(
-          (t) => t.type == DropsheetTaskType.leave && t.startTime.isNotEmpty);
+      final leave = widget.section.tasks.firstWhere((t) =>
+          t.type == DropsheetTaskType.leave &&
+          t.typeData['isPickupDivider'] != true &&
+          t.startTime.isNotEmpty);
       return leave.startTime;
     } catch (_) {
       return depot.startTime;
@@ -121,7 +123,6 @@ class _DriverSectionWidgetState
             '${(route.totalDistanceMeters / 1000).toStringAsFixed(1)} km · '
             '${(route.totalDurationSeconds / 60).round()} min'
             '${route.skippedTaskIds.isEmpty ? '' : ' (${route.skippedTaskIds.length} skipped — missing coords)'}',
-
           ),
         ),
       );
@@ -165,9 +166,15 @@ class _DriverSectionWidgetState
         updated.startTime.isNotEmpty &&
         updated.startTime != task.startTime) {
       final config = ref.read(dropsheetTaskConfigRiverpod);
+      // When the separator's departure time changes, we still replay from
+      // the morning leave time — the new separator time is already saved in
+      // Firestore and will be picked up by recalculateETAsFromLegs.
+      final replayStartTime = updated.typeData['isPickupDivider'] == true
+          ? _leaveTime(config.depot)
+          : updated.startTime;
       await ref.read(dropsheetRiverpod).recalculateETAsFromLegs(
             widget.section.id,
-            updated.startTime,
+            replayStartTime,
             config.serviceMinutesFor,
           );
     }
@@ -271,8 +278,8 @@ class _DriverSectionWidgetState
                       onEdit: () => _editTask(context, task),
                       onDelete: _isLeadingTask(task)
                           ? null
-                          : () => dropsheet.removeTask(
-                              widget.section.id, task.id),
+                          : () =>
+                              dropsheet.removeTask(widget.section.id, task.id),
                       onMoveToSection: !hasOtherSections
                           ? null
                           : (targetSectionId) async {
@@ -532,53 +539,84 @@ class _Footer extends riverpod.ConsumerWidget {
 
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final dropsheet = ref.watch(dropsheetRiverpod);
+    final currentSection =
+        dropsheet.day.sections.where((s) => s.id == section.id).firstOrNull;
+    final hasSeparator = currentSection?.tasks.any((t) =>
+            t.type == DropsheetTaskType.leave &&
+            t.typeData['isPickupDivider'] == true) ??
+        false;
+    final isUnassigned = section.driverName.isEmpty;
+
     return Padding(
       padding: const EdgeInsets.all(8),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: TextButton.icon(
-          onPressed: () async {
-            // Step 1: pick the type.
-            final selection = await showDialog<TaskTypeSelection>(
-              context: context,
-              builder: (_) => const DropsheetTaskTypePicker(),
-            );
-            if (selection == null) return;
-            if (!context.mounted) return;
-            final dropsheet = ref.read(dropsheetRiverpod);
-            // Build the initial task based on whether it's a dynamic type.
-            final DropsheetTask initialTask;
-            if (selection.isDynamic) {
-              final def = selection.dynamicType!;
-              initialTask = DropsheetTask(
-                id: 't_${DateTime.now().microsecondsSinceEpoch}',
-                type: DropsheetTaskType.custom,
-                job: def.label,
-                typeData: {'dynamicTypeId': def.id},
+      child: Row(
+        children: [
+          TextButton.icon(
+            onPressed: () async {
+              // Step 1: pick the type.
+              final selection = await showDialog<TaskTypeSelection>(
+                context: context,
+                builder: (_) => const DropsheetTaskTypePicker(),
               );
-            } else {
-              final t = selection.type;
-              initialTask = DropsheetTask(
-                id: 't_${DateTime.now().microsecondsSinceEpoch}',
-                type: t,
-                job: t.displayName,
+              if (selection == null) return;
+              if (!context.mounted) return;
+              final ds = ref.read(dropsheetRiverpod);
+              // Build the initial task based on whether it's a dynamic type.
+              final DropsheetTask initialTask;
+              if (selection.isDynamic) {
+                final def = selection.dynamicType!;
+                initialTask = DropsheetTask(
+                  id: 't_${DateTime.now().microsecondsSinceEpoch}',
+                  type: DropsheetTaskType.custom,
+                  job: def.label,
+                  typeData: {'dynamicTypeId': def.id},
+                );
+              } else {
+                final t = selection.type;
+                initialTask = DropsheetTask(
+                  id: 't_${DateTime.now().microsecondsSinceEpoch}',
+                  type: t,
+                  job: t.displayName,
+                );
+              }
+              // Step 2: open the type-aware editor.
+              final newTask = await showDialog<DropsheetTask>(
+                context: context,
+                builder: (_) => DropsheetTaskEditorDialog(
+                  initial: initialTask,
+                  sheetDate: ds.date,
+                ),
               );
-            }
-            // Step 2: open the type-aware editor.
-            final newTask = await showDialog<DropsheetTask>(
-              context: context,
-              builder: (_) => DropsheetTaskEditorDialog(
-                initial: initialTask,
-                sheetDate: dropsheet.date,
+              if (newTask != null) {
+                await ds.addTask(section.id, task: newTask);
+              }
+            },
+            icon: const Icon(Icons.add),
+            label: const Text('Add task'),
+          ),
+          if (!hasSeparator && !isUnassigned)
+            TextButton.icon(
+              onPressed: () async {
+                final separator = DropsheetTask(
+                  id: 't_sep_${DateTime.now().microsecondsSinceEpoch}',
+                  type: DropsheetTaskType.leave,
+                  job: 'Leave',
+                  startTime: '17:30',
+                  isMandatory: false,
+                  typeData: const {'isPickupDivider': true},
+                );
+                await ref
+                    .read(dropsheetRiverpod)
+                    .addTask(section.id, task: separator);
+              },
+              icon: const Icon(Icons.south, size: 18),
+              label: const Text('Add separator'),
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.blue.shade700,
               ),
-            );
-            if (newTask != null) {
-              await dropsheet.addTask(section.id, task: newTask);
-            }
-          },
-          icon: const Icon(Icons.add),
-          label: const Text('Add task'),
-        ),
+            ),
+        ],
       ),
     );
   }

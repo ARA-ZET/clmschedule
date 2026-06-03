@@ -154,30 +154,68 @@ class DropsheetRoutePlanner {
     required DateTime baseDate,
     String? startTime,
   }) async {
-    final stops = <RouteStop>[];
+    // Locate the pickup-separator divider — if present, tasks after it form
+    // the "afternoon leg" routed sequentially from the depot.
+    final separatorTask = section.tasks
+        .where((t) =>
+            t.type == DropsheetTaskType.leave &&
+            t.typeData['isPickupDivider'] == true)
+        .firstOrNull;
+    final separatorIdx =
+        separatorTask == null ? -1 : section.tasks.indexOf(separatorTask);
+    final hasSeparator = separatorIdx != -1;
+
+    final morningStops = <RouteStop>[];
+    final afternoonStops = <RouteStop>[];
+    // All non-mandatory task IDs after the separator (including no-geo) kept
+    // in original section order so their positions are preserved in taskOrder.
+    final afternoonAllTaskIds = <String>[];
     final skipped = <String>[];
     // Accumulate service minutes for unrouted tasks (no coordinates) so the
     // total route duration and ETA remain realistic.
     var unroutedServiceMinutes = 0;
 
-    for (final task in section.tasks) {
-      // The 3 mandatory tasks happen at the depot before leaving — they
+    for (var i = 0; i < section.tasks.length; i++) {
+      final task = section.tasks[i];
+      // The mandatory tasks happen at the depot before leaving — they
       // do not count as routing stops.
       if (task.isMandatory) continue;
+      if (task.typeData['isPickupDivider'] == true) continue;
+
+      final isAfternoon = hasSeparator && i > separatorIdx;
+
+      if (isAfternoon && !afternoonAllTaskIds.contains(task.id)) {
+        afternoonAllTaskIds.add(task.id);
+      }
+
       final taskStops = _stopsForTask(task);
       if (taskStops.isEmpty) {
-        unroutedServiceMinutes += _config.serviceMinutesFor(task);
-        skipped.add(task.id);
+        if (!isAfternoon) {
+          unroutedServiceMinutes += _config.serviceMinutesFor(task);
+          skipped.add(task.id);
+        }
+        // Afternoon no-geo tasks: kept in taskOrder via afternoonAllTaskIds.
         continue;
       }
-      stops.addAll(taskStops);
+
+      if (isAfternoon) {
+        afternoonStops.addAll(taskStops);
+      } else {
+        morningStops.addAll(taskStops);
+      }
     }
 
-    debugPrint(
-        '[DropsheetRoute] section=${section.id} stops=${stops.length} '
+    // Use morning stops for the greedy NN; when no separator exists fall back
+    // to all stops (existing behaviour).
+    final stops = hasSeparator
+        ? morningStops
+        : <RouteStop>[...morningStops, ...afternoonStops];
+
+    debugPrint('[DropsheetRoute] section=${section.id} stops=${stops.length} '
+        'afternoonStops=${afternoonStops.length} '
         'skipped=${skipped.length} unroutedMin=$unroutedServiceMinutes');
 
-    if (stops.isEmpty) return null;
+    if (stops.isEmpty && afternoonStops.isEmpty) return null;
     if (depot.lat == null || depot.lng == null) {
       debugPrint('[DropsheetRoute] depot not geocoded — aborting');
       return null;
@@ -187,7 +225,9 @@ class DropsheetRoutePlanner {
     // server, which already has access to the shared org-wide
     // routeCache. Falls back to the local path on any failure so the
     // user is never left without a result.
-    if (useCloud) {
+    // Cloud path is bypassed when a separator is present (two-leg routing
+    // is handled locally).
+    if (useCloud && !hasSeparator) {
       final cloudResult = await _runOnCloud(
         section: section,
         depot: depot,
@@ -226,6 +266,7 @@ class DropsheetRoutePlanner {
     final ordered = <RouteStop>[];
     final legs = <RouteLeg>[];
     final arrivalTimes = <String, String>{};
+    final legBeforeStopMap = <String, RouteLeg>{};
 
     String? currentId; // null at depot
     double currentLat = depot.lat!;
@@ -235,7 +276,9 @@ class DropsheetRoutePlanner {
       // Determine whether any non-pickUp stops are still unvisited.
       // Pick-up stops are deferred until all drops and other tasks are
       // done — the car visits them on the way back to the office.
-      final hasNonPickUp =
+      // This constraint is skipped when a separator is present because
+      // pick-ups are handled in the afternoon leg instead.
+      final hasNonPickUp = !hasSeparator &&
           remaining.any((s) => s.taskType != DropsheetTaskType.pickUp);
 
       // Filter to stops whose dependency (if any) has been satisfied,
@@ -314,6 +357,7 @@ class DropsheetRoutePlanner {
 
       ordered.add(best);
       legs.add(bestLeg);
+      legBeforeStopMap[best.stopKey] = bestLeg;
       // Advance the clock by this leg's travel + service time.
       clock = clock.add(Duration(seconds: bestLeg.durationSeconds));
       arrivalTimes[best.stopKey] = _fmtHHmm(clock);
@@ -338,7 +382,7 @@ class DropsheetRoutePlanner {
           '[DropsheetRoute] applied ${unroutedServiceMinutes}min unrouted overhead');
     }
 
-    // Return leg: last stop → depot so the total is a full round trip.
+    // Return leg: last morning stop → depot so the arrive task ETA is set.
     if (ordered.isNotEmpty) {
       final lastAddr =
           _addressFor(id: currentId!, lat: currentLat, lng: currentLng);
@@ -348,24 +392,93 @@ class DropsheetRoutePlanner {
         departureTime: clock,
       );
       if (returnSeg != null) {
-        legs.add(RouteLeg(
+        final returnLeg = RouteLeg(
           fromStopKey: currentId,
           toStopKey: '__depot',
           distanceMeters: returnSeg.distanceMeters,
           durationSeconds: returnSeg.durationInTrafficSeconds,
           polyline: returnSeg.polylinePoints,
-        ));
+        );
+        legs.add(returnLeg);
+        legBeforeStopMap['__depot'] = returnLeg;
         clock =
             clock.add(Duration(seconds: returnSeg.durationInTrafficSeconds));
         arrivalTimes['__depot'] = _fmtHHmm(clock);
       }
     }
 
-    // Deduplicate task order (furniture-move contributes 2 stops).
+    // ── Afternoon sequential leg ──────────────────────────────────────────
+    // When a pickup separator exists, process afternoon tasks in their
+    // original section order, starting at the depot at the separator's
+    // departure time. Tasks without geolocation are kept in taskOrder but
+    // receive no ETA update.
+    if (hasSeparator && afternoonStops.isNotEmpty) {
+      final sepTimeStr = separatorTask!.startTime.isNotEmpty
+          ? separatorTask.startTime
+          : '17:30';
+      final sepStart = _parseStartTime(sepTimeStr);
+      var afClock = DateTime(
+        baseDate.year,
+        baseDate.month,
+        baseDate.day,
+        sepStart.hour,
+        sepStart.minute,
+      );
+      var afLat = depot.lat!;
+      var afLng = depot.lng!;
+      String? afCurrentId; // null = at depot
+
+      for (final stop in afternoonStops) {
+        final fromAddr = afCurrentId == null
+            ? depotAddr
+            : _addressFor(id: afCurrentId, lat: afLat, lng: afLng);
+        final toAddr =
+            _addressFor(id: stop.stopKey, lat: stop.lat, lng: stop.lng);
+        final seg = await _matrix.getRouteSegment(
+          fromAddr,
+          toAddr,
+          departureTime: afClock,
+        );
+        if (seg == null) {
+          debugPrint(
+              '[DropsheetRoute] afternoon: no segment ${fromAddr.id} -> ${stop.stopKey}');
+          continue;
+        }
+        final afLeg = RouteLeg(
+          fromStopKey: afCurrentId,
+          toStopKey: stop.stopKey,
+          distanceMeters: seg.distanceMeters,
+          durationSeconds: seg.durationInTrafficSeconds,
+          polyline: seg.polylinePoints,
+        );
+        legs.add(afLeg);
+        legBeforeStopMap[stop.stopKey] = afLeg;
+        afClock = afClock.add(Duration(seconds: seg.durationInTrafficSeconds));
+        arrivalTimes[stop.stopKey] = _fmtHHmm(afClock);
+        afClock = afClock.add(Duration(minutes: stop.serviceMinutes));
+        afCurrentId = stop.stopKey;
+        afLat = stop.lat;
+        afLng = stop.lng;
+      }
+
+      debugPrint(
+          '[DropsheetRoute] afternoon leg: ${afternoonStops.length} stops');
+    }
+
+    // Deduplicate morning task order (furniture-move contributes 2 stops).
     final taskOrder = <String>[];
     for (final s in ordered) {
       if (taskOrder.isEmpty || taskOrder.last != s.taskId) {
         taskOrder.add(s.taskId);
+      }
+    }
+
+    // Append separator and ALL afternoon task IDs in original section order
+    // (including no-geo tasks so their positions are preserved).
+    if (hasSeparator && separatorTask != null) {
+      taskOrder.add(separatorTask.id);
+      for (final id in afternoonAllTaskIds) {
+        if (!taskOrder.contains(id)) taskOrder.add(id);
       }
     }
 
@@ -379,10 +492,6 @@ class DropsheetRoutePlanner {
         fullPolyline.addAll(leg.polyline.skip(1));
       }
     }
-
-    final legBeforeStop = <String, RouteLeg>{
-      for (var i = 0; i < ordered.length; i++) ordered[i].stopKey: legs[i],
-    };
 
     final totalDistance =
         legs.fold<double>(0, (sum, l) => sum + l.distanceMeters);
@@ -398,7 +507,7 @@ class DropsheetRoutePlanner {
       sectionId: section.id,
       taskOrder: taskOrder,
       arrivalTimes: arrivalTimes,
-      legBeforeStop: legBeforeStop,
+      legBeforeStop: legBeforeStopMap,
       fullPolyline: fullPolyline,
       totalDistanceMeters: totalDistance,
       totalDurationSeconds: totalDuration,
@@ -602,6 +711,13 @@ class DropsheetRoutePlanner {
   /// reordering. Equivalent to [optimizeSection] but the stop sequence is
   /// taken as-is from [section.tasks].
   ///
+  /// When a pickup-separator is present the tasks are processed in two legs:
+  ///   • **Morning leg** — tasks before the separator, starting at [startTime].
+  ///   • **Afternoon leg** — tasks after the separator, starting at the
+  ///     separator's departure time (default 17:30) with position reset to
+  ///     the depot.  Afternoon tasks without coordinates are kept in
+  ///     [taskOrder] so their position relative to the separator is preserved.
+  ///
   /// [startTime] overrides the depot's configured start time — pass the
   /// Leave-task's `startTime` value so realistic traffic-aware ETAs are
   /// computed for the actual departure time rather than the stored default.
@@ -616,19 +732,43 @@ class DropsheetRoutePlanner {
       return null;
     }
 
+    // ── Locate pickup separator ─────────────────────────────────────────────
+    final separatorTask = section.tasks
+        .where((t) =>
+            t.type == DropsheetTaskType.leave &&
+            t.typeData['isPickupDivider'] == true)
+        .firstOrNull;
+    final separatorIdx =
+        separatorTask == null ? -1 : section.tasks.indexOf(separatorTask);
+    final hasSeparator = separatorIdx != -1;
+
     // Collect per-task routing data up-front (all synchronous).
-    final taskData = <({DropsheetTask task, List<RouteStop> stops})>[];
-    for (final task in section.tasks) {
+    // Tag each datum as morning or afternoon so we can split the legs.
+    final taskData =
+        <({DropsheetTask task, List<RouteStop> stops, bool isAfternoon})>[];
+    for (var i = 0; i < section.tasks.length; i++) {
+      final task = section.tasks[i];
       if (task.isMandatory) continue;
-      taskData.add((task: task, stops: _stopsForTask(task)));
+      if (task.typeData['isPickupDivider'] == true) continue;
+      taskData.add((
+        task: task,
+        stops: _stopsForTask(task),
+        isAfternoon: hasSeparator && i > separatorIdx,
+      ));
     }
 
-    final routableCount = taskData.fold(0, (s, d) => s + d.stops.length);
+    final morningData = taskData.where((d) => !d.isAfternoon).toList();
+    final afternoonData = taskData.where((d) => d.isAfternoon).toList();
+
+    final morningRoutable = morningData.fold(0, (s, d) => s + d.stops.length);
+    final afternoonRoutable =
+        afternoonData.fold(0, (s, d) => s + d.stops.length);
     final unroutedCount = taskData.where((d) => d.stops.isEmpty).length;
-    debugPrint(
-        '[DropsheetRoute] section=${section.id} routable=$routableCount '
+    debugPrint('[DropsheetRoute] section=${section.id} '
+        'morningRoutable=$morningRoutable '
+        'afternoonRoutable=$afternoonRoutable '
         'unrouted=$unroutedCount');
-    if (routableCount == 0) return null;
+    if (morningRoutable == 0 && afternoonRoutable == 0) return null;
 
     final depotAddr =
         _addressFor(id: '__depot', lat: depot.lat!, lng: depot.lng!);
@@ -638,37 +778,36 @@ class DropsheetRoutePlanner {
     var clock = DateTime(
         baseDate.year, baseDate.month, baseDate.day, start.hour, start.minute);
 
-    final ordered = <RouteStop>[];
-    final legs = <RouteLeg>[];
+    // Shared accumulators across both legs.
+    final allOrdered = <RouteStop>[];
+    final allLegs = <RouteLeg>[];
+    final legBeforeStopMap = <String, RouteLeg>{};
     final arrivalTimes = <String, String>{};
     final skipped = <String>[];
+    final taskOrder = <String>[];
 
     String? currentId;
     double currentLat = depot.lat!;
     double currentLng = depot.lng!;
 
-    for (final d in taskData) {
+    // ── Morning leg ─────────────────────────────────────────────────────────
+    for (final d in morningData) {
       if (d.stops.isEmpty) {
-        // Task has no routing stop (no coordinates). Still advance the clock
-        // by its configured service time so downstream ETAs remain realistic.
         final serviceMin = _config.serviceMinutesFor(d.task);
         if (serviceMin > 0) {
           clock = clock.add(Duration(minutes: serviceMin));
-          debugPrint(
-              '[DropsheetRoute] task=${d.task.id} (${d.task.type.name}) '
+          debugPrint('[DropsheetRoute] task=${d.task.id} (${d.task.type.name}) '
               'no coords — +${serviceMin}min to clock');
         }
         skipped.add(d.task.id);
         continue;
       }
-
       for (final stop in d.stops) {
         final candAddr =
             _addressFor(id: stop.stopKey, lat: stop.lat, lng: stop.lng);
         final fromAddr = currentId == null
             ? depotAddr
             : _addressFor(id: currentId, lat: currentLat, lng: currentLng);
-
         final seg = await _matrix.getRouteSegment(fromAddr, candAddr,
             departureTime: clock);
         if (seg == null) {
@@ -677,7 +816,6 @@ class DropsheetRoutePlanner {
           skipped.add(stop.taskId);
           continue;
         }
-
         final legDuration = seg.durationInTrafficSeconds;
         final leg = RouteLeg(
           fromStopKey: currentId,
@@ -686,51 +824,143 @@ class DropsheetRoutePlanner {
           durationSeconds: legDuration,
           polyline: seg.polylinePoints,
         );
-
-        ordered.add(stop);
-        legs.add(leg);
+        allOrdered.add(stop);
+        allLegs.add(leg);
+        legBeforeStopMap[stop.stopKey] = leg;
         clock = clock.add(Duration(seconds: legDuration));
         arrivalTimes[stop.stopKey] = _fmtHHmm(clock);
         clock = clock.add(Duration(minutes: stop.serviceMinutes));
-
         currentId = stop.stopKey;
         currentLat = stop.lat;
         currentLng = stop.lng;
       }
     }
 
-    // Return leg: last stop → depot so the total is a full round trip.
-    if (ordered.isNotEmpty) {
+    // Build morning task order in original section order, including skipped
+    // tasks (those without geocoded coordinates) so they stay in their
+    // original position rather than being moved to the end of the section.
+    for (final d in morningData) {
+      if (!taskOrder.contains(d.task.id)) {
+        taskOrder.add(d.task.id);
+      }
+    }
+
+    // Return leg after morning so the arrive task gets an ETA even if no
+    // afternoon leg follows.  When there IS an afternoon leg this ETA is
+    // overwritten by the afternoon return below.
+    if (currentId != null) {
       final lastAddr =
-          _addressFor(id: currentId!, lat: currentLat, lng: currentLng);
-      final returnSeg = await _matrix.getRouteSegment(
-        lastAddr,
-        depotAddr,
-        departureTime: clock,
-      );
+          _addressFor(id: currentId, lat: currentLat, lng: currentLng);
+      final returnSeg = await _matrix.getRouteSegment(lastAddr, depotAddr,
+          departureTime: clock);
       if (returnSeg != null) {
-        legs.add(RouteLeg(
+        final returnLeg = RouteLeg(
           fromStopKey: currentId,
           toStopKey: '__depot',
           distanceMeters: returnSeg.distanceMeters,
           durationSeconds: returnSeg.durationInTrafficSeconds,
           polyline: returnSeg.polylinePoints,
-        ));
+        );
+        allLegs.add(returnLeg);
+        legBeforeStopMap['__depot'] = returnLeg;
         clock =
             clock.add(Duration(seconds: returnSeg.durationInTrafficSeconds));
-        arrivalTimes['__depot'] = _fmtHHmm(clock);
+        // Only commit this as the arrive ETA when no afternoon leg follows.
+        if (!hasSeparator || afternoonRoutable == 0) {
+          arrivalTimes['__depot'] = _fmtHHmm(clock);
+        }
       }
     }
 
-    final taskOrder = <String>[];
-    for (final s in ordered) {
-      if (taskOrder.isEmpty || taskOrder.last != s.taskId) {
-        taskOrder.add(s.taskId);
+    // ── Afternoon leg ────────────────────────────────────────────────────────
+    if (hasSeparator) {
+      taskOrder.add(separatorTask!.id);
+
+      if (afternoonData.isNotEmpty) {
+        // Reset clock to separator's departure time; reset position to depot.
+        final sepTimeStr = separatorTask.startTime.isNotEmpty
+            ? separatorTask.startTime
+            : '17:30';
+        final sepStart = _parseStartTime(sepTimeStr);
+        clock = DateTime(baseDate.year, baseDate.month, baseDate.day,
+            sepStart.hour, sepStart.minute);
+        currentId = null;
+        currentLat = depot.lat!;
+        currentLng = depot.lng!;
+
+        final afOrdered = <RouteStop>[];
+
+        for (final d in afternoonData) {
+          if (d.stops.isEmpty) {
+            // No coordinates: preserve position in taskOrder, skip routing.
+            if (!taskOrder.contains(d.task.id)) taskOrder.add(d.task.id);
+            skipped.add(d.task.id);
+            continue;
+          }
+          for (final stop in d.stops) {
+            final candAddr =
+                _addressFor(id: stop.stopKey, lat: stop.lat, lng: stop.lng);
+            final fromAddr = currentId == null
+                ? depotAddr
+                : _addressFor(id: currentId, lat: currentLat, lng: currentLng);
+            final seg = await _matrix.getRouteSegment(fromAddr, candAddr,
+                departureTime: clock);
+            if (seg == null) {
+              debugPrint('[DropsheetRoute] afternoon: no segment '
+                  '${fromAddr.id} -> ${candAddr.id}');
+              skipped.add(stop.taskId);
+              continue;
+            }
+            final legDuration = seg.durationInTrafficSeconds;
+            final leg = RouteLeg(
+              fromStopKey: currentId,
+              toStopKey: stop.stopKey,
+              distanceMeters: seg.distanceMeters,
+              durationSeconds: legDuration,
+              polyline: seg.polylinePoints,
+            );
+            afOrdered.add(stop);
+            allLegs.add(leg);
+            legBeforeStopMap[stop.stopKey] = leg;
+            clock = clock.add(Duration(seconds: legDuration));
+            arrivalTimes[stop.stopKey] = _fmtHHmm(clock);
+            clock = clock.add(Duration(minutes: stop.serviceMinutes));
+            currentId = stop.stopKey;
+            currentLat = stop.lat;
+            currentLng = stop.lng;
+          }
+          if (!taskOrder.contains(d.task.id)) taskOrder.add(d.task.id);
+        }
+
+        // Return leg after afternoon — sets the final arrive task ETA.
+        if (afOrdered.isNotEmpty && currentId != null) {
+          final lastAddr =
+              _addressFor(id: currentId, lat: currentLat, lng: currentLng);
+          final returnSeg = await _matrix.getRouteSegment(lastAddr, depotAddr,
+              departureTime: clock);
+          if (returnSeg != null) {
+            final returnLeg = RouteLeg(
+              fromStopKey: currentId,
+              toStopKey: '__depot',
+              distanceMeters: returnSeg.distanceMeters,
+              durationSeconds: returnSeg.durationInTrafficSeconds,
+              polyline: returnSeg.polylinePoints,
+            );
+            allLegs.add(returnLeg);
+            legBeforeStopMap['__depot'] = returnLeg;
+            clock = clock
+                .add(Duration(seconds: returnSeg.durationInTrafficSeconds));
+            arrivalTimes['__depot'] = _fmtHHmm(clock);
+          }
+        }
+
+        debugPrint(
+            '[DropsheetRoute] afternoon in-place: ${afOrdered.length} stops');
       }
     }
 
     final fullPolyline = <LatLng>[];
-    for (final leg in legs) {
+    for (final leg in allLegs) {
       if (leg.polyline.isEmpty) continue;
       if (fullPolyline.isEmpty) {
         fullPolyline.addAll(leg.polyline);
@@ -739,12 +969,9 @@ class DropsheetRoutePlanner {
       }
     }
 
-    final legBeforeStop = <String, RouteLeg>{
-      for (var i = 0; i < ordered.length; i++) ordered[i].stopKey: legs[i],
-    };
-
-    final totalDistance = legs.fold<double>(0, (s, l) => s + l.distanceMeters);
-    final totalDuration = legs.fold<int>(0, (s, l) => s + l.durationSeconds);
+    final totalDistance =
+        allLegs.fold<double>(0, (s, l) => s + l.distanceMeters);
+    final totalDuration = allLegs.fold<int>(0, (s, l) => s + l.durationSeconds);
 
     debugPrint(
         '[DropsheetRoute] section=${section.id} in-place=${taskOrder.length} '
@@ -755,7 +982,7 @@ class DropsheetRoutePlanner {
       sectionId: section.id,
       taskOrder: taskOrder,
       arrivalTimes: arrivalTimes,
-      legBeforeStop: legBeforeStop,
+      legBeforeStop: legBeforeStopMap,
       fullPolyline: fullPolyline,
       totalDistanceMeters: totalDistance,
       totalDurationSeconds: totalDuration,

@@ -82,6 +82,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     // Make sure the global dropsheet provider is showing the same date
     // as the planner page. setDate is idempotent if already set.
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       // Reset per-session toggles for this navigation.
       ref.read(sectionPickUpViewProvider.notifier).state = {};
       ref.read(markerLabelsProvider.notifier).state = true;
@@ -171,6 +172,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
   }
 
   void _scheduleMarkerRefresh() {
+    if (!mounted) return;
     final dropsheet = ref.read(dropsheetRiverpod);
     final schedule = ref.read(scheduleRiverpod);
     final config = ref.read(dropsheetTaskConfigRiverpod);
@@ -292,6 +294,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
               mapToolbarEnabled: false,
               zoomControlsEnabled: false,
               onTap: (_) => setState(() => _selectedMarker = null),
+              onCameraMove: (_) => _updateInfoWindowPosition(),
               onMapCreated: (controller) {
                 if (!_mapController.isCompleted) {
                   _mapController.complete(controller);
@@ -406,9 +409,17 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
 
   Set<Polyline> _memoPolylines(DropsheetDay day) {
     final sb = StringBuffer();
-    for (final s in day.sections) {
+    // Include the section's color (which is derived from its position in
+    // the sections list). If a task moves between drivers the section
+    // composition can change → the polyline must repaint with the new
+    // colour. Without writing the colour the length-only signature would
+    // miss this case.
+    for (var i = 0; i < day.sections.length; i++) {
+      final s = day.sections[i];
       sb
         ..write(s.id)
+        ..write('#')
+        ..write(i) // position drives colorForSection
         ..write(':')
         ..write(s.routePolyline.length)
         ..write(';');
@@ -510,6 +521,48 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     int seq,
     bool showLabels,
   ) async {
+    // ── Office / depot marker ─────────────────────────────────────────────────
+    // Collected from the first leave task that has geocoded depot coordinates.
+    LatLng? officePos;
+    String officeAddress = '';
+    for (final section in day.sections) {
+      for (final t in section.tasks) {
+        if (t.type == DropsheetTaskType.leave && t.isMandatory) {
+          final lat = t.typeData['lat'] as double?;
+          final lng = t.typeData['lng'] as double?;
+          if (lat != null && lng != null) {
+            officePos = LatLng(lat, lng);
+            officeAddress = t.location;
+          }
+          break;
+        }
+      }
+      if (officePos != null) break;
+    }
+    final driverCount =
+        day.sections.where((s) => s.driverName.isNotEmpty).length;
+    _MarkerSpec? officeSpec;
+    if (officePos != null) {
+      officeSpec = _MarkerSpec(
+        id: 'office_depot',
+        position: officePos,
+        color: const Color(0xFF5F6368),
+        number: 0,
+        primaryLabel: showLabels ? 'Office' : '',
+        secondaryLabel: showLabels
+            ? '$driverCount ${driverCount == 1 ? "driver" : "drivers"}'
+            : '',
+        job: null,
+        task: null,
+        driverName: officeAddress.isNotEmpty ? officeAddress : 'Office',
+        sectionId: '',
+        taskId: '',
+        taskAbsoluteIndex: -1,
+        isOffice: true,
+      );
+    }
+
+    // ── Per-task stop markers ─────────────────────────────────────────────────
     final pending = <_MarkerSpec>[];
     for (final section in day.sections) {
       final color = colorForSection(section.id, day.sections);
@@ -593,7 +646,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
           onDragEnd: (LatLng pos) {
             if (!hasJob) {
               _persistTaskCoords(spec, pos);
-            } else if (spec.task.type == DropsheetTaskType.pickUp) {
+            } else if (spec.task?.type == DropsheetTaskType.pickUp) {
               _persistPickUp(spec.job!, pos);
             } else {
               _persistDropOff(spec.job!, pos);
@@ -601,6 +654,25 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
           },
         ),
       );
+    }
+
+    // ── Office marker (icon-style, non-draggable) ─────────────────────────────
+    if (officeSpec != null) {
+      final os = officeSpec;
+      final officeBitmap = await _markerCache.getIconMarker(
+        color: const Color(0xFF5F6368),
+        iconCodePoint: Icons.business.codePoint,
+        primaryLabel: os.primaryLabel,
+        secondaryLabel: os.secondaryLabel,
+      );
+      markers.add(Marker(
+        markerId: MarkerId(os.id),
+        position: os.position,
+        icon: officeBitmap.icon,
+        anchor: officeBitmap.anchor,
+        draggable: false,
+        onTap: () => _onMarkerTap(os),
+      ));
     }
 
     if (!mounted) return;
@@ -620,6 +692,21 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       _selectedMarker = spec;
       _infoWindowOffset = Offset(sc.x.toDouble(), sc.y.toDouble());
     });
+  }
+
+  /// Recalculate the info window's screen offset whenever the camera
+  /// moves so the card tracks its marker during pan/zoom instead of
+  /// staying glued to the original screen pixel.
+  Future<void> _updateInfoWindowPosition() async {
+    final spec = _selectedMarker;
+    if (spec == null) return;
+    if (!_mapController.isCompleted) return;
+    final ctrl = await _mapController.future;
+    final sc = await ctrl.getScreenCoordinate(spec.position);
+    if (!mounted || _selectedMarker?.id != spec.id) return;
+    final next = Offset(sc.x.toDouble(), sc.y.toDouble());
+    if (_infoWindowOffset == next) return;
+    setState(() => _infoWindowOffset = next);
   }
 
   /// Persists dragged coordinates for a non-distributor task back into its
@@ -839,6 +926,18 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       }
       sb.write(',');
     }
+    // Include depot coords so the office marker rebuilds when the address changes.
+    for (final s in day.sections) {
+      for (final t in s.tasks) {
+        if (t.type == DropsheetTaskType.leave && t.isMandatory) {
+          final lat = t.typeData['lat'];
+          final lng = t.typeData['lng'];
+          if (lat != null) sb.write('|depot:$lat,$lng');
+          break;
+        }
+      }
+      break; // same depot across all sections
+    }
     return sb.toString();
   }
 
@@ -903,12 +1002,13 @@ class _MarkerSpec {
   final String primaryLabel;
   final String secondaryLabel;
   final Job? job;
-  final DropsheetTask task;
+  final DropsheetTask? task;
   final String driverName;
   final String sectionId;
   final String taskId;
   final int taskAbsoluteIndex;
   final bool isPickUp;
+  final bool isOffice;
 
   _MarkerSpec({
     required this.id,
@@ -918,12 +1018,13 @@ class _MarkerSpec {
     required this.primaryLabel,
     this.secondaryLabel = '',
     required this.job,
-    required this.task,
+    this.task,
     required this.driverName,
     required this.sectionId,
     required this.taskId,
     required this.taskAbsoluteIndex,
     this.isPickUp = false,
+    this.isOffice = false,
   });
 }
 
@@ -938,7 +1039,7 @@ class _StopPoint {
 // Custom info-window card — overlaid on the map via Stack + Positioned
 // =============================================================================
 
-class _MarkerInfoCard extends StatelessWidget {
+class _MarkerInfoCard extends riverpod.ConsumerWidget {
   final _MarkerSpec spec;
   final DropsheetDay day;
   final VoidCallback onClose;
@@ -952,10 +1053,37 @@ class _MarkerInfoCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final task = spec.task;
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    // Re-resolve the live task from the dropsheet so edits made elsewhere
+    // (task editor, reorder, time change) reflect in the info window while
+    // it's open. Falls back to the captured snapshot if the live lookup
+    // misses (e.g. task transiently absent during a re-sort).
+    final liveDay = ref.watch(dropsheetRiverpod).day;
+
+    // Office marker has its own dedicated info card.
+    if (spec.isOffice) return _buildOfficeCard(liveDay);
+
+    DropsheetTask? liveTask;
+    String liveSectionId = spec.sectionId;
+    for (final s in liveDay.sections) {
+      for (final t in s.tasks) {
+        if (t.id == spec.taskId) {
+          liveTask = t;
+          liveSectionId = s.id;
+          break;
+        }
+      }
+      if (liveTask != null) break;
+    }
+    // If the task has been deleted from the dropsheet, dismiss the card
+    // on the next frame rather than continuing to render stale content.
+    if (liveTask == null && liveDay.sections.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => onClose());
+    }
+    final task = liveTask ?? spec.task;
+    if (task == null) return const SizedBox.shrink();
     final otherSections =
-        day.sections.where((s) => s.id != spec.sectionId).toList();
+        liveDay.sections.where((s) => s.id != liveSectionId).toList();
 
     return Material(
       elevation: 8,
@@ -1044,7 +1172,7 @@ class _MarkerInfoCard extends StatelessWidget {
                           avatar: CircleAvatar(
                             radius: 6,
                             backgroundColor:
-                                colorForSection(s.id, day.sections),
+                                colorForSection(s.id, liveDay.sections),
                           ),
                           label: Text(
                             s.driverName.isEmpty ? 'Driver' : s.driverName,
@@ -1056,6 +1184,138 @@ class _MarkerInfoCard extends StatelessWidget {
                           onPressed: () => onReassign(s.id),
                         ),
                     ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Info card shown when the office/depot marker is tapped. Displays
+  /// the depot address and each driver's leave time + arrive ETA.
+  Widget _buildOfficeCard(DropsheetDay liveDay) {
+    const officeColor = Color(0xFF5F6368);
+    // address stored in spec.driverName when building the office spec
+    final address = spec.driverName != 'Office' ? spec.driverName : '';
+
+    final drivers = <({String name, String leaveTime, String arriveEta})>[];
+    for (final s in liveDay.sections) {
+      if (s.driverName.isEmpty) continue;
+      String leaveTime = '';
+      String arriveEta = '';
+      for (final t in s.tasks) {
+        if (t.type == DropsheetTaskType.leave && t.isMandatory) {
+          leaveTime = t.startTime;
+        }
+        if (t.type == DropsheetTaskType.arrive && t.isMandatory) {
+          arriveEta = (t.typeData['eta'] as String?) ?? '';
+        }
+      }
+      drivers.add(
+          (name: s.driverName, leaveTime: leaveTime, arriveEta: arriveEta));
+    }
+
+    return Material(
+      elevation: 8,
+      borderRadius: BorderRadius.circular(12),
+      clipBehavior: Clip.hardEdge,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Header
+          Container(
+            color: officeColor,
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+            child: Row(
+              children: [
+                const Icon(Icons.business, color: Colors.white, size: 16),
+                const SizedBox(width: 6),
+                const Expanded(
+                  child: Text(
+                    'Office',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: onClose,
+                  child: const Icon(Icons.close, color: Colors.white, size: 18),
+                ),
+              ],
+            ),
+          ),
+          // Body
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (address.isNotEmpty) ...[
+                  Row(
+                    children: [
+                      const Icon(Icons.location_on_outlined,
+                          size: 14, color: officeColor),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          address,
+                          style: const TextStyle(fontSize: 12),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                if (drivers.isEmpty)
+                  const Text('No drivers assigned',
+                      style: TextStyle(fontSize: 12, color: Colors.grey)),
+                for (final d in drivers) ...[
+                  Row(
+                    children: [
+                      const Icon(Icons.person_outline,
+                          size: 14, color: Colors.grey),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          d.name,
+                          style: const TextStyle(
+                              fontSize: 12, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ],
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 20, top: 2, bottom: 6),
+                    child: Row(
+                      children: [
+                        if (d.leaveTime.isNotEmpty)
+                          Text('Leave ${d.leaveTime}',
+                              style: TextStyle(
+                                  fontSize: 11, color: Colors.grey.shade600)),
+                        if (d.leaveTime.isNotEmpty && d.arriveEta.isNotEmpty)
+                          Text('  →  ',
+                              style: TextStyle(
+                                  fontSize: 11, color: Colors.grey.shade400)),
+                        if (d.arriveEta.isNotEmpty)
+                          Text('Arrive ~${d.arriveEta}',
+                              style: TextStyle(
+                                  fontSize: 11, color: Colors.grey.shade600)),
+                        if (d.leaveTime.isEmpty && d.arriveEta.isEmpty)
+                          Text('No times set',
+                              style: TextStyle(
+                                  fontSize: 11, color: Colors.grey.shade400)),
+                      ],
+                    ),
                   ),
                 ],
               ],

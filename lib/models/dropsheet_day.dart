@@ -69,8 +69,7 @@ class DropsheetDriverSection {
     // Backward compatibility: older sections were created before the
     // trailing "Arrive at office" mandatory task existed. Append it on
     // read so every section always has it pinned at the bottom.
-    final hasArrive =
-        rawTasks.any((t) => t.type == DropsheetTaskType.arrive);
+    final hasArrive = rawTasks.any((t) => t.type == DropsheetTaskType.arrive);
     final id = data['id'] as String;
     final tasks = hasArrive
         ? rawTasks
@@ -200,8 +199,8 @@ class DropsheetDay {
     return DropsheetDay(
       date: date,
       sections: (data['sections'] as List<dynamic>?)
-              ?.map((e) =>
-                  DropsheetDriverSection.fromMap(Map<String, dynamic>.from(e as Map)))
+              ?.map((e) => DropsheetDriverSection.fromMap(
+                  Map<String, dynamic>.from(e as Map)))
               .toList() ??
           const [],
     );

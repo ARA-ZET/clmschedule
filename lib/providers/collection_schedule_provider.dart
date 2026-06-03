@@ -1,22 +1,27 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/collection_job.dart';
 import '../models/job_list_item.dart';
 import '../models/work_area.dart';
 import '../services/firestore_service.dart';
-import 'job_list_provider.dart';
+import '../services/job_list_service.dart';
 import 'job_type_provider.dart';
 
 final collectionScheduleRiverpod =
     riverpod.ChangeNotifierProvider<CollectionScheduleProvider>(
   (ref) => CollectionScheduleProvider(
-    jobListProvider: ref.read(jobListRiverpod),
+    jobListService: ref.read(jobListServiceRiverpod),
   ),
 );
 
 class CollectionScheduleProvider extends ChangeNotifier {
   final FirestoreService _firestoreService;
-  final JobListProvider _jobListProvider;
+  final JobListService _jobListService;
+
+  // Own independent stream — does not share month state with JobListProvider
+  List<JobListItem> _ownJobListItems = [];
+  StreamSubscription<List<JobListItem>>? _ownJobListSubscription;
 
   List<CollectionJob> _collectionJobs = [];
   List<WorkArea> _workAreas = [];
@@ -30,6 +35,10 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   // Fingerprint of last job list data to skip redundant rebuilds
   int _lastJobListFingerprint = 0;
+
+  // True between setCurrentMonth() and the first stream delivery for the new month.
+  // Drives the loading overlay so the user sees a spinner instead of a blank grid.
+  bool _isMonthChanging = false;
 
   // Cache for time slot occupation checks to avoid expensive filtering during UI renders
   // Key: "vehicleType_yyyy-MM-dd_timeSlot", Value: List of jobs occupying that slot
@@ -52,44 +61,64 @@ class CollectionScheduleProvider extends ChangeNotifier {
   String get currentMonthDisplay =>
       _firestoreService.getMonthlyDocumentId(_currentMonth);
   bool get isInitialized => _isInitialized;
-  bool get isLoading => _isLoading;
+  bool get isLoading => _isLoading || _isMonthChanging;
 
   CollectionScheduleProvider({
     FirestoreService? firestoreService,
-    required JobListProvider jobListProvider,
+    required JobListService jobListService,
   })  : _firestoreService = firestoreService ?? FirestoreService(),
-        _jobListProvider = jobListProvider {
-    // Listen to JobListProvider changes so collection schedule auto-updates
-    // when jobs are added, edited, or deleted in the job list.
-    _jobListProvider.addListener(_onJobListChanged);
-  }
+        _jobListService = jobListService;
 
-  /// Called when JobListProvider data changes. Only rebuilds if
-  /// collection-relevant items actually changed (checks fingerprint).
-  void _onJobListChanged() {
-    if (!_isInitialized) return;
-
-    // Compute fingerprint of collection-relevant items to skip no-op rebuilds
-    final items = _jobListProvider.allJobListItems;
+  /// Called whenever the own Firestore stream delivers new job list data.
+  /// Applies a fingerprint check to skip rebuilds when nothing relevant changed.
+  void _onOwnStreamData(List<JobListItem> items) {
+    // Always clear the month-change loading flag on the first delivery for a
+    // new month, even if the fingerprint matches (e.g. empty month).
+    final wasMonthChanging = _isMonthChanging;
+    _isMonthChanging = false;
     final jobTypeProvider = JobTypeProvider.instance;
     int fp = items.length;
     for (final item in items) {
       if (jobTypeProvider?.appearsOnCollectionSchedule(item.jobTypeId) ??
           false) {
-        fp = fp * 31 + item.id.hashCode ^
-            item.date.millisecondsSinceEpoch ^
-            item.quantity ^
-            item.quantityDistributed ^
-            item.jobStatusId.hashCode;
+        fp = fp * 31 +
+            item.id.hashCode +
+            item.date.millisecondsSinceEpoch +
+            item.collectionDate.millisecondsSinceEpoch +
+            item.quantity +
+            item.quantityDistributed +
+            item.manDays.hashCode +
+            item.jobStatusId.hashCode +
+            item.vehicleTrailerCombo.hashCode +
+            item.collectionAddress.hashCode +
+            item.area.hashCode +
+            item.client.hashCode +
+            item.specialInstructions.hashCode;
       }
     }
-    if (fp == _lastJobListFingerprint) return; // Nothing relevant changed
+    if (fp == _lastJobListFingerprint) {
+      if (wasMonthChanging) notifyListeners(); // dismiss the loading overlay
+      return;
+    }
     _lastJobListFingerprint = fp;
 
+    _ownJobListItems = items;
     _buildCollectionJobs();
     _rebuildTimeSlotCache();
     _invalidateMonthCache();
     notifyListeners();
+  }
+
+  /// Cancel any existing subscription and open a new stream for [_currentMonth].
+  /// This is independent of JobListProvider — navigating months here does not
+  /// affect the Job List tab and vice versa.
+  Future<void> _setupOwnStream() async {
+    await _ownJobListSubscription?.cancel();
+    _ownJobListSubscription = _jobListService
+        .getJobListItems(_currentMonth)
+        .listen(_onOwnStreamData, onError: (e) {
+      debugPrint('CollectionScheduleProvider: Stream error: $e');
+    });
   }
 
   void _invalidateMonthCache() {
@@ -105,32 +134,38 @@ class CollectionScheduleProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _loadDataForMonth(_currentMonth);
+      // Mark initialized before any awaits so _onOwnStreamData() is never
+      // dropped while work areas are loading.
       _isInitialized = true;
+
+      // Open own Firestore stream for the current month.
+      await _setupOwnStream();
+
+      notifyListeners(); // surface whatever the cache delivers immediately
+
+      await _loadWorkAreas();
+
+      // Rebuild after work areas arrive (they can affect display).
+      _buildCollectionJobs();
+      _rebuildTimeSlotCache();
+      _invalidateMonthCache();
     } finally {
       _isLoading = false;
       notifyListeners();
     }
   }
 
-  // Load data for a specific month
-  Future<void> _loadDataForMonth(DateTime month) async {
-    // Filter and convert job list items to collection jobs
+  // Rebuild collection data after a month change (the stream is already restarted)
+  void _loadDataForMonth() {
     _buildCollectionJobs();
-
-    // Load work areas (one-time fetch)
-    await _loadWorkAreas();
-
-    // Pre-compute time slot cache
     _rebuildTimeSlotCache();
     _invalidateMonthCache();
-
     notifyListeners();
   }
 
-  // Build collection jobs from job list provider
+  // Build collection jobs from the own stream data
   void _buildCollectionJobs() {
-    final jobListItems = _jobListProvider.allJobListItems;
+    final jobListItems = _ownJobListItems;
     final jobTypeProvider = JobTypeProvider.instance;
     _collectionJobs = jobListItems
         .where((job) =>
@@ -179,7 +214,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _loadDataForMonth(_currentMonth);
+      _loadDataForMonth();
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -246,11 +281,24 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   // Month navigation methods
   Future<void> setCurrentMonth(DateTime month) async {
-    if (_currentMonth != month) {
-      _currentMonth = month;
-      _invalidateMonthCache();
-      await _loadDataForMonth(_currentMonth);
+    if (_currentMonth.year == month.year &&
+        _currentMonth.month == month.month) {
+      return;
     }
+
+    _currentMonth = month;
+    _isMonthChanging = true; // Show loading overlay until stream delivers data
+    _invalidateMonthCache();
+
+    // Reset state for the new month so stale data is not shown.
+    _lastJobListFingerprint = 0;
+    _ownJobListItems = [];
+
+    // Restart the stream for the new month. This is fully independent of
+    // JobListProvider — the Job List tab keeps its own month unchanged.
+    await _setupOwnStream();
+
+    _loadDataForMonth();
   }
 
   void goToNextMonth() {
@@ -571,7 +619,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    _jobListProvider.removeListener(_onJobListChanged);
+    _ownJobListSubscription?.cancel();
     super.dispose();
   }
 }

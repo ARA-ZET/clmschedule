@@ -43,6 +43,7 @@ import 'widgets/job_status_management_dialog.dart';
 import 'widgets/job_list_status_management_dialog.dart';
 import 'widgets/invoice_status_management_dialog.dart';
 import 'widgets/job_type_management_dialog.dart';
+import 'widgets/map_instruction_management_dialog.dart';
 import 'widgets/auth_gate.dart';
 import 'widgets/chat_dialog.dart';
 import 'widgets/chat_admin_panel.dart';
@@ -508,7 +509,10 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
 
     // Build initialization list based on flavor
     final List<Future<void>> initializations = [
-      ref.read(jobListRiverpod).initialize(),
+      // JobListProvider is now lazy-initialized — its Firestore stream only
+      // starts when the Job List or Collection Schedule tab is first opened.
+      // This avoids paying N reads (1 per job item) at login for users who
+      // never visit those tabs.
       ref.read(inventoryRiverpod).initialize(),
       ref.read(toolSettingsRiverpod).loadSettings(),
     ];
@@ -1161,6 +1165,12 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                           context: context,
                           builder: (context) => const JobTypeManagementDialog(),
                         );
+                      } else if (value == 'map_instructions') {
+                        showDialog(
+                          context: context,
+                          builder: (context) =>
+                              const MapInstructionManagementDialog(),
+                        );
                       } else if (value == 'signout') {
                         final confirmed = await showDialog<bool>(
                           context: context,
@@ -1239,6 +1249,14 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         child: ListTile(
                           leading: Icon(Icons.category),
                           title: Text('Job Types'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem<String>(
+                        value: 'map_instructions',
+                        child: ListTile(
+                          leading: Icon(Icons.library_books_outlined),
+                          title: Text('Map Instructions'),
                           contentPadding: EdgeInsets.zero,
                         ),
                       ),
@@ -1442,11 +1460,23 @@ class _JobListTabState extends riverpod.ConsumerState<JobListTab>
   @override
   bool get wantKeepAlive => true;
 
+  bool _hasInitialized = false;
+
   @override
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
 
     final jobListProvider = ref.watch(jobListRiverpod);
+
+    // Lazy-initialize: start the Firestore stream only when this tab is
+    // first opened, not at login, to avoid unnecessary reads for users who
+    // never visit the Job List tab.
+    if (!_hasInitialized) {
+      _hasInitialized = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        jobListProvider.initialize();
+      });
+    }
     // Show error state if there's an error
     if (jobListProvider.error != null && jobListProvider.isInitialized) {
       return Center(
@@ -1472,8 +1502,8 @@ class _JobListTabState extends riverpod.ConsumerState<JobListTab>
             const SizedBox(height: 16),
             ElevatedButton(
               onPressed: () {
-                // Retry by reinitializing
-                jobListProvider.initialize();
+                // Retry by resetting all state and re-initializing
+                jobListProvider.resetAndInitialize();
               },
               child: const Text('Retry'),
             ),
@@ -1539,12 +1569,7 @@ class _CollectionScheduleTabState extends riverpod
         LazyLoadingIndicator(
           isLoading: isLoading,
           message: 'Loading Collection Schedule...',
-          child: isLoading
-              ? Container(
-                  color: Theme.of(context).scaffoldBackgroundColor,
-                  child: const SizedBox.expand(),
-                )
-              : const CollectionScheduleGrid(),
+          child: const CollectionScheduleGrid(),
         ),
       ],
     );

@@ -7,6 +7,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:gpx/gpx.dart';
@@ -15,6 +16,7 @@ import 'package:intl/intl.dart';
 import '../providers/cloud_file_manager_provider.dart';
 import '../providers/job_list_provider.dart';
 import '../services/gpx_storage_service.dart';
+import '../utils/web_file_download.dart';
 
 class CloudFileManagerScreen extends StatefulWidget {
   /// Optional callback when a file is selected to open in the track editor.
@@ -321,6 +323,120 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
 
   // ── Rename / Copy / Move ───────────────────────────────────────────────
 
+  Future<void> _renameFolder(StorageFolderItem folder) async {
+    final controller = TextEditingController(text: folder.name);
+
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename folder'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'New name',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (v) => Navigator.pop(ctx, v),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Any maps or jobs linked to this folder will be '
+              'updated automatically.',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+
+    if (newName == null || newName.trim().isEmpty) return;
+    if (newName.trim() == folder.name) return;
+
+    _showTaskProgressDialog();
+    final result = await _provider.renameFolder(folder, newName.trim());
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    if (!mounted) return;
+
+    if (result.newPath == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_provider.error ?? 'Rename failed'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final refParts = <String>[];
+    if (result.mapsUpdated > 0) {
+      refParts.add(
+          '${result.mapsUpdated} map${result.mapsUpdated == 1 ? '' : 's'} updated');
+    }
+    if (result.jobsUpdated > 0) {
+      refParts.add(
+          '${result.jobsUpdated} job${result.jobsUpdated == 1 ? '' : 's'} updated');
+    }
+    final suffix = refParts.isEmpty ? '' : ' · ${refParts.join(', ')}';
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Renamed "${folder.name}" → "${newName.trim()}"$suffix'),
+      ),
+    );
+  }
+
+  Future<void> _downloadFolder(StorageFolderItem folder) async {
+    _showTaskProgressDialog();
+    final zipBytes = await _provider.downloadFolderAsZip(folder);
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    if (!mounted) return;
+
+    if (zipBytes == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Download failed or folder is empty.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final savedPath = await triggerFileDownload(
+      zipBytes,
+      '${folder.name}.zip',
+      'application/zip',
+    );
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          kIsWeb
+              ? 'Downloaded "${folder.name}.zip"'
+              : savedPath != null
+                  ? 'Saved to $savedPath'
+                  : 'Save failed.',
+        ),
+        backgroundColor: (!kIsWeb && savedPath == null) ? Colors.red : null,
+      ),
+    );
+  }
+
   Future<void> _renameFile(StorageFileItem file) async {
     final dot = file.name.lastIndexOf('.');
     final baseName = dot > 0 ? file.name.substring(0, dot) : file.name;
@@ -428,7 +544,8 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
     if (files.isEmpty) return;
     final srcFolder = _provider.currentPath;
     final dest = await _pickDestinationFolder(
-      title: 'Move ${files.length} file${files.length == 1 ? '' : 's'} to\u2026',
+      title:
+          'Move ${files.length} file${files.length == 1 ? '' : 's'} to\u2026',
       excludeFolder: srcFolder,
     );
     if (dest == null) return;
@@ -510,9 +627,8 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
     if (!mounted) return;
 
     final hasGpx = entries.any((e) => e.name.toLowerCase().endsWith('.gpx'));
-    final tail = hasGpx
-        ? ' Compiling tracks & waypoints in the cloud\u2026'
-        : '';
+    final tail =
+        hasGpx ? ' Compiling tracks & waypoints in the cloud\u2026' : '';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('Uploaded $ok of ${entries.length} file(s).$tail'),
@@ -1002,11 +1118,50 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(
-              icon: const Icon(Icons.delete_outline, size: 20),
-              tooltip: 'Delete folder',
-              color: Colors.red[300],
-              onPressed: () => _confirmDeleteFolder(folder),
+            PopupMenuButton<_FolderAction>(
+              tooltip: 'Folder options',
+              icon: const Icon(Icons.more_vert, size: 20),
+              onSelected: (action) {
+                switch (action) {
+                  case _FolderAction.rename:
+                    _renameFolder(folder);
+                    break;
+                  case _FolderAction.download:
+                    _downloadFolder(folder);
+                    break;
+                  case _FolderAction.delete:
+                    _confirmDeleteFolder(folder);
+                    break;
+                }
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(
+                  value: _FolderAction.rename,
+                  child: ListTile(
+                    dense: true,
+                    leading: Icon(Icons.drive_file_rename_outline),
+                    title: Text('Rename'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: _FolderAction.download,
+                  child: ListTile(
+                    dense: true,
+                    leading: Icon(Icons.folder_zip_outlined),
+                    title: Text('Download as ZIP'),
+                  ),
+                ),
+                const PopupMenuDivider(),
+                PopupMenuItem(
+                  value: _FolderAction.delete,
+                  child: ListTile(
+                    dense: true,
+                    leading: Icon(Icons.delete_outline, color: Colors.red[400]),
+                    title: Text('Delete',
+                        style: TextStyle(color: Colors.red[400])),
+                  ),
+                ),
+              ],
             ),
             const Icon(Icons.chevron_right),
           ],
@@ -1158,6 +1313,8 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
 }
 
 enum _FileAction { rename, copy, move, delete, select }
+
+enum _FolderAction { rename, download, delete }
 
 /// A modal progress dialog driven by [CloudFileManagerProvider]'s
 /// bulk-task state (label, total/completed counts, current file name).
@@ -1373,7 +1530,8 @@ class _FolderNavigatorPickerState extends State<_FolderNavigatorPicker> {
   void _goUp() {
     if (_currentPath == widget.rootPath) return;
     final slash = _currentPath.lastIndexOf('/');
-    final parent = slash > 0 ? _currentPath.substring(0, slash) : widget.rootPath;
+    final parent =
+        slash > 0 ? _currentPath.substring(0, slash) : widget.rootPath;
     _load(parent);
   }
 
@@ -1480,9 +1638,8 @@ class _FolderNavigatorPickerState extends State<_FolderNavigatorPicker> {
                                   folder.name,
                                   style: TextStyle(
                                     fontSize: 13,
-                                    color: isSource
-                                        ? Colors.grey
-                                        : Colors.black87,
+                                    color:
+                                        isSource ? Colors.grey : Colors.black87,
                                     fontStyle: isSource
                                         ? FontStyle.italic
                                         : FontStyle.normal,
@@ -1492,8 +1649,8 @@ class _FolderNavigatorPickerState extends State<_FolderNavigatorPicker> {
                                     ? const Text('Source folder',
                                         style: TextStyle(fontSize: 10))
                                     : null,
-                                trailing: const Icon(Icons.chevron_right,
-                                    size: 18),
+                                trailing:
+                                    const Icon(Icons.chevron_right, size: 18),
                                 onTap: () => _load(folder.fullPath),
                               );
                             },

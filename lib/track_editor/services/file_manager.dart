@@ -57,4 +57,26 @@ class TEFileManager {
     final xmlString = await _toGpxTracksString(tracks);
     await downloadStringAsFile(xmlString, fileName);
   }
+
+  Future<String> _toGpxCombinedString(
+      List<Trk> tracks, List<Wpt> waypoints) async {
+    final gpx = Gpx()
+      ..version = '1.1'
+      ..creator = 'dart-gpx library'
+      ..metadata = (Metadata()
+        ..name = 'CLM Track Editor Export'
+        ..time = DateTime.now())
+      ..trks = tracks
+      ..wpts = waypoints;
+    return _fixNamespace(GpxWriter().asString(gpx, pretty: true));
+  }
+
+  Future<String> toGpxCombinedString(List<Trk> tracks, List<Wpt> waypoints) =>
+      _toGpxCombinedString(tracks, waypoints);
+
+  Future<void> saveGpxCombinedFile(
+      String fileName, List<Trk> tracks, List<Wpt> waypoints) async {
+    final xmlString = await _toGpxCombinedString(tracks, waypoints);
+    await downloadStringAsFile(xmlString, fileName);
+  }
 }

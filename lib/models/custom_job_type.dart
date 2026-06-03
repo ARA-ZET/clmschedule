@@ -44,6 +44,15 @@ class CustomJobType {
   /// Optional ARGB colour as an int (matches `Color.value`).
   final int? colorValue;
 
+  /// When true, job-list items of this type are automatically mirrored as
+  /// tasks in the Dropsheet for the same date (today / next planning day
+  /// window). The dropsheet task type is given by [dropsheetTaskTypeKey].
+  final bool appearsOnDropsheet;
+
+  /// The [DropsheetTaskType.storageKey] used when auto-creating a Dropsheet
+  /// task from a job-list item of this type. Null → `custom`.
+  final String? dropsheetTaskTypeKey;
+
   // ─── Future extensibility ────────────────────────────────────────────
   /// Optional default tools pre-selected when this Happy Sun service is
   /// created. Used only when `isHappySunService` is true.
@@ -62,6 +71,8 @@ class CustomJobType {
     this.createsCloudFolder = false,
     this.iconName,
     this.colorValue,
+    this.appearsOnDropsheet = false,
+    this.dropsheetTaskTypeKey,
     this.defaultTools = const [],
   });
 
@@ -80,6 +91,8 @@ class CustomJobType {
       createsCloudFolder: data['createsCloudFolder'] as bool? ?? false,
       iconName: data['iconName'] as String?,
       colorValue: (data['colorValue'] as num?)?.toInt(),
+      appearsOnDropsheet: data['appearsOnDropsheet'] as bool? ?? false,
+      dropsheetTaskTypeKey: data['dropsheetTaskTypeKey'] as String?,
       defaultTools:
           (data['defaultTools'] as List?)?.map((e) => e.toString()).toList() ??
               const [],
@@ -100,6 +113,8 @@ class CustomJobType {
       'createsCloudFolder': createsCloudFolder,
       'iconName': iconName,
       'colorValue': colorValue,
+      'appearsOnDropsheet': appearsOnDropsheet,
+      if (dropsheetTaskTypeKey != null) 'dropsheetTaskTypeKey': dropsheetTaskTypeKey,
       'defaultTools': defaultTools,
     };
   }
@@ -118,6 +133,9 @@ class CustomJobType {
     String? iconName,
     int? colorValue,
     List<String>? defaultTools,
+    bool? appearsOnDropsheet,
+    String? dropsheetTaskTypeKey,
+    bool clearDropsheetTaskTypeKey = false,
     bool clearIcon = false,
     bool clearColor = false,
   }) {
@@ -135,6 +153,10 @@ class CustomJobType {
       createsCloudFolder: createsCloudFolder ?? this.createsCloudFolder,
       iconName: clearIcon ? null : (iconName ?? this.iconName),
       colorValue: clearColor ? null : (colorValue ?? this.colorValue),
+      appearsOnDropsheet: appearsOnDropsheet ?? this.appearsOnDropsheet,
+      dropsheetTaskTypeKey: clearDropsheetTaskTypeKey
+          ? null
+          : (dropsheetTaskTypeKey ?? this.dropsheetTaskTypeKey),
       defaultTools: defaultTools ?? this.defaultTools,
     );
   }
@@ -196,6 +218,8 @@ class CustomJobType {
         order: 1,
         needsTimeSlot: true,
         appearsOnCollectionSchedule: true,
+        appearsOnDropsheet: true,
+        dropsheetTaskTypeKey: 'collection',
         quantityLabel: '30-min time slots',
       ),
       CustomJobType(
@@ -212,6 +236,8 @@ class CustomJobType {
         order: 3,
         needsTimeSlot: true,
         appearsOnCollectionSchedule: true,
+        appearsOnDropsheet: true,
+        dropsheetTaskTypeKey: 'furnitureMove',
         quantityLabel: '30-min time slots',
       ),
       CustomJobType(
@@ -260,6 +286,7 @@ class CustomJobType {
         order: 9,
         needsTimeSlot: true,
         appearsOnCollectionSchedule: true,
+        appearsOnDropsheet: true,
         quantityLabel: '30-min time slots',
       ),
       CustomJobType(

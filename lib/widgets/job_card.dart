@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../config/flavor_config.dart';
+import '../providers/map_instruction_provider.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
@@ -643,6 +644,22 @@ class _ClientListDialogState extends State<_ClientListDialog> {
     );
   }
 
+  /// Opens the [_SnippetPickerDialog] for the instruction field at [index].
+  /// Selecting a snippet replaces the field's text.
+  /// Snippets are managed via Settings > Map Instructions.
+  void _showSnippetPicker(BuildContext context, int index) {
+    showDialog<String>(
+      context: context,
+      builder: (_) => const _SnippetPickerDialog(),
+    ).then((selected) {
+      if (selected != null && mounted) {
+        setState(() {
+          _instructionControllers[index].text = selected;
+        });
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return riverpod.Consumer(
@@ -847,6 +864,20 @@ class _ClientListDialogState extends State<_ClientListDialog> {
                                 contentPadding: const EdgeInsets.symmetric(
                                     horizontal: 12, vertical: 8),
                                 isDense: true,
+                                suffixIcon: Tooltip(
+                                  message: 'Quick snippets',
+                                  child: IconButton(
+                                    icon: Icon(
+                                      Icons.bookmarks_outlined,
+                                      size: 16,
+                                      color: Colors.teal.shade400,
+                                    ),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    onPressed: () =>
+                                        _showSnippetPicker(context, index),
+                                  ),
+                                ),
                               ),
                             ),
                           ],
@@ -1439,6 +1470,101 @@ class _DeleteJobButtonState extends riverpod.ConsumerState<_DeleteJobButton> {
               ),
             )
           : const Text('Delete Job'),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Snippet picker dialog
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A read-only picker that lets the user insert a saved map instruction
+/// snippet into the instruction field.
+///
+/// Snippets are managed via Settings > Map Instructions.
+/// Pops with the selected [MapInstruction.text], or `null` if dismissed.
+class _SnippetPickerDialog extends riverpod.ConsumerWidget {
+  const _SnippetPickerDialog();
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final provider = ref.watch(mapInstructionRiverpod);
+    final instructions = provider.instructions;
+    final isLoading = provider.isLoading;
+
+    return AlertDialog(
+      title: Row(
+        children: [
+          Icon(Icons.bookmarks_outlined, size: 20, color: Colors.teal.shade600),
+          const SizedBox(width: 8),
+          const Text('Map Instructions'),
+        ],
+      ),
+      contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      content: SizedBox(
+        width: 360,
+        child: isLoading
+            ? const SizedBox(
+                height: 80,
+                child: Center(child: CircularProgressIndicator()),
+              )
+            : instructions.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 20),
+                    child: Text(
+                      'No map instructions yet.\n'
+                      'Add them via Settings > Map Instructions.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey.shade500,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  )
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'Tap an instruction to insert it:',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      const SizedBox(height: 4),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 300),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: instructions.length,
+                          separatorBuilder: (_, __) =>
+                              const Divider(height: 1),
+                          itemBuilder: (context, idx) {
+                            final instr = instructions[idx];
+                            return InkWell(
+                              onTap: () =>
+                                  Navigator.of(context).pop(instr.text),
+                              borderRadius: BorderRadius.circular(4),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    vertical: 10, horizontal: 4),
+                                child: Text(
+                                  instr.text,
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+      ],
     );
   }
 }

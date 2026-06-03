@@ -101,6 +101,22 @@ class JobListProvider extends ChangeNotifier {
     ]);
   }
 
+  // Reset all state and re-initialize. Use when a previous initialization
+  // failed and the user explicitly retries (e.g., error retry button).
+  Future<void> resetAndInitialize() async {
+    _jobListSubscription?.cancel();
+    _jobListSubscription = null;
+    _hasInitialLoad = false;
+    _isInitialized = false;
+    _error = null;
+    _jobListItems = [];
+    _knownJobIds = {};
+    _lastCheckedTimeLoaded = false;
+    _invalidateItemCaches();
+    notifyListeners();
+    await initialize();
+  }
+
   // Getters
   List<JobListItem> get jobListItems => _filteredJobListItems();
   List<JobListItem> get allJobListItems => _getMergedJobListItems();
@@ -1529,5 +1545,53 @@ class JobListProvider extends ChangeNotifier {
     _jobListSubscription?.cancel();
     _isSearchingNotifier.dispose();
     super.dispose();
+  }
+
+  // ── Duplicate client name check ──────────────────────────────────────────
+
+  /// Per-session cache: monthKey → lowercase client name set.
+  /// Populated on first call for a given month and reused within the session.
+  final Map<String, Set<String>> _clientNameCache = {};
+
+  /// Returns a set of lower-cased client names for [month].
+  ///
+  /// • Same month as [currentMonth]: uses the already-loaded in-memory list
+  ///   (0 extra reads).
+  /// • Different month: fetches ONLY the `client` field from Firestore once,
+  ///   caches the result for the rest of the session.
+  Future<Set<String>> fetchClientNamesForMonth(DateTime month) async {
+    final isCurrent =
+        _currentMonth.year == month.year && _currentMonth.month == month.month;
+    if (isCurrent) {
+      return allJobListItems
+          .map((e) => e.client.trim().toLowerCase())
+          .where((c) => c.isNotEmpty)
+          .toSet();
+    }
+
+    final key = _jobListService.getMonthlyDocumentId(month);
+    if (_clientNameCache.containsKey(key)) return _clientNameCache[key]!;
+
+    final snapshot =
+        await _jobListService.getJobListItemsCollectionForMonth(month).get();
+    final names = snapshot.docs
+        .map((d) {
+          final data = d.data();
+          if (data is Map<String, dynamic>) {
+            return (data['client'] as String? ?? '').trim().toLowerCase();
+          }
+          return '';
+        })
+        .where((c) => c.isNotEmpty)
+        .toSet();
+
+    _clientNameCache[key] = names;
+    return names;
+  }
+
+  /// Invalidate the cached client names for [month] (call after adding a job).
+  void invalidateClientNameCache(DateTime month) {
+    final key = _jobListService.getMonthlyDocumentId(month);
+    _clientNameCache.remove(key);
   }
 }
