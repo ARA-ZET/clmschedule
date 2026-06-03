@@ -68,8 +68,23 @@ class DropsheetMaps {
         return [DropsheetMapLink(label: addr, url: pinUrlFromAddress(addr))];
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
+        return const [];
       case DropsheetTaskType.leave:
       case DropsheetTaskType.arrive:
+        final lat = (task.typeData['lat'] as num?)?.toDouble();
+        final lng = (task.typeData['lng'] as num?)?.toDouble();
+        final label = task.location.isNotEmpty ? task.location : 'Office';
+        if (lat != null && lng != null) {
+          return [
+            DropsheetMapLink(label: label, url: pinUrlFromLatLng(lat, lng))
+          ];
+        }
+        if (task.location.isNotEmpty) {
+          return [
+            DropsheetMapLink(
+                label: task.location, url: pinUrlFromAddress(task.location))
+          ];
+        }
         return const [];
     }
   }

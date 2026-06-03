@@ -111,6 +111,20 @@ class _DropsheetTaskEditorDialogState
     _collectionAddress.text = (_typeData['address'] as String?) ?? '';
     _serviceTime.text =
         t.serviceTimeMinutes == null ? '' : '${t.serviceTimeMinutes}';
+
+    // Pre-fill leave/arrive location from depot config when not already set.
+    if ((t.type == DropsheetTaskType.leave ||
+            t.type == DropsheetTaskType.arrive) &&
+        _location.text.isEmpty) {
+      final depot = configProvider.depot;
+      if (depot.address.isNotEmpty) {
+        _location.text = depot.address;
+        if (depot.lat != null && depot.lng != null) {
+          _typeData['lat'] = depot.lat!;
+          _typeData['lng'] = depot.lng!;
+        }
+      }
+    }
   }
 
   @override
