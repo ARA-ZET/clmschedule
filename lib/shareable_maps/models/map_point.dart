@@ -116,19 +116,45 @@ class MapPoint {
     bool isSelected = false,
     VoidCallback? onTap,
     BitmapDescriptor? customIcon,
+    bool useAdvancedMarker = false,
     bool draggable = false,
     ValueChanged<LatLng>? onDragEnd,
     bool visible = true,
   }) {
+    final fallbackColor =
+        pointCategory != PointCategory.generic ? pointCategory.color : color;
+    final icon = customIcon ??
+        (useAdvancedMarker
+            ? BitmapDescriptor.pinConfig(
+                backgroundColor: fallbackColor,
+                borderColor: Colors.white,
+                glyph: const CircleGlyph(color: Colors.white),
+              )
+            : BitmapDescriptor.defaultMarkerWithHue(
+                pointCategory != PointCategory.generic
+                    ? HSLColor.fromColor(pointCategory.color).hue
+                    : _getMarkerHue(),
+              ));
+
+    if (useAdvancedMarker) {
+      return AdvancedMarker(
+        markerId: MarkerId(id),
+        position: position,
+        infoWindow: InfoWindow.noText,
+        icon: icon,
+        alpha: isSelected ? 1.0 : 0.9,
+        visible: visible,
+        onTap: onTap,
+        draggable: draggable,
+        onDragEnd: onDragEnd,
+      );
+    }
+
     return Marker(
       markerId: MarkerId(id),
       position: position,
       infoWindow: InfoWindow.noText,
-      icon: customIcon ??
-          BitmapDescriptor.defaultMarkerWithHue(
-              pointCategory != PointCategory.generic
-                  ? HSLColor.fromColor(pointCategory.color).hue
-                  : _getMarkerHue()),
+      icon: icon,
       alpha: isSelected ? 1.0 : 0.9,
       visible: visible,
       onTap: onTap,

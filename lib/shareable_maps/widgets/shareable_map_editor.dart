@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -907,6 +908,16 @@ class MapViewWidget extends riverpod.ConsumerStatefulWidget {
 }
 
 class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
+  static const bool _advancedMarkersEnabled = bool.fromEnvironment(
+    'ENABLE_ADVANCED_MARKERS',
+    defaultValue: false,
+  );
+
+  static const String _googleMapsWebMapId = String.fromEnvironment(
+    'GOOGLE_MAPS_WEB_MAP_ID',
+    defaultValue: '89c628d2bb3002712797ce42',
+  );
+
   // Custom bitmap descriptors are owned by [MapBitmapCache] and shared
   // across every editor instance / hot-reload. We hold a reference here
   // so the rest of the widget code can read them synchronously without
@@ -977,6 +988,70 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   _HoverTooltipData? _hoverTooltipData;
   // Throttle: timestamp of last hover hit-test execution.
   DateTime? _lastHoverTime;
+
+  bool get _useAdvancedMarkers =>
+      kIsWeb && _advancedMarkersEnabled && _googleMapsWebMapId.isNotEmpty;
+
+  Marker _buildMapMarker({
+    required MarkerId markerId,
+    required LatLng position,
+    required BitmapDescriptor icon,
+    Offset anchor = const Offset(0.5, 1.0),
+    double alpha = 1.0,
+    bool consumeTapEvents = false,
+    bool draggable = false,
+    bool visible = true,
+    int zIndexInt = 0,
+    InfoWindow infoWindow = InfoWindow.noText,
+    VoidCallback? onTap,
+    ValueChanged<LatLng>? onDrag,
+    ValueChanged<LatLng>? onDragEnd,
+  }) {
+    if (_useAdvancedMarkers) {
+      return AdvancedMarker(
+        markerId: markerId,
+        position: position,
+        icon: icon,
+        anchor: anchor,
+        alpha: alpha,
+        consumeTapEvents: consumeTapEvents,
+        draggable: draggable,
+        visible: visible,
+        zIndex: zIndexInt,
+        infoWindow: infoWindow,
+        onTap: onTap,
+        onDrag: onDrag,
+        onDragEnd: onDragEnd,
+      );
+    }
+
+    return Marker(
+      markerId: markerId,
+      position: position,
+      icon: icon,
+      anchor: anchor,
+      alpha: alpha,
+      consumeTapEvents: consumeTapEvents,
+      draggable: draggable,
+      visible: visible,
+      zIndexInt: zIndexInt,
+      infoWindow: infoWindow,
+      onTap: onTap,
+      onDrag: onDrag,
+      onDragEnd: onDragEnd,
+    );
+  }
+
+  BitmapDescriptor _fallbackMarkerIcon(Color color) {
+    if (_useAdvancedMarkers) {
+      return BitmapDescriptor.pinConfig(
+        backgroundColor: color,
+        borderColor: Colors.white,
+        glyph: const CircleGlyph(color: Colors.white),
+      );
+    }
+    return BitmapDescriptor.defaultMarkerWithHue(HSLColor.fromColor(color).hue);
+  }
 
   @override
   void initState() {
@@ -1064,10 +1139,8 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
 
     final cacheVertex = _bitmapCache.vertex;
     final cacheMidpoint = _bitmapCache.midpoint;
-    final vertexIcon = cacheVertex ??
-        BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
-    final midpointIcon = cacheMidpoint ??
-        BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
+    final vertexIcon = cacheVertex ?? _fallbackMarkerIcon(Colors.blue);
+    final midpointIcon = cacheMidpoint ?? _fallbackMarkerIcon(Colors.orange);
     debugPrint('[WASM-DEBUG] _buildEditingMarkers: editingPoints='
         '${editingPoints.length} '
         'cacheLoaded=${_bitmapCache.isLoaded} '
@@ -1078,10 +1151,10 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
 
     for (int i = 0; i < editingPoints.length; i++) {
       markers.add(
-        Marker(
+        _buildMapMarker(
           markerId: MarkerId('vertex_$i'),
-          icon: vertexIcon,
           position: editingPoints[i],
+          icon: vertexIcon,
           draggable: true,
           consumeTapEvents: true,
           onTap: () {
@@ -1109,10 +1182,10 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
           _calculateMidpoints(editingPoints, isPolygon: isPolygon);
       for (int i = 0; i < midpoints.length; i++) {
         markers.add(
-          Marker(
+          _buildMapMarker(
             markerId: MarkerId('midpoint_$i'),
-            icon: midpointIcon,
             position: midpoints[i],
+            icon: midpointIcon,
             draggable: true,
             anchor: const Offset(0.5, 0.5),
             onDragEnd: (newPosition) {
@@ -1141,11 +1214,9 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
 
     final cacheVertex = _bitmapCache.vertex;
     final cacheFirst = _bitmapCache.firstVertex;
-    final normalIcon = cacheVertex ??
-        BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+    final normalIcon = cacheVertex ?? _fallbackMarkerIcon(Colors.blue);
     final firstIcon = canClose
-        ? (cacheFirst ??
-            BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen))
+      ? (cacheFirst ?? _fallbackMarkerIcon(Colors.green))
         : normalIcon;
     debugPrint('[WASM-DEBUG] _buildDrawingMarkers: points=${points.length} '
         'mode=${provider.drawingMode} canClose=$canClose '
@@ -1158,7 +1229,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       final point = entry.value;
       final isFirst = index == 0;
 
-      return Marker(
+      return _buildMapMarker(
         markerId: MarkerId('drawing_point_$index'),
         position: point,
         icon: isFirst ? firstIcon : normalIcon,
@@ -1321,6 +1392,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
           ? (pointId, newPos) => provider.moveMarker(pointId, newPos)
           : null,
       pointIcons: isWaypoint ? (waypointPointIcons ?? pointIcons) : pointIcons,
+      useAdvancedMarkers: _useAdvancedMarkers,
       markerVisible: isVisible,
     ) as List<Marker>;
 
@@ -1812,6 +1884,10 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
             child: Stack(
               children: [
                 GoogleMap(
+                  mapId: _useAdvancedMarkers ? _googleMapsWebMapId : null,
+                  markerType: _useAdvancedMarkers
+                      ? GoogleMapMarkerType.advancedMarker
+                      : GoogleMapMarkerType.marker,
                   initialCameraPosition: CameraPosition(
                     target: map.defaultCenter,
                     zoom: map.defaultZoom,

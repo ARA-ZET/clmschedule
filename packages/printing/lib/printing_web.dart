@@ -128,10 +128,10 @@ class PrintingPlugin extends PrintingPlatform {
 
       // Restore module and exports
       if (module != null) {
-        web.window['module'] = module;
+        web.window.setProperty('module'.toJS, module);
       }
       if (exports != null) {
-        web.window['exports'] = exports;
+        web.window.setProperty('exports'.toJS, exports);
       }
     }
 
@@ -190,8 +190,7 @@ class PrintingPlugin extends PrintingPlatform {
 
     final userAgent = web.window.navigator.userAgent;
     final isChrome = web.window['chrome'] != null;
-    final isSafari = web.window['safari'] != null &&
-        !userAgent.contains(RegExp(r'Version/14\.1\.'));
+    final isSafari = !userAgent.contains(RegExp(r'Version/14\.1\.'));
     final isMobile = userAgent.contains('Mobile');
     final isFirefox = userAgent.contains('Firefox');
 
@@ -205,11 +204,11 @@ class PrintingPlugin extends PrintingPlatform {
       final pdfUrl = web.URL.createObjectURL(pdfFile);
       final doc = web.window.document;
 
-      final script =
-          doc.getElementById(_scriptId) ?? doc.createElement('script');
+      final script = (doc.getElementById(_scriptId) ??
+          doc.createElement('script')) as web.HTMLScriptElement;
       script.setAttribute('id', _scriptId);
       script.setAttribute('type', 'text/javascript');
-      script.innerHTML =
+      script.text =
           '''function ${_frameId}_print(){var f=document.getElementById('$_frameId');f.focus();f.contentWindow.print();}''';
       doc.body!.append(script);
 

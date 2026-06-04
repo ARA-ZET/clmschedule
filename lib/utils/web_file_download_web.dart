@@ -4,7 +4,6 @@
 // programmatically clicks a temporary <a download="..."> element so the
 // browser presents its native Save-As / Downloads flow.
 import 'dart:js_interop';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:web/web.dart' as web;

@@ -502,7 +502,7 @@ class _MapGrid extends StatelessWidget {
             maxCrossAxisExtent: maxExtent,
             crossAxisSpacing: 10,
             mainAxisSpacing: 10,
-            childAspectRatio: 0.85,
+            childAspectRatio: 0.76,
           ),
           itemCount: items.length,
           itemBuilder: (context, index) {

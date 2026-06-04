@@ -219,6 +219,7 @@ class MapLayer {
     bool draggable = false,
     Function(String pointId, LatLng newPosition)? onDragEnd,
     Map<PointCategory, BitmapDescriptor>? pointIcons,
+    bool useAdvancedMarkers = false,
     LatLngBounds? visibleBounds,
     bool? markerVisible,
   }) {
@@ -235,6 +236,7 @@ class MapLayer {
       result.add(point.toGoogleMapsMarker(
         isSelected: point.id == selectedElementId,
         onTap: onTap != null ? () => onTap(point.id) : null,
+        useAdvancedMarker: useAdvancedMarkers,
         draggable: draggable,
         onDragEnd: draggable && onDragEnd != null
             ? (pos) => onDragEnd(point.id, pos)
@@ -253,6 +255,7 @@ class MapLayer {
         markerId: markerId,
         isSelected: markerId == selectedElementId,
         onTap: onTap != null ? () => onTap(markerId) : null,
+        useAdvancedMarker: useAdvancedMarkers,
         draggable: draggable,
         onDragEnd: draggable && onDragEnd != null
             ? (pos) => onDragEnd(markerId, pos)

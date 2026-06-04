@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -80,10 +78,8 @@ class _EditDistributorDialogState extends State<EditDistributorDialog> {
 
   Future<String?> _uploadImage(String distributorId) async {
     if (_pendingImageBytes == null) return null;
-    final ext = (_pendingImageFileName ?? 'photo.jpg')
-        .split('.')
-        .last
-        .toLowerCase();
+    final ext =
+        (_pendingImageFileName ?? 'photo.jpg').split('.').last.toLowerCase();
     final contentType = ext == 'png' ? 'image/png' : 'image/jpeg';
     final ref = FirebaseStorage.instance
         .ref()
@@ -151,8 +147,8 @@ class _EditDistributorDialogState extends State<EditDistributorDialog> {
                   color: Color(0xFF1565C0),
                 ),
                 padding: const EdgeInsets.all(6),
-                child: const Icon(Icons.camera_alt,
-                    size: 16, color: Colors.white),
+                child:
+                    const Icon(Icons.camera_alt, size: 16, color: Colors.white),
               ),
             ],
           ),
@@ -349,8 +345,7 @@ class _EditDistributorDialogState extends State<EditDistributorDialog> {
                   // Upload new image if one was picked
                   if (_pendingImageBytes != null) {
                     try {
-                      finalImageUrl =
-                          await _uploadImage(widget.distributor.id);
+                      finalImageUrl = await _uploadImage(widget.distributor.id);
                     } catch (e) {
                       setState(() => _uploading = false);
                       if (mounted) {

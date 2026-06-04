@@ -625,14 +625,17 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
                 : ListView(
                     children: [
                       for (final folder in _cloudProvider.folders)
-                        ListTile(
-                          dense: true,
-                          leading: const Icon(Icons.folder,
-                              color: Colors.amber, size: 24),
-                          title: Text(folder.name,
-                              style: const TextStyle(fontSize: 13)),
-                          trailing: const Icon(Icons.chevron_right, size: 18),
-                          onTap: () => _cloudProvider.openFolder(folder),
+                        Material(
+                          type: MaterialType.transparency,
+                          child: ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.folder,
+                                color: Colors.amber, size: 24),
+                            title: Text(folder.name,
+                                style: const TextStyle(fontSize: 13)),
+                            trailing: const Icon(Icons.chevron_right, size: 18),
+                            onTap: () => _cloudProvider.openFolder(folder),
+                          ),
                         ),
                       for (final file in _cloudProvider.files)
                         _buildCloudFileTile(file),
@@ -653,20 +656,23 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
             : Icons.insert_drive_file;
     final color = canImport ? Colors.green : Colors.grey;
 
-    return ListTile(
-      dense: true,
-      leading: Icon(icon, color: color, size: 22),
-      title: Text(file.name, style: const TextStyle(fontSize: 13)),
-      subtitle: Text(ext.toUpperCase(),
-          style: TextStyle(fontSize: 10, color: Colors.grey[500])),
-      trailing: canImport
-          ? TextButton.icon(
-              icon: const Icon(Icons.download, size: 16),
-              label: const Text('Import', style: TextStyle(fontSize: 12)),
-              onPressed: _isLoading ? null : () => _importCloudFile(file),
-            )
-          : null,
-      onTap: canImport && !_isLoading ? () => _importCloudFile(file) : null,
+    return Material(
+      type: MaterialType.transparency,
+      child: ListTile(
+        dense: true,
+        leading: Icon(icon, color: color, size: 22),
+        title: Text(file.name, style: const TextStyle(fontSize: 13)),
+        subtitle: Text(ext.toUpperCase(),
+            style: TextStyle(fontSize: 10, color: Colors.grey[500])),
+        trailing: canImport
+            ? TextButton.icon(
+                icon: const Icon(Icons.download, size: 16),
+                label: const Text('Import', style: TextStyle(fontSize: 12)),
+                onPressed: _isLoading ? null : () => _importCloudFile(file),
+              )
+            : null,
+        onTap: canImport && !_isLoading ? () => _importCloudFile(file) : null,
+      ),
     );
   }
 

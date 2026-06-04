@@ -245,18 +245,46 @@ class CustomPolygon {
     bool draggable = false,
     ValueChanged<LatLng>? onDragEnd,
     BitmapDescriptor? customIcon,
+    bool useAdvancedMarker = false,
     bool visible = true,
   }) {
     if (!isMarker && !isPoint || points.isEmpty) return null;
 
+    final fallbackColor =
+        pointCategory != PointCategory.generic ? pointCategory.color : color;
+    final icon = customIcon ??
+        (useAdvancedMarker
+            ? BitmapDescriptor.pinConfig(
+                backgroundColor: fallbackColor,
+                borderColor: Colors.white,
+                glyph: const CircleGlyph(color: Colors.white),
+              )
+            : BitmapDescriptor.defaultMarkerWithHue(_colorToMarkerHue(
+                pointCategory != PointCategory.generic
+                    ? pointCategory.color
+                    : color)));
+
+    if (useAdvancedMarker) {
+      return AdvancedMarker(
+        markerId: MarkerId(markerId),
+        position: points.first,
+        icon: icon,
+        alpha: isSelected ? 1.0 : 0.85,
+        visible: visible,
+        infoWindow: InfoWindow(
+          title: name.isNotEmpty ? name : pointCategory.label,
+          snippet: description.isNotEmpty ? description : null,
+        ),
+        onTap: onTap,
+        draggable: draggable,
+        onDragEnd: onDragEnd,
+      );
+    }
+
     return Marker(
       markerId: MarkerId(markerId),
       position: points.first,
-      icon: customIcon ??
-          BitmapDescriptor.defaultMarkerWithHue(_colorToMarkerHue(
-              pointCategory != PointCategory.generic
-                  ? pointCategory.color
-                  : color)),
+      icon: icon,
       alpha: isSelected ? 1.0 : 0.85,
       visible: visible,
       infoWindow: InfoWindow(

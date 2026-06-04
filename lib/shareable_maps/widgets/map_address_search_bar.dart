@@ -226,27 +226,30 @@ class _MapAddressSearchBarState
                   itemCount: _suggestions.length,
                   itemBuilder: (context, index) {
                     final s = _suggestions[index];
-                    return ListTile(
-                      dense: true,
-                      leading: const Icon(Icons.place,
-                          size: 20, color: Color(0xFF5F6368)),
-                      title: Text(
-                        s.mainText,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
+                    return Material(
+                      type: MaterialType.transparency,
+                      child: ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.place,
+                            size: 20, color: Color(0xFF5F6368)),
+                        title: Text(
+                          s.mainText,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: Text(
-                        s.secondaryText,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFF9AA0A6),
+                        subtitle: Text(
+                          s.secondaryText,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF9AA0A6),
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        overflow: TextOverflow.ellipsis,
+                        onTap: () => _onSuggestionTap(s),
                       ),
-                      onTap: () => _onSuggestionTap(s),
                     );
                   },
                 ),
