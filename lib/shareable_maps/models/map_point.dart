@@ -63,10 +63,12 @@ class MapPoint {
       icon: data['icon'] as String? ?? 'pin',
       pointCategory: PointCategory.fromId(data['pointCategory'] as String?),
       createdAt: data['createdAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['createdAt'] as num).toInt())
           : DateTime.now(),
       updatedAt: data['updatedAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((data['updatedAt'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['updatedAt'] as num).toInt())
           : DateTime.now(),
     );
   }

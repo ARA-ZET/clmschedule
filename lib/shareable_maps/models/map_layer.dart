@@ -63,13 +63,13 @@ class MapLayer {
       description: data['description'] as String? ?? '',
       isVisible: data['isVisible'] as bool? ?? true,
       order: (data['order'] as num?)?.toInt() ?? 0,
-      defaultColor:
-          Color((data['defaultColor'] as num?)?.toInt() ?? Colors.blue.toARGB32()),
+      defaultColor: Color(
+          (data['defaultColor'] as num?)?.toInt() ?? Colors.blue.toARGB32()),
       polygons: (data['polygons'] as List<dynamic>?)
               ?.asMap()
               .entries
-              .map(
-                  (e) => CustomPolygon.fromMap(Map<String, dynamic>.from(e.value as Map)))
+              .map((e) => CustomPolygon.fromMap(
+                  Map<String, dynamic>.from(e.value as Map)))
               .toList() ??
           [],
       polylines:
@@ -88,10 +88,12 @@ class MapLayer {
           [],
       isExpanded: data['isExpanded'] as bool? ?? true,
       createdAt: data['createdAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['createdAt'] as num).toInt())
           : DateTime.now(),
       updatedAt: data['updatedAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((data['updatedAt'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['updatedAt'] as num).toInt())
           : DateTime.now(),
     );
   }

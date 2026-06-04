@@ -1216,7 +1216,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     final cacheFirst = _bitmapCache.firstVertex;
     final normalIcon = cacheVertex ?? _fallbackMarkerIcon(Colors.blue);
     final firstIcon = canClose
-      ? (cacheFirst ?? _fallbackMarkerIcon(Colors.green))
+        ? (cacheFirst ?? _fallbackMarkerIcon(Colors.green))
         : normalIcon;
     debugPrint('[WASM-DEBUG] _buildDrawingMarkers: points=${points.length} '
         'mode=${provider.drawingMode} canClose=$canClose '
