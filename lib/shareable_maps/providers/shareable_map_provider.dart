@@ -19,6 +19,8 @@ import '../models/map_polyline.dart';
 import '../models/map_point.dart';
 import '../services/map_thumbnail_service.dart';
 import '../services/shareable_maps_firestore_service.dart';
+import '../services/cloud_dataset_service.dart';
+import '../utils/waypoint_spatial_index.dart';
 
 /// Riverpod provider for ShareableMapProvider.
 final shareableMapRiverpod =
@@ -204,6 +206,7 @@ class ShareableMapProvider extends ChangeNotifier {
   bool _isEditingPolygon =
       false; // true when the element being edited is a polygon
   String? _editingElementId; // Track which element is being edited
+  int _editingPointsVersion = 0; // Monotonically incremented on every vertex mutation
 
   // ── Cloud overlay layers (ephemeral — never persisted to Firestore) ───
   final Map<String, MapLayer> _cloudTracksLayers = {};
@@ -212,6 +215,15 @@ class ShareableMapProvider extends ChangeNotifier {
   final Set<String> _loadingCloudWaypointFolders = {};
   final Set<String> _loadedCloudTrackFolders = {};
   final Set<String> _loadedCloudWaypointFolders = {};
+
+  // ── Dataset API metadata & spatial indexes (keyed by folder path) ─────
+  // When a Maps Platform Dataset exists for a folder, the editor renders
+  // its waypoints via TileOverlay instead of creating Marker DOM nodes.
+  // The spatial index lets the editor do hit-testing on map tap without
+  // needing any Marker objects.
+  final Map<String, CloudDatasetMeta> _cloudDatasetMeta = {};
+  final Map<String, WaypointSpatialIndex> _cloudWaypointIndexes = {};
+  final Set<String> _creatingDatasetFolders = {};
 
   /// Layer IDs currently mid-visibility-toggle. The map widget needs a
   /// frame to push the marker-set diff across the JS bridge; ignoring
@@ -295,6 +307,7 @@ class ShareableMapProvider extends ChangeNotifier {
   bool get isEditingVertices => _isEditingVertices;
   bool get isEditingPolygon => _isEditingPolygon;
   String? get editingElementId => _editingElementId;
+  int get editingPointsVersion => _editingPointsVersion;
   InfoWindowData? get infoWindowData => _infoWindowData;
   bool get showStylePanel => _showStylePanel;
   MapType get mapType => _mapType;
@@ -456,6 +469,21 @@ class ShareableMapProvider extends ChangeNotifier {
   bool get cloudTracksLoaded => _loadedCloudTrackFolders.isNotEmpty;
   bool get cloudWaypointsLoaded => _loadedCloudWaypointFolders.isNotEmpty;
 
+  /// Dataset API metadata keyed by folder path.
+  /// Non-empty when at least one folder has a synced Maps Platform Dataset.
+  Map<String, CloudDatasetMeta> get cloudDatasetMeta =>
+      Map.unmodifiable(_cloudDatasetMeta);
+
+  /// Spatial indexes for viewport hit-testing, keyed by folder path.
+  Map<String, WaypointSpatialIndex> get cloudWaypointIndexes =>
+      Map.unmodifiable(_cloudWaypointIndexes);
+
+  /// Returns the cloud waypoint [MapLayer] shell for [folderPath], or null.
+  MapLayer? cloudWaypointLayerForFolder(String folderPath) {
+    final layerId = _cloudLayerId('waypoints', folderPath.trim());
+    return _cloudWaypointsLayers[layerId];
+  }
+
   List<String> get linkedCloudFolders {
     final map = _currentMap;
     if (map == null) return const [];
@@ -503,16 +531,55 @@ class ShareableMapProvider extends ChangeNotifier {
     final polygon = layer.polygons[polygonIndex];
     if (!polygon.isPolygon || polygon.points.length < 3) return null;
 
+    final bounds = _latLngBoundsFromPoints(polygon.points);
+
     final linkedFolders = folders.toSet();
     var reached = 0;
-    for (final waypointLayer in _cloudWaypointsLayers.values) {
-      final folderPath = waypointLayer.description.trim();
-      if (!linkedFolders.contains(folderPath)) continue;
-      for (final point in waypointLayer.points) {
-        if (_pointInPolygon(point.position, polygon.points)) reached++;
+    for (final folderPath in linkedFolders) {
+      // Prefer spatial index (dataset-backed layers have empty layer.points)
+      final index = _cloudWaypointIndexes[folderPath];
+      if (index != null) {
+        final candidates = index.query(bounds, limit: 200000);
+        for (final wpt in candidates) {
+          if (_pointInPolygon(wpt.position, polygon.points)) reached++;
+        }
+      } else {
+        final waypointLayerId = _cloudLayerId('waypoints', folderPath);
+        final waypointLayer = _cloudWaypointsLayers[waypointLayerId];
+        if (waypointLayer == null) continue;
+        for (final point in waypointLayer.points) {
+          if (_pointInPolygon(point.position, polygon.points)) reached++;
+        }
       }
     }
     return reached;
+  }
+
+  /// Actual waypoint count for a cloud waypoint layer — uses the spatial
+  /// index when available (dataset-backed, layer.points is empty).
+  int cloudWaypointCountForLayer(String layerId) {
+    final folderPath = cloudFolderForLayer(layerId)?.trim();
+    if (folderPath == null) return 0;
+    return _cloudWaypointIndexes[folderPath]?.count ??
+        _cloudWaypointsLayers[layerId]?.points.length ??
+        0;
+  }
+
+  static LatLngBounds _latLngBoundsFromPoints(List<LatLng> pts) {
+    var minLat = pts[0].latitude;
+    var maxLat = pts[0].latitude;
+    var minLng = pts[0].longitude;
+    var maxLng = pts[0].longitude;
+    for (final p in pts) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+    return LatLngBounds(
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
+    );
   }
 
   bool cloudTracksLoadedFor(String folderPath) =>
@@ -810,6 +877,9 @@ class ShareableMapProvider extends ChangeNotifier {
     _loadedCloudWaypointFolders.clear();
     _loadingCloudTrackFolders.clear();
     _loadingCloudWaypointFolders.clear();
+    _cloudDatasetMeta.clear();
+    _cloudWaypointIndexes.clear();
+    _creatingDatasetFolders.clear();
 
     // Selection / overlays
     _selectedElementId = null;
@@ -914,6 +984,9 @@ class ShareableMapProvider extends ChangeNotifier {
       _cloudWaypointsLayers.clear();
       _loadedCloudTrackFolders.clear();
       _loadedCloudWaypointFolders.clear();
+      _cloudDatasetMeta.clear();
+      _cloudWaypointIndexes.clear();
+      _creatingDatasetFolders.clear();
     } else {
       final trackId = _cloudLayerId('tracks', cleanPath!);
       final waypointId = _cloudLayerId('waypoints', cleanPath);
@@ -921,6 +994,8 @@ class ShareableMapProvider extends ChangeNotifier {
       _cloudWaypointsLayers.remove(waypointId);
       _loadedCloudTrackFolders.remove(cleanPath);
       _loadedCloudWaypointFolders.remove(cleanPath);
+      _cloudDatasetMeta.remove(cleanPath);
+      _cloudWaypointIndexes.remove(cleanPath);
     }
     _notifyAndSave();
     debugPrint(
@@ -1139,16 +1214,45 @@ class ShareableMapProvider extends ChangeNotifier {
             '[CloudWaypoints] parsed ${points.length} waypoints from compiled JSON in ${sw.elapsedMilliseconds}ms');
 
         final clippedPoints = _clipCloudPointsToPolygons(points);
+
+        // Build spatial index for viewport hit-testing (always, regardless of dataset).
+        final index = WaypointSpatialIndex();
+        index.insertAll(clippedPoints
+            .map((p) => WaypointMeta(
+                  id: p.id,
+                  name: p.name,
+                  description: p.description,
+                  position: p.position,
+                ))
+            .toList());
+        _cloudWaypointIndexes[resolvedFolderPath] = index;
+
+        // Check for a Maps Platform Dataset. If one exists the editor renders
+        // via TileOverlay so we keep the layer shell empty (no Marker objects).
+        final datasetMeta =
+            await CloudDatasetService().getDatasetMeta(resolvedFolderPath);
+        if (datasetMeta != null) {
+          _cloudDatasetMeta[resolvedFolderPath] = datasetMeta;
+          debugPrint(
+              '[CloudWaypoints] dataset found: ${datasetMeta.datasetId} (${datasetMeta.featureCount} features)');
+        } else if (!_creatingDatasetFolders.contains(resolvedFolderPath)) {
+          _triggerDatasetCreationInBackground(resolvedFolderPath);
+        }
+
         final layerId = _cloudLayerId('waypoints', resolvedFolderPath);
         var layer = _cloudWaypointsLayers[layerId] ??
             _cloudWaypointLayerShell(resolvedFolderPath, order: 901);
         layer = layer.copyWith(
-          points: clippedPoints,
+          // Dataset present → render via TileOverlay, keep layer shell empty.
+          // No dataset → fall back to Marker-based rendering as before.
+          points: datasetMeta != null ? const [] : clippedPoints,
         );
         _cloudWaypointsLayers[layerId] = layer;
         _loadedCloudWaypointFolders.add(resolvedFolderPath);
         debugPrint(
-            '[CloudWaypoints] DONE (compiled) in ${sw.elapsedMilliseconds}ms — ${clippedPoints.length}/${points.length} waypoints');
+            '[CloudWaypoints] DONE (compiled) in ${sw.elapsedMilliseconds}ms — '
+            '${clippedPoints.length}/${points.length} waypoints, '
+            'dataset=${datasetMeta != null}');
         _loadingCloudWaypointFolders.remove(resolvedFolderPath);
         notifyListeners();
         return;
@@ -1190,25 +1294,63 @@ class ShareableMapProvider extends ChangeNotifier {
         _IsolateParseInput(downloaded),
       );
 
+      final clippedFallback = _clipCloudPointsToPolygons(result.points);
+
+      final index = WaypointSpatialIndex();
+      index.insertAll(clippedFallback
+          .map((p) => WaypointMeta(
+                id: p.id,
+                name: p.name,
+                description: p.description,
+                position: p.position,
+              ))
+          .toList());
+      _cloudWaypointIndexes[resolvedFolderPath] = index;
+
+      final datasetMeta =
+          await CloudDatasetService().getDatasetMeta(resolvedFolderPath);
+      if (datasetMeta != null) {
+        _cloudDatasetMeta[resolvedFolderPath] = datasetMeta;
+      } else if (!_creatingDatasetFolders.contains(resolvedFolderPath)) {
+        _triggerDatasetCreationInBackground(resolvedFolderPath);
+      }
+
       final layerId = _cloudLayerId('waypoints', resolvedFolderPath);
       var layer = _cloudWaypointsLayers[layerId] ??
           _cloudWaypointLayerShell(resolvedFolderPath, order: 901);
 
       layer = layer.copyWith(
-        points: _clipCloudPointsToPolygons(result.points),
+        points: datasetMeta != null ? const [] : clippedFallback,
       );
 
       _cloudWaypointsLayers[layerId] = layer;
       _loadedCloudWaypointFolders.add(resolvedFolderPath);
       debugPrint(
           '[CloudWaypoints] DONE (fallback) in ${sw.elapsedMilliseconds}ms — '
-          '${result.points.length} points from ${downloaded.length} files');
+          '${result.points.length} points from ${downloaded.length} files, '
+          'dataset=${datasetMeta != null}');
     } catch (e) {
       debugPrint('[CloudWaypoints] FAILED at ${sw.elapsedMilliseconds}ms: $e');
     }
 
     _loadingCloudWaypointFolders.remove(resolvedFolderPath);
     notifyListeners();
+  }
+
+  /// Calls the `syncWaypointDataset` Cloud Function in the background to
+  /// create a Maps Platform Dataset for [folderPath]. When the CF returns
+  /// successfully, reloads the waypoints for this folder so the editor
+  /// switches from Marker-based rendering to TileOverlay automatically.
+  void _triggerDatasetCreationInBackground(String folderPath) {
+    _creatingDatasetFolders.add(folderPath);
+    final mapId = _currentMap?.id;
+    CloudDatasetService().triggerDatasetCreation(folderPath).then((datasetId) {
+      _creatingDatasetFolders.remove(folderPath);
+      if (datasetId != null && _currentMap?.id == mapId) {
+        debugPrint('[CloudWaypoints] dataset created ($datasetId), reloading waypoints for $folderPath');
+        loadCloudFolderWaypoints(folderPath: folderPath, force: true);
+      }
+    });
   }
 
   List<List<LatLng>> _cloudClipPolygons() {
@@ -2000,10 +2142,10 @@ class ShareableMapProvider extends ChangeNotifier {
   }
 
   /// Mark that the next tap should be ignored (e.g. after button press)
-  void markIgnoreNextTap() {
-    _ignoreNextTap = true;
-    debugPrint('⏭️ Next tap will be ignored');
-  }
+  // void markIgnoreNextTap() {
+  //   _ignoreNextTap = true;
+  //   debugPrint('⏭️ Next tap will be ignored');
+  // }
 
   /// Start drawing
   void startDrawing() {
@@ -2035,6 +2177,22 @@ class ShareableMapProvider extends ChangeNotifier {
     _drawingPoints.add(point);
     debugPrint(
         '[WASM-DEBUG] Added drawing point: total=${_drawingPoints.length}');
+    notifyListeners();
+  }
+
+  /// Update a drawing point position while drawing.
+  void updateDrawingPoint(int index, LatLng newPosition) {
+    if (!_isDrawing) return;
+    if (index < 0 || index >= _drawingPoints.length) return;
+    _drawingPoints[index] = newPosition;
+    notifyListeners();
+  }
+
+  /// Insert a drawing point at [index] while drawing.
+  void insertDrawingPoint(int index, LatLng position) {
+    if (!_isDrawing) return;
+    if (index < 0 || index > _drawingPoints.length) return;
+    _drawingPoints.insert(index, position);
     notifyListeners();
   }
 
@@ -2276,6 +2434,7 @@ class ShareableMapProvider extends ChangeNotifier {
     }
 
     _editingPoints![index] = newPosition;
+    _editingPointsVersion++;
     if (!temporary) {
       _hasUnsavedChanges = true;
     }
@@ -2288,6 +2447,7 @@ class ShareableMapProvider extends ChangeNotifier {
 
     if (index >= 0 && index <= _editingPoints!.length) {
       _editingPoints!.insert(index, position);
+      _editingPointsVersion++;
       _hasUnsavedChanges = true;
       debugPrint('Inserted new vertex at index $index');
       notifyListeners();
@@ -2303,6 +2463,7 @@ class ShareableMapProvider extends ChangeNotifier {
 
     if (index >= 0 && index < _editingPoints!.length) {
       _editingPoints!.removeAt(index);
+      _editingPointsVersion++;
       _hasUnsavedChanges = true;
       debugPrint('Removed vertex at index $index');
       notifyListeners();
@@ -2359,6 +2520,7 @@ class ShareableMapProvider extends ChangeNotifier {
     _editingPoints = null;
     _editingElementId = null;
     _hasUnsavedChanges = false;
+    _editingPointsVersion = 0;
     notifyListeners();
   }
 
@@ -2946,6 +3108,49 @@ class ShareableMapProvider extends ChangeNotifier {
     );
   }
 
+  /// Select a point, open its info window, and animate the camera to it —
+  /// mirrors [focusOnPolyline] for marker elements.
+  Future<void> focusOnPoint(String layerId, String pointId) async {
+    if (_currentMap == null) return;
+
+    MapPoint? found;
+    String resolvedLayerId = layerId;
+    for (final layer in _currentMap!.layers) {
+      final match = layer.points.where((p) => p.id == pointId).firstOrNull;
+      if (match != null) {
+        found = match;
+        resolvedLayerId = layer.id;
+        break;
+      }
+    }
+    if (found == null) return;
+
+    _selectedLayerId = resolvedLayerId;
+    _selectedElementId = pointId;
+    _ignoreNextTap = true;
+    _showStylePanel = false;
+    notifyListeners(); // update selection highlight before animation
+
+    if (_mapController == null) return;
+    await _mapController!.animateCamera(
+      CameraUpdate.newLatLng(found.position),
+    );
+
+    // Open the info window AFTER the camera has settled so _latLngToScreen
+    // in the ValueListenableBuilder uses the final (centred) camera position,
+    // not the pre-animation position which would place the overlay off-target.
+    _infoWindowData = InfoWindowData(
+      elementId: pointId,
+      layerId: resolvedLayerId,
+      title: found.name.isNotEmpty ? found.name : 'Unnamed Point',
+      description: found.description,
+      subtitle: '',
+      type: 'point',
+      anchor: found.position,
+    );
+    notifyListeners();
+  }
+
   /// Animate the camera to a specific position at the given zoom level.
   Future<void> animateToPosition(LatLng position, {double zoom = 16.0}) async {
     if (_mapController == null) return;
@@ -3181,6 +3386,30 @@ class ShareableMapProvider extends ChangeNotifier {
     }
   }
 
+  /// Update a lasso point position (vertex drag).
+  void updateLassoPoint(int index, LatLng newPosition) {
+    if (!_isLassoSelectActive) return;
+    if (index < 0 || index >= _lassoPoints.length) return;
+    _lassoPoints[index] = newPosition;
+    notifyListeners();
+  }
+
+  /// Insert a new lasso point at [index] (midpoint drag to add vertex).
+  void insertLassoPoint(int index, LatLng position) {
+    if (!_isLassoSelectActive) return;
+    if (index < 0 || index > _lassoPoints.length) return;
+    _lassoPoints.insert(index, position);
+    notifyListeners();
+  }
+
+  /// Remove the lasso point at [index] (vertex delete — min 3 must remain).
+  void removeLassoPointAt(int index) {
+    if (_lassoPoints.length <= 3) return;
+    if (index < 0 || index >= _lassoPoints.length) return;
+    _lassoPoints.removeAt(index);
+    notifyListeners();
+  }
+
   /// Complete lasso selection and return the list of work areas whose
   /// centroid falls inside the drawn polygon. Does not auto-add them
   /// — the caller should present a confirmation and call
@@ -3351,6 +3580,9 @@ class ShareableMapProvider extends ChangeNotifier {
     _loadingCloudWaypointFolders.clear();
     _loadedCloudTrackFolders.clear();
     _loadedCloudWaypointFolders.clear();
+    _cloudDatasetMeta.clear();
+    _cloudWaypointIndexes.clear();
+    _creatingDatasetFolders.clear();
     _drawingPoints.clear();
     _lassoPoints.clear();
     _editingPoints = null;

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/job.dart';
 import '../models/custom_polygon.dart';
 import '../models/distributor.dart';
+import '../providers/day_off_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/unfinished_work_areas_provider.dart';
 import '../providers/scale_provider.dart';
@@ -49,33 +50,9 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
           orElse: () => jobs.first,
         );
 
-        // Merge clients (case-insensitive dedupe, preserve original casing
-        // of whichever side the value appeared in first).
-        final combinedClients = _mergeStringsPreserveCase(
-          targetJob.clients,
-          unfinishedItem.clients,
-        );
-
-        // Merge working-area names the same way so labels aren't lost.
-        final combinedWorkingAreas = _mergeStringsPreserveCase(
-          targetJob.workingAreas,
-          unfinishedItem.workingAreas,
-        );
-
-        // Merge polygons / work maps. Target keeps priority; any polygon
-        // from the unfinished item whose (name, type) isn't already present
-        // is appended so polygons without names still flow through.
-        final combinedWorkMaps = _mergeWorkMaps(
-          targetJob.workMaps,
-          unfinishedItem.workMaps,
-        );
-
-        final combinedJob = targetJob.copyWith(
-          clients: combinedClients,
-          workingAreas: combinedWorkingAreas,
-          workMaps: combinedWorkMaps,
-          // Inherit drop-off from unfinished item only when target lacks one.
-          dropOffPoint: targetJob.dropOffPoint ?? unfinishedItem.dropOffPoint,
+        final combinedJob = _mergeScheduleJobs(
+          targetJob: targetJob,
+          incomingJob: unfinishedItem,
         );
 
         await scheduleProvider.updateJobWithUndo(targetJob, combinedJob, date);
@@ -165,6 +142,53 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
     return out;
   }
 
+  /// Merge two schedule jobs without dropping instructions or access notes.
+  static Job _mergeScheduleJobs({
+    required Job targetJob,
+    required Job incomingJob,
+  }) {
+    final combinedClients = _mergeStringsPreserveCase(
+      targetJob.clients,
+      incomingJob.clients,
+    );
+    final combinedClientInstructions = _mergeStringsPreserveCase(
+      targetJob.clientInstructions,
+      incomingJob.clientInstructions,
+    );
+    final combinedWorkingAreas = _mergeStringsPreserveCase(
+      targetJob.workingAreas,
+      incomingJob.workingAreas,
+    );
+    final combinedWorkMaps = _mergeWorkMaps(
+      targetJob.workMaps,
+      incomingJob.workMaps,
+    );
+
+    return targetJob.copyWith(
+      clients: combinedClients,
+      clientInstructions: combinedClientInstructions,
+      workingAreas: combinedWorkingAreas,
+      workMaps: combinedWorkMaps,
+      mapInstructions: _mergeTextBlocks(
+        targetJob.mapInstructions,
+        incomingJob.mapInstructions,
+      ),
+      dropOffPoint: targetJob.dropOffPoint ?? incomingJob.dropOffPoint,
+      pickUpPoint: targetJob.pickUpPoint ?? incomingJob.pickUpPoint,
+    );
+  }
+
+  /// Combine two free-form instruction blocks without losing either side.
+  static String _mergeTextBlocks(String a, String b) {
+    final lines = <String>[];
+    for (final value in [a, b]) {
+      final trimmed = value.trim();
+      if (trimmed.isEmpty) continue;
+      if (!lines.contains(trimmed)) lines.add(trimmed);
+    }
+    return lines.join('\n');
+  }
+
   /// Merge two polygon/work-map lists. The [target] list keeps priority.
   ///
   /// Incoming polygons whose `(type, name)` collides with an entry already
@@ -220,6 +244,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final scaleProvider = ref.read(scaleRiverpod);
+    final isDayOff = ref.watch(dayOffRiverpod).isDayOff(distributor.id, date);
 
     return DragTarget<Job>(
       onAcceptWithDetails: (jobDetails) async {
@@ -325,25 +350,9 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
                 );
               }
             } else if (action == DropAction.addToExisting) {
-              final combinedClients = <String>{
-                ...targetJob.clients,
-                ...draggedJob.clients,
-              }.toList();
-
-              final combinedWorkingAreas = <String>{
-                ...targetJob.workingAreas,
-                ...draggedJob.workingAreas,
-              }.toList();
-
-              final combinedWorkMaps = <CustomPolygon>[
-                ...targetJob.workMaps,
-                ...draggedJob.workMaps,
-              ];
-
-              final combinedJob = targetJob.copyWith(
-                clients: combinedClients,
-                workingAreas: combinedWorkingAreas,
-                workMaps: combinedWorkMaps,
+              final combinedJob = _mergeScheduleJobs(
+                targetJob: targetJob,
+                incomingJob: draggedJob,
               );
 
               await scheduleProvider.combineJobsWithUndo(
@@ -369,25 +378,9 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
                 );
               }
             } else if (action == DropAction.copy) {
-              final combinedClients = <String>{
-                ...targetJob.clients,
-                ...draggedJob.clients,
-              }.toList();
-
-              final combinedWorkingAreas = <String>{
-                ...targetJob.workingAreas,
-                ...draggedJob.workingAreas,
-              }.toList();
-
-              final combinedWorkMaps = <CustomPolygon>[
-                ...targetJob.workMaps,
-                ...draggedJob.workMaps,
-              ];
-
-              final combinedJob = targetJob.copyWith(
-                clients: combinedClients,
-                workingAreas: combinedWorkingAreas,
-                workMaps: combinedWorkMaps,
+              final combinedJob = _mergeScheduleJobs(
+                targetJob: targetJob,
+                incomingJob: draggedJob,
               );
 
               await scheduleProvider.copyAndCombineJobsWithUndo(
@@ -447,8 +440,15 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
           }
         }
       },
-      onWillAcceptWithDetails: (job) => true,
+      onWillAcceptWithDetails: (job) => !isDayOff,
       builder: (context, candidateData, rejectedData) {
+        if (isDayOff) {
+          return _DayOffCard(
+            distributor: distributor,
+            date: date,
+            isFullscreen: isFullscreen,
+          );
+        }
         return Card(
           color: candidateData.isNotEmpty
               ? Theme.of(context).primaryColor.withValues(alpha: 0.1)
@@ -488,8 +488,9 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
   }
 }
 
-/// Button widget for adding a new job to an empty cell
-class _AddJobButton extends StatefulWidget {
+/// Button widget for adding a new job to an empty cell.
+/// Also shows a day-off toggle button alongside the add button.
+class _AddJobButton extends riverpod.ConsumerStatefulWidget {
   final Distributor distributor;
   final DateTime date;
   final ScaleProvider scaleProvider;
@@ -501,30 +502,26 @@ class _AddJobButton extends StatefulWidget {
   });
 
   @override
-  State<_AddJobButton> createState() => _AddJobButtonState();
+  riverpod.ConsumerState<_AddJobButton> createState() => _AddJobButtonState();
 }
 
-class _AddJobButtonState extends State<_AddJobButton> {
-  bool _isLoading = false;
+class _AddJobButtonState extends riverpod.ConsumerState<_AddJobButton> {
+  bool _isAddingJob = false;
+  bool _isMarkingDayOff = false;
 
   Future<void> _addJob() async {
-    if (_isLoading) return;
-
-    setState(() {
-      _isLoading = true;
-    });
-
+    if (_isAddingJob) return;
+    setState(() => _isAddingJob = true);
     try {
       final newJob = Job(
-        id: '', // Will be set by Firestore
+        id: '',
         clients: [],
-        workingAreas: [], // Empty names to be selected later
-        workMaps: [], // Empty work maps to be added later
+        workingAreas: [],
+        workMaps: [],
         distributorId: widget.distributor.id,
         date: widget.date,
-        statusId: 'scheduled', // Use default scheduled status
+        statusId: 'scheduled',
       );
-
       if (mounted) {
         await riverpod.ProviderScope.containerOf(context)
             .read(scheduleRiverpod)
@@ -541,36 +538,224 @@ class _AddJobButtonState extends State<_AddJobButton> {
         );
       }
     } finally {
+      if (mounted) setState(() => _isAddingJob = false);
+    }
+  }
+
+  Future<void> _markDayOff() async {
+    if (_isMarkingDayOff) return;
+    setState(() => _isMarkingDayOff = true);
+    try {
+      await ref
+          .read(dayOffRiverpod)
+          .markDayOff(widget.distributor.id, widget.date);
+    } catch (e) {
       if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to mark day off: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
       }
+    } finally {
+      if (mounted) setState(() => _isMarkingDayOff = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: _isLoading
-          ? SizedBox(
-              width: widget.scaleProvider.mediumIconSize,
-              height: widget.scaleProvider.mediumIconSize,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation<Color>(
-                  Theme.of(context).primaryColor,
-                ),
-              ),
-            )
-          : IconButton(
-              icon: Icon(
-                Icons.add,
-                size: widget.scaleProvider.mediumIconSize,
-              ),
-              tooltip: 'Add new job',
-              onPressed: _addJob,
+    final iconSize = widget.scaleProvider.mediumIconSize;
+
+    if (_isAddingJob || _isMarkingDayOff) {
+      return Center(
+        child: SizedBox(
+          width: iconSize,
+          height: iconSize,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation<Color>(
+              Theme.of(context).primaryColor,
             ),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: Icon(Icons.add, size: iconSize),
+          tooltip: 'Add new job',
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+          onPressed: _addJob,
+        ),
+        const SizedBox(width: 4),
+        IconButton(
+          icon: Icon(Icons.event_busy,
+              size: iconSize - 2, color: Colors.blueGrey.shade300),
+          tooltip: 'Mark as day off',
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+          onPressed: _markDayOff,
+        ),
+      ],
+    );
+  }
+}
+
+/// Card shown in a schedule cell when a distributor has a day off on that date.
+/// Collapsed: icon + "DAY OFF" label.
+/// Expanded (isFullscreen): adds "Not available" subtitle and a REMOVE action.
+class _DayOffCard extends riverpod.ConsumerStatefulWidget {
+  final Distributor distributor;
+  final DateTime date;
+  final bool isFullscreen;
+
+  const _DayOffCard({
+    required this.distributor,
+    required this.date,
+    required this.isFullscreen,
+  });
+
+  @override
+  riverpod.ConsumerState<_DayOffCard> createState() => _DayOffCardState();
+}
+
+class _DayOffCardState extends riverpod.ConsumerState<_DayOffCard> {
+  bool _isLoading = false;
+
+  Future<void> _removeDayOff() async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+    try {
+      await ref
+          .read(dayOffRiverpod)
+          .removeDayOff(widget.distributor.id, widget.date);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to remove day off: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scaleProvider = ref.read(scaleRiverpod);
+
+    final loadingIndicator = SizedBox(
+      width: 12,
+      height: 12,
+      child: CircularProgressIndicator(
+        strokeWidth: 1.5,
+        valueColor: AlwaysStoppedAnimation<Color>(Colors.white54),
+      ),
+    );
+
+    if (widget.isFullscreen) {
+      return Card(
+        margin: const EdgeInsets.all(1),
+        color: Colors.blueGrey,
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.event_busy,
+                      color: Colors.white70,
+                      size: scaleProvider.mediumIconSize),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      'DAY OFF',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: scaleProvider.mediumFontSize,
+                        letterSpacing: 1,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  _isLoading
+                      ? loadingIndicator
+                      : GestureDetector(
+                          onTap: _removeDayOff,
+                          child: Text(
+                            'REMOVE',
+                            style: TextStyle(
+                              color: Colors.red,
+                              fontWeight: FontWeight.bold,
+                              fontSize: scaleProvider.smallFontSize,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                ],
+              ),
+              Container(
+                height: 1,
+                color: Colors.white24,
+                margin: const EdgeInsets.symmetric(vertical: 3),
+              ),
+              Text(
+                'Not available',
+                style: TextStyle(
+                    color: Colors.white, fontSize: scaleProvider.smallFontSize),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Collapsed view — tap anywhere to remove
+    return Card(
+      margin: const EdgeInsets.all(1),
+      color: Colors.blueGrey.shade800,
+      child: InkWell(
+        onTap: _removeDayOff,
+        borderRadius: BorderRadius.circular(4),
+        child: Center(
+          child: _isLoading
+              ? loadingIndicator
+              : Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.event_busy,
+                        color: Colors.white70,
+                        size: scaleProvider.smallIconSize),
+                    const SizedBox(width: 2),
+                    Flexible(
+                      child: Text(
+                        'DAY OFF',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: scaleProvider.smallFontSize,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ),
     );
   }
 }

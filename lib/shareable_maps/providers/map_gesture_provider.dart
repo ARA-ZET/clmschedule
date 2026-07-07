@@ -32,3 +32,31 @@ class MapGestureProvider extends ChangeNotifier {
     }
   }
 }
+
+/// Riverpod provider for WidgetOverPolygonNotifier.
+final widgetOverPolygonRiverpod =
+    riverpod.ChangeNotifierProvider<WidgetOverPolygonNotifier>(
+        (ref) => WidgetOverPolygonNotifier());
+
+/// Tracks whether the mouse cursor is currently over a UI widget that is
+/// positioned on top of a polygon layer. When true, polygon/polyline onTap
+/// handlers return null so taps are not consumed by the map element beneath.
+class WidgetOverPolygonNotifier extends ChangeNotifier {
+  bool _isOver = false;
+
+  bool get isOver => _isOver;
+
+  void enable() {
+    if (!_isOver) {
+      _isOver = true;
+      notifyListeners();
+    }
+  }
+
+  void disable() {
+    if (_isOver) {
+      _isOver = false;
+      notifyListeners();
+    }
+  }
+}

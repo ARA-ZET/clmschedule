@@ -191,7 +191,7 @@ class KmlParserService {
           if (pos != null) {
             final ptName = name.isEmpty ? 'Point ${points.length + 1}' : name;
             points.add(MapPoint(
-              id: _makeId('point', ptName, baseTs, seq++),
+              id: MapPoint.importId(ptName, pos),
               name: ptName,
               description: desc,
               position: pos,
@@ -281,7 +281,7 @@ class KmlParserService {
               final pos = _parseKmlPoint(child);
               if (pos != null) {
                 points.add(MapPoint(
-                  id: _makeId('point', subName, baseTs, seq++),
+                  id: MapPoint.importId(subName, pos),
                   name: subName,
                   description: desc,
                   position: pos,
@@ -336,7 +336,7 @@ class KmlParserService {
             wpt.findElements('desc').firstOrNull?.innerText.trim() ?? '';
         final wptName = name.isEmpty ? 'Waypoint ${points.length + 1}' : name;
         points.add(MapPoint(
-          id: _makeId('point', wptName, baseTs, seq++),
+          id: MapPoint.importId(wptName, pos),
           name: wptName,
           description: desc,
           position: pos,

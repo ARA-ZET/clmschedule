@@ -209,7 +209,10 @@ class JobTypeProvider extends ChangeNotifier {
     bool? createsCloudFolder,
     String? iconName,
     int? colorValue,
+    bool? autoAllocatesToSchedule,
+    bool? hasTwoStops,
     List<String>? defaultTools,
+    bool? chargesVat,
     bool clearIcon = false,
     bool clearColor = false,
   }) async {
@@ -229,7 +232,10 @@ class JobTypeProvider extends ChangeNotifier {
       createsCloudFolder: createsCloudFolder,
       iconName: iconName,
       colorValue: colorValue,
+      autoAllocatesToSchedule: autoAllocatesToSchedule,
+      hasTwoStops: hasTwoStops,
       defaultTools: defaultTools,
+      chargesVat: chargesVat,
       clearIcon: clearIcon,
       clearColor: clearColor,
     );
@@ -286,6 +292,13 @@ class JobTypeProvider extends ChangeNotifier {
 
   bool tracksQuantity(String id) => getJobTypeById(id)?.tracksQuantity ?? true;
 
+  bool autoAllocatesToSchedule(String id) =>
+      getJobTypeById(id)?.autoAllocatesToSchedule ?? false;
+
+  bool hasTwoStops(String id) => getJobTypeById(id)?.hasTwoStops ?? false;
+
+  bool chargesVat(String id) => getJobTypeById(id)?.chargesVat ?? false;
+
   String quantityLabel(String id) =>
       getJobTypeById(id)?.quantityLabel ?? 'Quantity';
 
@@ -295,6 +308,18 @@ class JobTypeProvider extends ChangeNotifier {
 
   List<String> defaultTools(String id) =>
       getJobTypeById(id)?.defaultTools ?? const [];
+
+  /// Convenience: ids of every type that auto-allocates to the schedule grid.
+  List<String> get scheduleAutoAllocateTypeIds => _jobTypes
+      .where((jt) => jt.autoAllocatesToSchedule)
+      .map((jt) => jt.id)
+      .toList(growable: false);
+
+  /// Convenience: ids of every type that has two stops (loading + offloading).
+  List<String> get twoStopTypeIds => _jobTypes
+      .where((jt) => jt.hasTwoStops)
+      .map((jt) => jt.id)
+      .toList(growable: false);
 
   /// Convenience: ids of every type configured to appear on the
   /// Collection Schedule. Used by providers that need to filter job lists.

@@ -148,13 +148,13 @@ class CloudTransferProvider extends ChangeNotifier {
 
     job.currentFileName = null;
 
-    // Rebuild compiled waypoints for any folder touched by the job.
+    // Recompile affected folders server-side.
     for (final folder in affectedFolders) {
       if (folder.isEmpty) continue;
       try {
-        await _storage.regenerateCompiledWaypoints(folder);
+        await _storage.callCompileGpxFolder(folder);
       } catch (e) {
-        debugPrint('CloudTransfer: rebuild compiled($folder) failed: $e');
+        debugPrint('CloudTransfer: recompile($folder) failed: $e');
       }
     }
 

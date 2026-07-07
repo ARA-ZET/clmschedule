@@ -279,7 +279,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                     if (isWaypointLayer) ...[
                       const SizedBox(width: 6),
                       Text(
-                        '${layer.points.length}',
+                        '${provider.cloudWaypointCountForLayer(layer.id)}',
                         style: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
@@ -400,7 +400,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                   : Icon(Icons.place, size: 18, color: point.color),
               title: point.name,
               elementId: point.id,
-              onTap: () => _selectElement(provider, point.id),
+              onTap: () => provider.focusOnPoint(layer.id, point.id),
               onEdit: () =>
                   _showEditPointDialog(context, provider, layer, point),
               onDelete: () => _deletePoint(context, provider, layer, point.id),
@@ -809,10 +809,6 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
     }
 
     return DateFormat('MMM d, y').format(createdAt);
-  }
-
-  void _selectElement(ShareableMapProvider provider, String elementId) {
-    provider.selectElement(elementId);
   }
 
   static LatLng _centroid(List<LatLng> points) {

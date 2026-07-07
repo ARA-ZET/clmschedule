@@ -12,6 +12,7 @@ import '../providers/te_map_layer_provider.dart';
 import '../providers/te_mode_provider.dart';
 import '../providers/te_tools_provider.dart';
 import '../providers/te_undo_provider.dart';
+import '../providers/te_processing_provider.dart';
 import '../models/styled_polygon.dart';
 import '../models/tab_item.dart';
 import '../services/point_in_polygon.dart';
@@ -81,6 +82,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
   final List<LatLng> _drawingPoints = [];
   BitmapDescriptor? _drawingVertexIcon;
   BitmapDescriptor? _drawingFirstVertexIcon;
+  BitmapDescriptor? _drawingMidpointIcon;
   bool _isDialogOpen = false;
 
   // Live camera position – updated on every onCameraMove for smooth reprojection.
@@ -329,8 +331,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       TECommand(
         description: 'Delete waypoint "$name"',
         doFn: () => tabsProvider.removeWaypoint(tabIndex, waypointIndex),
-        undoFn: () => tabsProvider.insertWaypoint(
-            tabIndex, waypointIndex, removedWpt),
+        undoFn: () =>
+            tabsProvider.insertWaypoint(tabIndex, waypointIndex, removedWpt),
       ),
     );
     ref.read(teMapLayerRiverpod).selectWaypoint(tabIndex, null);
@@ -495,6 +497,26 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
             BitmapDescriptor.bytes(data2.buffer.asUint8List());
       });
     }
+
+    // Orange midpoint marker, slightly smaller than vertex markers.
+    const double midSize = 18.0;
+    const double midRadius = 6.0;
+    final recorder3 = ui.PictureRecorder();
+    final canvas3 = Canvas(recorder3);
+    final midCenter = Offset(midSize / 2, midSize / 2);
+    canvas3.drawCircle(
+        midCenter, midRadius + 1.5, Paint()..color = Colors.white);
+    canvas3.drawCircle(midCenter, midRadius, Paint()..color = Colors.orange);
+    canvas3.drawCircle(midCenter, 2.5, Paint()..color = Colors.white);
+    final picture3 = recorder3.endRecording();
+    final image3 = await picture3.toImage(midSize.toInt(), midSize.toInt());
+    final data3 = await image3.toByteData(format: ui.ImageByteFormat.png);
+    if (mounted && data3 != null) {
+      setState(() {
+        _drawingMidpointIcon =
+            BitmapDescriptor.bytes(data3.buffer.asUint8List());
+      });
+    }
   }
 
   Future<void> _loadScissorsIcons() async {
@@ -512,7 +534,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       final recorder = ui.PictureRecorder();
       final canvas = Canvas(recorder);
       // White ring for contrast against any map background.
-      canvas.drawCircle(center, radius + ringWidth, Paint()..color = Colors.white);
+      canvas.drawCircle(
+          center, radius + ringWidth, Paint()..color = Colors.white);
       canvas.drawCircle(center, radius, Paint()..color = fill);
       // Inner white dot so the marker reads as a "target" pip.
       canvas.drawCircle(center, dotRadius, Paint()..color = Colors.white);
@@ -573,11 +596,14 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
 
   Set<Marker> _buildDrawingMarkers() {
     if (_drawingPoints.isEmpty) return {};
+    final drawingMode = ref.read(teToolsRiverpod).drawingMode;
+    final isPolygonDrawing = drawingMode == TEDrawingMode.polygon;
     final markers = <Marker>{};
     for (int i = 0; i < _drawingPoints.length; i++) {
       final idx = i; // capture for closure
       final isFirst = i == 0;
-      final canClose = isFirst && _drawingPoints.length >= 3;
+      final canClose =
+          isPolygonDrawing && isFirst && _drawingPoints.length >= 3;
       markers.add(Marker(
         markerId: MarkerId('draw_vtx_$i'),
         position: _drawingPoints[i],
@@ -600,6 +626,32 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
             : null,
       ));
     }
+
+    if (isPolygonDrawing && _drawingPoints.length >= 2) {
+      for (int i = 0; i < _drawingPoints.length; i++) {
+        final next = (i + 1) % _drawingPoints.length;
+        final current = _drawingPoints[i];
+        final following = _drawingPoints[next];
+        final midpoint = LatLng(
+          (current.latitude + following.latitude) / 2,
+          (current.longitude + following.longitude) / 2,
+        );
+        markers.add(Marker(
+          markerId: MarkerId('draw_mid_$i'),
+          position: midpoint,
+          anchor: const Offset(0.5, 0.5),
+          zIndex: 19,
+          draggable: true,
+          consumeTapEvents: true,
+          icon: _drawingMidpointIcon ??
+              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+          onDragEnd: (newPos) {
+            setState(() => _drawingPoints.insert(i + 1, newPos));
+          },
+        ));
+      }
+    }
+
     return markers;
   }
 
@@ -619,7 +671,6 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
   Future<void> _showPolygonNameClientDialog(
       BuildContext context, int currentTab) async {
     final nameCtrl = TextEditingController();
-    final clientCtrl = TextEditingController();
 
     // Find overlapping work area maps
     final scheduleProvider = ref.read(scheduleRiverpod);
@@ -648,7 +699,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       }
     }
 
-    // Get distributor client names from existing jobs
+    // Get distributor client names from existing jobs (used as the
+    // "add another client" suggestion list).
     final clientSuggestions = <String>{};
     for (final job in scheduleProvider.jobs) {
       for (final c in job.clients) {
@@ -657,19 +709,76 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     }
     final sortedClients = clientSuggestions.toList()..sort();
 
+    // Clients and work-area names allocated to THIS tab's distributor on its
+    // date. These become the primary dropdown/chip options in the draw dialog.
+    final allocatedClients = <String>[];
+    final allocatedAreaNames = <String>[];
+    if (tabData.distributorId != null &&
+        tabData.distributorId!.isNotEmpty &&
+        tabData.trackDate != null) {
+      try {
+        final jobs = await scheduleProvider.fetchJobsForDistributorAndDate(
+            tabData.distributorId!, tabData.trackDate!);
+        final clientSet = <String>{};
+        final areaSet = <String>{};
+        for (final j in jobs) {
+          for (final c in j.clients) {
+            final clean = c.trim();
+            if (clean.isNotEmpty) clientSet.add(clean);
+          }
+          for (final area in j.workingAreas) {
+            final clean = area.trim();
+            if (clean.isNotEmpty) areaSet.add(clean);
+          }
+          for (final wm in j.workMaps) {
+            final clean = wm.name.trim();
+            if (clean.isNotEmpty) areaSet.add(clean);
+          }
+        }
+        allocatedClients.addAll(clientSet.toList()..sort());
+        allocatedAreaNames.addAll(areaSet.toList()..sort());
+      } catch (e) {
+        debugPrint('⚠️ Could not load allocated clients/work areas: $e');
+      }
+    }
+    if (allocatedClients.isEmpty) {
+      allocatedClients.addAll(sortedClients);
+    }
+
     // Get work area names for polygon name suggestions
     final workAreaNames = workAreas
         .map((wa) => wa.name)
         .where((n) => n.isNotEmpty)
         .toList()
       ..sort();
+    final polygonNameOptions =
+        allocatedAreaNames.isNotEmpty ? allocatedAreaNames : workAreaNames;
+    String selectedPolygonName =
+        polygonNameOptions.length == 1 ? polygonNameOptions.first : '';
+    final selectedClients = <String>{};
+    if (allocatedClients.length == 1) {
+      selectedClients.add(allocatedClients.first);
+    }
+    String? validationError;
 
     if (!context.mounted) return;
+
+    // Where to save the drawn polygon:
+    //   'gap'         → unfinished work areas (gap maps) — the default.
+    //   'distributor' → the schedule job's work areas for this tab's
+    //                   distributor + date, then auto-refresh so the new
+    //                   polygon shows up ready to trim & save.
+    // The distributor option is only valid for tabs opened from the
+    // processing flow (they carry a distributorId + trackDate).
+    final canSaveToDistributor = tabData.distributorId != null &&
+        tabData.distributorId!.isNotEmpty &&
+        tabData.trackDate != null;
+    String destination = 'gap';
 
     _isDialogOpen = true;
     ref.read(mapGestureRiverpod).disableMapGestures();
 
-    final result = await showDialog<Map<String, String>>(
+    final result = await showDialog<Map<String, Object>>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
@@ -680,71 +789,127 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Autocomplete<String>(
-                  optionsBuilder: (textEditingValue) {
-                    if (textEditingValue.text.isEmpty) return workAreaNames;
-                    final q = textEditingValue.text.toLowerCase();
-                    return workAreaNames
-                        .where((n) => n.toLowerCase().contains(q));
-                  },
-                  fieldViewBuilder: (ctx, controller, focusNode, onSubmitted) {
-                    controller.addListener(() {
-                      if (nameCtrl.text != controller.text) {
-                        nameCtrl.text = controller.text;
+                if (polygonNameOptions.isNotEmpty)
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedPolygonName.isNotEmpty
+                        ? selectedPolygonName
+                        : null,
+                    decoration: const InputDecoration(
+                      labelText: 'Polygon Name',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    hint: const Text('Select allocated area'),
+                    items: polygonNameOptions
+                        .map(
+                          (n) => DropdownMenuItem<String>(
+                            value: n,
+                            child: Text(n),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (val) {
+                      setDialogState(() {
+                        selectedPolygonName = (val ?? '').trim();
+                        validationError = null;
+                      });
+                    },
+                  )
+                else
+                  TextField(
+                    controller: nameCtrl,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Polygon Name',
+                      hintText: 'Enter polygon name',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (_) {
+                      if (validationError != null) {
+                        setDialogState(() => validationError = null);
                       }
-                    });
-                    nameCtrl.addListener(() {
-                      if (controller.text != nameCtrl.text) {
-                        controller.text = nameCtrl.text;
-                      }
-                    });
-                    return TextField(
-                      controller: controller,
-                      focusNode: focusNode,
-                      autofocus: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Polygon Name',
-                        hintText: 'e.g. Block A, Zone 3',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                    );
-                  },
-                  onSelected: (val) => nameCtrl.text = val,
-                ),
+                    },
+                  ),
                 const SizedBox(height: 12),
-                Autocomplete<String>(
-                  optionsBuilder: (textEditingValue) {
-                    if (textEditingValue.text.isEmpty) return sortedClients;
-                    final q = textEditingValue.text.toLowerCase();
-                    return sortedClients
-                        .where((c) => c.toLowerCase().contains(q));
-                  },
-                  fieldViewBuilder: (ctx, controller, focusNode, onSubmitted) {
-                    // Sync the autocomplete controller with our controller
-                    clientCtrl.addListener(() {
-                      if (controller.text != clientCtrl.text) {
-                        controller.text = clientCtrl.text;
-                      }
-                    });
-                    controller.addListener(() {
-                      if (clientCtrl.text != controller.text) {
-                        clientCtrl.text = controller.text;
-                      }
-                    });
-                    return TextField(
-                      controller: controller,
-                      focusNode: focusNode,
-                      decoration: const InputDecoration(
-                        labelText: 'Client Name',
-                        hintText: 'Type or select from list',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                    );
-                  },
-                  onSelected: (val) => clientCtrl.text = val,
+                const Text(
+                  'Select Client(s)',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
                 ),
+                const SizedBox(height: 6),
+                if (allocatedClients.isNotEmpty)
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: allocatedClients.map((client) {
+                      final selected = selectedClients.contains(client);
+                      return FilterChip(
+                        label: Text(client),
+                        selected: selected,
+                        onSelected: (isSelected) {
+                          setDialogState(() {
+                            if (isSelected) {
+                              selectedClients.add(client);
+                            } else {
+                              selectedClients.remove(client);
+                            }
+                            validationError = null;
+                          });
+                        },
+                      );
+                    }).toList(),
+                  )
+                else
+                  Text(
+                    'No allocated clients found for this distributor/day.',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                  ),
+                if (validationError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    validationError!,
+                    style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                const Text(
+                  'Save to',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    ChoiceChip(
+                      label: const Text('Unfinished Work Areas'),
+                      avatar: const Icon(Icons.map_outlined, size: 16),
+                      selected: destination == 'gap',
+                      onSelected: (_) =>
+                          setDialogState(() => destination = 'gap'),
+                    ),
+                    ChoiceChip(
+                      label: Text(canSaveToDistributor
+                          ? "${tabData.title}'s work areas"
+                          : 'Distributor work areas'),
+                      avatar: const Icon(Icons.person_pin_circle, size: 16),
+                      selected: destination == 'distributor',
+                      onSelected: canSaveToDistributor
+                          ? (_) =>
+                              setDialogState(() => destination = 'distributor')
+                          : null,
+                    ),
+                  ],
+                ),
+                if (!canSaveToDistributor)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      'Open this tab from Processing (distributor + date) to '
+                      'save into the day\'s work areas.',
+                      style:
+                          TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                    ),
+                  ),
                 if (overlapping.isNotEmpty) ...[
                   const SizedBox(height: 12),
                   Container(
@@ -834,11 +999,26 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
             ),
             FilledButton(
               onPressed: () {
-                final name = nameCtrl.text.trim();
-                if (name.isEmpty) return;
+                final name = selectedPolygonName.isNotEmpty
+                    ? selectedPolygonName
+                    : nameCtrl.text.trim();
+                final clients = selectedClients
+                    .map((c) => c.trim())
+                    .where((c) => c.isNotEmpty)
+                    .toList();
+
+                if (name.isEmpty || clients.isEmpty || destination.isEmpty) {
+                  setDialogState(() {
+                    validationError =
+                        'Select polygon name and at least one client before saving.';
+                  });
+                  return;
+                }
+
                 Navigator.of(ctx).pop({
                   'name': name,
-                  'client': clientCtrl.text.trim(),
+                  'clients': clients,
+                  'destination': destination,
                 });
               },
               child: const Text('Save'),
@@ -849,63 +1029,163 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     );
 
     nameCtrl.dispose();
-    clientCtrl.dispose();
 
     _isDialogOpen = false;
     ref.read(mapGestureRiverpod).enableMapGestures();
 
     if (result != null && _drawingPoints.isNotEmpty) {
-      final polygon = TEStyledPolygon(
-        id: 'drawn_${DateTime.now().millisecondsSinceEpoch}',
-        name: result['name']!,
-        clientName: result['client'] ?? '',
-        points: List<LatLng>.from(_drawingPoints),
-        style: TEKmlStyle(
-          strokeColor: Colors.blue.shade700,
-          strokeWidth: 2.0,
-          fillColor: Colors.blue.shade300,
-          fill: true,
-          outline: true,
-        ),
-      );
-      // Wrap as an undoable command so Ctrl+Z removes the just-drawn
-      // polygon. The undo simply drops the last polygon on the tab
-      // (matches our "append" pattern in `addPolygonsToCurrentTab`).
-      final tabsP = ref.read(teTabsRiverpod);
-      final tabIdx = tabsP.currentTab;
-      ref.read(teUndoRiverpod).run(
-            tabsP.activeMode,
-            tabIdx,
-            TECommand(
-              description: 'Draw polygon "${result['name']}"',
-              doFn: () => tabsP.addPolygonsToCurrentTab([polygon]),
-              undoFn: () {
-                if (tabIdx < 0 || tabIdx >= tabsP.tabs.length) return;
-                final cur = tabsP.tabs[tabIdx].polygons;
-                if (cur.isEmpty) return;
-                tabsP.replacePolygons(tabIdx, cur.sublist(0, cur.length - 1));
-              },
-            ),
-          );
-
-      // Always save to Firestore unfinished work areas.
-      final customPoly = CustomPolygon(
-        name: result['name']!,
-        description: '',
-        points: List<LatLng>.from(_drawingPoints),
-        color: Colors.blue.shade700,
-      );
-      final client = result['client'] ?? '';
-      ref.read(unfinishedWorkAreasRiverpod).addItem(
-        clients: client.isNotEmpty ? [client] : [],
-        workingAreas: [result['name']!],
-        workMaps: [customPoly],
-      );
+      final name = (result['name'] ?? '').toString();
+      final clients = (result['clients'] as List<dynamic>? ?? const [])
+          .map((c) => c.toString().trim())
+          .where((c) => c.isNotEmpty)
+          .toList();
+      final points = List<LatLng>.from(_drawingPoints);
+      if ((result['destination'] ?? 'gap') == 'distributor') {
+        await _saveDrawnPolygonToDistributor(name, clients, points, currentTab);
+      } else {
+        _saveDrawnPolygonToGapMaps(name, clients, points);
+      }
     }
     // Always clear drawing state (like shareable maps completeDrawing /
     // cancelDrawing) — dialog Cancel exits draw mode too.
     setState(() => _drawingPoints.clear());
     ref.read(teToolsRiverpod).cancelDrawing();
+  }
+
+  /// Save a freshly drawn polygon to the "gap maps" (unfinished work areas).
+  /// The polygon is added to the current tab as an undoable command and
+  /// persisted to the Firestore `unfinishedWorkAreas` collection.
+  void _saveDrawnPolygonToGapMaps(
+      String name, List<String> clients, List<LatLng> points) {
+    final polygon = TEStyledPolygon(
+      id: 'drawn_${DateTime.now().millisecondsSinceEpoch}',
+      name: name,
+      clientName: clients.join(', '),
+      points: List<LatLng>.from(points),
+      style: TEKmlStyle(
+        strokeColor: Colors.blue.shade700,
+        strokeWidth: 2.0,
+        fillColor: Colors.blue.shade300,
+        fill: true,
+        outline: true,
+      ),
+    );
+    // Wrap as an undoable command so Ctrl+Z removes the just-drawn
+    // polygon. The undo simply drops the last polygon on the tab
+    // (matches our "append" pattern in `addPolygonsToCurrentTab`).
+    final tabsP = ref.read(teTabsRiverpod);
+    final tabIdx = tabsP.currentTab;
+    ref.read(teUndoRiverpod).run(
+          tabsP.activeMode,
+          tabIdx,
+          TECommand(
+            description: 'Draw polygon "$name"',
+            doFn: () => tabsP.addPolygonsToCurrentTab([polygon]),
+            undoFn: () {
+              if (tabIdx < 0 || tabIdx >= tabsP.tabs.length) return;
+              final cur = tabsP.tabs[tabIdx].polygons;
+              if (cur.isEmpty) return;
+              tabsP.replacePolygons(tabIdx, cur.sublist(0, cur.length - 1));
+            },
+          ),
+        );
+
+    // Persist to Firestore unfinished work areas.
+    final customPoly = CustomPolygon(
+      name: name,
+      description: '',
+      points: List<LatLng>.from(points),
+      color: Colors.blue.shade700,
+    );
+    ref.read(unfinishedWorkAreasRiverpod).addItem(
+      clients: clients,
+      workingAreas: [name],
+      workMaps: [customPoly],
+    );
+  }
+
+  /// Save a freshly drawn polygon into the schedule job's work areas for the
+  /// tab's distributor + date, then auto-refresh the tab so the new polygon
+  /// reloads as a selectable work-area polygon ready to trim & save. Falls
+  /// back to the gap maps if no matching job exists so the drawing is never
+  /// lost.
+  Future<void> _saveDrawnPolygonToDistributor(
+    String name,
+    List<String> clients,
+    List<LatLng> points,
+    int tabIndex,
+  ) async {
+    final tabsP = ref.read(teTabsRiverpod);
+    if (tabIndex < 0 || tabIndex >= tabsP.tabs.length) return;
+    final tab = tabsP.tabs[tabIndex];
+    final distributorId = tab.distributorId;
+    final trackDate = tab.trackDate;
+    if (distributorId == null || distributorId.isEmpty || trackDate == null) {
+      // No distributor/date on this tab — keep the drawing as a gap map.
+      _saveDrawnPolygonToGapMaps(name, clients, points);
+      return;
+    }
+
+    final scheduleP = ref.read(scheduleRiverpod);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    try {
+      final jobs = await scheduleP.fetchJobsForDistributorAndDate(
+          distributorId, trackDate);
+      if (jobs.isEmpty) {
+        _saveDrawnPolygonToGapMaps(name, clients, points);
+        messenger?.showSnackBar(const SnackBar(
+          content: Text(
+              'No job for this distributor on this day — saved to gap maps instead.'),
+          duration: Duration(seconds: 3),
+        ));
+        return;
+      }
+      // Prefer jobs linked to this tab, then those matching selected clients.
+      final linkedJobs = tab.jobIds.isEmpty
+          ? jobs
+          : jobs.where((j) => tab.jobIds.contains(j.id)).toList();
+      final preferredJobs = linkedJobs.isNotEmpty ? linkedJobs : jobs;
+      final clientSet =
+          clients.map((c) => c.trim()).where((c) => c.isNotEmpty).toSet();
+      final matching = clientSet.isEmpty
+          ? preferredJobs
+          : preferredJobs
+              .where((j) => j.clients.any((c) => clientSet.contains(c.trim())))
+              .toList();
+      final target = matching.isNotEmpty ? matching.first : preferredJobs.first;
+      final polygon = CustomPolygon(
+        name: name,
+        description: '',
+        points: List<LatLng>.from(points),
+        color: Colors.blue.shade700,
+      );
+      final updatedClients = <String>{...target.clients, ...clientSet}.toList();
+      final updatedJob = target.copyWith(
+        clients: updatedClients,
+        workMaps: [...target.workMaps, polygon],
+        workingAreas: target.workingAreas.contains(name)
+            ? target.workingAreas
+            : [...target.workingAreas, name],
+      );
+      await scheduleP.updateJob(updatedJob);
+      // Auto-refresh the tab so the new polygon comes back as a selectable
+      // work-area polygon (the user can immediately trim & save it).
+      await ref
+          .read(teProcessingRiverpod)
+          .refreshTab(tabIndex, tabsP, scheduleP);
+      if (!mounted) return;
+      messenger?.showSnackBar(SnackBar(
+        content: Text('Added "$name" to ${tab.title}\'s work areas'),
+        duration: const Duration(seconds: 2),
+      ));
+    } catch (e) {
+      debugPrint('❌ _saveDrawnPolygonToDistributor: $e');
+      if (!mounted) return;
+      messenger?.showSnackBar(SnackBar(
+        content: Text('Failed to add to work areas: $e'),
+        duration: const Duration(seconds: 3),
+      ));
+    }
   }
 
   Future<void> _showPointNameDialog(
@@ -1326,8 +1606,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       TECommand(
         description: 'Split track',
         doFn: () {
-          success = tabsProvider.splitTrack(
-              currentTab, splitIdx, splitPointIdx);
+          success =
+              tabsProvider.splitTrack(currentTab, splitIdx, splitPointIdx);
         },
         undoFn: () {
           // The split replaced 1 track with 2 starting at splitIdx.
@@ -1365,8 +1645,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
         position: d.position,
         anchor: const Offset(0.5, 1.0),
         zIndex: 3,
-        icon: BitmapDescriptor.defaultMarkerWithHue(
-            BitmapDescriptor.hueViolet),
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet),
         infoWindow: InfoWindow(title: d.label),
       ));
     }
@@ -1428,8 +1707,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
               currentTab,
               TECommand(
                 description: 'Move trackpoint',
-                doFn: () => tabsP.moveTrackpoint(
-                    currentTab, trackIndex, idx, newPos),
+                doFn: () =>
+                    tabsP.moveTrackpoint(currentTab, trackIndex, idx, newPos),
                 undoFn: () => tabsP.moveTrackpoint(
                     currentTab, trackIndex, idx, originalPos),
               ),
@@ -2006,20 +2285,20 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
                                     }
                                     final wpts =
                                         tabsP.tabs[currentTab].waypoints;
-                                    final indicesAsc = multiSelectedWpts
-                                        .toList()
-                                      ..sort();
+                                    final indicesAsc =
+                                        multiSelectedWpts.toList()..sort();
                                     // Capture waypoints with their original
                                     // indices so we can restore them on undo.
-                                    final removed = <({int index, Wpt waypoint})>[];
+                                    final removed =
+                                        <({int index, Wpt waypoint})>[];
                                     for (final i in indicesAsc) {
                                       if (i >= 0 && i < wpts.length) {
-                                        removed.add(
-                                            (index: i, waypoint: wpts[i]));
+                                        removed
+                                            .add((index: i, waypoint: wpts[i]));
                                       }
                                     }
-                                    final selSet = Set<int>.from(
-                                        multiSelectedWpts);
+                                    final selSet =
+                                        Set<int>.from(multiSelectedWpts);
                                     ref.read(teUndoRiverpod).run(
                                           tabsP.activeMode,
                                           currentTab,

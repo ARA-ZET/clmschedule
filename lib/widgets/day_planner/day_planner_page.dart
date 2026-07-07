@@ -9,9 +9,12 @@ import '../../models/dropsheet_day.dart';
 import '../../models/dropsheet_task.dart';
 import '../../models/dropsheet_task_type_config.dart';
 import '../../models/job.dart';
+import 'package:pointer_interceptor/pointer_interceptor.dart';
+
 import '../../providers/dropsheet_provider.dart';
 import '../../providers/dropsheet_task_config_provider.dart';
 import '../../providers/schedule_provider.dart';
+import '../../shareable_maps/providers/map_gesture_provider.dart';
 import '../date_schedule_map_page.dart';
 import 'day_planner_palette.dart';
 import 'day_planner_panel.dart';
@@ -49,10 +52,6 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
   String _markersSignature = '';
   bool _markersLoading = false;
 
-  /// Tracks the set of job IDs from the last schedule update.
-  /// Used to detect real changes and skip the initial load so we don't
-  /// double-fire syncFromSchedule alongside _maybeAutoSeed.
-  String _lastScheduleJobsKey = '';
   bool _initialFitDone = false;
   int _rebuildSeq = 0;
 
@@ -104,23 +103,14 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     );
     _scheduleSub = ref.listenManual<ScheduleProvider>(
       scheduleRiverpod,
-      (_, next) {
+      (_, __) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           _scheduleMarkerRefresh();
-          // Auto-sync the dropsheet whenever the schedule for this date
-          // changes (drag-drop between distributors or dates, edits to
-          // working areas, etc.). Skip the very first emission to avoid
-          // racing with _maybeAutoSeed.
-          final jobs = next.getJobsForDate(widget.date);
-          final key = jobs
-              .map((j) =>
-                  '${j.id}|${j.distributorId}|${j.workingAreas.join(",")}')
-              .join(';');
-          if (_lastScheduleJobsKey.isNotEmpty && key != _lastScheduleJobsKey) {
-            ref.read(dropsheetRiverpod).syncFromSchedule();
-          }
-          _lastScheduleJobsKey = key;
+          // Schedule → dropsheet sync is handled by DropsheetProvider's own
+          // _scheduleSub (debounced 400ms). Calling syncFromSchedule() here
+          // too would race with that debounced call and bypass its burst
+          // protection, potentially causing two concurrent sync writes.
         });
       },
     );
@@ -293,6 +283,8 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
               myLocationButtonEnabled: false,
               mapToolbarEnabled: false,
               zoomControlsEnabled: false,
+              webGestureHandling:
+                  ref.watch(mapGestureRiverpod).gestureHandling,
               onTap: (_) => setState(() => _selectedMarker = null),
               onCameraMove: (_) => _updateInfoWindowPosition(),
               onMapCreated: (controller) {
@@ -317,24 +309,34 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
               Positioned(
                 right: 12,
                 bottom: 12,
-                child: Card(
-                  elevation: 3,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8)),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          width: 13,
-                          height: 13,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                child: PointerInterceptor(
+                  child: MouseRegion(
+                    onEnter: (_) =>
+                        ref.read(mapGestureRiverpod).disableMapGestures(),
+                    onExit: (_) =>
+                        ref.read(mapGestureRiverpod).enableMapGestures(),
+                    child: Card(
+                      elevation: 3,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 7),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(
+                              width: 13,
+                              height: 13,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            SizedBox(width: 8),
+                            Text('Loading markers…',
+                                style: TextStyle(fontSize: 12)),
+                          ],
                         ),
-                        SizedBox(width: 8),
-                        Text('Loading markers…',
-                            style: TextStyle(fontSize: 12)),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -361,21 +363,28 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       left: left,
       top: top,
       width: cardW,
-      child: _MarkerInfoCard(
-        spec: spec,
-        day: day,
-        onClose: () => setState(() => _selectedMarker = null),
-        onReassign: (toSectionId) {
-          setState(() => _selectedMarker = null);
-          final dropsheet = ref.read(dropsheetRiverpod);
-          final toSection = day.sections.firstWhere((s) => s.id == toSectionId);
-          dropsheet.moveTask(
-            fromSectionId: spec.sectionId,
-            fromIndex: spec.taskAbsoluteIndex,
-            toSectionId: toSectionId,
-            toIndex: toSection.tasks.length,
-          );
-        },
+      child: PointerInterceptor(
+        child: MouseRegion(
+          onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
+          onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+          child: _MarkerInfoCard(
+            spec: spec,
+            day: day,
+            onClose: () => setState(() => _selectedMarker = null),
+            onReassign: (toSectionId) {
+              setState(() => _selectedMarker = null);
+              final dropsheet = ref.read(dropsheetRiverpod);
+              final toSection =
+                  day.sections.firstWhere((s) => s.id == toSectionId);
+              dropsheet.moveTask(
+                fromSectionId: spec.sectionId,
+                fromIndex: spec.taskAbsoluteIndex,
+                toSectionId: toSectionId,
+                toIndex: toSection.tasks.length,
+              );
+            },
+          ),
+        ),
       ),
     );
   }
@@ -644,7 +653,10 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
           draggable: true,
           onTap: () => _onMarkerTap(spec),
           onDragEnd: (LatLng pos) {
-            if (!hasJob) {
+            // Per-area pins store their coordinate on the task, so dragging one
+            // must not move the job's primary drop-off/pick-up point.
+            final isWorkAreaPin = spec.task?.typeData['workAreaPin'] == true;
+            if (!hasJob || isWorkAreaPin) {
               _persistTaskCoords(spec, pos);
             } else if (spec.task?.type == DropsheetTaskType.pickUp) {
               _persistPickUp(spec.job!, pos);
@@ -783,6 +795,31 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
   /// when the address was geocoded.
   List<_StopPoint> _stopPointsFor(DropsheetTask t, Job? job) {
     final out = <_StopPoint>[];
+    if (t.type == DropsheetTaskType.dropOff ||
+        t.type == DropsheetTaskType.pickUp) {
+      // Per-area drop-offs (and pick-ups derived from them) pin their own
+      // coordinate so they render as distinct pins. The default drop-off keeps
+      // using the job's point so it tracks schedule-grid edits live.
+      final tLat = (t.typeData['lat'] as num?)?.toDouble();
+      final tLng = (t.typeData['lng'] as num?)?.toDouble();
+      if (t.typeData['workAreaPin'] == true && tLat != null && tLng != null) {
+        out.add(_StopPoint(LatLng(tLat, tLng), 'single'));
+        return out;
+      }
+      final p = job != null
+          ? (t.type == DropsheetTaskType.pickUp
+              ? defaultPickUpFor(job)
+              : defaultDropOffFor(job))
+          : null;
+      if (p != null) {
+        out.add(_StopPoint(p, 'single'));
+        return out;
+      }
+      if (tLat != null && tLng != null) {
+        out.add(_StopPoint(LatLng(tLat, tLng), 'single'));
+      }
+      return out;
+    }
     if (job != null) {
       // Pick-up tasks use the job's pickUpPoint (falls back to dropOffPoint);
       // drop-off tasks use dropOffPoint / work-area centroid.
@@ -958,6 +995,25 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       }
       final dp = j.dropOffPoint;
       if (dp != null) allPoints.add(dp);
+    }
+    // Also include joblist task coordinates (collections, furniture moves, etc.)
+    // so workers without distributor polygons still get a sensible map zoom.
+    final day = ref.read(dropsheetRiverpod).day;
+    for (final section in day.sections) {
+      for (final task in section.tasks) {
+        if (task.type == DropsheetTaskType.furnitureMove) {
+          final ll = (task.typeData['loadingLat'] as num?)?.toDouble();
+          final lo = (task.typeData['loadingLng'] as num?)?.toDouble();
+          if (ll != null && lo != null) allPoints.add(LatLng(ll, lo));
+          final ol = (task.typeData['offloadLat'] as num?)?.toDouble();
+          final og = (task.typeData['offloadLng'] as num?)?.toDouble();
+          if (ol != null && og != null) allPoints.add(LatLng(ol, og));
+        } else {
+          final lat = (task.typeData['lat'] as num?)?.toDouble();
+          final lng = (task.typeData['lng'] as num?)?.toDouble();
+          if (lat != null && lng != null) allPoints.add(LatLng(lat, lng));
+        }
+      }
     }
     if (allPoints.isEmpty) return;
     double minLat = allPoints.first.latitude, maxLat = minLat;

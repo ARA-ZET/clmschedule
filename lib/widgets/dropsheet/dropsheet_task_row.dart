@@ -57,9 +57,7 @@ class DropsheetTaskRow extends StatelessWidget {
       onTap: onEdit,
       child: Container(
         decoration: BoxDecoration(
-          color: task.isMandatory
-              ? Colors.amber.withValues(alpha: 0.08)
-              : null,
+          color: task.isMandatory ? Colors.amber.withValues(alpha: 0.08) : null,
           border: Border(
             bottom: BorderSide(color: Colors.grey.shade200),
           ),
@@ -80,7 +78,7 @@ class DropsheetTaskRow extends StatelessWidget {
     // for in-section reorder, so the two gestures do not conflict.
     return LongPressDraggable<TaskDragPayload>(
       data: payload,
-      delay: const Duration(milliseconds: 300),
+      delay: const Duration(milliseconds: 500),
       feedback: Material(
         elevation: 6,
         child: Container(
@@ -110,9 +108,11 @@ class DropsheetTaskRow extends StatelessWidget {
   }
 
   /// Renders the "Leave and start pickups" separator row.
+  ///
+  /// Purely visual — it carries no time or location. Afternoon pick-up ETAs
+  /// are anchored to the Arrive task's target time and computed backwards.
   Widget _buildPickupSeparator(BuildContext context) {
     const sepColor = Color(0xFF1565C0);
-    final timeLabel = task.startTime.isNotEmpty ? task.startTime : '17:30';
 
     final payload = TaskDragPayload(
       fromSectionId: sectionId,
@@ -137,8 +137,8 @@ class DropsheetTaskRow extends StatelessWidget {
             ReorderableDragStartListener(
               index: dragIndex,
               child: const SizedBox(
-                width: 24,
-                child: Icon(Icons.drag_indicator, size: 16, color: Colors.grey),
+                width: 36,
+                child: Icon(Icons.drag_indicator, size: 20, color: Colors.grey),
               ),
             ),
             const SizedBox(width: 6),
@@ -154,23 +154,6 @@ class DropsheetTaskRow extends StatelessWidget {
                 ),
               ),
             ),
-            // Departure time badge.
-            Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: sepColor,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                timeLabel,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 12,
-                ),
-              ),
-            ),
             _buildMenuButton(context),
           ],
         ),
@@ -179,7 +162,7 @@ class DropsheetTaskRow extends StatelessWidget {
 
     return LongPressDraggable<TaskDragPayload>(
       data: payload,
-      delay: const Duration(milliseconds: 300),
+      delay: const Duration(milliseconds: 500),
       feedback: Material(
         elevation: 6,
         child: Container(
@@ -278,8 +261,8 @@ class DropsheetTaskRow extends StatelessWidget {
         ReorderableDragStartListener(
           index: dragIndex,
           child: const SizedBox(
-            width: 24,
-            child: Icon(Icons.drag_indicator, size: 16, color: Colors.grey),
+            width: 36,
+            child: Icon(Icons.apps, size: 20, color: Colors.grey),
           ),
         ),
         SizedBox(
@@ -314,7 +297,7 @@ class DropsheetTaskRow extends StatelessWidget {
 
   Widget _buildNarrowRow(BuildContext context, String jobLabel,
       String locationLabel, List<DropsheetMapLink> mapLinks) {
-    const indent = 78.0; // drag(24) + number(48) + gap(6)
+    const indent = 90.0; // drag(36) + number(48) + gap(6)
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -324,8 +307,8 @@ class DropsheetTaskRow extends StatelessWidget {
             ReorderableDragStartListener(
               index: dragIndex,
               child: const SizedBox(
-                width: 24,
-                child: Icon(Icons.drag_indicator, size: 16, color: Colors.grey),
+                width: 36,
+                child: Icon(Icons.apps, size: 20, color: Colors.grey),
               ),
             ),
             SizedBox(

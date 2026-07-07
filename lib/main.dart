@@ -28,6 +28,7 @@ import 'providers/tool_settings_provider.dart';
 import 'providers/job_type_provider.dart'
     show JobTypeProvider; // static accessor only
 import 'providers/unfinished_work_areas_provider.dart';
+import 'providers/day_off_provider.dart';
 import 'shareable_maps/providers/shareable_map_provider.dart';
 import 'shareable_maps/services/map_bitmap_cache.dart';
 import 'shareable_maps/widgets/shareable_maps_gallery.dart';
@@ -44,6 +45,7 @@ import 'widgets/job_list_status_management_dialog.dart';
 import 'widgets/invoice_status_management_dialog.dart';
 import 'widgets/job_type_management_dialog.dart';
 import 'widgets/map_instruction_management_dialog.dart';
+import 'widgets/vat_settings_dialog.dart';
 import 'widgets/auth_gate.dart';
 import 'widgets/chat_dialog.dart';
 import 'widgets/chat_admin_panel.dart';
@@ -63,6 +65,7 @@ import 'track_editor/pages/track_editor_screen.dart';
 // TE provider imports migrated to Riverpod
 // ErfPropertyProvider migrated to Riverpod
 import 'erf_property/pages/erf_property_screen.dart';
+import 'widgets/ward_map_screen.dart';
 import 'services/version_service.dart';
 
 // import 'services/work_area_service.dart'; // Migrated to Riverpod
@@ -74,6 +77,7 @@ import 'services/version_service.dart';
 // import 'providers/ai_chat_provider.dart'; // Migrated to Riverpod
 import 'widgets/ai_chat_dialog.dart';
 import 'widgets/dropsheet/dropsheet_tab.dart';
+import 'widgets/payroll/payroll_tab.dart';
 import 'widgets/cloud_file_manager_screen.dart';
 import 'services/inventory_service.dart';
 import 'services/connectivity_service.dart';
@@ -521,6 +525,7 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
     if (FlavorConfig.instance.isCLM) {
       initializations.add(ref.read(scheduleRiverpod).initialize());
       initializations.add(ref.read(unfinishedWorkAreasRiverpod).initialize());
+      ref.read(dayOffRiverpod).initialize();
     }
 
     // Run all provider initializations in parallel for fast startup.
@@ -770,13 +775,15 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
   late TabController _tabController;
   int _currentTabIndex = 0;
   bool _showAiChat = false;
+  final _bodyNavKey = GlobalKey<NavigatorState>();
 
   // Dynamic tab count based on flavor
   int get _tabCount {
-    // CLM flavor: Schedule + Job List + Collection Schedule + Dropsheet + Happy Sun = 5 tabs
+    // CLM flavor: Schedule + Job List + Collection Schedule + Dropsheet +
+    // Happy Sun + Payroll = 6 tabs
     // Dropsheet flavor: Dropsheet only = 1 tab
     // Happy Sun flavor: Happy Sun only = 1 tab (simplified for solar projects only)
-    if (FlavorConfig.instance.isCLM) return 5;
+    if (FlavorConfig.instance.isCLM) return 6;
     return 1;
   }
 
@@ -798,6 +805,8 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
       setState(() {
         _currentTabIndex = _tabController.index;
       });
+      // Dismiss any open sub-page so the selected tab is visible
+      _bodyNavKey.currentState?.popUntil((route) => route.isFirst);
     }
   }
 
@@ -817,6 +826,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
       icon: Icons.wb_sunny,
       color: Color.fromARGB(255, 231, 223, 0)
     ),
+    (label: 'Payroll', icon: Icons.payments, color: Color(0xFF6A1B9A)),
   ];
 
   Widget _buildTab(int index) {
@@ -944,8 +954,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                     onPressed: () {
                       final container =
                           riverpod.ProviderScope.containerOf(context);
-                      Navigator.push(
-                        context,
+                      _bodyNavKey.currentState?.push(
                         MaterialPageRoute(
                           builder: (_) => CloudFileManagerScreen(
                             onOpenInTrackEditor: (fileName, bytes, sourcePath) {
@@ -958,8 +967,8 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                                 sourcePath: sourcePath,
                               );
                               // Close file manager then open Track Editor.
-                              Navigator.of(context)
-                                ..pop()
+                              _bodyNavKey.currentState
+                                ?..pop()
                                 ..push(MaterialPageRoute(
                                   builder: (_) => const TrackEditorScreen(),
                                 ));
@@ -974,8 +983,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                     icon: Icons.route,
                     label: 'Editor',
                     onPressed: () {
-                      Navigator.push(
-                        context,
+                      _bodyNavKey.currentState?.push(
                         MaterialPageRoute(
                           builder: (_) => const TrackEditorScreen(),
                         ),
@@ -987,8 +995,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                     icon: Icons.map_outlined,
                     label: 'My Maps',
                     onPressed: () {
-                      Navigator.push(
-                        context,
+                      _bodyNavKey.currentState?.push(
                         MaterialPageRoute(
                           builder: (_) => const ShareableMapsGallery(),
                         ),
@@ -1007,8 +1014,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         await provider
                             .loadFromAdapter(WorkAreaCollectionAdapter());
                         if (context.mounted) {
-                          Navigator.push(
-                            context,
+                          _bodyNavKey.currentState?.push(
                             MaterialPageRoute(
                               builder: (_) => const ShareableMapEditor(),
                             ),
@@ -1038,8 +1044,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                       try {
                         await provider.loadFromAdapter(WorkSuburbsAdapter());
                         if (context.mounted) {
-                          Navigator.push(
-                            context,
+                          _bodyNavKey.currentState?.push(
                             MaterialPageRoute(
                               builder: (_) => const ShareableMapEditor(),
                             ),
@@ -1095,15 +1100,19 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                     ),
                     onSelected: (String value) {
                       if (value == 'geocode') {
-                        Navigator.push(
-                          context,
+                        _bodyNavKey.currentState?.push(
                           MaterialPageRoute(
                               builder: (_) => const SuburbListScreen()),
                         );
                       } else if (value == 'erf') {
-                        Navigator.of(context).push(
+                        _bodyNavKey.currentState?.push(
                           MaterialPageRoute(
                               builder: (_) => const ErfPropertyScreen()),
+                        );
+                      } else if (value == 'ward_maps') {
+                        _bodyNavKey.currentState?.push(
+                          MaterialPageRoute(
+                              builder: (_) => const WardMapScreen()),
                         );
                       }
                     },
@@ -1121,6 +1130,14 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         child: ListTile(
                           leading: Icon(Icons.location_city),
                           title: Text('ERF Property Viewer'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem<String>(
+                        value: 'ward_maps',
+                        child: ListTile(
+                          leading: Icon(Icons.how_to_vote_outlined),
+                          title: Text('SA Ward Mapper'),
                           contentPadding: EdgeInsets.zero,
                         ),
                       ),
@@ -1159,6 +1176,11 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                           context: context,
                           builder: (context) =>
                               const InvoiceStatusManagementDialog(),
+                        );
+                      } else if (value == 'vat_settings') {
+                        showDialog(
+                          context: context,
+                          builder: (context) => const VatSettingsDialog(),
                         );
                       } else if (value == 'job_types') {
                         showDialog(
@@ -1245,6 +1267,14 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         ),
                       ),
                       const PopupMenuItem<String>(
+                        value: 'vat_settings',
+                        child: ListTile(
+                          leading: Icon(Icons.percent),
+                          title: Text('VAT Settings'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem<String>(
                         value: 'job_types',
                         child: ListTile(
                           leading: Icon(Icons.category),
@@ -1276,28 +1306,34 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
               ),
         body: Stack(
           children: [
-            // Main content fills the entire area
-            IndexedStack(
-              index: _currentTabIndex,
-              children: [
-                // CLM flavor has all tabs: Schedule, Job List, Collection Schedule, Dropsheet, Happy Sun
-                if (FlavorConfig.instance.isCLM) ...[
-                  const ScheduleTab(),
-                  const JobListTab(),
-                  const CollectionScheduleTab(),
-                  const DropsheetTab(),
-                  const HappySunTab(),
-                ],
-                // Dropsheet flavor only has the Dropsheet tab
-                if (FlavorConfig.instance.isDropsheet)
-                  const SafeArea(child: DropsheetTab()),
-                // Happy Sun flavor only has Happy Sun tab (Job List filtered in background)
-                // Wrap in SafeArea to avoid system UI overlays (status bar, navigation bar)
-                if (FlavorConfig.instance.isHappySun)
-                  const SafeArea(
-                    child: HappySunTab(),
+            // Nested Navigator — sub-pages render here so the AppBar above
+            // stays visible on every screen. ListenableBuilder wires
+            // _tabController into the Navigator's isolated element tree
+            // (outer setState does not propagate through Navigator boundaries).
+            Navigator(
+              key: _bodyNavKey,
+              onGenerateRoute: (_) => MaterialPageRoute(
+                builder: (_) => ListenableBuilder(
+                  listenable: _tabController,
+                  builder: (_, __) => IndexedStack(
+                    index: _tabController.index,
+                    children: [
+                      if (FlavorConfig.instance.isCLM) ...[
+                        const ScheduleTab(),
+                        const JobListTab(),
+                        const CollectionScheduleTab(),
+                        const DropsheetTab(),
+                        const HappySunTab(),
+                        const _PayrollTabGate(),
+                      ],
+                      if (FlavorConfig.instance.isDropsheet)
+                        const SafeArea(child: DropsheetTab()),
+                      if (FlavorConfig.instance.isHappySun)
+                        const SafeArea(child: HappySunTab()),
+                    ],
                   ),
-              ],
+                ),
+              ),
             ),
             // AI Chat panel floats above everything
             if (_showAiChat)
@@ -1573,6 +1609,26 @@ class _CollectionScheduleTabState extends riverpod
         ),
       ],
     );
+  }
+}
+
+/// Gates [PayrollTab] behind admin access — wages and bank details are
+/// sensitive, so non-admins see a restricted message instead of the tab
+/// content. The tab itself stays in the tab bar for every CLM user since
+/// the [TabController] length is fixed at construction (see [_tabCount]);
+/// only the content is access-controlled.
+class _PayrollTabGate extends riverpod.ConsumerWidget {
+  const _PayrollTabGate();
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final authProvider = ref.watch(authRiverpod);
+    if (!authProvider.isAdmin) {
+      return const Center(
+        child: Text('Payroll is only available to admins.'),
+      );
+    }
+    return const PayrollTab();
   }
 }
 

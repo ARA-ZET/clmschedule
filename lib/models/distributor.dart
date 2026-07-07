@@ -1,3 +1,5 @@
+import 'distributor_payroll_profile.dart';
+
 // Distributor role enum (shown on the digital ID card)
 enum DistributorRole {
   distributor,
@@ -78,6 +80,7 @@ class Distributor {
   final DistributorStatus status; // Current status
   final String? imageUrl; // Profile photo URL (Firebase Storage)
   final DistributorRole role; // Role shown on the digital ID card
+  final DistributorPayrollProfile? payroll; // Wage rates + bank details
 
   Distributor({
     required this.id,
@@ -88,6 +91,7 @@ class Distributor {
     this.status = DistributorStatus.active,
     this.imageUrl,
     this.role = DistributorRole.distributor,
+    this.payroll,
   });
 
   // Create from Firestore
@@ -101,6 +105,10 @@ class Distributor {
       status: DistributorStatus.fromString(data['status'] as String?),
       imageUrl: data['imageUrl'] as String?,
       role: DistributorRole.fromString(data['role'] as String?),
+      payroll: data['payroll'] != null
+          ? DistributorPayrollProfile.fromMap(
+              Map<String, dynamic>.from(data['payroll'] as Map))
+          : null,
     );
   }
 
@@ -114,6 +122,7 @@ class Distributor {
       'status': status.name,
       'imageUrl': imageUrl,
       'role': role.name,
+      'payroll': payroll?.toMap(),
     };
   }
 
@@ -128,6 +137,7 @@ class Distributor {
     String? imageUrl,
     bool clearImageUrl = false,
     DistributorRole? role,
+    DistributorPayrollProfile? payroll,
   }) {
     return Distributor(
       id: id ?? this.id,
@@ -138,6 +148,7 @@ class Distributor {
       status: status ?? this.status,
       imageUrl: clearImageUrl ? null : (imageUrl ?? this.imageUrl),
       role: role ?? this.role,
+      payroll: payroll ?? this.payroll,
     );
   }
 

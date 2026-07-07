@@ -218,6 +218,24 @@ class Job {
     return null;
   }
 
+  /// Centroid of the polygon work area whose name matches [name]
+  /// (case-insensitive, trimmed). Falls back to the job-wide estimate when no
+  /// polygon matches. Used when adding a per-work-area drop-off task so its pin
+  /// lands inside the chosen area's polygon.
+  static LatLng? centroidForWorkArea(List<CustomPolygon> maps, String name) {
+    final target = name.trim().toLowerCase();
+    if (target.isNotEmpty) {
+      for (final map in maps) {
+        if (map.isPolygon &&
+            map.points.isNotEmpty &&
+            map.name.trim().toLowerCase() == target) {
+          return _centroid(map.points);
+        }
+      }
+    }
+    return estimateDropOffPointFromWorkMaps(maps);
+  }
+
   /// Returns true when [point] is inside at least one polygon work map.
   static bool isPointInsideAnyWorkArea(
       LatLng point, List<CustomPolygon> workMaps) {

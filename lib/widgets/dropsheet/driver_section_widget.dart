@@ -162,19 +162,29 @@ class _DriverSectionWidgetState
 
     // When the Leave task's departure time changes and the section already
     // has a computed route, propagate new ETAs offline using stored leg data.
+    // The pickup separator carries no time, so it is excluded here.
     if (updated.type == DropsheetTaskType.leave &&
+        updated.typeData['isPickupDivider'] != true &&
         updated.startTime.isNotEmpty &&
         updated.startTime != task.startTime) {
       final config = ref.read(dropsheetTaskConfigRiverpod);
-      // When the separator's departure time changes, we still replay from
-      // the morning leave time — the new separator time is already saved in
-      // Firestore and will be picked up by recalculateETAsFromLegs.
-      final replayStartTime = updated.typeData['isPickupDivider'] == true
-          ? _leaveTime(config.depot)
-          : updated.startTime;
       await ref.read(dropsheetRiverpod).recalculateETAsFromLegs(
             widget.section.id,
-            replayStartTime,
+            updated.startTime,
+            config.serviceMinutesFor,
+          );
+    }
+
+    // When the Arrive task's target time changes, recompute the afternoon
+    // pick-up ETAs backwards from it so the driver still reaches the office
+    // on time (the afternoon leg is anchored to this value).
+    if (updated.type == DropsheetTaskType.arrive &&
+        updated.startTime.isNotEmpty &&
+        updated.startTime != task.startTime) {
+      final config = ref.read(dropsheetTaskConfigRiverpod);
+      await ref.read(dropsheetRiverpod).recalculateAfternoonFromArrive(
+            widget.section.id,
+            updated.startTime,
             config.serviceMinutesFor,
           );
     }
@@ -183,6 +193,7 @@ class _DriverSectionWidgetState
     // all tasks that come after it in the section by the same delta so
     // relative spacing is preserved without re-running the route API.
     if (updated.type != DropsheetTaskType.leave &&
+        updated.type != DropsheetTaskType.arrive &&
         updated.startTime.isNotEmpty &&
         task.startTime.isNotEmpty &&
         updated.startTime != task.startTime) {
@@ -283,11 +294,15 @@ class _DriverSectionWidgetState
                       onMoveToSection: !hasOtherSections
                           ? null
                           : (targetSectionId) async {
+                              final target = otherSections.firstWhere(
+                                (s) => s.id == targetSectionId,
+                                orElse: () => widget.section,
+                              );
                               await dropsheet.moveTask(
                                 fromSectionId: widget.section.id,
                                 fromIndex: index,
                                 toSectionId: targetSectionId,
-                                toIndex: 0,
+                                toIndex: target.tasks.length,
                               );
                             },
                       otherSections: otherSections,
@@ -602,7 +617,6 @@ class _Footer extends riverpod.ConsumerWidget {
                   id: 't_sep_${DateTime.now().microsecondsSinceEpoch}',
                   type: DropsheetTaskType.leave,
                   job: 'Leave',
-                  startTime: '17:30',
                   isMandatory: false,
                   typeData: const {'isPickupDivider': true},
                 );

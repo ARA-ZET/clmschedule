@@ -10,7 +10,10 @@ import 'dart:math' as math;
 // ignore: avoid_web_libraries_in_flutter, depend_on_referenced_packages
 import 'package:web/web.dart' as web show document;
 import '../../config/flavor_config.dart';
+import '../../env.dart';
 import '../../models/custom_polygon.dart';
+import '../services/cloud_dataset_service.dart';
+import '../utils/waypoint_spatial_index.dart';
 import '../../models/work_area.dart';
 import '../../models/work_suburb.dart';
 import '../../providers/auth_provider.dart';
@@ -114,10 +117,14 @@ class _ShareableMapEditorState
                   left: 0,
                   right: 0,
                   child: MouseRegion(
-                    onEnter: (_) =>
-                        ref.read(mapGestureRiverpod).disableMapGestures(),
-                    onExit: (_) =>
-                        ref.read(mapGestureRiverpod).enableMapGestures(),
+                    onEnter: (_) {
+                      ref.read(mapGestureRiverpod).disableMapGestures();
+                      ref.read(widgetOverPolygonRiverpod).enable();
+                    },
+                    onExit: (_) {
+                      ref.read(mapGestureRiverpod).enableMapGestures();
+                      ref.read(widgetOverPolygonRiverpod).disable();
+                    },
                     child: Center(
                       child: Container(
                         padding: const EdgeInsets.symmetric(
@@ -154,10 +161,14 @@ class _ShareableMapEditorState
                   top: 8,
                   right: 8,
                   child: MouseRegion(
-                    onEnter: (_) =>
-                        ref.read(mapGestureRiverpod).disableMapGestures(),
-                    onExit: (_) =>
-                        ref.read(mapGestureRiverpod).enableMapGestures(),
+                    onEnter: (_) {
+                      ref.read(mapGestureRiverpod).disableMapGestures();
+                      ref.read(widgetOverPolygonRiverpod).enable();
+                    },
+                    onExit: (_) {
+                      ref.read(mapGestureRiverpod).enableMapGestures();
+                      ref.read(widgetOverPolygonRiverpod).disable();
+                    },
                     child: WorkAreaPickerPanel(
                       onClose: () => provider.hideWorkAreaPicker(),
                     ),
@@ -967,6 +978,20 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   String? _stablePolygonsKey;
   Set<Polyline>? _stablePolylines;
   String? _stablePolylinesKey;
+
+  // ── Dataset tile overlays + viewport markers ──────────────────────────
+  // Cloud waypoint markers are always viewport-culled (adaptive limit by
+  // zoom). A version counter lets the total markers Set stay stable across
+  // unrelated provider notifies (auto-save, info-window, drawing) so the
+  // JS bridge diff is only triggered when the viewport actually changes.
+  Set<TileOverlay> _datasetTileOverlays = const {};
+  Set<Marker> _viewportWaypointMarkers = const {};
+  int _viewportMarkersVersion = 0;
+  Timer? _viewportRefreshTimer;
+
+  // Stable total markers Set — same reference = bridge skips diff entirely.
+  Set<Marker>? _stableMarkers;
+  String? _stableMarkersKey;
   // Last pointer-down position in local widget coordinates.
   // Used to anchor the info window at the tapped location for polygon/polyline.
   Offset? _lastPointerDown;
@@ -1063,6 +1088,10 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   void dispose() {
     _cameraIdleDebounce?.cancel();
     _cameraIdleDebounce = null;
+    _viewportRefreshTimer?.cancel();
+    _viewportRefreshTimer = null;
+    _stableMarkers = null;
+    _stableMarkersKey = null;
     _largeLayerMarkerCache.clear();
     _largeLayerCacheKey.clear();
     _cameraNotifier.dispose();
@@ -1209,44 +1238,177 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     }
 
     final points = provider.drawingPoints;
+    final isPolygonDrawing = provider.drawingMode == DrawingMode.polygon;
+    final isPolylineDrawing = provider.drawingMode == DrawingMode.polyline;
+    final allowVertexDrag = isPolygonDrawing || isPolylineDrawing;
     final canClose =
         provider.drawingMode == DrawingMode.polygon && points.length >= 3;
 
     final cacheVertex = _bitmapCache.vertex;
     final cacheFirst = _bitmapCache.firstVertex;
+    final cacheMidpoint = _bitmapCache.midpoint;
     final normalIcon = cacheVertex ?? _fallbackMarkerIcon(Colors.blue);
     final firstIcon = canClose
         ? (cacheFirst ?? _fallbackMarkerIcon(Colors.green))
         : normalIcon;
+    final midpointIcon = cacheMidpoint ?? _fallbackMarkerIcon(Colors.orange);
     debugPrint('[WASM-DEBUG] _buildDrawingMarkers: points=${points.length} '
         'mode=${provider.drawingMode} canClose=$canClose '
         'cacheLoaded=${_bitmapCache.isLoaded} '
         'normalIcon=${cacheVertex == null ? "FALLBACK" : "cached"} '
-        'firstIcon=${cacheFirst == null ? "FALLBACK" : "cached"}');
+        'firstIcon=${cacheFirst == null ? "FALLBACK" : "cached"} '
+        'midpointIcon=${cacheMidpoint == null ? "FALLBACK" : "cached"}');
 
-    return points.asMap().entries.map((entry) {
+    final markers = <Marker>{};
+
+    for (final entry in points.asMap().entries) {
       final index = entry.key;
       final point = entry.value;
       final isFirst = index == 0;
 
-      return _buildMapMarker(
-        markerId: MarkerId('drawing_point_$index'),
-        position: point,
-        icon: isFirst ? firstIcon : normalIcon,
-        anchor: const Offset(0.5, 0.5),
-        zIndexInt: isFirst ? 1001 : 1000,
-        draggable: false,
-        consumeTapEvents: isFirst && canClose,
-        onTap: isFirst && canClose
-            ? () {
-                // User tapped the first marker — complete the polygon
-                provider.setDialogOpen(true);
-                MapEditorDialogs.showElementNameDialog(context, provider)
-                    .then((_) => provider.setDialogOpen(false));
-              }
-            : null,
+      markers.add(
+        _buildMapMarker(
+          markerId: MarkerId('drawing_point_$index'),
+          position: point,
+          icon: isFirst ? firstIcon : normalIcon,
+          anchor: const Offset(0.5, 0.5),
+          zIndexInt: isFirst ? 1001 : 1000,
+          draggable: allowVertexDrag,
+          consumeTapEvents: allowVertexDrag || (isFirst && canClose),
+          onDrag: allowVertexDrag
+              ? (newPosition) => provider.updateDrawingPoint(index, newPosition)
+              : null,
+          onDragEnd: allowVertexDrag
+              ? (newPosition) => provider.updateDrawingPoint(index, newPosition)
+              : null,
+          onTap: isFirst && canClose
+              ? () {
+                  // User tapped the first marker — complete the polygon
+                  provider.setDialogOpen(true);
+                  MapEditorDialogs.showElementNameDialog(context, provider)
+                      .then((_) => provider.setDialogOpen(false));
+                }
+              : null,
+        ),
       );
-    }).toSet();
+    }
+
+    if (allowVertexDrag && points.length >= 2) {
+      final midpoints =
+          _calculateMidpoints(points, isPolygon: isPolygonDrawing);
+      for (int i = 0; i < midpoints.length; i++) {
+        markers.add(
+          _buildMapMarker(
+            markerId: MarkerId('drawing_midpoint_$i'),
+            position: midpoints[i],
+            icon: midpointIcon,
+            draggable: true,
+            consumeTapEvents: true,
+            anchor: const Offset(0.5, 0.5),
+            zIndexInt: 999,
+            onDragEnd: (newPosition) =>
+                provider.insertDrawingPoint(i + 1, newPosition),
+          ),
+        );
+      }
+    }
+
+    return markers;
+  }
+
+  // ── Lasso select vertex / midpoint markers ─────────────────────────────
+
+  void _showDeleteLassoVertexDialog(
+      BuildContext context, ShareableMapProvider provider, int index) {
+    showDialog(
+      context: context,
+      builder: (ctx) => _gestureAwareOverlay(
+        ctx,
+        child: AlertDialog(
+          title: const Text('Delete Vertex'),
+          content: Text(
+              'Remove vertex ${index + 1} of ${provider.lassoPoints.length}?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                provider.removeLassoPointAt(index);
+                if (mounted) setState(() {});
+              },
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Set<Marker> _buildLassoMarkers(
+      BuildContext context, ShareableMapProvider provider) {
+    if (!provider.isLassoSelectActive || provider.lassoPoints.isEmpty) {
+      return {};
+    }
+
+    final points = provider.lassoPoints;
+    final canClose = points.length >= 3;
+
+    final cacheVertex = _bitmapCache.vertex;
+    final cacheFirst = _bitmapCache.firstVertex;
+    final cacheMidpoint = _bitmapCache.midpoint;
+    final normalIcon = cacheVertex ?? _fallbackMarkerIcon(Colors.orange);
+    final firstIcon =
+        canClose ? (cacheFirst ?? _fallbackMarkerIcon(Colors.green)) : normalIcon;
+    final midpointIcon = cacheMidpoint ?? _fallbackMarkerIcon(Colors.orange);
+
+    final markers = <Marker>{};
+
+    for (int i = 0; i < points.length; i++) {
+      final isFirst = i == 0;
+      markers.add(
+        _buildMapMarker(
+          markerId: MarkerId('lasso_vertex_$i'),
+          position: points[i],
+          icon: isFirst ? firstIcon : normalIcon,
+          draggable: true,
+          consumeTapEvents: true,
+          anchor: const Offset(0.5, 0.5),
+          zIndexInt: isFirst ? 1001 : 1000,
+          onDrag: (newPos) => provider.updateLassoPoint(i, newPos),
+          onDragEnd: (newPos) => provider.updateLassoPoint(i, newPos),
+          onTap: points.length > 3
+              ? () => _showDeleteLassoVertexDialog(context, provider, i)
+              : null,
+        ),
+      );
+    }
+
+    if (points.length >= 2) {
+      final midpoints = _calculateMidpoints(points, isPolygon: true);
+      for (int i = 0; i < midpoints.length; i++) {
+        markers.add(
+          _buildMapMarker(
+            markerId: MarkerId('lasso_midpoint_$i'),
+            position: midpoints[i],
+            icon: midpointIcon,
+            draggable: true,
+            consumeTapEvents: true,
+            anchor: const Offset(0.5, 0.5),
+            zIndexInt: 999,
+            onDragEnd: (newPos) {
+              provider.insertLassoPoint(i + 1, newPos);
+              if (mounted) setState(() {});
+            },
+          ),
+        );
+      }
+    }
+
+    return markers;
   }
 
   // ── Info window helpers ────────────────────────────────────────────────
@@ -1258,6 +1420,132 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       ref.read(mapGestureRiverpod).enableMapGestures();
       provider.dismissInfoWindow();
     }
+  }
+
+  // ── Dataset tile overlays + viewport waypoint markers ─────────────────
+
+  /// Debounced entry-point called from [GoogleMap.onCameraIdle] and from
+  /// [build] when new dataset metadata is detected.
+  void _scheduleViewportRefresh(ShareableMapProvider provider) {
+    _viewportRefreshTimer?.cancel();
+    _viewportRefreshTimer = Timer(const Duration(milliseconds: 250), () {
+      if (mounted) _rebuildViewportAndTileOverlays(provider);
+    });
+  }
+
+  // ── Waypoint zoom / limit config ──────────────────────────────────────
+  // Edit these two tables to tune how many waypoint markers show at each
+  // zoom band. Changes take effect on the next onCameraIdle event.
+  //
+  // How to read the zoom scale (Google Maps):
+  //   ≈ 20  individual house           ≈ 14  street block
+  //   ≈ 17  building footprint         ≈ 12  suburb
+  //   ≈ 15  street level               ≈ 10  city
+  //   ≈  8  metro region               ≈  6  province / country
+  //
+  // minZoom: the camera must be AT LEAST this zoomed-in before any
+  //          waypoints are shown (below this → 0 markers).
+  // Each band entry: [minZoomForBand, markerLimit].
+  //   Bands are evaluated top-to-bottom; first match wins.
+  //   Add / remove rows freely — keep them sorted highest zoom first.
+  static const double _waypointMinZoom = 11.0; // below this: show nothing
+
+  static const List<(double zoom, int limit)> _waypointZoomBands = [
+    (16.0, 10000),
+    (15.0, 8000), // street / individual property
+    (14.0, 5000), // building footprint
+    (13.0, 3000), // street block
+    (12.0, 2000), // suburb
+    (11.0, 1000), // district / city overview
+  ];
+
+  static int _viewportLimit(double zoom) {
+    if (zoom < _waypointMinZoom) return 0;
+    for (final (minZoom, limit) in _waypointZoomBands) {
+      if (zoom >= minZoom) return limit;
+    }
+    return 0;
+  }
+
+  /// Rebuilds [_datasetTileOverlays] and [_viewportWaypointMarkers].
+  /// Always viewport-culled — only markers inside the current bounds are
+  /// created. Increments [_viewportMarkersVersion] so the stable markers
+  /// Set key in [build] changes only when the viewport actually changes.
+  void _rebuildViewportAndTileOverlays(ShareableMapProvider provider) {
+    if (!mounted) return;
+
+    // ── Tile overlays ──────────────────────────────────────────────────
+    final tileOverlays = <TileOverlay>{};
+    for (final entry in provider.cloudDatasetMeta.entries) {
+      final folderPath = entry.key;
+      final meta = entry.value;
+      final layer = provider.cloudWaypointLayerForFolder(folderPath);
+      if (layer == null) continue;
+      tileOverlays.add(TileOverlay(
+        tileOverlayId: TileOverlayId('ds_${meta.datasetId}'),
+        tileProvider: DatasetTileProvider(
+          datasetId: meta.datasetId,
+          apiKey: Env.googleMapsApiKey,
+        ),
+        fadeIn: false, // snap tiles in immediately — fade causes inter-tile gap
+        visible: layer.isVisible,
+        transparency: 0.0,
+      ));
+    }
+
+    // ── Viewport-culled waypoint markers ───────────────────────────────
+    final vpMarkers = <Marker>{};
+    final zoom = _currentCamera?.zoom ?? 10.0;
+    final limit = _viewportLimit(zoom);
+
+    if (limit > 0) {
+      final bounds = _estimateVisibleBounds();
+      if (bounds != null) {
+        final waypointIcon =
+            _bitmapCache.waypoint ?? BitmapDescriptor.defaultMarker;
+        for (final entry in provider.cloudWaypointIndexes.entries) {
+          final folderPath = entry.key;
+          final index = entry.value;
+          final layer = provider.cloudWaypointLayerForFolder(folderPath);
+          if (layer == null || !layer.isVisible) continue;
+          for (final wpt in index.query(bounds, limit: limit)) {
+            vpMarkers.add(_buildMapMarker(
+              markerId: MarkerId('vp_wpt_${wpt.id}'),
+              position: wpt.position,
+              icon: waypointIcon,
+              onTap: () =>
+                  _handleViewportWaypointTap(provider, folderPath, wpt),
+            ));
+          }
+        }
+      }
+    }
+
+    setState(() {
+      _datasetTileOverlays = tileOverlays;
+      _viewportWaypointMarkers = vpMarkers;
+      _viewportMarkersVersion++;
+    });
+  }
+
+  void _handleViewportWaypointTap(
+    ShareableMapProvider provider,
+    String folderPath,
+    WaypointMeta wpt,
+  ) {
+    if (provider.isDrawing || provider.isEditingVertices) return;
+    _dismissInfoWindow();
+    final layerId = provider.cloudWaypointLayerForFolder(folderPath)?.id ?? '';
+    provider.openInfoWindow(InfoWindowData(
+      elementId: wpt.id,
+      layerId: layerId,
+      title: wpt.name,
+      description: wpt.description,
+      subtitle:
+          '${wpt.position.latitude.toStringAsFixed(6)}, ${wpt.position.longitude.toStringAsFixed(6)}',
+      type: 'point',
+      anchor: wpt.position,
+    ));
   }
 
   /// Centroid of a list of LatLng points.
@@ -1372,8 +1660,23 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     // toggling visibility is a cheap native-visibility update on the JS
     // bridge rather than a mass add/remove of thousands of markers.
     final canDrag = isDraggable && isVisible;
+    final drawingDisablesElementTaps = provider.isDrawing &&
+        (provider.drawingMode == DrawingMode.polygon ||
+            provider.drawingMode == DrawingMode.polyline ||
+            provider.drawingMode == DrawingMode.point);
 
     final key = '$pointCount|$isVisible|$canDrag|$selected|$isWaypoint';
+
+    // Dataset-backed waypoint layers are rendered server-side via TileOverlay
+    // and hit-tested via WaypointSpatialIndex. No Marker objects are needed.
+    if (isWaypoint &&
+        provider.cloudDatasetMeta
+            .containsKey((layer.description as String).trim())) {
+      _largeLayerCacheKey[layerId] = key;
+      _largeLayerMarkerCache[layerId] = const [];
+      _layerMarkerCacheReused = false;
+      return const [];
+    }
 
     if (_largeLayerCacheKey[layerId] == key) {
       final cached = _largeLayerMarkerCache[layerId];
@@ -1386,7 +1689,9 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     final renderSw = Stopwatch()..start();
     final markers = layer.getGoogleMapsMarkers(
       selectedElementId: provider.selectedElementId,
-      onTap: (pointId) => _handleMarkerTap(context, provider, pointId),
+      onTap: drawingDisablesElementTaps
+          ? null
+          : (pointId) => _handleMarkerTap(context, provider, pointId),
       draggable: canDrag,
       onDragEnd: canDrag
           ? (pointId, newPos) => provider.moveMarker(pointId, newPos)
@@ -1618,6 +1923,9 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       ..write('|')
       ..write(provider.isEditingVertices)
       ..write('|')
+      ..write(
+          provider.isDrawing) // onTap is null while drawing — must invalidate
+      ..write('|')
       ..write(provider.isWorkAreaPickerVisible)
       ..write('|')
       ..write(provider.pickerWorkAreasVisible)
@@ -1647,6 +1955,10 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       }
     }
     final polyKey = polyKeyBuf.toString();
+    final drawingDisablesElementTaps = provider.isDrawing &&
+        (provider.drawingMode == DrawingMode.polygon ||
+            provider.drawingMode == DrawingMode.polyline ||
+            provider.drawingMode == DrawingMode.point);
 
     final Set<Polygon> polygons;
     if (polyKey == _stablePolygonsKey && _stablePolygons != null) {
@@ -1656,10 +1968,19 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         ...visibleLayers.expand((layer) => layer.getGoogleMapsPolygons(
               selectedElementId: provider.selectedElementId,
               editingElementId: provider.editingElementId,
-              onTap: provider.isEditingVertices
+              // Null during drawing so taps fall through to the map and
+              // addDrawingPoint fires — avoids the tap being eaten on WASM.
+              onTap: (provider.isEditingVertices || drawingDisablesElementTaps)
                   ? null
-                  : (polygonId) =>
-                      _handlePolygonTap(context, provider, polygonId),
+                  : (polygonId) {
+                      if (ref.read(widgetOverPolygonRiverpod).isOver) return;
+                      debugPrint('[PolyTap] callback fired '
+                          'polygonId=$polygonId '
+                          'pointer=$_lastPointerDown '
+                          'mapSize=$_mapSize '
+                          'camera=${_currentCamera?.target}/${_currentCamera?.zoom}');
+                      _handlePolygonTap(context, provider, polygonId);
+                    },
             )),
         if (provider.isEditingVertices && provider.getEditingPolygon() != null)
           provider.getEditingPolygon()!,
@@ -1674,7 +1995,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
             polygonId: PolygonId('preview_wa_${wa.name}'),
             points: wa.polygonPoints,
             strokeColor: color.withValues(alpha: 0.7),
-            strokeWidth: 2,
+            strokeWidth: 4,
             fillColor: color.withValues(alpha: 0.10),
             consumeTapEvents: true,
             onTap: () => _handlePreviewWorkAreaTap(context, provider, wa),
@@ -1751,6 +2072,13 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       ..write('|')
       ..write(provider.lassoPoints.length)
       ..write('|');
+    for (final p in provider.lassoPoints) {
+      lineKeyBuf
+        ..write(p.latitude.toStringAsFixed(6))
+        ..write(',')
+        ..write(p.longitude.toStringAsFixed(6))
+        ..write(';');
+    }
     for (final l in visibleLayers) {
       lineKeyBuf.write('${l.id}:${l.polylines.length},');
     }
@@ -1764,10 +2092,12 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         ...visibleLayers.expand((layer) => layer.getGoogleMapsPolylines(
               selectedElementId: provider.selectedElementId,
               editingElementId: provider.editingElementId,
-              onTap: provider.isEditingVertices
+              onTap: (provider.isEditingVertices || drawingDisablesElementTaps)
                   ? null
-                  : (polylineId) =>
-                      _handlePolylineTap(context, provider, polylineId),
+                  : (polylineId) {
+                      if (ref.read(widgetOverPolygonRiverpod).isOver) return;
+                      _handlePolylineTap(context, provider, polylineId);
+                    },
             )),
         if (provider.isEditingVertices && provider.getEditingPolyline() != null)
           provider.getEditingPolyline()!,
@@ -1823,45 +2153,95 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     // unrelated provider notifies (auto-save, info window, drawing, …).
     final currentZoom = _currentCamera?.zoom ?? map.defaultZoom;
 
-    final markerSw = Stopwatch()..start();
     int totalRenderedMarkers = 0;
     int reusedLayers = 0;
     int rebuiltLayers = 0;
 
-    final markers = <Marker>{
-      if (!provider.isEditingVertices) ...[
-        // Iterate ALL layers (visible + hidden) so the marker set stays
-        // stable when toggling visibility. Hidden layers contribute
-        // markers with visible:false so the JS bridge only diffs the
-        // visibility property instead of removing/re-adding thousands
-        // of markers — keeps the UI responsive for 15k+ waypoint layers.
-        ...allLayersSorted.expand((layer) {
-          final result = _markersForLayer(
-            layer: layer,
-            provider: provider,
-            isDraggable: isDraggable,
-            pointIcons: pointIcons,
-            waypointPointIcons: waypointPointIcons,
-          );
-          totalRenderedMarkers += result.length;
-          if (_layerMarkerCacheReused) {
-            reusedLayers++;
-          } else {
-            rebuiltLayers++;
-          }
-          return result;
-        }),
-      ],
-      ..._buildDrawingMarkers(context, provider),
-      ..._buildEditingMarkers(context, provider),
-    };
+    // When dataset meta is newly populated, kick a viewport refresh so tile
+    // overlays and viewport markers appear without waiting for a camera move.
+    if (provider.cloudDatasetMeta.isNotEmpty && _datasetTileOverlays.isEmpty) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _scheduleViewportRefresh(provider));
+    }
 
-    if (markerSw.elapsedMilliseconds > 5 ||
-        rebuiltLayers > 0 ||
-        totalRenderedMarkers > 500) {
-      debugPrint('[MapView] markers built in ${markerSw.elapsedMilliseconds}ms '
-          '(total=$totalRenderedMarkers, reusedLayers=$reusedLayers, '
-          'rebuiltLayers=$rebuiltLayers, zoom=${currentZoom.toStringAsFixed(1)})');
+    // ── Stable markers Set ─────────────────────────────────────────────
+    // Build a key from every input that affects the markers Set. If the key
+    // is unchanged the SAME Set<Marker> object is returned, so
+    // GoogleMap.didUpdateWidget (which uses != identity) skips the entire
+    // JS-bridge diff. Markers are only re-diffed when something actually
+    // changed (layer data, drawing state, or viewport waypoints).
+    final markerKeySb = StringBuffer()
+      ..write(provider.isEditingVertices ? 'E' : 'N')
+      ..write('|d:${provider.isDrawing}:${provider.drawingPoints.length}'
+          ':${provider.lassoPoints.length}')
+      ..write('|e:${provider.editingElementId ?? ''}')
+      ..write('|ev:${provider.editingPointsVersion}')
+      ..write('|sel:${provider.selectedElementId ?? ''}')
+      ..write('|vp:$_viewportMarkersVersion')
+      ..write('|drag:$isDraggable|');
+    for (final p in provider.lassoPoints) {
+      markerKeySb
+        ..write(p.latitude.toStringAsFixed(6))
+        ..write(',')
+        ..write(p.longitude.toStringAsFixed(6))
+        ..write(';');
+    }
+    for (final l in allLayersSorted) {
+      markerKeySb.write(_largeLayerCacheKey[l.id] ?? l.id);
+      markerKeySb.write(';');
+    }
+    final markerKey = markerKeySb.toString();
+
+    final Set<Marker> markers;
+    final markerSw = Stopwatch()..start();
+
+    if (markerKey == _stableMarkersKey && _stableMarkers != null) {
+      markers = _stableMarkers!;
+      debugPrint('[MapView] markers STABLE (key unchanged, skipping diff)');
+    } else {
+      final built = <Marker>{
+        if (!provider.isEditingVertices) ...[
+          // Iterate ALL layers (visible + hidden) so the marker set stays
+          // stable when toggling visibility. Hidden layers contribute
+          // markers with visible:false so the JS bridge only diffs the
+          // visibility property instead of removing/re-adding thousands
+          // of markers — keeps the UI responsive for 15k+ waypoint layers.
+          ...allLayersSorted.expand((layer) {
+            final result = _markersForLayer(
+              layer: layer,
+              provider: provider,
+              isDraggable: isDraggable,
+              pointIcons: pointIcons,
+              waypointPointIcons: waypointPointIcons,
+            );
+            totalRenderedMarkers += result.length;
+            if (_layerMarkerCacheReused) {
+              reusedLayers++;
+            } else {
+              rebuiltLayers++;
+            }
+            return result;
+          }),
+        ],
+        ..._buildDrawingMarkers(context, provider),
+        ..._buildEditingMarkers(context, provider),
+        ..._buildLassoMarkers(context, provider),
+        // Viewport-culled letterbox.png markers, rebuilt on onCameraIdle.
+        ..._viewportWaypointMarkers,
+      };
+      markers = built;
+      _stableMarkers = built;
+      _stableMarkersKey = markerKey;
+
+      if (markerSw.elapsedMilliseconds > 5 ||
+          rebuiltLayers > 0 ||
+          totalRenderedMarkers > 500) {
+        debugPrint(
+            '[MapView] markers rebuilt in ${markerSw.elapsedMilliseconds}ms '
+            '(total=$totalRenderedMarkers, reusedLayers=$reusedLayers, '
+            'rebuiltLayers=$rebuiltLayers, vp=${_viewportWaypointMarkers.length}, '
+            'zoom=${currentZoom.toStringAsFixed(1)})');
+      }
     }
 
     return LayoutBuilder(
@@ -1901,14 +2281,15 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                   // or the entire marker set (incl. 12k-point clustering)
                   // would rebuild every frame during pan/zoom.
                   onCameraMove: (pos) => _cameraNotifier.value = pos,
-                  // No onCameraIdle handler: marker rendering no longer
-                  // depends on the viewport, so panning/zooming does not
-                  // need to trigger a rebuild. Info-window/style-panel
-                  // overlays still track the camera continuously via the
-                  // _cameraNotifier ValueListenable above.
+                  // Rebuild dataset tile overlays and viewport waypoint
+                  // markers (letterbox.png) once the camera settles.
+                  // This is cheap: spatial index query is O(viewport_cells)
+                  // regardless of total waypoint count.
+                  onCameraIdle: () => _scheduleViewportRefresh(provider),
                   webGestureHandling:
                       ref.watch(mapGestureRiverpod).gestureHandling,
                   onTap: (position) {
+                    ref.read(widgetOverPolygonRiverpod).disable();
                     debugPrint('[MapTap] background tap at $position '
                         'infoOpen=${provider.infoWindowData?.elementId}');
                     // Guard: ignore map tap when user is interacting with
@@ -1943,6 +2324,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                   polygons: polygons,
                   polylines: polylines,
                   markers: markers,
+                  tileOverlays: _datasetTileOverlays,
                   mapType: provider.mapType,
                   style: provider.mapStyle,
                   myLocationButtonEnabled: true,
@@ -1957,64 +2339,94 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                 ValueListenableBuilder<CameraPosition?>(
                   valueListenable: _cameraNotifier,
                   builder: (context, cam, _) {
-                    final infoScreen = iw != null && cam != null
-                        ? _latLngToScreen(iw.anchor, cam, mapSize)
+                    // cam is null until the first onCameraMove — use the
+                    // map's initial camera as a fallback so the info window
+                    // can be projected even before the user pans.
+                    final effectiveCam = cam ??
+                        CameraPosition(
+                          target: map.defaultCenter,
+                          zoom: map.defaultZoom,
+                        );
+                    final infoScreen = iw != null && mapSize != Size.zero
+                        ? _latLngToScreen(iw.anchor, effectiveCam, mapSize)
                         : null;
-                    if (infoScreen == null) {
+                    final hasWaypointIndex =
+                        provider.cloudWaypointIndexes.isNotEmpty;
+                    if (infoScreen == null && !hasWaypointIndex) {
                       return const SizedBox.shrink();
                     }
                     return Stack(
                       children: [
-                        if (provider.showStylePanel && canEditInThisView)
-                          _MapStylePanel(screen: infoScreen),
-                        _InfoWindowOverlay(
-                          screen: infoScreen,
-                          mapSize: mapSize,
-                          data: iw!,
-                          canEdit: canEditInThisView &&
-                              !provider.capabilities.readOnly,
-                          onDismiss: _dismissInfoWindow,
-                          onStyle: canEditInThisView &&
-                                  (iw.type == 'polygon' ||
-                                      iw.type == 'polyline')
-                              ? () {
-                                  _lastInfoWindowAction = DateTime.now();
-                                  provider.toggleStylePanel();
-                                }
-                              : null,
-                          onEditVertices: () {
-                            _lastInfoWindowAction = DateTime.now();
-                            final elementId = iw.elementId;
-                            final type = iw.type;
-                            _dismissInfoWindow();
-                            if (type == 'polygon' || type == 'polyline') {
-                              provider.startVertexEditing(elementId);
-                            }
-                          },
-                          onPhoto: null,
-                          onDelete: () {
-                            _lastInfoWindowAction = DateTime.now();
-                            // Use explicit IDs from the info window data —
-                            // selectedElementId may already be cleared by a
-                            // concurrent web tap-through.
-                            final elementId = iw.elementId;
-                            final layerId = iw.layerId;
-                            _dismissInfoWindow();
-                            provider.deleteElement(elementId, layerId);
-                          },
-                          onAddToMap: canEditInThisView &&
-                                  iw.type == 'preview_work_area'
-                              ? () {
-                                  _lastInfoWindowAction = DateTime.now();
-                                  final selected =
-                                      _previewWorkAreaForInfoWindow;
-                                  if (selected != null) {
-                                    provider.addWorkAreaToMap(selected);
-                                    _dismissInfoWindow();
+                        // Live zoom + waypoint count badge — visible whenever
+                        // a cloud waypoint layer is loaded. Stays in sync with
+                        // every camera move via the ValueListenableBuilder so
+                        // it never triggers a GoogleMap rebuild.
+                        if (hasWaypointIndex)
+                          Positioned(
+                            bottom: 96,
+                            right: 58,
+                            child: _WaypointZoomBadge(
+                              zoom: effectiveCam.zoom,
+                              shown: _viewportWaypointMarkers.length,
+                              limit: _viewportLimit(effectiveCam.zoom),
+                              total: provider.cloudWaypointIndexes.values
+                                  .fold(0, (s, idx) => s + idx.count),
+                              minZoom: _waypointMinZoom,
+                              bands: _waypointZoomBands,
+                            ),
+                          ),
+                        if (infoScreen != null) ...[
+                          if (provider.showStylePanel && canEditInThisView)
+                            _MapStylePanel(screen: infoScreen),
+                          _InfoWindowOverlay(
+                            screen: infoScreen,
+                            mapSize: mapSize,
+                            data: iw!,
+                            canEdit: canEditInThisView &&
+                                !provider.capabilities.readOnly,
+                            onDismiss: _dismissInfoWindow,
+                            onStyle: canEditInThisView &&
+                                    (iw.type == 'polygon' ||
+                                        iw.type == 'polyline')
+                                ? () {
+                                    _lastInfoWindowAction = DateTime.now();
+                                    provider.toggleStylePanel();
                                   }
-                                }
-                              : null,
-                        ),
+                                : null,
+                            onEditVertices: () {
+                              _lastInfoWindowAction = DateTime.now();
+                              final elementId = iw.elementId;
+                              final type = iw.type;
+                              _dismissInfoWindow();
+                              if (type == 'polygon' || type == 'polyline') {
+                                provider.startVertexEditing(elementId);
+                              }
+                            },
+                            onPhoto: null,
+                            onDelete: () {
+                              _lastInfoWindowAction = DateTime.now();
+                              // Use explicit IDs from the info window data —
+                              // selectedElementId may already be cleared by a
+                              // concurrent web tap-through.
+                              final elementId = iw.elementId;
+                              final layerId = iw.layerId;
+                              _dismissInfoWindow();
+                              provider.deleteElement(elementId, layerId);
+                            },
+                            onAddToMap: canEditInThisView &&
+                                    iw.type == 'preview_work_area'
+                                ? () {
+                                    _lastInfoWindowAction = DateTime.now();
+                                    final selected =
+                                        _previewWorkAreaForInfoWindow;
+                                    if (selected != null) {
+                                      provider.addWorkAreaToMap(selected);
+                                      _dismissInfoWindow();
+                                    }
+                                  }
+                                : null,
+                          ),
+                        ], // end if (infoScreen != null)
                       ],
                     );
                   },
@@ -2407,13 +2819,15 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         'isEditing=${provider.isEditingVertices} '
         'isCycleMod=$_isCycleModifierHeld '
         'infoOpen=${provider.infoWindowData?.elementId}');
-    // Ignore element taps when gestures are disabled (user is over a UI overlay)
-    if (ref.read(mapGestureRiverpod).gestureHandling ==
-        WebGestureHandling.none) {
-      debugPrint('[PolyTap] BAIL — gestures disabled');
+    // A polygon tap is explicit user intent — re-enable gestures rather than
+    // bailing. On WASM the JS→Dart bridge can arrive after a MouseRegion
+    // onEnter has already disabled gestures, making the guard a false positive.
+    ref.read(mapGestureRiverpod).enableMapGestures();
+    if (provider.isDrawing || provider.isEditingVertices) {
+      debugPrint('[PolyTap] BAIL — drawing=${provider.isDrawing} '
+          'editing=${provider.isEditingVertices}');
       return;
     }
-    if (provider.isDrawing || provider.isEditingVertices) return;
     // Shift/Ctrl/Meta+click: cycle through overlapping elements.
     if (_isCycleModifierHeld) {
       debugPrint('[PolyTap] cycleModifier held → cycling');
@@ -2431,17 +2845,34 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     debugPrint('[PolyTap] opening info window for $polygonId');
 
     final match = RegExp(r'^(.+)_polygon_(\d+)$').firstMatch(polygonId);
-    if (match == null) return;
+    if (match == null) {
+      debugPrint('[PolyTap] BAIL — polygonId did not match expected pattern');
+      return;
+    }
     final layerId = match.group(1)!;
     final idx = int.parse(match.group(2)!);
 
     final layer = provider.layers.where((l) => l.id == layerId).firstOrNull;
-    if (layer == null || idx >= layer.polygons.length) return;
+    if (layer == null) {
+      debugPrint('[PolyTap] BAIL — layer not found for layerId=$layerId');
+      return;
+    }
+    if (idx >= layer.polygons.length) {
+      debugPrint('[PolyTap] BAIL — polygon index out of range '
+          'idx=$idx polygonCount=${layer.polygons.length}');
+      return;
+    }
     final polygon = layer.polygons[idx];
 
     final areaKm2 = _polygonAreaKm2(polygon.points);
     final perimeterKm = _pathLengthKm(polygon.points, closed: true);
     final subtitle = '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}';
+    final anchor = _tapAnchor(_centroid(polygon.points));
+
+    debugPrint('[PolyTap] resolved '
+        'layerId=$layerId idx=$idx '
+        'name="${polygon.name}" points=${polygon.points.length} '
+        'anchor=$anchor subtitle="$subtitle"');
 
     provider.openInfoWindow(InfoWindowData(
       elementId: polygonId,
@@ -2450,9 +2881,13 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       description: polygon.description,
       subtitle: subtitle,
       type: 'polygon',
-      anchor: _tapAnchor(_centroid(polygon.points)),
+      anchor: anchor,
       letterBoxEstimate: polygon.letterBoxEstimate,
     ));
+
+    debugPrint('[PolyTap] openInfoWindow done '
+        'selected=${provider.selectedElementId} '
+        'infoOpen=${provider.infoWindowData?.elementId}');
   }
 
   /// Handle tap on a preview (ghost) work-area polygon shown during import
@@ -2489,10 +2924,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
 
   void _handlePolylineTap(
       BuildContext context, ShareableMapProvider provider, String polylineId) {
-    if (ref.read(mapGestureRiverpod).gestureHandling ==
-        WebGestureHandling.none) {
-      return;
-    }
+    ref.read(mapGestureRiverpod).enableMapGestures();
     if (provider.isDrawing || provider.isEditingVertices) return;
     // Shift/Ctrl/Meta+click: cycle through overlapping elements.
     if (_isCycleModifierHeld) {
@@ -2541,11 +2973,8 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   }
 
   void _handleMarkerTap(
-      BuildContext context, ShareableMapProvider provider, String pointId) {
-    if (ref.read(mapGestureRiverpod).gestureHandling ==
-        WebGestureHandling.none) {
-      return;
-    }
+      BuildContext context, ShareableMapProvider provider, String markerId) {
+    ref.read(mapGestureRiverpod).enableMapGestures();
     // Shift/Ctrl/Meta+click: cycle through overlapping elements.
     if (_isCycleModifierHeld) {
       _dismissInfoWindow();
@@ -2556,19 +2985,47 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       _dismissInfoWindow();
       return;
     }
+
     for (final layer in provider.layers) {
-      final found = layer.points.where((p) => p.id == pointId).firstOrNull;
+      // ── Regular MapPoint markers ──────────────────────────────────────
+      final found = layer.points.where((p) => p.id == markerId).firstOrNull;
       if (found != null) {
+        // Use _tapAnchor so the info window opens at the actual tap position
+        // (the pin head) rather than at found.position (the pin tip), which
+        // would make the popup appear ~40 px below where the user clicked.
         provider.openInfoWindow(InfoWindowData(
-          elementId: pointId,
+          elementId: markerId,
           layerId: layer.id,
           title: found.name.isNotEmpty ? found.name : 'Unnamed Point',
           description: found.description,
           subtitle: '',
           type: 'point',
-          anchor: found.position,
+          anchor: _tapAnchor(found.position),
         ));
         return;
+      }
+
+      // ── CustomPolygon marker entries (ID = "${layerId}_polygon_marker_$i") ──
+      // These are polygon entries with isMarker=true (e.g. auto-generated
+      // Drop-off Point). moveMarker already handles the same ID format.
+      if (markerId.startsWith('${layer.id}_polygon_marker_')) {
+        final suffix = markerId.substring('${layer.id}_polygon_marker_'.length);
+        final index = int.tryParse(suffix);
+        if (index != null && index < layer.polygons.length) {
+          final cp = layer.polygons[index];
+          if (cp.isMarker && cp.markerPosition != null) {
+            provider.openInfoWindow(InfoWindowData(
+              elementId: markerId,
+              layerId: layer.id,
+              title: cp.name.isNotEmpty ? cp.name : 'Unnamed Point',
+              description: cp.description,
+              subtitle: '',
+              type: 'point',
+              anchor: _tapAnchor(cp.markerPosition!),
+            ));
+            return;
+          }
+        }
       }
     }
   }
@@ -2630,8 +3087,14 @@ class _MapSidebarWidgetState extends riverpod.ConsumerState<MapSidebarWidget> {
           ],
         ),
         child: MouseRegion(
-          onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
-          onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+          onEnter: (_) {
+            ref.read(mapGestureRiverpod).disableMapGestures();
+            ref.read(widgetOverPolygonRiverpod).enable();
+          },
+          onExit: (_) {
+            ref.read(mapGestureRiverpod).enableMapGestures();
+            ref.read(widgetOverPolygonRiverpod).disable();
+          },
           child: const MapLayersSidebar(),
         ),
       ),
@@ -2662,8 +3125,14 @@ class _WorkAreaTableSidebar extends riverpod.ConsumerWidget {
           ],
         ),
         child: MouseRegion(
-          onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
-          onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+          onEnter: (_) {
+            ref.read(mapGestureRiverpod).disableMapGestures();
+            ref.read(widgetOverPolygonRiverpod).enable();
+          },
+          onExit: (_) {
+            ref.read(mapGestureRiverpod).enableMapGestures();
+            ref.read(widgetOverPolygonRiverpod).disable();
+          },
           child: const WorkAreaTablePanel(),
         ),
       ),
@@ -2694,8 +3163,14 @@ class _WorkSuburbsTableSidebar extends riverpod.ConsumerWidget {
           ],
         ),
         child: MouseRegion(
-          onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
-          onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+          onEnter: (_) {
+            ref.read(mapGestureRiverpod).disableMapGestures();
+            ref.read(widgetOverPolygonRiverpod).enable();
+          },
+          onExit: (_) {
+            ref.read(mapGestureRiverpod).enableMapGestures();
+            ref.read(widgetOverPolygonRiverpod).disable();
+          },
           child: const WorkSuburbsTablePanel(),
         ),
       ),
@@ -2713,8 +3188,14 @@ class MapDrawingToolbarWidget extends riverpod.ConsumerWidget {
       right: 16,
       top: 16,
       child: MouseRegion(
-        onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
-        onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+        onEnter: (_) {
+          ref.read(mapGestureRiverpod).disableMapGestures();
+          ref.read(widgetOverPolygonRiverpod).enable();
+        },
+        onExit: (_) {
+          ref.read(mapGestureRiverpod).enableMapGestures();
+          ref.read(widgetOverPolygonRiverpod).disable();
+        },
         child: const MapDrawingToolbar(),
       ),
     );
@@ -2747,8 +3228,14 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
           elevation: 8,
           borderRadius: BorderRadius.circular(8),
           child: MouseRegion(
-            onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
-            onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+            onEnter: (_) {
+              ref.read(mapGestureRiverpod).disableMapGestures();
+              ref.read(widgetOverPolygonRiverpod).enable();
+            },
+            onExit: (_) {
+              ref.read(mapGestureRiverpod).enableMapGestures();
+              ref.read(widgetOverPolygonRiverpod).disable();
+            },
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
@@ -2816,7 +3303,7 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                                   provider.removeLastLassoPoint();
                                 } else {
                                   provider.removeLastDrawingPoint();
-                                  provider.markIgnoreNextTap();
+                                  // provider.markIgnoreNextTap();
                                 }
                               }
                             : null,
@@ -3748,6 +4235,7 @@ class _InfoWindowOverlayState
 
   @override
   void dispose() {
+    ref.read(widgetOverPolygonRiverpod).disable();
     _titleFocusNode.removeListener(_onFocusChanged);
     _titleFocusNode.dispose();
     _titleController.dispose();
@@ -3825,8 +4313,11 @@ class _InfoWindowOverlayState
     final tailCenterX =
         (offset.dx - left).clamp(_tailHalfWidth, _cardWidth - _tailHalfWidth);
 
-    // Flip below the tap point when too close to the top edge.
-    final tailBelow = offset.dy >= _flipThreshold;
+    // Points/markers: always show below so the pin stays visible (tail at top).
+    // Other elements: flip below only when too close to the top edge.
+    final tailBelow = widget.data.type == 'point'
+        ? false
+        : offset.dy >= _flipThreshold;
 
     final column = Column(
       mainAxisSize: MainAxisSize.min,
@@ -3858,25 +4349,16 @@ class _InfoWindowOverlayState
         ? Positioned(
             left: left,
             bottom: widget.mapSize.height - offset.dy,
-            child: Listener(
-              behavior: HitTestBehavior.opaque,
-              onPointerDown: (_) =>
-                  ref.read(mapGestureRiverpod).disableMapGestures(),
-              onPointerUp: (_) {
-                // Keep gestures disabled briefly so the platform view
-                // doesn't fire GoogleMap.onTap concurrently.
-                Future.delayed(const Duration(milliseconds: 350), () {
-                  if (context.mounted) {
-                    ref.read(mapGestureRiverpod).enableMapGestures();
-                  }
-                });
+            child: MouseRegion(
+              onEnter: (_) {
+                ref.read(mapGestureRiverpod).disableMapGestures();
+                ref.read(widgetOverPolygonRiverpod).enable();
               },
-              child: MouseRegion(
-                onEnter: (_) =>
-                    ref.read(mapGestureRiverpod).disableMapGestures(),
-                onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
-                child: column,
-              ),
+              onExit: (_) {
+                ref.read(mapGestureRiverpod).enableMapGestures();
+                ref.read(widgetOverPolygonRiverpod).disable();
+              },
+              child: column,
             ),
           )
         : Positioned(
@@ -3894,9 +4376,14 @@ class _InfoWindowOverlayState
                 });
               },
               child: MouseRegion(
-                onEnter: (_) =>
-                    ref.read(mapGestureRiverpod).disableMapGestures(),
-                onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+                onEnter: (_) {
+                  ref.read(mapGestureRiverpod).disableMapGestures();
+                  ref.read(widgetOverPolygonRiverpod).enable();
+                },
+                onExit: (_) {
+                  ref.read(mapGestureRiverpod).enableMapGestures();
+                  ref.read(widgetOverPolygonRiverpod).disable();
+                },
                 child: column,
               ),
             ),
@@ -3909,7 +4396,29 @@ class _InfoWindowOverlayState
     final letterBoxesReached = data.type == 'polygon'
         ? provider.letterBoxesReachedForPolygon(data.layerId, data.elementId)
         : null;
-    final hasSubtitle = data.subtitle.isNotEmpty;
+
+    // During vertex editing, recompute area/perimeter or distance live from
+    // editingPoints so the info window reflects the current shape in real time.
+    final isEditingThisElement = provider.isEditingVertices &&
+        provider.editingElementId == data.elementId &&
+        provider.editingPoints != null;
+    final String liveSubtitle;
+    if (isEditingThisElement) {
+      final pts = provider.editingPoints!;
+      if (data.type == 'polygon') {
+        final areaKm2 = _MapViewWidgetState._polygonAreaKm2(pts);
+        final perimKm = _MapViewWidgetState._pathLengthKm(pts, closed: true);
+        liveSubtitle = '${_MapViewWidgetState._fmtKm2(areaKm2)}  ·  ${_MapViewWidgetState._fmtKm(perimKm)}';
+      } else if (data.type == 'polyline') {
+        liveSubtitle = _MapViewWidgetState._fmtKm(_MapViewWidgetState._pathLengthKm(pts));
+      } else {
+        liveSubtitle = data.subtitle;
+      }
+    } else {
+      liveSubtitle = data.subtitle;
+    }
+
+    final hasSubtitle = liveSubtitle.isNotEmpty;
     final hasDesc = data.description.isNotEmpty;
     final isShapeable = data.type == 'polygon' || data.type == 'polyline';
     final isPreviewWorkArea = data.type == 'preview_work_area';
@@ -3991,7 +4500,7 @@ class _InfoWindowOverlayState
                     const SizedBox(width: 4),
                     GestureDetector(
                       onTap: () {
-                        ref.read(shareableMapRiverpod).markIgnoreNextTap();
+                        // ref.read(shareableMapRiverpod).markIgnoreNextTap();
                         widget.onDismiss();
                       },
                       child: const Padding(
@@ -4029,7 +4538,7 @@ class _InfoWindowOverlayState
                     const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 child: _buildStatsRow(
                   data.type,
-                  data.subtitle,
+                  liveSubtitle,
                   data.letterBoxEstimate,
                   letterBoxesReached,
                 ),
@@ -4062,7 +4571,7 @@ class _InfoWindowOverlayState
             child: TextButton(
               onPressed: () {
                 // Guard against web tap-through to underlying preview polygon.
-                ref.read(shareableMapRiverpod).markIgnoreNextTap();
+                // ref.read(shareableMapRiverpod).markIgnoreNextTap();
                 widget.onDismiss();
               },
               child: const Text('Cancel'),
@@ -4077,7 +4586,7 @@ class _InfoWindowOverlayState
             child: FilledButton.icon(
               onPressed: () {
                 // Guard against web tap-through to underlying preview polygon.
-                ref.read(shareableMapRiverpod).markIgnoreNextTap();
+                // ref.read(shareableMapRiverpod).markIgnoreNextTap();
                 widget.onAddToMap?.call();
               },
               icon: const Icon(Icons.add, size: 16),
@@ -4573,6 +5082,12 @@ class _StylePanelOverlayState
   }
 
   @override
+  void dispose() {
+    ref.read(widgetOverPolygonRiverpod).disable();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final screenSize = MediaQuery.of(context).size;
     const panelW = 260.0;
@@ -4590,8 +5105,14 @@ class _StylePanelOverlayState
       left: left,
       top: top,
       child: MouseRegion(
-        onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
-        onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+        onEnter: (_) {
+          ref.read(mapGestureRiverpod).disableMapGestures();
+          ref.read(widgetOverPolygonRiverpod).enable();
+        },
+        onExit: (_) {
+          ref.read(mapGestureRiverpod).enableMapGestures();
+          ref.read(widgetOverPolygonRiverpod).disable();
+        },
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: () {}, // absorb taps so GoogleMap.onTap doesn't fire
@@ -4617,12 +5138,19 @@ class _StylePanelOverlayState
                                 fontWeight: FontWeight.w600,
                                 color: Color(0xFF202124))),
                       ),
-                      GestureDetector(
-                        onTap: widget.onClose,
-                        child: const Padding(
-                          padding: EdgeInsets.all(4),
-                          child: Icon(Icons.close,
-                              size: 16, color: Color(0xFF80868B)),
+                      MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        onEnter: (_) =>
+                            ref.read(mapGestureRiverpod).disableMapGestures(),
+                        onExit: (_) =>
+                            ref.read(mapGestureRiverpod).enableMapGestures(),
+                        child: GestureDetector(
+                          onTap: widget.onClose,
+                          child: const Padding(
+                            padding: EdgeInsets.all(4),
+                            child: Icon(Icons.close,
+                                size: 16, color: Color(0xFF80868B)),
+                          ),
                         ),
                       ),
                     ]),
@@ -4757,6 +5285,113 @@ class _ColorGrid extends StatelessWidget {
           ),
         );
       }).toList(),
+    );
+  }
+}
+
+// ── Waypoint zoom debug badge ─────────────────────────────────────────────────
+//
+// Shows the current zoom level, how many waypoint markers are rendered, the
+// cap for this zoom band, and the total in the spatial index. Use this while
+// tuning _waypointZoomBands / _waypointMinZoom in _MapViewWidgetState.
+//
+// The band colour gives instant visual feedback:
+//   green  → street band (highest detail)
+//   blue   → suburb band
+//   orange → district band
+//   grey   → below minimum zoom (no markers shown)
+
+class _WaypointZoomBadge extends StatelessWidget {
+  final double zoom;
+  final int shown;
+  final int limit;
+  final int total;
+  final double minZoom;
+  final List<(double, int)> bands;
+
+  const _WaypointZoomBadge({
+    required this.zoom,
+    required this.shown,
+    required this.limit,
+    required this.total,
+    required this.minZoom,
+    required this.bands,
+  });
+
+  Color get _bandColor {
+    if (zoom < minZoom) return Colors.grey.shade600;
+    final index = bands.indexWhere((b) => zoom >= b.$1);
+    if (index == 0) return Colors.green.shade700; // finest band
+    if (index == 1) return Colors.blue.shade700;
+    return Colors.orange.shade800;
+  }
+
+  String get _bandLabel {
+    if (zoom < minZoom) return 'off';
+    final index = bands.indexWhere((b) => zoom >= b.$1);
+    final labels = ['street', 'block', 'suburb', 'district', 'region'];
+    return index >= 0 && index < labels.length ? labels[index] : 'band $index';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _bandColor;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.93),
+        borderRadius: BorderRadius.circular(8),
+        border: Border(left: BorderSide(color: color, width: 3)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.15),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: DefaultTextStyle(
+        style: const TextStyle(
+          fontSize: 11,
+          color: Color(0xFF202124),
+          fontFamily: 'monospace',
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'zoom ${zoom.toStringAsFixed(1)}',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    _bandLabel,
+                    style: TextStyle(color: color, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 3),
+            Text(
+              limit == 0
+                  ? 'zoom in to see waypoints'
+                  : '$shown / $limit shown  ·  $total total',
+              style: const TextStyle(color: Color(0xFF5F6368)),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

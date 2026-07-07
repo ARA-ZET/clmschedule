@@ -1,14 +1,16 @@
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/job_list_item.dart';
+import '../providers/day_off_provider.dart';
 import '../providers/schedule_provider.dart';
 
 /// Service class responsible for automatically assigning jobs to distributors
 /// based on their availability and index order
 class JobAssignmentService {
   final ScheduleProvider scheduleProvider;
+  final DayOffProvider? dayOffProvider;
 
-  JobAssignmentService(this.scheduleProvider);
+  JobAssignmentService(this.scheduleProvider, {this.dayOffProvider});
 
   /// Rounds up man-days (2.3 → 3)
   int roundUpManDays(double manDays) {
@@ -25,11 +27,12 @@ class JobAssignmentService {
     final assignedDistributorIds =
         jobsForDate.map((job) => job.distributorId).toSet();
 
-    // Filter out assigned distributors and non-active distributors, then sort by index
+    // Filter out assigned, non-active, and day-off distributors, then sort by index
     final availableDistributors = allDistributors
         .where((distributor) =>
             distributor.status == DistributorStatus.active &&
-            !assignedDistributorIds.contains(distributor.id))
+            !assignedDistributorIds.contains(distributor.id) &&
+            !(dayOffProvider?.isDayOff(distributor.id, date) ?? false))
         .toList();
 
     // Sort by index (lowest index first)

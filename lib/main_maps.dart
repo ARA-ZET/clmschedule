@@ -13,6 +13,7 @@ import 'shareable_maps/widgets/clm_maps_admin_login_page.dart';
 import 'shareable_maps/widgets/clm_maps_splash.dart';
 import 'shareable_maps/widgets/shareable_maps_gallery.dart';
 import 'providers/auth_provider.dart';
+import 'providers/schedule_provider.dart';
 import 'firebase_options.dart';
 
 /// Standalone CLM Maps Entry Point
@@ -178,6 +179,7 @@ class _MapsRootGate extends riverpod.ConsumerWidget {
       return const ClmMapsSplash();
     }
     if (auth.isAuthenticated) {
+      ref.read(scheduleRiverpod).initializeWorkAreaStreams();
       return const ShareableMapsGallery();
     }
     return const CLMAdvertPage();

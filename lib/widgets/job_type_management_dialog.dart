@@ -29,6 +29,9 @@ class _JobTypeManagementDialogState
   bool _appearsOnCollectionSchedule = false;
   bool _tracksQuantity = true;
   bool _createsCloudFolder = false;
+  bool _autoAllocatesToSchedule = false;
+  bool _hasTwoStops = false;
+  bool _chargesVat = false;
   String? _iconName;
   int? _colorValue;
 
@@ -50,6 +53,9 @@ class _JobTypeManagementDialogState
       _appearsOnCollectionSchedule = false;
       _tracksQuantity = true;
       _createsCloudFolder = false;
+      _autoAllocatesToSchedule = false;
+      _hasTwoStops = false;
+      _chargesVat = false;
       _iconName = null;
       _colorValue = null;
     });
@@ -66,6 +72,9 @@ class _JobTypeManagementDialogState
       _appearsOnCollectionSchedule = jobType.appearsOnCollectionSchedule;
       _tracksQuantity = jobType.tracksQuantity;
       _createsCloudFolder = jobType.createsCloudFolder;
+      _autoAllocatesToSchedule = jobType.autoAllocatesToSchedule;
+      _hasTwoStops = jobType.hasTwoStops;
+      _chargesVat = jobType.chargesVat;
       _iconName = jobType.iconName;
       _colorValue = jobType.colorValue;
     });
@@ -106,6 +115,9 @@ class _JobTypeManagementDialogState
           tracksQuantity: _tracksQuantity,
           quantityLabel: quantityLabel,
           createsCloudFolder: _createsCloudFolder,
+          autoAllocatesToSchedule: _autoAllocatesToSchedule,
+          hasTwoStops: _hasTwoStops,
+          chargesVat: _chargesVat,
           iconName: _iconName,
           colorValue: _colorValue,
           clearIcon: _iconName == null,
@@ -121,6 +133,9 @@ class _JobTypeManagementDialogState
           tracksQuantity: _tracksQuantity,
           quantityLabel: quantityLabel,
           createsCloudFolder: _createsCloudFolder,
+          autoAllocatesToSchedule: _autoAllocatesToSchedule,
+          hasTwoStops: _hasTwoStops,
+          chargesVat: _chargesVat,
           iconName: _iconName,
           colorValue: _colorValue,
           clearIcon: _iconName == null,
@@ -287,6 +302,9 @@ class _JobTypeManagementDialogState
       if (jt.appearsOnCollectionSchedule) 'Collection',
       if (!jt.tracksQuantity) 'No quantity',
       if (jt.createsCloudFolder) 'Cloud folder',
+      if (jt.autoAllocatesToSchedule) 'Auto-schedule',
+      if (jt.hasTwoStops) '2 stops',
+      if (jt.chargesVat) 'VAT',
     ];
     final color = jt.colorValue != null ? Color(jt.colorValue!) : null;
     return ListTile(
@@ -419,6 +437,43 @@ class _JobTypeManagementDialogState
               ),
               value: _createsCloudFolder,
               onChanged: (v) => setState(() => _createsCloudFolder = v),
+            ),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Auto-allocates to schedule'),
+              subtitle: const Text(
+                'Adding a job of this type automatically creates an entry on '
+                'the Schedule grid for the same date, ready for a distributor',
+                style: TextStyle(fontSize: 11),
+              ),
+              value: _autoAllocatesToSchedule,
+              onChanged: (v) =>
+                  setState(() => _autoAllocatesToSchedule = v),
+            ),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Two-stop job (loading + offloading)'),
+              subtitle: const Text(
+                'Shows separate Loading address and Offloading address fields '
+                'in the job form instead of a single collection address',
+                style: TextStyle(fontSize: 11),
+              ),
+              value: _hasTwoStops,
+              onChanged: (v) => setState(() => _hasTwoStops = v),
+            ),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Charges VAT'),
+              subtitle: const Text(
+                'Shows the incl/excl VAT toggle in the job form and the '
+                'coloured VAT badge on the job list amount column',
+                style: TextStyle(fontSize: 11),
+              ),
+              value: _chargesVat,
+              onChanged: (v) => setState(() => _chargesVat = v),
             ),
             if (_tracksQuantity) ...[
               const SizedBox(height: 8),

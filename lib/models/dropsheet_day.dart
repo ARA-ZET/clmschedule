@@ -152,6 +152,7 @@ class DropsheetDriverSection {
     VehicleType? vehicle,
     TrailerType? trailer,
     DepotConfig? depot,
+    String? packDetails,
   }) {
     return DropsheetDriverSection(
       id: driverId,
@@ -167,6 +168,7 @@ class DropsheetDriverSection {
         depotLat: depot?.lat,
         depotLng: depot?.lng,
         depotStartTime: depot?.startTime,
+        packDetails: packDetails,
       ),
     );
   }

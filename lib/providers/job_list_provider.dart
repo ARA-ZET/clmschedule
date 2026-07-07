@@ -560,6 +560,10 @@ class JobListProvider extends ChangeNotifier {
         item1.reportAddresses == item2.reportAddresses &&
         item1.whoToInvoice == item2.whoToInvoice &&
         item1.vehicleTrailerCombo == item2.vehicleTrailerCombo &&
+        item1.offloadingAddress == item2.offloadingAddress &&
+        item1.priceIsInclVat == item2.priceIsInclVat &&
+        item1.amountExclVat == item2.amountExclVat &&
+        item1.amountInclVat == item2.amountInclVat &&
         _areRemindersEqual(item1.reminders, item2.reminders);
   }
 
@@ -743,27 +747,7 @@ class JobListProvider extends ChangeNotifier {
       final generatedId =
           await _jobListService.addJobListItem(jobListItem, jobListItem.date);
 
-      final savedJob = JobListItem(
-        id: generatedId,
-        invoice: jobListItem.invoice,
-        amount: jobListItem.amount,
-        client: jobListItem.client,
-        jobStatusId: jobListItem.jobStatusId,
-        invoiceStatusId: jobListItem.invoiceStatusId,
-        jobTypeId: jobListItem.jobTypeId,
-        area: jobListItem.area,
-        quantity: jobListItem.quantity,
-        manDays: jobListItem.manDays,
-        date: jobListItem.date,
-        collectionAddress: jobListItem.collectionAddress,
-        collectionDate: jobListItem.collectionDate,
-        specialInstructions: jobListItem.specialInstructions,
-        quantityDistributed: jobListItem.quantityDistributed,
-        invoiceDetails: jobListItem.invoiceDetails,
-        reportAddresses: jobListItem.reportAddresses,
-        whoToInvoice: jobListItem.whoToInvoice,
-        collectionJobId: jobListItem.collectionJobId,
-      );
+      final savedJob = jobListItem.copyWith(id: generatedId);
 
       // Track this job as locally added to prevent duplicate sync from listener
       _locallyAddedJobIds.add(savedJob.id);
@@ -1080,7 +1064,8 @@ class JobListProvider extends ChangeNotifier {
       throw Exception('User must be authenticated to make changes');
     }
 
-    // Create item with tracked changes
+    // Create item with tracked changes, then overlay the VAT fields which
+    // copyWithTrackedChange doesn't know about.
     final trackedItem = originalItem.copyWithTrackedChange(
       userId: currentUser.uid,
       userDisplayName:
@@ -1154,6 +1139,15 @@ class JobListProvider extends ChangeNotifier {
       resolveJobStatusLabel: resolveJobStatusLabel,
       resolveInvoiceStatusLabel: resolveInvoiceStatusLabel,
       resolveQuantityLabel: resolveQuantityLabel,
+    ).copyWith(
+      // These fields are not tracked for change history but must always reflect
+      // the dialog's edit. copyWithTrackedChange doesn't carry them, so without
+      // this overlay they would silently revert to the original values.
+      amountExclVat: updatedItem.amountExclVat,
+      amountInclVat: updatedItem.amountInclVat,
+      priceIsInclVat: updatedItem.priceIsInclVat,
+      offloadingAddress: updatedItem.offloadingAddress,
+      toolsNeeded: updatedItem.toolsNeeded,
     );
 
     // Update locally first, then save

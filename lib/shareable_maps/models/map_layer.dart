@@ -186,6 +186,9 @@ class MapLayer {
   }
 
   /// Get all polylines as Google Maps Polyline objects
+  ///
+  /// Each visible polyline is paired with a wider transparent hit-zone polyline
+  /// so that taps near (but not exactly on) the thin line are still captured.
   List<Polyline> getGoogleMapsPolylines({
     String? selectedElementId,
     String? editingElementId,
@@ -193,15 +196,34 @@ class MapLayer {
   }) {
     if (!isVisible) return [];
 
-    return polylines
-        .where((polyline) => polyline.id != editingElementId)
-        .map((polyline) {
-      return polyline.toGoogleMapsPolyline(
+    final result = <Polyline>[];
+    for (final polyline in polylines) {
+      if (polyline.id == editingElementId) continue;
+
+      final tapCallback = onTap != null ? () => onTap(polyline.id) : null;
+      final visible = polyline.toGoogleMapsPolyline(
         isSelected: polyline.id == selectedElementId,
         isEditing: polyline.id == editingElementId,
-        onTap: onTap != null ? () => onTap(polyline.id) : null,
+        onTap: tapCallback,
       );
-    }).toList();
+      result.add(visible);
+
+      // Invisible wide hit-zone so taps near the line are captured.
+      // alpha=1 (≈0.4% opacity) keeps it visually invisible while still
+      // being hit-testable on both native and web map renderers.
+      if (tapCallback != null) {
+        result.add(Polyline(
+          polylineId: PolylineId('${polyline.id}_hit'),
+          points: polyline.points,
+          color: const Color(0x01000000),
+          width: 20,
+          consumeTapEvents: true,
+          onTap: tapCallback,
+          zIndex: visible.zIndex + 1,
+        ));
+      }
+    }
+    return result;
   }
 
   /// Get all points as Google Maps Marker objects

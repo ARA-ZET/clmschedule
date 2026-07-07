@@ -19,6 +19,9 @@ class EditableTableCell extends riverpod.ConsumerStatefulWidget {
   final bool showTooltip;
   final Color? textColor;
 
+  /// Optional widget shown instead of [value] text when not in edit mode.
+  final Widget? displayWidget;
+
   const EditableTableCell({
     super.key,
     required this.value,
@@ -30,6 +33,7 @@ class EditableTableCell extends riverpod.ConsumerStatefulWidget {
     this.width,
     this.showTooltip = false,
     this.textColor,
+    this.displayWidget,
   });
 
   @override
@@ -141,42 +145,47 @@ class _EditableTableCellState
             onTap: _startEditing,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: widget.showTooltip && widget.value.isNotEmpty
-                  ? Tooltip(
-                      message: widget.value,
-                      textStyle: TextStyle(
-                          fontSize: scaleProvider.largeFontSize,
-                          color: Colors.white),
-                      decoration: BoxDecoration(
-                        color: Colors.black,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      padding: const EdgeInsets.all(8),
-                      child: Text(
-                        widget.value.isEmpty ? 'Click to edit' : widget.value,
-                        style: TextStyle(
-                          fontSize: scaleProvider.mediumFontSize,
-                          color: Colors.black,
-                          fontWeight: FontWeight.bold,
-                          fontStyle:
-                              widget.value.isEmpty ? FontStyle.italic : null,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: widget.maxLines,
-                      ),
-                    )
-                  : Text(
-                      widget.value.isEmpty ? 'Click to edit' : widget.value,
-                      style: TextStyle(
-                        fontSize: scaleProvider.mediumFontSize,
-                        color: Colors.black,
-                        fontWeight: FontWeight.bold,
-                        fontStyle:
-                            widget.value.isEmpty ? FontStyle.italic : null,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: widget.maxLines,
-                    ),
+              child: widget.displayWidget ??
+                  (widget.showTooltip && widget.value.isNotEmpty
+                      ? Tooltip(
+                          message: widget.value,
+                          textStyle: TextStyle(
+                              fontSize: scaleProvider.largeFontSize,
+                              color: Colors.white),
+                          decoration: BoxDecoration(
+                            color: Colors.black,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          padding: const EdgeInsets.all(8),
+                          child: Text(
+                            widget.value.isEmpty
+                                ? 'Click to edit'
+                                : widget.value,
+                            style: TextStyle(
+                              fontSize: scaleProvider.mediumFontSize,
+                              color: Colors.black,
+                              fontWeight: FontWeight.bold,
+                              fontStyle: widget.value.isEmpty
+                                  ? FontStyle.italic
+                                  : null,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: widget.maxLines,
+                          ),
+                        )
+                      : Text(
+                          widget.value.isEmpty ? 'Click to edit' : widget.value,
+                          style: TextStyle(
+                            fontSize: scaleProvider.mediumFontSize,
+                            color:
+                                widget.textColor ?? Colors.black,
+                            fontWeight: FontWeight.bold,
+                            fontStyle:
+                                widget.value.isEmpty ? FontStyle.italic : null,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: widget.maxLines,
+                        )),
             ),
           ),
         );

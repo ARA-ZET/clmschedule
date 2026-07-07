@@ -171,6 +171,8 @@ class CollectionJob {
   final List<String> clients;
   final String notes;
   final String jobListItemId; // Link to the original job list item
+  /// Offloading address for two-stop jobs. Empty for single-stop jobs.
+  final String offloadLocation;
 
   CollectionJob({
     required this.id,
@@ -186,7 +188,8 @@ class CollectionJob {
     required this.statusId,
     required this.clients,
     this.notes = '',
-    this.jobListItemId = '', // Optional link to job list item
+    this.jobListItemId = '',
+    this.offloadLocation = '',
   }) : timeSlots = (timeSlots != null && timeSlots >= 1) ? timeSlots : 1;
 
   // Create from Firestore
@@ -221,6 +224,7 @@ class CollectionJob {
       clients: (data['clients'] as List<dynamic>?)?.cast<String>() ?? [],
       notes: data['notes'] as String? ?? '',
       jobListItemId: data['jobListItemId'] as String? ?? '',
+      offloadLocation: data['offloadLocation'] as String? ?? '',
     );
   }
 
@@ -241,6 +245,7 @@ class CollectionJob {
       'clients': clients,
       'notes': notes,
       'jobListItemId': jobListItemId,
+      if (offloadLocation.isNotEmpty) 'offloadLocation': offloadLocation,
     };
   }
 
@@ -259,6 +264,7 @@ class CollectionJob {
     List<String>? clients,
     String? notes,
     String? jobListItemId,
+    String? offloadLocation,
   }) {
     return CollectionJob(
       id: id,
@@ -275,6 +281,7 @@ class CollectionJob {
       clients: clients ?? this.clients,
       notes: notes ?? this.notes,
       jobListItemId: jobListItemId ?? this.jobListItemId,
+      offloadLocation: offloadLocation ?? this.offloadLocation,
     );
   }
 

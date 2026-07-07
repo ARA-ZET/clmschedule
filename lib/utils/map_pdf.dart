@@ -34,6 +34,7 @@ Map<String, Object?> distributionMapPdfPayload({
   required Job job,
   required String? distributorName,
   required bool isLandscape,
+  Set<int> hiddenClientIndices = const {},
 }) {
   return {
     'mapImageBytes': mapImageBytes,
@@ -41,7 +42,11 @@ Map<String, Object?> distributionMapPdfPayload({
     'distributorName': distributorName,
     'isLandscape': isLandscape,
     'clients': job.clients
-        .where((client) => client.trim().isNotEmpty)
+        .asMap()
+        .entries
+        .where((e) =>
+            e.value.trim().isNotEmpty && !hiddenClientIndices.contains(e.key))
+        .map((e) => e.value)
         .toList(growable: false),
     'workMaps': job.workMaps
         .where((map) => map.isPolygon)

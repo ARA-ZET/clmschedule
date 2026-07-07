@@ -14,6 +14,10 @@ import '../providers/job_list_status_provider.dart';
 import '../providers/invoice_status_provider.dart';
 import '../providers/scale_provider.dart';
 import '../providers/job_type_provider.dart';
+import '../providers/vat_settings_provider.dart';
+import '../providers/schedule_provider.dart';
+import '../providers/day_off_provider.dart';
+import '../services/schedule_reallocation_service.dart';
 import 'add_edit_job_dialog.dart';
 import 'editable_table_cell.dart';
 import 'multi_select_status_filter.dart';
@@ -24,6 +28,18 @@ import 'job_list_columns_dialog.dart';
 import 'job_list_column_config.dart';
 import 'reminder_dialog.dart' as reminder;
 import 'map_picker_dialog.dart';
+
+enum _DateShiftPromptChoice {
+  keepSchedule,
+  moveChangedOnly,
+  moveGrouped,
+}
+
+enum _ClientRenamePromptChoice {
+  cancel,
+  updateJobListOnly,
+  updateJobListAndSchedule,
+}
 
 // Reusable DataTable column header widget
 class DataTableHeaderWidget extends StatelessWidget {
@@ -845,13 +861,60 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
 
     // Amount
     if (prefsProvider.isColumnVisible('amount')) {
+      final vatProvider = ref.watch(vatSettingsRiverpod);
+      final vatPct = vatProvider.vatPercentage;
+      final typeChargesVat =
+          JobTypeProvider.instance?.chargesVat(item.jobTypeId) ?? false;
+      final isIncl = item.priceIsInclVat;
+      final displayAmount =
+          isIncl ? item.computedInclVat(vatPct) : item.computedExclVat(vatPct);
+
+      Widget? amountDisplay;
+      if (typeChargesVat) {
+        final badgeColor =
+            isIncl ? Colors.green.shade700 : Colors.orange.shade800;
+        final amountLabel = isIncl ? 'Incl' : 'Excl';
+        amountDisplay = Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'R ${displayAmount.toStringAsFixed(2)}',
+              style: const TextStyle(
+                color: Colors.black,
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+              decoration: BoxDecoration(
+                color: badgeColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                    color: badgeColor.withValues(alpha: 0.45), width: 0.8),
+              ),
+              child: Text(
+                amountLabel,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: badgeColor,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        );
+      }
+
       cells.add(DataCell(
         EditableTableCell(
-          value: 'R ${item.amount.toStringAsFixed(2)}',
+          value: 'R ${displayAmount.toStringAsFixed(2)}',
+          displayWidget: amountDisplay,
           onSave: (value) {
             final cleanValue = value.replaceAll(RegExp(r'[^0-9.]'), '');
-            final amount = double.tryParse(cleanValue) ?? item.amount;
-            onUpdateField(item, 'amount', amount);
+            final newAmount = double.tryParse(cleanValue) ?? item.amount;
+            onUpdateField(item, 'amount', newAmount);
           },
           width: JobListColumnConfig.getWidth('amount'),
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
@@ -1914,6 +1977,17 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
 
   // Helper method to update individual job fields
   void _updateJobField(JobListItem item, String field, dynamic value) {
+    if (field == 'client') {
+      final newClient = (value as String).trim();
+      if (newClient == item.client.trim()) return;
+      unawaited(_handleClientRenameUpdate(
+        context,
+        originalItem: item,
+        newClient: newClient,
+      ));
+      return;
+    }
+
     try {
       JobListItem updatedItem;
 
@@ -1922,7 +1996,17 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           updatedItem = item.copyWith(invoice: value as String);
           break;
         case 'amount':
-          updatedItem = item.copyWith(amount: value as double);
+          final newAmt = value as double;
+          final vatPct = ref.read(vatSettingsRiverpod).vatPercentage;
+          final newExcl =
+              item.priceIsInclVat ? newAmt / (1 + vatPct / 100) : newAmt;
+          final newIncl =
+              item.priceIsInclVat ? newAmt : newAmt * (1 + vatPct / 100);
+          updatedItem = item.copyWith(
+            amount: newAmt,
+            amountExclVat: newExcl,
+            amountInclVat: newIncl,
+          );
           break;
         case 'client':
           updatedItem = item.copyWith(client: value as String);
@@ -2002,6 +2086,14 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
                 invoiceStatusProvider.getStatusById(statusId)?.label,
             resolveQuantityLabel: _getVehicleTrailerComboFromQuantity,
           );
+
+      if (field == 'date') {
+        unawaited(_maybeReallocateScheduleAfterDateChange(
+          context,
+          originalItem: item,
+          updatedItem: updatedItem,
+        ));
+      }
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2056,8 +2148,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content:
-                      Text('Job added successfully with schedule allocation!'),
+                  content: Text('Job added successfully!'),
                   backgroundColor: Colors.green,
                 ),
               );
@@ -2091,6 +2182,23 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
 
     if (result != null && context.mounted) {
       try {
+        _ClientRenamePromptChoice renameChoice =
+            _ClientRenamePromptChoice.updateJobListOnly;
+        final clientChanged =
+            result.client.trim().toLowerCase() != item.client.trim().toLowerCase();
+        if (clientChanged) {
+          final choice = await _showClientRenamePrompt(
+            context,
+            originalItem: item,
+            updatedItem: result,
+          );
+          if (!context.mounted) return;
+          if (choice == null || choice == _ClientRenamePromptChoice.cancel) {
+            return;
+          }
+          renameChoice = choice;
+        }
+
         final jobListStatusProvider = ref.read(jobListStatusRiverpod);
         final invoiceStatusProvider = ref.read(invoiceStatusRiverpod);
         await ref.read(jobListRiverpod).updateJobListItemWithTracking(
@@ -2102,6 +2210,21 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
                   invoiceStatusProvider.getStatusById(statusId)?.label,
               resolveQuantityLabel: _getVehicleTrailerComboFromQuantity,
             );
+
+        await _maybeReallocateScheduleAfterDateChange(
+          context,
+          originalItem: item,
+          updatedItem: result,
+        );
+
+        if (renameChoice == _ClientRenamePromptChoice.updateJobListAndSchedule) {
+          await _syncClientRenameOnSchedule(
+            context,
+            originalItem: item,
+            updatedItem: result,
+          );
+        }
+
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Job updated successfully!')),
@@ -2117,6 +2240,300 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     }
   }
 
+  Future<void> _maybeReallocateScheduleAfterDateChange(
+    BuildContext context, {
+    required JobListItem originalItem,
+    required JobListItem updatedItem,
+  }) async {
+    final sw = Stopwatch()..start();
+    debugPrint(
+      '[job-date-shift] evaluate start job=${originalItem.id} client="${originalItem.client}" from=${originalItem.date} to=${updatedItem.date}',
+    );
+    final dateChanged = !_isSameDate(originalItem.date, updatedItem.date);
+    if (!dateChanged) {
+      debugPrint('[job-date-shift] skip: no date change');
+      return;
+    }
+
+    final jobTypeProvider = JobTypeProvider.instance;
+    final autoAllocates =
+        jobTypeProvider?.autoAllocatesToSchedule(updatedItem.jobTypeId) ??
+            false;
+    if (!autoAllocates) {
+      debugPrint('[job-date-shift] skip: job type is not auto-allocating');
+      return;
+    }
+
+    final today = DateTime.now();
+    final todayOnly = DateTime(today.year, today.month, today.day);
+    final sourceDate =
+        DateTime(originalItem.date.year, originalItem.date.month, originalItem.date.day);
+    if (sourceDate.isBefore(todayOnly)) {
+      debugPrint('[job-date-shift] skip: source date is in the past');
+      return;
+    }
+
+    final service = ScheduleReallocationService(
+      scheduleProvider: ref.read(scheduleRiverpod),
+      dayOffProvider: ref.read(dayOffRiverpod),
+    );
+
+    if (!service.hasEligibleAllocations(originalItem)) {
+      debugPrint('[job-date-shift] skip: no eligible schedule allocations found');
+      return;
+    }
+
+    final hasGroupedConflict = service.hasGroupedAllocationConflict(originalItem);
+    final choice = await _showDateShiftPrompt(
+      context,
+      originalItem: originalItem,
+      updatedItem: updatedItem,
+      hasGroupedConflict: hasGroupedConflict,
+    );
+    if (!mounted || choice == null) return;
+    debugPrint('[job-date-shift] user choice=$choice');
+
+    if (choice == _DateShiftPromptChoice.keepSchedule) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Job date updated. Existing schedule allocation was kept.'),
+          ),
+        );
+      }
+      return;
+    }
+
+    final mode = choice == _DateShiftPromptChoice.moveGrouped
+        ? ScheduleDateChangeMoveMode.moveGroupedJobs
+        : ScheduleDateChangeMoveMode.moveChangedOnly;
+
+    try {
+      final result = await service.reallocateAfterDateChange(
+        originalItem: originalItem,
+        updatedItem: updatedItem,
+        moveMode: mode,
+      );
+      sw.stop();
+      debugPrint(
+        '[job-date-shift] finished in ${sw.elapsedMilliseconds}ms result changed=${result.changed} removed=${result.removed} added=${result.added}',
+      );
+
+      if (!context.mounted) return;
+
+      if (result.changed) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+                'Shifted ${result.removed} scheduled job(s) to the new date plan (${result.added} added).'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No eligible schedule jobs were shifted for this change.'),
+          ),
+        );
+      }
+    } catch (e) {
+      sw.stop();
+      debugPrint(
+        '[job-date-shift] failed in ${sw.elapsedMilliseconds}ms error=$e',
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Job date was updated but schedule shift failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _handleClientRenameUpdate(
+    BuildContext context, {
+    required JobListItem originalItem,
+    required String newClient,
+  }) async {
+    final updatedItem = originalItem.copyWith(client: newClient);
+    final choice = await _showClientRenamePrompt(
+      context,
+      originalItem: originalItem,
+      updatedItem: updatedItem,
+    );
+    if (!mounted || choice == null || choice == _ClientRenamePromptChoice.cancel) {
+      return;
+    }
+
+    try {
+      final jobListStatusProvider = ref.read(jobListStatusRiverpod);
+      final invoiceStatusProvider = ref.read(invoiceStatusRiverpod);
+      await ref.read(jobListRiverpod).updateJobListItemWithTracking(
+            originalItem,
+            updatedItem,
+            resolveJobStatusLabel: (statusId) =>
+                jobListStatusProvider.getStatusById(statusId)?.label,
+            resolveInvoiceStatusLabel: (statusId) =>
+                invoiceStatusProvider.getStatusById(statusId)?.label,
+            resolveQuantityLabel: _getVehicleTrailerComboFromQuantity,
+          );
+
+      if (choice == _ClientRenamePromptChoice.updateJobListAndSchedule) {
+        await _syncClientRenameOnSchedule(
+          context,
+          originalItem: originalItem,
+          updatedItem: updatedItem,
+        );
+      }
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Client updated successfully.')),
+        );
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error updating client: $e')),
+      );
+    }
+  }
+
+  Future<void> _syncClientRenameOnSchedule(
+    BuildContext context, {
+    required JobListItem originalItem,
+    required JobListItem updatedItem,
+  }) async {
+    final service = ScheduleReallocationService(
+      scheduleProvider: ref.read(scheduleRiverpod),
+      dayOffProvider: ref.read(dayOffRiverpod),
+    );
+
+    try {
+      final updatedCount = await service.renameClientInAllocatedJobs(
+        originalItem: originalItem,
+        updatedItem: updatedItem,
+      );
+      if (!context.mounted) return;
+
+      if (updatedCount > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Updated client name on $updatedCount scheduled job(s).'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Client name changed in Job List. No linked schedule jobs were updated.'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Client name changed in Job List, but schedule sync failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<_ClientRenamePromptChoice?> _showClientRenamePrompt(
+    BuildContext context, {
+    required JobListItem originalItem,
+    required JobListItem updatedItem,
+  }) {
+    return showDialog<_ClientRenamePromptChoice>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Confirm Client Name Change'),
+        content: Text(
+          'Change client name from "${originalItem.client}" to "${updatedItem.client}"?\n\nYou can update only the Job List, or update both Job List and linked schedule jobs.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext)
+                .pop(_ClientRenamePromptChoice.cancel),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext)
+                .pop(_ClientRenamePromptChoice.updateJobListOnly),
+            child: const Text('Job List Only'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(dialogContext)
+                .pop(_ClientRenamePromptChoice.updateJobListAndSchedule),
+            child: const Text('Job List + Schedule'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<_DateShiftPromptChoice?> _showDateShiftPrompt(
+    BuildContext context, {
+    required JobListItem originalItem,
+    required JobListItem updatedItem,
+    required bool hasGroupedConflict,
+  }) {
+    final oldDate =
+        '${originalItem.date.day.toString().padLeft(2, '0')}-${originalItem.date.month.toString().padLeft(2, '0')}-${originalItem.date.year}';
+    final newDate =
+        '${updatedItem.date.day.toString().padLeft(2, '0')}-${updatedItem.date.month.toString().padLeft(2, '0')}-${updatedItem.date.year}';
+
+    return showDialog<_DateShiftPromptChoice>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Shift scheduled allocation?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+                'This job moved from $oldDate to $newDate. Do you want to shift its allocated schedule jobs?'),
+            const SizedBox(height: 10),
+            Text(
+                'The shift uses auto-allocation rules and respects man-days (${updatedItem.manDays.ceil()}).'),
+            if (hasGroupedConflict) ...[
+              const SizedBox(height: 10),
+              const Text(
+                'This allocation shares a distributor slot with other clients. You can move only this changed allocation or move the grouped slot jobs.',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext)
+                .pop(_DateShiftPromptChoice.keepSchedule),
+            child: const Text('Keep Schedule'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext)
+                .pop(_DateShiftPromptChoice.moveChangedOnly),
+            child: const Text('Move Changed Only'),
+          ),
+          if (hasGroupedConflict)
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext)
+                  .pop(_DateShiftPromptChoice.moveGrouped),
+              child: const Text('Move Grouped Jobs'),
+            ),
+        ],
+      ),
+    );
+  }
+
+  bool _isSameDate(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
   void _showCopyJobDialog(BuildContext context, JobListItem item) async {
     // Capture the source job's coordinates *before* opening the dialog so
     // that we can clone its linked map after the duplicate has been saved.
@@ -2129,32 +2546,19 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         '📋 [CopyJob] source item id=$sourceJobItemId month=$sourceJobMonthId '
         'client="${item.client}" shareableMapId="$sourceShareableMapId"');
 
-    // Create a new job with all fields copied but empty ID (so dialog treats it as new)
-    // NOTE: `area` is cleared to suppress the auto-link logic from latching
-    // onto the SOURCE map's share URL. The new map's URL is written back by
-    // `_duplicateMapForCopiedJob` once the cloud function returns.
-    final copiedJob = JobListItem(
-      id: '', // Empty ID so dialog treats it as a new job
+    // Build the pre-populated job for the dialog.
+    // id='' signals the dialog that this is a new job (not an edit).
+    // area is cleared when the source has a linked map — the clone URL will
+    // be written back by `_duplicateMapForCopiedJob` once the CF returns.
+    final copiedJob = item.copyWith(
+      id: '',
       invoice: '',
-      amount: item.amount,
-      client: item.client,
-      jobStatusId: item.jobStatusId,
       invoiceStatusId: 'INV_NOT CREATED',
-      jobTypeId: item.jobTypeId,
-      area: sourceShareableMapId.isNotEmpty ? '' : item.area,
-      quantity: item.quantity,
-      manDays: item.manDays,
-      date: item.date,
-      collectionAddress: item.collectionAddress,
-      collectionDate: item.collectionDate,
-      specialInstructions: item.specialInstructions,
-      quantityDistributed: item.quantityDistributed,
-      invoiceDetails: item.invoiceDetails,
-      reportAddresses: item.reportAddresses,
-      whoToInvoice: item.whoToInvoice,
-      collectionJobId: '', // Don't copy the collection job link
-      updates: const [], // Start with empty update history
-      customPolygons: item.customPolygons,
+      area: sourceShareableMapId.isNotEmpty ? '' : null,
+      collectionJobId: '',
+      shareableMapId: '',
+      storageFolderPath: '',
+      updates: const [],
     );
 
     final result = await showDialog<dynamic>(

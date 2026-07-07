@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:archive/archive.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:gpx/gpx.dart';
@@ -544,6 +545,20 @@ class GpxStorageService {
   /// NOTE: this only rebuilds the waypoints file. For combined
   /// tracks + waypoints rebuild (matching the Cloud Function schema), use
   /// [regenerateCompiledFiles].
+  /// Invoke the server-side `compileGpxFolder` Cloud Function to rebuild
+  /// `_compiled_tracks.json` and `_compiled_waypoints.json` for [folderPath].
+  /// Prefer this over the client-side [regenerateCompiledFiles] for copy/move
+  /// triggered recompilation because it runs on Google's servers and is not
+  /// subject to client lifecycle or network constraints.
+  Future<void> callCompileGpxFolder(String folderPath) async {
+    final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
+        .httpsCallable(
+      'compileGpxFolder',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 120)),
+    );
+    await callable.call({'folderPath': folderPath});
+  }
+
   Future<int?> regenerateCompiledWaypoints(String folderPath) async {
     final result = await regenerateCompiledFiles(folderPath);
     return result?.waypointCount;

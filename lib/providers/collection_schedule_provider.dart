@@ -92,6 +92,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
             item.vehicleTrailerCombo.hashCode +
             item.collectionAddress.hashCode +
             item.area.hashCode +
+            item.offloadingAddress.hashCode +
             item.client.hashCode +
             item.specialInstructions.hashCode;
       }
@@ -262,6 +263,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
       clients: [jobListItem.client],
       notes: jobListItem.specialInstructions,
       jobListItemId: jobListItem.id,
+      offloadLocation: jobListItem.offloadingAddress,
     );
   }
 

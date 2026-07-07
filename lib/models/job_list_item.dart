@@ -6,6 +6,11 @@ import 'job_reminder.dart';
 import 'happy_sun_shared.dart';
 import 'collection_job.dart';
 
+/// Sentinel for [JobListItem.copyWith] so that `toolsNeeded` can be left
+/// unchanged (default), explicitly updated, or cleared to `null`. Without it,
+/// a nullable field cannot tell "not provided" apart from "set to null".
+const Object _toolsNeededUnchanged = Object();
+
 // Legacy enum for backwards compatibility during migration
 enum JobListStatus {
   orderConfirmedNotPaid('Order Confirmed Not Paid'),
@@ -99,6 +104,20 @@ class JobListItem {
   final String storageFolderPath; // Cloud Storage folder for tracks/waypoints
   final String
       vehicleTrailerCombo; // Vehicle+trailer enum name for collection jobs
+  /// Offloading address for two-stop jobs (e.g. furniture moves, trailer towing).
+  /// Only populated when the job type has `hasTwoStops = true`.
+  final String offloadingAddress;
+
+  /// Amount excluding VAT. For old records this defaults to [amount].
+  final double amountExclVat;
+
+  /// Amount including VAT. Zero means it was not explicitly stored (compute
+  /// on the fly from [amountExclVat] using the current VAT percentage).
+  final double amountInclVat;
+
+  /// Whether the user entered the price as an incl-VAT figure.
+  /// Old records default to false (all legacy prices were excl VAT).
+  final bool priceIsInclVat;
 
   JobListItem({
     required this.id,
@@ -128,6 +147,10 @@ class JobListItem {
     this.storageFolderPath = '', // Optional cloud storage folder path
     this.vehicleTrailerCombo =
         '', // Optional vehicle+trailer combo for collection jobs
+    this.offloadingAddress = '',
+    this.amountExclVat = 0.0,
+    this.amountInclVat = 0.0,
+    this.priceIsInclVat = false,
   });
 
   // Create from Firestore
@@ -224,6 +247,13 @@ class JobListItem {
         (data['quantity'] as num?)?.toInt() ?? 0,
         data['jobType'] as String? ?? '',
       ),
+      offloadingAddress: data['offloadingAddress'] as String? ?? '',
+      // Old records had no VAT fields — amount was always excl VAT.
+      priceIsInclVat: data['priceIsInclVat'] as bool? ?? false,
+      amountExclVat: (data['amountExclVat'] as num?)?.toDouble() ??
+          (data['amount'] as num?)?.toDouble() ??
+          0.0,
+      amountInclVat: (data['amountInclVat'] as num?)?.toDouble() ?? 0.0,
     );
   }
 
@@ -276,11 +306,16 @@ class JobListItem {
       if (storageFolderPath.isNotEmpty) 'storageFolderPath': storageFolderPath,
       if (vehicleTrailerCombo.isNotEmpty)
         'vehicleTrailerCombo': vehicleTrailerCombo,
+      if (offloadingAddress.isNotEmpty) 'offloadingAddress': offloadingAddress,
+      'priceIsInclVat': priceIsInclVat,
+      'amountExclVat': amountExclVat,
+      'amountInclVat': amountInclVat,
     };
   }
 
   // Create a copy with some fields updated
   JobListItem copyWith({
+    String? id,
     String? invoice,
     double? amount,
     String? client,
@@ -306,9 +341,14 @@ class JobListItem {
     String? shareableMapId,
     String? storageFolderPath,
     String? vehicleTrailerCombo,
+    String? offloadingAddress,
+    Object? toolsNeeded = _toolsNeededUnchanged,
+    double? amountExclVat,
+    double? amountInclVat,
+    bool? priceIsInclVat,
   }) {
     return JobListItem(
-      id: id,
+      id: id ?? this.id,
       invoice: invoice ?? this.invoice,
       amount: amount ?? this.amount,
       client: client ?? this.client,
@@ -333,6 +373,13 @@ class JobListItem {
       shareableMapId: shareableMapId ?? this.shareableMapId,
       storageFolderPath: storageFolderPath ?? this.storageFolderPath,
       vehicleTrailerCombo: vehicleTrailerCombo ?? this.vehicleTrailerCombo,
+      offloadingAddress: offloadingAddress ?? this.offloadingAddress,
+      toolsNeeded: identical(toolsNeeded, _toolsNeededUnchanged)
+          ? this.toolsNeeded
+          : toolsNeeded as CategorizedTools?,
+      amountExclVat: amountExclVat ?? this.amountExclVat,
+      amountInclVat: amountInclVat ?? this.amountInclVat,
+      priceIsInclVat: priceIsInclVat ?? this.priceIsInclVat,
     );
   }
 
@@ -619,6 +666,19 @@ class JobListItem {
       reminders: reminders ?? this.reminders,
       vehicleTrailerCombo: vehicleTrailerCombo,
     );
+  }
+
+  /// Compute the excl-VAT amount given a VAT percentage.
+  double computedExclVat(double vatPercent) {
+    if (amountExclVat > 0) return amountExclVat;
+    return amount; // backward compat — old records are excl VAT
+  }
+
+  /// Compute the incl-VAT amount given a VAT percentage.
+  double computedInclVat(double vatPercent) {
+    if (amountInclVat > 0) return amountInclVat;
+    final excl = computedExclVat(vatPercent);
+    return excl * (1 + vatPercent / 100);
   }
 
   // Helper method to compare dates (ignoring time)

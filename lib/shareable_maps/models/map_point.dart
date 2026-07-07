@@ -26,6 +26,24 @@ class MapPoint {
     required this.updatedAt,
   });
 
+  /// Deterministic ID for imported points: derived from lat/lng + name so that
+  /// re-importing the same data yields the same IDs, and two different points
+  /// at different locations never share an ID (unlike bare-index schemes).
+  ///
+  /// Format: `pt_<lat6>_<lng6>[_<slug>]`
+  /// e.g.   `pt_n33p845123_18p423456_my_waypoint`
+  static String importId(String name, LatLng position) {
+    String fmt(double v) =>
+        v.toStringAsFixed(6).replaceAll('-', 'n').replaceAll('.', 'p');
+    final slug = name
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'(^_+)|(_+$)'), '');
+    final loc = '${fmt(position.latitude)}_${fmt(position.longitude)}';
+    return slug.isEmpty ? 'pt_$loc' : 'pt_${loc}_$slug';
+  }
+
   /// Create a new point with generated ID
   factory MapPoint.create({
     required String name,

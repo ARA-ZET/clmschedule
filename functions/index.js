@@ -3,6 +3,7 @@ const { onCall, onRequest, HttpsError } = require("firebase-functions/v2/https")
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { onObjectFinalized, onObjectDeleted } = require("firebase-functions/v2/storage");
 const admin = require("firebase-admin");
+const crypto = require("crypto");
 const { GoogleGenAI } = require("@google/genai");
 const { XMLParser } = require("fast-xml-parser");
 
@@ -2900,7 +2901,297 @@ async function compileGpxFolder(folderPath) {
   const tracksKB = (tracksJson.length / 1024).toFixed(1);
   const waypointsKB = (waypointsJson.length / 1024).toFixed(1);
   console.log(`[compileGpx] DONE in ${Date.now() - sw}ms — tracks: ${tracksKB}KB, waypoints: ${waypointsKB}KB`);
+
+  // Sync waypoints to a Maps Platform Dataset so the Flutter app can render
+  // them server-side via TileOverlay (zero Marker DOM nodes on the client).
+  // This is non-blocking — a failure here does not affect GPX compilation.
+  if (allWaypoints.length > 0) {
+    syncWaypointDataset(folderPath, allWaypoints).catch((e) => {
+      console.error(`[syncDataset] Non-fatal error for ${folderPath}: ${e.message}`);
+    });
+  }
 }
+
+// =============================================================================
+// MAPS PLATFORM DATASET SYNC
+// =============================================================================
+// After compiling waypoints, upload them as a GeoJSON Dataset so the Flutter
+// app can render thousands of markers server-side via TileOverlay instead of
+// pushing Marker DOM nodes through the google_maps_flutter JS bridge.
+//
+// Prerequisites (do once in Cloud Console):
+//   1. Enable "Maps Platform Datasets API" for your GCP project.
+//   2. Enable "Map Tiles API" for your GCP project.
+//   3. Grant the Cloud Functions service account the role
+//      "roles/mapsplatformdatasets.admin".
+//
+// The Flutter DatasetTileProvider reads tiles from:
+//   https://tile.googleapis.com/v1/datasets/{datasetId}/tiles/{z}/{x}/{y}?key={GOOGLE_MAPS_API_KEY}
+// =============================================================================
+
+const MAPS_DATASETS_API = "https://mapsplatformdatasets.googleapis.com/v1";
+
+/**
+ * Returns an OAuth2 access token using the Cloud Function's
+ * Application Default Credentials via the GCP metadata server.
+ * Only works inside a GCP environment (Cloud Functions / Cloud Run).
+ */
+async function getGCPAccessToken() {
+  const resp = await fetch(
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+    { headers: { "Metadata-Flavor": "Google" } }
+  );
+  if (!resp.ok) {
+    throw new Error(`Metadata server returned ${resp.status}`);
+  }
+  const data = await resp.json();
+  return data.access_token;
+}
+
+/**
+ * Produce a Firestore document ID from a folder path.
+ * Must match CloudDatasetService.folderHash() in the Flutter app.
+ */
+function datasetDocId(folderPath) {
+  return folderPath.trim().replace(/[^a-zA-Z0-9]/g, "_").replace(/_+/g, "_");
+}
+
+/**
+ * Create or update a Maps Platform Dataset for [folderPath].
+ * Writes { datasetId, folderPath, featureCount, updatedAt } to
+ * Firestore `cloudDatasets/{docId}` when complete.
+ *
+ * The import operation is asynchronous on Google's side; the dataset ID is
+ * stored immediately so the Flutter TileOverlay can be wired up before
+ * tiles are fully available (they appear within ~30 s for small datasets).
+ */
+// Build a unique display name, capped at 63 UTF-8 bytes (API hard limit)
+function buildDatasetDisplayName(folderPath) {
+  const parts = folderPath.split("/").filter(Boolean);
+  let name = "Waypoints - " + parts.slice(-2).join(" / ");
+  while (Buffer.byteLength(name, "utf8") >= 64) {
+    name = name.slice(0, -4) + "...";
+  }
+  return name;
+}
+
+async function syncWaypointDataset(folderPath, waypoints) {
+  const sw = Date.now();
+  const projectId = process.env.GCLOUD_PROJECT;
+  if (!projectId) {
+    throw new Error("GCLOUD_PROJECT env var not set — cannot call Datasets API");
+  }
+
+  const token = await getGCPAccessToken();
+  const authHeaders = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    "X-Goog-User-Project": projectId,
+  };
+
+  const docId = datasetDocId(folderPath);
+  const metaRef = db.collection("cloudDatasets").doc(docId);
+  const metaSnap = await metaRef.get();
+  // Use stored full resource name (includes project number) for import URL
+  let datasetFullName = metaSnap.exists ? metaSnap.data().datasetFullName : null;
+  let datasetId = metaSnap.exists ? metaSnap.data().datasetId : null;
+
+  // ── 1. Create dataset if we don't have a record yet ────────────────────
+  if (!datasetFullName) {
+    const dName = buildDatasetDisplayName(folderPath);
+    const createResp = await fetch(
+      `${MAPS_DATASETS_API}/projects/${projectId}/datasets`,
+      {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          displayName: dName,
+          description: `Auto-compiled from ${folderPath}`,
+          usage: ["USAGE_DATA_DRIVEN_STYLING"],
+        }),
+      }
+    );
+
+    if (createResp.status === 409) {
+      // Already exists from a previous failed run — list and find by display name
+      const listResp = await fetch(
+        `${MAPS_DATASETS_API}/projects/${projectId}/datasets?pageSize=200`,
+        { headers: authHeaders }
+      );
+      const listData = await listResp.json();
+      const found = (listData.datasets || []).find((ds) => ds.displayName === dName);
+      if (!found) throw new Error(`409 conflict but dataset '${dName}' not found in project list`);
+      datasetFullName = found.name;
+    } else if (!createResp.ok) {
+      const body = await createResp.text();
+      throw new Error(`Create dataset failed (${createResp.status}): ${body}`);
+    } else {
+      const dataset = await createResp.json();
+      // dataset.name uses project NUMBER e.g. "projects/346281153032/datasets/{uuid}"
+      datasetFullName = dataset.name;
+    }
+
+    datasetId = datasetFullName.split("/").pop();
+    console.log(`[syncDataset] Dataset ${datasetId} for ${folderPath}`);
+  }
+
+  // ── 2. Write GeoJSON to Cloud Storage (import source) ──────────────────
+  const geojson = JSON.stringify({
+    type: "FeatureCollection",
+    features: waypoints.map((w, i) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [w.lon, w.lat] },
+      properties: { id: `wpt_${i}`, name: w.name || "", desc: w.desc || "" },
+    })),
+  });
+
+  const bucket = getBucket();
+  const geojsonPath = `_dataset_imports/${docId}.geojson`;
+  await bucket.file(geojsonPath).save(geojson, {
+    contentType: "application/geo+json",
+    metadata: { cacheControl: "no-cache" },
+  });
+  console.log(`[syncDataset] GeoJSON written (${(geojson.length / 1024).toFixed(1)}KB) in ${Date.now() - sw}ms`);
+
+  // ── 3. Persist metadata immediately so Flutter activates viewport-marker mode ─
+  // Even if import fails (API in Preview), the zero-Marker performance fix works.
+  await metaRef.set({
+    datasetId,
+    datasetFullName,
+    folderPath,
+    featureCount: waypoints.length,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  console.log(`[syncDataset] Metadata written in ${Date.now() - sw}ms`);
+
+  // ── 4. Import GeoJSON (non-fatal if API access not yet granted) ────────
+  const gcsUri = `gs://${bucket.name}/${geojsonPath}`;
+  try {
+    const importResp = await fetch(
+      `${MAPS_DATASETS_API}/${datasetFullName}:importDataset`,
+      {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          gcsSource: {
+            inputUris: [gcsUri],
+            fileFormat: "FILE_FORMAT_GEOJSON",
+          },
+        }),
+      }
+    );
+    if (!importResp.ok) {
+      const body = await importResp.text();
+      console.warn(`[syncDataset] Import ${importResp.status} (tile overlay unavailable until API access granted): ${body.slice(0, 200)}`);
+    } else {
+      const importOp = await importResp.json();
+      console.log(`[syncDataset] Import started: ${importOp.name || "(no op name)"} in ${Date.now() - sw}ms`);
+    }
+  } catch (e) {
+    console.warn(`[syncDataset] Import error (non-fatal): ${e.message}`);
+  }
+
+  console.log(`[syncDataset] DONE — dataset=${datasetId}, features=${waypoints.length}, elapsed=${Date.now() - sw}ms`);
+  return datasetId;
+}
+
+// Callable to backfill ALL existing folders that have _compiled_waypoints.json.
+// Run this once to seed Firestore cloudDatasets for every historical folder.
+// Processes folders in parallel batches of 5 to respect Datasets API rate limits.
+exports.backfillAllWaypointDatasets = onCall(
+  { region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Must be signed in.");
+    }
+
+    const bucket = getBucket();
+    const [files] = await bucket.getFiles({ prefix: "Distribution/" });
+
+    // Collect all folder paths that contain _compiled_waypoints.json
+    const folderPaths = [
+      ...new Set(
+        files
+          .filter((f) => f.name.endsWith(`/${COMPILED_WAYPOINTS_FILE}`))
+          .map((f) => f.name.replace(`/${COMPILED_WAYPOINTS_FILE}`, ""))
+      ),
+    ];
+
+    console.log(`[backfillAll] Found ${folderPaths.length} folders to backfill`);
+
+    const results = { synced: [], skipped: [], errors: [] };
+    const BATCH = 5; // parallel limit — Datasets API rate limit is ~10 req/s
+
+    for (let i = 0; i < folderPaths.length; i += BATCH) {
+      const batch = folderPaths.slice(i, i + BATCH);
+      await Promise.all(
+        batch.map(async (folderPath) => {
+          try {
+            const file = bucket.file(`${folderPath}/${COMPILED_WAYPOINTS_FILE}`);
+            const [buf] = await file.download();
+            const data = JSON.parse(buf.toString("utf-8"));
+            const waypoints = data.waypoints || [];
+            if (waypoints.length === 0) {
+              results.skipped.push(`${folderPath} (0 waypoints)`);
+              return;
+            }
+            const datasetId = await syncWaypointDataset(folderPath, waypoints);
+            results.synced.push({ folderPath, datasetId, count: waypoints.length });
+            console.log(`[backfillAll] ✓ ${folderPath} (${waypoints.length} pts)`);
+          } catch (e) {
+            results.errors.push({ folderPath, error: e.message });
+            console.error(`[backfillAll] ✗ ${folderPath}: ${e.message}`);
+          }
+        })
+      );
+    }
+
+    console.log(
+      `[backfillAll] DONE — synced:${results.synced.length} skipped:${results.skipped.length} errors:${results.errors.length}`
+    );
+    return {
+      success: true,
+      total: folderPaths.length,
+      synced: results.synced.length,
+      skipped: results.skipped.length,
+      errors: results.errors,
+    };
+  }
+);
+
+// Callable function to manually trigger a dataset sync for a folder.
+// Useful for backfilling existing folders that already have compiled JSON.
+exports.syncWaypointDataset = onCall(
+  { region: "us-central1" },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Must be signed in.");
+    }
+    const { folderPath } = request.data;
+    if (!folderPath || typeof folderPath !== "string") {
+      throw new HttpsError("invalid-argument", "folderPath is required.");
+    }
+
+    // Download the existing compiled waypoints for this folder
+    const bucket = getBucket();
+    const waypointsFile = bucket.file(`${folderPath}/${COMPILED_WAYPOINTS_FILE}`);
+    const [exists] = await waypointsFile.exists();
+    if (!exists) {
+      throw new HttpsError("not-found", `No compiled waypoints found at ${folderPath}/${COMPILED_WAYPOINTS_FILE}. Run compileGpxFolder first.`);
+    }
+
+    const [buf] = await waypointsFile.download();
+    const data = JSON.parse(buf.toString("utf-8"));
+    const waypoints = data.waypoints || [];
+
+    if (waypoints.length === 0) {
+      throw new HttpsError("failed-precondition", "Compiled waypoints file has no waypoints.");
+    }
+
+    const datasetId = await syncWaypointDataset(folderPath, waypoints);
+    return { success: true, datasetId, featureCount: waypoints.length };
+  }
+);
 
 /**
  * Extract the parent folder path from a file path.
@@ -2950,6 +3241,178 @@ exports.compileGpxFolder = onCall(
     }
     await compileGpxFolder(folderPath);
     return { success: true };
+  }
+);
+
+// =============================================================================
+// CLOUD FILE SEARCH INDEX
+// =============================================================================
+// Firebase Storage has no query/search API — finding a file by name would
+// otherwise mean recursively walking every folder with listAll(), which
+// costs one Storage "list" op per folder and scales with the size of the
+// whole tree.
+//
+// One doc per FILE would fix the walk but not the read cost: a scoped
+// search still has to read every file doc in range, so cost scales with
+// total file count as the archive grows for years. Instead we keep one doc
+// per FOLDER (fileFolders), with every file in that folder stored as an
+// entry in a `files` map field. Reading "every file in this folder" is then
+// ONE document read regardless of how many files it holds — cost scales
+// with the number of *folders* in scope, not files, and folder count grows
+// far slower (one per client/round, not one per GPX upload).
+//
+// Each folder doc also stores `ancestorFolders`: every folder path above it
+// (Distribution, Distribution/2026, Distribution/2026/Jun 2026, ...). The
+// client scopes a search to "this folder and its subfolders" with a single
+// exact `array-contains` match against that field on the (small, grows only
+// with folder count) fileFolders collection — cheap and exact (no
+// prefix-collision risk between sibling folders that share a text prefix,
+// e.g. "Blue Magazine" vs "Blue Magazine Door to door").
+//
+// Writes stay cheap and contention-free: the `files` map is keyed by
+// filename, so an upload/delete only ever touches its own key via a merge
+// write. Concurrent uploads to the same folder touch different keys, so no
+// transaction is needed even under parallel bulk uploads.
+const FILE_FOLDERS_COLLECTION = "fileFolders";
+const FILE_SEARCH_SKIP_PREFIXES = ["_compiled_"];
+
+/** Deterministic doc id for a folder path (paths can't be used directly — they contain '/'). */
+function fileFolderDocId(folderPath) {
+  return crypto.createHash("md5").update(folderPath).digest("hex");
+}
+
+/** Whether a Storage object should be mirrored into the search index. */
+function shouldIndexFile(filePath) {
+  if (!filePath.startsWith("Distribution/")) return false;
+  const name = filePath.split("/").pop();
+  if (!name || name === ".folder") return false;
+  return !FILE_SEARCH_SKIP_PREFIXES.some((p) => name.startsWith(p));
+}
+
+/** Every ancestor folder path above [folderPath], from the root down. */
+function ancestorFoldersFor(folderPath) {
+  const parts = folderPath.split("/").filter(Boolean);
+  const out = [];
+  let acc = "";
+  for (const p of parts) {
+    acc = acc ? `${acc}/${p}` : p;
+    out.push(acc);
+  }
+  return out;
+}
+
+/** Split a full Storage path into its parent folder and leaf file name. */
+function splitFilePath(filePath) {
+  const parts = filePath.split("/");
+  const name = parts.pop();
+  return { name, folderPath: parts.join("/") };
+}
+
+// Triggered on every file upload/overwrite under Distribution/ — merges this
+// file's entry into its folder's aggregate doc. Runs alongside
+// compileGpxOnUpload (separate trigger), so indexing never blocks or
+// depends on GPX compilation.
+exports.indexFileOnUpload = onObjectFinalized(
+  { region: "us-central1" },
+  async (event) => {
+    const filePath = event.data.name;
+    if (!shouldIndexFile(filePath)) return;
+    const { name, folderPath } = splitFilePath(filePath);
+
+    await db
+      .collection(FILE_FOLDERS_COLLECTION)
+      .doc(fileFolderDocId(folderPath))
+      .set(
+        {
+          folderPath,
+          ancestorFolders: ancestorFoldersFor(folderPath),
+          files: {
+            [name]: {
+              nameLower: name.toLowerCase(),
+              sizeBytes: event.data.size != null ? Number(event.data.size) : null,
+              contentType: event.data.contentType || null,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+          },
+        },
+        { merge: true }
+      );
+  }
+);
+
+// Triggered on every file deletion under Distribution/ — removes just this
+// file's entry from its folder's aggregate doc (merge + FieldValue.delete()
+// touches only that one map key, leaving sibling files and the doc itself
+// untouched). Covers renames/moves too, since those are implemented
+// client-side as copy-then-delete (the copy's finalize event adds the new
+// entry; this event removes the old one).
+exports.indexFileOnDelete = onObjectDeleted(
+  { region: "us-central1" },
+  async (event) => {
+    const filePath = event.data.name;
+    if (!shouldIndexFile(filePath)) return;
+    const { name, folderPath } = splitFilePath(filePath);
+
+    await db
+      .collection(FILE_FOLDERS_COLLECTION)
+      .doc(fileFolderDocId(folderPath))
+      .set(
+        { files: { [name]: admin.firestore.FieldValue.delete() } },
+        { merge: true }
+      );
+  }
+);
+
+// One-time backfill for files that were already in Storage before the
+// triggers above existed. Safe to re-run — each folder doc is rebuilt from
+// scratch from the current Storage listing, so it self-corrects any drift.
+exports.backfillFileFolders = onCall(
+  { region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Must be signed in.");
+    }
+
+    const bucket = getBucket();
+    const [files] = await bucket.getFiles({ prefix: "Distribution/" });
+    const toIndex = files.filter((f) => shouldIndexFile(f.name));
+
+    // Group files by folder so each folder becomes exactly one write.
+    const folders = new Map(); // folderPath -> { [name]: fileEntry }
+    for (const f of toIndex) {
+      const { name, folderPath } = splitFilePath(f.name);
+      if (!folders.has(folderPath)) folders.set(folderPath, {});
+      folders.get(folderPath)[name] = {
+        nameLower: name.toLowerCase(),
+        sizeBytes: f.metadata && f.metadata.size ? Number(f.metadata.size) : null,
+        contentType: (f.metadata && f.metadata.contentType) || null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+    }
+
+    console.log(
+      `[backfillFileFolders] Indexing ${toIndex.length} files across ${folders.size} folders`
+    );
+
+    let written = 0;
+    const folderEntries = [...folders.entries()];
+    const BATCH = 400; // Firestore batched writes cap at 500 ops
+    for (let i = 0; i < folderEntries.length; i += BATCH) {
+      const slice = folderEntries.slice(i, i + BATCH);
+      const batch = db.batch();
+      for (const [folderPath, fileMap] of slice) {
+        batch.set(db.collection(FILE_FOLDERS_COLLECTION).doc(fileFolderDocId(folderPath)), {
+          folderPath,
+          ancestorFolders: ancestorFoldersFor(folderPath),
+          files: fileMap,
+        });
+      }
+      await batch.commit();
+      written += slice.length;
+    }
+
+    console.log(`[backfillFileFolders] DONE — wrote ${written} folder docs`);
+    return { success: true, folders: written, files: toIndex.length };
   }
 );
 

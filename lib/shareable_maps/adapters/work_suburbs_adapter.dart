@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../models/custom_polygon.dart';
@@ -8,15 +7,15 @@ import '../models/shareable_map.dart';
 import '../services/suburb_data_service.dart';
 import 'map_data_adapter.dart';
 
-/// Adapter that bridges the ShareableMapEditor to the suburb polygon dataset.
+/// Adapter that bridges the ShareableMapEditor to the suburb polygon dataset
+/// stored in Firestore at `workSuburbs/main`.
 ///
-/// **Load**: Downloads the KML from Firebase Storage (with in-memory session
-/// cache and bundled-asset fallback), parses it, then merges any user
-/// overrides from `workSuburbs/overrides`.
+/// **Load**: Reads the `suburbs` array from the Firestore document and converts
+/// each [WorkSuburb] — including its stored color — into a [CustomPolygon].
 ///
-/// **Save**: Persists only the user-editable fields (letterBoxEstimate,
-/// description) to `workSuburbs/overrides`. Polygon coordinates are never
-/// written back — they live exclusively in the KML.
+/// **Save**: Converts each edited [CustomPolygon] back into a [WorkSuburb]
+/// (preserving id, color, letterBoxEstimate, description, and coordinates) and
+/// writes the full list back to `workSuburbs/main`.
 class WorkSuburbsAdapter extends MapDataAdapter {
   final SuburbDataService _suburbService;
 
@@ -50,12 +49,13 @@ class WorkSuburbsAdapter extends MapDataAdapter {
       name: 'Work Suburbs',
       description: 'Cape Town suburb polygons',
       order: 0,
-      defaultColor: Colors.blue,
+      defaultColor: WorkSuburb.defaultColor,
       polygons: polygons,
       createdAt: now,
       updatedAt: now,
     );
 
+    // Compute a center from polygon points when no override is given.
     LatLng center = initialCenter ?? const LatLng(-33.925, 18.425);
     if (suburbs.isNotEmpty) {
       double latSum = 0, lngSum = 0;
@@ -88,37 +88,37 @@ class WorkSuburbsAdapter extends MapDataAdapter {
   Future<void> save(ShareableMap map) async {
     final allPolygons = map.layers.expand((l) => l.polygons).toList();
 
-    // Build a name→suburb lookup from the cached base KML suburbs so we can
-    // resolve the canonical id (SL_OFC_SBRB_KEY) for each polygon.
-    final base = _suburbService.baseSuburbs ?? [];
-    final baseByName = {for (final s in base) s.name: s};
-
     final suburbs = allPolygons.map((polygon) {
-      final match = baseByName[polygon.name];
+      // Recover the stable suburb id from the polygon's optional id field.
+      // Fall back to a slug derived from the name for user-drawn polygons.
+      final suburbId = (polygon.id != null && polygon.id!.isNotEmpty)
+          ? polygon.id!
+          : 'usr_${polygon.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_')}';
+
       return WorkSuburb(
-        // Use the original KML id when available; generate a stable id for new
-        // user-drawn polygons so they survive a save/reload cycle.
-        id: match?.id ??
-            'usr_${polygon.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_')}',
+        id: suburbId,
         name: polygon.name,
         description: polygon.description,
-        polygonPoints:
-            polygon.points, // pass real points so delta can detect edits
+        polygonPoints: polygon.points,
         letterBoxEstimate: polygon.letterBoxEstimate,
+        color: polygon.color,
       );
     }).toList();
 
-    await _suburbService.saveDelta(suburbs);
+    await _suburbService.saveSuburbs(suburbs);
   }
 
-  // ── Conversion helpers ──────────────────────────────────────────────
+  // ── Conversion helpers ──────────────────────────────────────────────────
 
+  /// Converts a [WorkSuburb] to a [CustomPolygon], preserving the stored color
+  /// and the stable suburb id for round-trip identity on save.
   static CustomPolygon _suburbToPolygon(WorkSuburb s) {
     return CustomPolygon(
+      id: s.id,
       name: s.name,
       description: s.description,
       points: List<LatLng>.from(s.polygonPoints),
-      color: Colors.blue,
+      color: s.color,
       letterBoxEstimate: s.letterBoxEstimate,
     );
   }

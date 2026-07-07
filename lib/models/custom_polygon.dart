@@ -232,6 +232,7 @@ class CustomPolygon {
       fillColor: fillColor,
       strokeColor: strokeColor,
       strokeWidth: sw,
+      consumeTapEvents: onTap != null,
       onTap: onTap,
     );
   }

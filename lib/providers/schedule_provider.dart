@@ -17,6 +17,7 @@ final scheduleRiverpod = riverpod.ChangeNotifierProvider<ScheduleProvider>(
 class ScheduleProvider extends ChangeNotifier {
   final FirestoreService _firestoreService;
   bool _isInitialized = false;
+  bool _workAreaStreamsInitialized = false;
 
   List<Distributor> _distributors = [];
   List<Job> _currentMonthJobs = [];
@@ -173,6 +174,31 @@ class ScheduleProvider extends ChangeNotifier {
     }).toList();
   }
 
+  /// Distributors filtered for payroll: active distributors, or non-active
+  /// distributors who have at least one schedule job whose date falls
+  /// within `[start, end]` (inclusive) — same rule as [gridDistributors],
+  /// but scoped to an arbitrary date range (a payroll week) instead of the
+  /// rolling current/next-month cache. Note [jobs] only spans the current
+  /// and next calendar month, so a payroll week further in the past may not
+  /// find matching jobs here — inactive distributors for such a week simply
+  /// won't show, which is the same trade-off [gridDistributors] makes.
+  List<Distributor> distributorsWithJobsInRange(DateTime start, DateTime end) {
+    final distributorIdsWithJobs = <String>{};
+    for (final job in jobs) {
+      // Compare by date only — job.date may carry a time-of-day component
+      // (e.g. time-slotted job types), which would wrongly exclude a job
+      // later on the range's end day if compared against midnight directly.
+      final d = DateTime(job.date.year, job.date.month, job.date.day);
+      if (!d.isBefore(start) && !d.isAfter(end)) {
+        distributorIdsWithJobs.add(job.distributorId);
+      }
+    }
+    return _distributors.where((d) {
+      if (d.status == DistributorStatus.active) return true;
+      return distributorIdsWithJobs.contains(d.id);
+    }).toList();
+  }
+
   /// Build (or return cached) lookup map for O(1) cell queries.
   Map<String, List<Job>> get _lookupMap {
     if (_jobLookupMap != null) return _jobLookupMap!;
@@ -232,6 +258,34 @@ class ScheduleProvider extends ChangeNotifier {
     await _initStreamsAsync();
   }
 
+  /// Lightweight init for the CLM Maps flavor.
+  /// Starts only the workAreas and workSuburbs streams — no distributors,
+  /// no job streams. Safe to call multiple times (idempotent).
+  void initializeWorkAreaStreams() {
+    if (_workAreaStreamsInitialized) return;
+    _workAreaStreamsInitialized = true;
+
+    _workAreasSubscription = _firestoreService.streamWorkAreas().listen(
+      (workAreas) {
+        _workAreas = workAreas;
+        notifyListeners();
+      },
+      onError: (error) {
+        debugPrint('ScheduleProvider: WorkAreas stream error: $error');
+      },
+    );
+
+    _workSuburbsSubscription = _firestoreService.streamWorkSuburbs().listen(
+      (suburbs) {
+        _workSuburbs = suburbs;
+        notifyListeners();
+      },
+      onError: (error) {
+        debugPrint('ScheduleProvider: WorkSuburbs stream error: $error');
+      },
+    );
+  }
+
   /// Lightweight init for the track editor flavor.
   /// Fetches distributors once (no ongoing streams) — jobs are read
   /// on-demand via [fetchJobsForDistributorAndDate].
@@ -277,27 +331,31 @@ class ScheduleProvider extends ChangeNotifier {
       },
     );
 
-    // Listen to work areas stream from root collection (not monthly)
-    _workAreasSubscription = _firestoreService.streamWorkAreas().listen(
-      (workAreas) {
-        _workAreas = workAreas;
-        notifyListeners();
-      },
-      onError: (error) {
-        debugPrint('ScheduleProvider: WorkAreas stream error: $error');
-      },
-    );
+    // Listen to work areas / work suburbs streams — skip if already started
+    // by initializeWorkAreaStreams() (CLM Maps flavor calls that first).
+    if (!_workAreaStreamsInitialized) {
+      _workAreaStreamsInitialized = true;
 
-    // Listen to work suburbs single-document stream
-    _workSuburbsSubscription = _firestoreService.streamWorkSuburbs().listen(
-      (suburbs) {
-        _workSuburbs = suburbs;
-        notifyListeners();
-      },
-      onError: (error) {
-        debugPrint('ScheduleProvider: WorkSuburbs stream error: $error');
-      },
-    );
+      _workAreasSubscription = _firestoreService.streamWorkAreas().listen(
+        (workAreas) {
+          _workAreas = workAreas;
+          notifyListeners();
+        },
+        onError: (error) {
+          debugPrint('ScheduleProvider: WorkAreas stream error: $error');
+        },
+      );
+
+      _workSuburbsSubscription = _firestoreService.streamWorkSuburbs().listen(
+        (suburbs) {
+          _workSuburbs = suburbs;
+          notifyListeners();
+        },
+        onError: (error) {
+          debugPrint('ScheduleProvider: WorkSuburbs stream error: $error');
+        },
+      );
+    }
   }
 
   // Tracks the month the next-month subscription is currently attached to.
@@ -526,6 +584,35 @@ class ScheduleProvider extends ChangeNotifier {
     }
   }
 
+  // Commit all pending distributor edits (reorders, field changes, deletes)
+  // in a single Firestore batch — 0 reads, 1 round-trip.
+  Future<void> saveDistributorChanges({
+    required List<Distributor> finalState,
+    required Set<String> deletedIds,
+  }) async {
+    final currentById = {for (final d in _distributors) d.id: d};
+
+    final toUpdate = <Distributor>[];
+    for (final d in finalState) {
+      final current = currentById[d.id];
+      if (current == null) continue;
+      if (current.index != d.index ||
+          current.name != d.name ||
+          current.phone1 != d.phone1 ||
+          current.phone2 != d.phone2 ||
+          current.status != d.status ||
+          current.imageUrl != d.imageUrl ||
+          current.role != d.role) {
+        toUpdate.add(d);
+      }
+    }
+
+    await _firestoreService.batchSaveDistributors(
+      toUpdate: toUpdate,
+      toDelete: deletedIds,
+    );
+  }
+
   // JOB OPERATIONS
 
   Future<void> addJob(Job job) async {
@@ -684,6 +771,53 @@ class ScheduleProvider extends ChangeNotifier {
     await deleteJob(job.id, targetDate);
   }
 
+  /// Atomically replaces a set of schedule jobs with another set.
+  ///
+  /// This is used by job-list date shift flows to avoid per-job delete/add
+  /// churn that can emit many intermediate stream states.
+  Future<List<Job>> reallocateJobsAtomically({
+    required List<Job> removeJobs,
+    required List<Job> addJobs,
+    String debugTag = 'schedule-reallocation',
+  }) async {
+    final sw = Stopwatch()..start();
+    debugPrint(
+      '[$debugTag] provider start: remove=${removeJobs.length}, add=${addJobs.length}',
+    );
+
+    final added = await _firestoreService.reallocateJobsAtomically(
+      removeJobs: removeJobs,
+      addJobs: addJobs,
+      debugTag: debugTag,
+    );
+
+    final affected = <String, DateTime>{};
+    for (final j in removeJobs) {
+      final d = DateTime(j.date.year, j.date.month, j.date.day);
+      affected['${d.year}-${d.month}-${d.day}'] = d;
+    }
+    for (final j in added) {
+      final d = DateTime(j.date.year, j.date.month, j.date.day);
+      affected['${d.year}-${d.month}-${d.day}'] = d;
+    }
+
+    final dists = _distributors.isNotEmpty ? _distributors : null;
+    for (final date in affected.values) {
+      unawaited(DropsheetProvider.syncDateOneShot(
+        date,
+        firestoreService: _firestoreService,
+        distributors: dists,
+      ));
+    }
+
+    sw.stop();
+    debugPrint(
+      '[$debugTag] provider complete in ${sw.elapsedMilliseconds}ms (affectedDates=${affected.length})',
+    );
+
+    return added;
+  }
+
   Future<void> updateJobStatusWithUndo(String jobId, String newStatusId,
       String originalStatusId, DateTime targetDate) async {
     final job = jobs.firstWhere((j) => j.id == jobId);
@@ -809,6 +943,7 @@ class ScheduleProvider extends ChangeNotifier {
   @override
   void dispose() {
     _isInitialized = false;
+    _workAreaStreamsInitialized = false;
     _distributorsSubscription?.cancel();
     _currentMonthJobsSubscription?.cancel();
     _nextMonthJobsSubscription?.cancel();

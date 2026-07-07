@@ -72,11 +72,13 @@ class GpxLayerLoader {
     for (var wi = 0; wi < gpx.wpts.length; wi++) {
       final wpt = gpx.wpts[wi];
       if (wpt.lat == null || wpt.lon == null) continue;
+      final wptPos = LatLng(wpt.lat!, wpt.lon!);
+      final wptName = wpt.name ?? 'Waypoint ${wi + 1}';
       points.add(MapPoint(
-        id: 'gpx_wpt_$wi',
-        name: wpt.name ?? 'Waypoint ${wi + 1}',
+        id: MapPoint.importId(wptName, wptPos),
+        name: wptName,
         description: wpt.desc ?? '',
-        position: LatLng(wpt.lat!, wpt.lon!),
+        position: wptPos,
         color: Colors.red,
         createdAt: now,
         updatedAt: now,

@@ -18,6 +18,8 @@ import '../providers/collection_schedule_provider.dart';
 import '../providers/inventory_provider.dart';
 import '../providers/tool_settings_provider.dart';
 import '../providers/job_type_provider.dart';
+import '../providers/day_off_provider.dart';
+import '../providers/vat_settings_provider.dart';
 import '../services/job_assignment_service.dart';
 import '../shareable_maps/services/map_link_service.dart';
 import 'address_point_search_dialog.dart';
@@ -60,6 +62,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   late final TextEditingController _areaController;
   late final TextEditingController _quantityController;
   late final TextEditingController _manDaysController;
+  late final TextEditingController _offloadingAddressController;
   late final TextEditingController _collectionAddressController;
   late final TextEditingController _specialInstructionsController;
   late final TextEditingController _quantityDistributedController;
@@ -71,6 +74,9 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   late String _selectedJobStatusId; // Now stores custom status ID
   late String _selectedJobType;
   VehicleTrailerCombo? _selectedVehicleTrailerCombo;
+
+  // VAT toggle — true = price entered as incl VAT, false = excl VAT
+  bool _priceIsInclVat = false;
 
   // Date values
   DateTime? _selectedDate;
@@ -102,6 +108,8 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         TextEditingController(text: job?.quantity.toString() ?? '');
     _manDaysController =
         TextEditingController(text: job?.manDays.toStringAsFixed(1) ?? '');
+    _offloadingAddressController =
+        TextEditingController(text: job?.offloadingAddress ?? '');
     _collectionAddressController =
         TextEditingController(text: job?.collectionAddress ?? '');
     _specialInstructionsController =
@@ -118,6 +126,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     // Initialize dropdown values
     _selectedJobStatusId = job?.jobStatusId ?? 'standby';
     _selectedJobType = job?.jobTypeId ?? 'flyersPrintingOnly';
+    _priceIsInclVat = job?.priceIsInclVat ?? false;
 
     // Initialize vehicle/trailer combo from existing job
     if (VehicleTrailerCombo.isVehicleJobType(_selectedJobType) && job != null) {
@@ -422,11 +431,12 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     // When copying a job that has a linked map, show a read-only hint
     // instead of an empty editable field — the map URL will be filled in
     // automatically once the cloud function finishes cloning the map.
+    final areaLabel = _jobTypeHasTwoStops ? 'Loading Address' : 'Area';
     if (widget.mapWillBeCopied) {
       return InputDecorator(
-        decoration: const InputDecoration(
-          labelText: 'Area',
-          border: OutlineInputBorder(),
+        decoration: InputDecoration(
+          labelText: areaLabel,
+          border: const OutlineInputBorder(),
         ),
         child: const Text(
           'Map will be copied',
@@ -464,9 +474,9 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         return TextFormField(
           controller: textController,
           focusNode: focusNode,
-          decoration: const InputDecoration(
-            labelText: 'Area',
-            border: OutlineInputBorder(),
+          decoration: InputDecoration(
+            labelText: areaLabel,
+            border: const OutlineInputBorder(),
           ),
           onFieldSubmitted: (_) => onFieldSubmitted(),
         );
@@ -509,6 +519,150 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     );
   }
 
+  /// Amount field. Shows Excl/Incl VAT toggle only when the selected job type
+  /// has `chargesVat = true`; otherwise renders a plain amount field.
+  Widget _buildAmountField() {
+    final typeChargesVat =
+        JobTypeProvider.instance?.chargesVat(_selectedJobType) ?? false;
+
+    final plainField = TextFormField(
+      controller: _amountController,
+      decoration: const InputDecoration(
+        labelText: 'Amount',
+        border: OutlineInputBorder(),
+        prefixText: 'R ',
+      ),
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      inputFormatters: [
+        FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}')),
+      ],
+      onChanged: (_) => setState(() {}),
+      validator: (value) {
+        if (value != null && value.isNotEmpty) {
+          if (double.tryParse(value) == null) {
+            return 'Please enter a valid amount';
+          }
+        }
+        return null;
+      },
+    );
+
+    if (!typeChargesVat) return plainField;
+
+    final vatProvider = ref.watch(vatSettingsRiverpod);
+    final vatPct = vatProvider.vatPercentage;
+    final entered = double.tryParse(_amountController.text) ?? 0.0;
+
+    String helperText = '';
+    if (entered > 0) {
+      if (_priceIsInclVat) {
+        final excl = entered / (1 + vatPct / 100);
+        helperText = '= R ${excl.toStringAsFixed(2)} excl VAT';
+      } else {
+        final incl = entered * (1 + vatPct / 100);
+        helperText = '= R ${incl.toStringAsFixed(2)} incl VAT';
+      }
+    }
+
+    final inclColor = Colors.green.shade700;
+    final exclColor = Colors.orange.shade800;
+    final activeColor = _priceIsInclVat ? inclColor : exclColor;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: TextFormField(
+                controller: _amountController,
+                decoration: InputDecoration(
+                  labelText: 'Amount',
+                  border: const OutlineInputBorder(),
+                  prefixText: 'R ',
+                  labelStyle: TextStyle(color: activeColor),
+                  focusedBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: activeColor, width: 2),
+                  ),
+                ),
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(
+                      RegExp(r'^\d+\.?\d{0,2}')),
+                ],
+                onChanged: (_) => setState(() {}),
+                validator: (value) {
+                  if (value != null && value.isNotEmpty) {
+                    if (double.tryParse(value) == null) {
+                      return 'Please enter a valid amount';
+                    }
+                  }
+                  return null;
+                },
+              ),
+            ),
+            const SizedBox(width: 8),
+            // Incl / Excl VAT toggle
+            Column(
+              children: [
+                const SizedBox(height: 4),
+                Container(
+                  decoration: BoxDecoration(
+                    border: Border.all(color: activeColor, width: 1.5),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _VatToggleButton(
+                        label: 'Excl',
+                        selected: !_priceIsInclVat,
+                        color: exclColor,
+                        onTap: () => setState(() => _priceIsInclVat = false),
+                      ),
+                      Container(
+                          width: 1,
+                          height: 36,
+                          color: activeColor.withValues(alpha: 0.4)),
+                      _VatToggleButton(
+                        label: 'Incl',
+                        selected: _priceIsInclVat,
+                        color: inclColor,
+                        onTap: () => setState(() => _priceIsInclVat = true),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'VAT ${vatPct % 1 == 0 ? vatPct.toInt() : vatPct}%',
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
+          ],
+        ),
+        if (helperText.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: Text(
+              helperText,
+              style: TextStyle(
+                fontSize: 12,
+                color: _priceIsInclVat ? exclColor : inclColor,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
   @override
   void dispose() {
     _scrollController.dispose();
@@ -518,6 +672,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     _areaController.dispose();
     _quantityController.dispose();
     _manDaysController.dispose();
+    _offloadingAddressController.dispose();
     _collectionAddressController.dispose();
     _specialInstructionsController.dispose();
     _quantityDistributedController.dispose();
@@ -608,30 +763,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                           ),
                                         ),
                                         const SizedBox(height: 12),
-                                        TextFormField(
-                                          controller: _amountController,
-                                          decoration: const InputDecoration(
-                                            labelText: 'Amount',
-                                            border: OutlineInputBorder(),
-                                            prefixText: 'R ',
-                                          ),
-                                          keyboardType: const TextInputType
-                                              .numberWithOptions(decimal: true),
-                                          inputFormatters: [
-                                            FilteringTextInputFormatter.allow(
-                                                RegExp(r'^\d+\.?\d{0,2}')),
-                                          ],
-                                          validator: (value) {
-                                            if (value != null &&
-                                                value.isNotEmpty) {
-                                              if (double.tryParse(value) ==
-                                                  null) {
-                                                return 'Please enter a valid amount';
-                                              }
-                                            }
-                                            return null;
-                                          },
-                                        ),
+                                        _buildAmountField(),
                                         const SizedBox(height: 12),
                                         TextFormField(
                                           controller: _clientController,
@@ -692,31 +824,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                         ),
                                         const SizedBox(width: 16),
                                         Expanded(
-                                          child: TextFormField(
-                                            controller: _amountController,
-                                            decoration: const InputDecoration(
-                                              labelText: 'Amount',
-                                              border: OutlineInputBorder(),
-                                              prefixText: 'R ',
-                                            ),
-                                            keyboardType: const TextInputType
-                                                .numberWithOptions(
-                                                decimal: true),
-                                            inputFormatters: [
-                                              FilteringTextInputFormatter.allow(
-                                                  RegExp(r'^\d+\.?\d{0,2}')),
-                                            ],
-                                            validator: (value) {
-                                              if (value != null &&
-                                                  value.isNotEmpty) {
-                                                if (double.tryParse(value) ==
-                                                    null) {
-                                                  return 'Please enter a valid amount';
-                                                }
-                                              }
-                                              return null;
-                                            },
-                                          ),
+                                          child: _buildAmountField(),
                                         ),
                                         const SizedBox(width: 16),
                                         Expanded(
@@ -799,6 +907,18 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                         ),
                                       ],
                                     ),
+                              // Offloading address — only for two-stop job types
+                              if (_jobTypeHasTwoStops) ...[
+                                const SizedBox(height: 12),
+                                TextFormField(
+                                  controller: _offloadingAddressController,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Offloading Address',
+                                    border: OutlineInputBorder(),
+                                  ),
+                                ),
+                              ],
+
                               const SizedBox(height: 16),
 
                               // Row 3: Area, Quantity (conditional based on job type)
@@ -1445,9 +1565,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                       ? Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            if (!isEditing &&
-                                !_needsTimeSelection(
-                                    _selectedJobType)) // Only show skip allocation for new jobs that don't need time selection
+                            if (!isEditing && _jobTypeAutoAllocates)
                               ElevatedButton(
                                 onPressed: _isProcessing
                                     ? null
@@ -1470,12 +1588,9 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                       )
                                     : const Text('Skip Allocation'),
                               ),
-                            if (!isEditing &&
-                                !_needsTimeSelection(_selectedJobType))
+                            if (!isEditing && _jobTypeAutoAllocates)
                               const SizedBox(height: 8),
-                            if (isEditing &&
-                                !_needsTimeSelection(
-                                    _selectedJobType)) // Show automatic allocation for editing jobs that don't need time selection
+                            if (isEditing && _jobTypeAutoAllocates)
                               ElevatedButton(
                                 onPressed: _isProcessing
                                     ? null
@@ -1497,8 +1612,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                       )
                                     : const Text('Automatic Allocation'),
                               ),
-                            if (isEditing &&
-                                !_needsTimeSelection(_selectedJobType))
+                            if (isEditing && _jobTypeAutoAllocates)
                               const SizedBox(height: 8),
                             ElevatedButton(
                               onPressed: _isProcessing ? null : _saveJob,
@@ -1535,9 +1649,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                   : () => Navigator.of(context).pop(),
                               child: const Text('Cancel'),
                             ),
-                            if (!isEditing &&
-                                !_needsTimeSelection(
-                                    _selectedJobType)) // Only show skip allocation for new jobs that don't need time selection
+                            if (!isEditing && _jobTypeAutoAllocates)
                               ElevatedButton(
                                 onPressed: _isProcessing
                                     ? null
@@ -1560,9 +1672,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                       )
                                     : const Text('Skip Allocation'),
                               ),
-                            if (isEditing &&
-                                !_needsTimeSelection(
-                                    _selectedJobType)) // Show automatic allocation for editing jobs that don't need time selection
+                            if (isEditing && _jobTypeAutoAllocates)
                               ElevatedButton(
                                 onPressed: _isProcessing
                                     ? null
@@ -1639,10 +1749,22 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       ));
     }
 
+    final enteredAmount = double.tryParse(_amountController.text) ?? 0.0;
+    final vatProvider = ref.read(vatSettingsRiverpod);
+    final double exclAmount;
+    final double inclAmount;
+    if (_priceIsInclVat) {
+      inclAmount = enteredAmount;
+      exclAmount = vatProvider.exclFromIncl(enteredAmount);
+    } else {
+      exclAmount = enteredAmount;
+      inclAmount = vatProvider.inclFromExcl(enteredAmount);
+    }
+
     return JobListItem(
       id: widget.jobToEdit?.id ?? '',
       invoice: _invoiceController.text.trim(),
-      amount: double.tryParse(_amountController.text) ?? 0.0,
+      amount: enteredAmount,
       client: _clientController.text.trim(),
       jobStatusId: _selectedJobStatusId,
       invoiceStatusId: widget.jobToEdit?.invoiceStatusId ?? 'pending',
@@ -1665,6 +1787,10 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       reminders: widget.jobToEdit?.reminders ?? const [],
       collectionJobId: widget.jobToEdit?.collectionJobId ?? '',
       vehicleTrailerCombo: _selectedVehicleTrailerCombo?.name ?? '',
+      offloadingAddress: _offloadingAddressController.text.trim(),
+      amountExclVat: exclAmount,
+      amountInclVat: inclAmount,
+      priceIsInclVat: _priceIsInclVat,
     );
   }
 
@@ -1759,33 +1885,28 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
           }
         }
 
-        // If editing existing job
-        if (widget.jobToEdit != null) {
+        // If editing an existing job (not a copy — copies have an empty id).
+        if (widget.jobToEdit != null && widget.jobToEdit!.id.isNotEmpty) {
           debugPrint(
               '   📝 Editing existing job - returning JobListItem to caller');
           debugPrint(
               '   No direct DB write from dialog - JobList/JobListGrid handles update');
-          // Check if this is a collection job and if time/date changed
-          if (VehicleTrailerCombo.isVehicleJobType(_selectedJobType) &&
-              widget.jobToEdit!.collectionJobId.isNotEmpty) {
-            // Update the linked collection job if date/time changed
-            // Collection job updates are now automatic via JobListProvider stream
-          }
           Navigator.of(context).pop(finalJobListItem);
           return;
         }
 
-        // For new jobs, run the assignment preview for ALL job types so the
-        // user gets distributor allocation on the schedule. Vehicle/collection
-        // jobs additionally appear on the collection schedule via JobListProvider.
-        if (VehicleTrailerCombo.isVehicleJobType(_selectedJobType)) {
-          debugPrint(
-              '   🚚 Collection job type - showing assignment preview for schedule allocation');
+        // For new / copied jobs: only show the assignment preview when the
+        // job type has autoAllocatesToSchedule = true. Otherwise pop with the
+        // item directly — the caller (JobListGrid) owns the DB write so we
+        // never double-save.
+        if (_jobTypeAutoAllocates) {
+          debugPrint('   📅 Auto-allocate job type — showing assignment preview');
+          await _showJobAssignmentPreview(finalJobListItem,
+              addressPoint: addressPoint);
         } else {
-          debugPrint('   📅 Non-collection job - showing assignment preview');
+          debugPrint('   📋 Non-auto-allocate — returning item to caller');
+          if (mounted) Navigator.of(context).pop(finalJobListItem);
         }
-        await _showJobAssignmentPreview(finalJobListItem,
-            addressPoint: addressPoint);
       } finally {
         if (mounted) {
           setState(() {
@@ -1942,7 +2063,10 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       final scheduleProvider = ref.read(scheduleRiverpod);
 
       // Create the assignment service
-      final assignmentService = JobAssignmentService(scheduleProvider);
+      final assignmentService = JobAssignmentService(
+        scheduleProvider,
+        dayOffProvider: ref.read(dayOffRiverpod),
+      );
       final areaText = jobListItem.area.trim();
       final assignmentWorkArea =
           areaText.isNotEmpty && !_isMapLinkOrUrl(areaText)
@@ -2054,6 +2178,19 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     if (provider == null) return false;
     return provider.needsTimeSlot(jobTypeId);
   }
+
+  /// True when the selected job type has `autoAllocatesToSchedule = true`.
+  /// Controls whether the "Add Job" button shows the assignment preview and
+  /// whether the "Skip Allocation" override button is visible.
+  bool get _jobTypeAutoAllocates =>
+      JobTypeProvider.instance?.autoAllocatesToSchedule(_selectedJobType) ??
+      false;
+
+  /// True when the selected job type has `hasTwoStops = true`.
+  /// Renames the area field to "Loading Address" and shows an additional
+  /// "Offloading Address" field below it.
+  bool get _jobTypeHasTwoStops =>
+      JobTypeProvider.instance?.hasTwoStops(_selectedJobType) ?? false;
 
   List<TimeOfDay> _getAvailableTimeSlots() {
     final slots = <TimeOfDay>[];
@@ -2456,6 +2593,43 @@ class _JobTypeRow extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact toggle button used inside the VAT incl/excl selector.
+class _VatToggleButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _VatToggleButton({
+    required this.label,
+    required this.selected,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? color.withValues(alpha: 0.15) : Colors.transparent,
+          borderRadius: BorderRadius.circular(5),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+            color: selected ? color : Colors.grey.shade600,
+          ),
         ),
       ),
     );

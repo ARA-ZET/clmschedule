@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import '../models/distributor.dart';
 import '../models/job.dart';
+import '../models/custom_polygon.dart';
 import '../models/work_area.dart';
 import '../models/work_suburb.dart';
 import '../models/collection_job.dart';
@@ -166,7 +167,134 @@ class FirestoreService {
     return _distributors.doc(distributorId).delete();
   }
 
+  // Atomically apply all distributor changes (deletes + updates) in one batch.
+  // 0 reads, 1 round-trip regardless of how many distributors changed.
+  Future<void> batchSaveDistributors({
+    required List<Distributor> toUpdate,
+    required Set<String> toDelete,
+  }) async {
+    if (toUpdate.isEmpty && toDelete.isEmpty) return;
+
+    final batch = _firestore.batch();
+
+    for (final id in toDelete) {
+      batch.delete(_distributors.doc(id));
+    }
+
+    for (final distributor in toUpdate) {
+      batch.update(_distributors.doc(distributor.id), distributor.toMap());
+    }
+
+    await batch.commit();
+  }
+
   // JOB OPERATIONS (DAILY STRUCTURE)
+
+  /// Atomically remove and add multiple schedule jobs across affected daily
+  /// documents in a single batch commit.
+  ///
+  /// Returns the added jobs with ensured IDs (generated when missing).
+  Future<List<Job>> reallocateJobsAtomically({
+    required List<Job> removeJobs,
+    required List<Job> addJobs,
+    String debugTag = 'schedule-reallocation',
+  }) async {
+    final sw = Stopwatch()..start();
+
+    if (removeJobs.isEmpty && addJobs.isEmpty) {
+      debugPrint('[$debugTag] atomic reallocation skipped (no changes)');
+      return const <Job>[];
+    }
+
+    // Ensure every added job has a stable ID before writing.
+    final resolvedAdds = addJobs
+        .map((job) => job.id.isEmpty ? _jobWithId(job, _newJobId()) : job)
+        .toList();
+
+    final affectedDates = <DateTime>[];
+    for (final j in removeJobs) {
+      affectedDates.add(DateTime(j.date.year, j.date.month, j.date.day));
+    }
+    for (final j in resolvedAdds) {
+      affectedDates.add(DateTime(j.date.year, j.date.month, j.date.day));
+    }
+
+    final uniqueDateKeys = <String, DateTime>{};
+    for (final date in affectedDates) {
+      uniqueDateKeys[_dailyService.getDailyDocumentId(date)] = date;
+    }
+
+    final uniqueDates = uniqueDateKeys.values.toList();
+    debugPrint(
+      '[$debugTag] atomic start: remove=${removeJobs.length}, add=${resolvedAdds.length}, docs=${uniqueDates.length}',
+    );
+
+    // Ensure all touched daily docs exist, then read each once.
+    await Future.wait(uniqueDates.map(_dailyService.ensureScheduleDailyDocExists));
+
+    final docByKey = <String, DocumentReference>{};
+    final jobsByKey = <String, List<Map<String, dynamic>>>{};
+
+    for (final date in uniqueDates) {
+      final key = _dailyService.getDailyDocumentId(date);
+      final doc = _dailyService.getScheduleDailyDoc(date);
+      docByKey[key] = doc;
+
+      final snapshot = await doc.get();
+      final data = Map<String, dynamic>.from(
+          (snapshot.data() as Map?) ?? <String, dynamic>{});
+      jobsByKey[key] = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
+    }
+
+    // Apply removals in-memory by source date key.
+    for (final job in removeJobs) {
+      final key = _dailyService.getDailyDocumentId(job.date);
+      final list = jobsByKey[key];
+      if (list == null) continue;
+      list.removeWhere((j) => j['id'] == job.id);
+    }
+
+    // Apply additions in-memory by target date key.
+    for (final job in resolvedAdds) {
+      final key = _dailyService.getDailyDocumentId(job.date);
+      final list = jobsByKey[key];
+      if (list == null) continue;
+      list.add(job.toMap());
+    }
+
+    final batch = _firestore.batch();
+    for (final entry in jobsByKey.entries) {
+      final doc = docByKey[entry.key];
+      if (doc == null) continue;
+      batch.update(doc, {'jobs': entry.value});
+    }
+
+    await batch.commit();
+    sw.stop();
+    debugPrint(
+      '[$debugTag] atomic commit complete in ${sw.elapsedMilliseconds}ms',
+    );
+
+    return resolvedAdds;
+  }
+
+  String _newJobId() => _firestore.collection('dummy').doc().id;
+
+  Job _jobWithId(Job job, String id) {
+    return Job(
+      id: id,
+      clients: List<String>.from(job.clients),
+      clientInstructions: List<String>.from(job.clientInstructions),
+      workingAreas: List<String>.from(job.workingAreas),
+      workMaps: List.from(job.workMaps),
+      distributorId: job.distributorId,
+      date: job.date,
+      statusId: job.statusId,
+      mapInstructions: job.mapInstructions,
+      dropOffPoint: job.dropOffPoint,
+      pickUpPoint: job.pickUpPoint,
+    );
+  }
 
   // Stream of all jobs for a specific date
   Stream<List<Job>> streamJobsForDate(DateTime date) {
@@ -365,6 +493,7 @@ class FirestoreService {
   // Add a new job
   Future<String> addJob(Job job, [DateTime? date]) async {
     final targetDate = date ?? job.date;
+    final sw = Stopwatch()..start();
 
     // Ensure daily document exists
     await _dailyService.ensureScheduleDailyDocExists(targetDate);
@@ -375,22 +504,30 @@ class FirestoreService {
     final jobId =
         job.id.isEmpty ? _firestore.collection('dummy').doc().id : job.id;
 
-    // Create job with proper ID
+    // Create job with proper ID while preserving every field.
     final updatedJob = Job(
       id: jobId,
-      clients: job.clients,
-      workingAreas: job.workingAreas,
-      workMaps: job.workMaps,
+      clients: List<String>.from(job.clients),
+      clientInstructions: List<String>.from(job.clientInstructions),
+      workingAreas: List<String>.from(job.workingAreas),
+      workMaps: List<CustomPolygon>.from(job.workMaps),
       distributorId: job.distributorId,
       date: job.date,
       statusId: job.statusId,
+      mapInstructions: job.mapInstructions,
       dropOffPoint: job.dropOffPoint,
+      pickUpPoint: job.pickUpPoint,
     );
 
     // Add job to the jobs array in the daily document
     await dailyDoc.update({
       'jobs': FieldValue.arrayUnion([updatedJob.toMap()]),
     });
+
+    sw.stop();
+    debugPrint(
+      '[schedule-add] added ${updatedJob.id} to ${_dailyService.getDailyDocumentId(targetDate)} in ${sw.elapsedMilliseconds}ms',
+    );
 
     return jobId;
   }
@@ -447,15 +584,23 @@ class FirestoreService {
   // Uses WriteBatch for atomic operation - job is never lost even on failure.
   Future<void> moveJobBetweenDates(Job originalJob, Job updatedJob,
       DateTime originalDate, DateTime newDate) async {
+    final sw = Stopwatch()..start();
+
     // If it's the same date, just do a regular update
     if (originalDate.year == newDate.year &&
         originalDate.month == newDate.month &&
         originalDate.day == newDate.day) {
+      debugPrint(
+        '[schedule-move] same-day update for ${originalJob.id} on ${_dailyService.getDailyDocumentId(newDate)}',
+      );
       await updateJob(updatedJob, newDate);
       return;
     }
 
     // Different dates - need to remove from original and add to new ATOMICALLY
+    debugPrint(
+      '[schedule-move] atomic move start id=${originalJob.id} from ${_dailyService.getDailyDocumentId(originalDate)} to ${_dailyService.getDailyDocumentId(newDate)}',
+    );
 
     // Ensure both daily documents exist
     await _dailyService.ensureScheduleDailyDocExists(originalDate);
@@ -486,6 +631,11 @@ class FirestoreService {
     batch.update(sourceDoc, {'jobs': sourceJobs});
     batch.update(destDoc, {'jobs': destJobs});
     await batch.commit();
+
+    sw.stop();
+    debugPrint(
+      '[schedule-move] atomic move complete id=${originalJob.id} in ${sw.elapsedMilliseconds}ms',
+    );
   }
 
   /// Swap two jobs on the same date in a single atomic write.

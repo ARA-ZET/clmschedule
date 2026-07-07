@@ -624,6 +624,20 @@ Widget _buildCollectionJobCard(
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
+                    if (job.offloadLocation.isNotEmpty) ...[
+                      const SizedBox(height: 1),
+                      Text(
+                        '→ ${job.offloadLocation}',
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w500,
+                          color: color.withValues(alpha: 0.75),
+                        ),
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
                     if (job.clients.isNotEmpty) ...[
                       const SizedBox(height: 1),
                       // Client
@@ -680,7 +694,10 @@ Widget _buildCollectionJobCard(
 String _buildJobTooltip(CollectionJob job) {
   final buffer = StringBuffer();
   buffer.writeln('${job.jobType} - ${job.vehicleType.displayName}');
-  buffer.writeln('Location: ${job.location}');
+  buffer.writeln('Loading: ${job.location}');
+  if (job.offloadLocation.isNotEmpty) {
+    buffer.writeln('Offloading: ${job.offloadLocation}');
+  }
   buffer.writeln('Time: ${job.timeRangeDisplay}');
   if (job.timeSlots > 1) {
     buffer

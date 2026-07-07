@@ -1495,19 +1495,15 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       await gpxStorage.deleteFile(sourcePath);
       await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
 
-      // Always rebuild the compiled waypoints aggregate since combined
-      // files contain waypoints.
-      int? rebuiltCount;
+      // Recompile server-side after overwrite.
       if (folderPath.isNotEmpty) {
-        rebuiltCount = await gpxStorage.regenerateCompiledWaypoints(folderPath);
+        await gpxStorage.callCompileGpxFolder(folderPath);
       }
 
       if (mounted) {
-        final suffix =
-            rebuiltCount != null ? ' · compiled waypoints: $rebuiltCount' : '';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Overwrote $fileName$suffix'),
+            content: Text('Overwrote $fileName'),
             backgroundColor: Colors.green,
           ),
         );
@@ -1815,18 +1811,14 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
       await gpxStorage.deleteFile(widget.sourceStoragePath);
       await gpxStorage.uploadGpxFile(_folderPath, _sourceFileName, gpxContent);
 
-      int? rebuiltCount;
       if (_isWaypointFile && _folderPath.isNotEmpty) {
-        rebuiltCount =
-            await gpxStorage.regenerateCompiledWaypoints(_folderPath);
+        await gpxStorage.callCompileGpxFolder(_folderPath);
       }
 
       if (mounted) {
-        final suffix =
-            rebuiltCount != null ? ' · recompiled $rebuiltCount waypoints' : '';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Updated $_sourceFileName$suffix'),
+            content: Text('Updated $_sourceFileName'),
             backgroundColor: Colors.green,
           ),
         );
@@ -1848,12 +1840,11 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
     if (_folderPath.isEmpty) return;
     setState(() => _recompileBusy = true);
     try {
-      final count =
-          await GpxStorageService().regenerateCompiledWaypoints(_folderPath);
+      await GpxStorageService().callCompileGpxFolder(_folderPath);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Recompiled waypoints: $count'),
+          const SnackBar(
+            content: Text('Recompiled successfully'),
             backgroundColor: Colors.blue,
           ),
         );

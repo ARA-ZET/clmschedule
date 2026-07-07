@@ -1028,11 +1028,15 @@ class _StopRow extends riverpod.ConsumerWidget {
                 tooltip: 'Move to driver',
                 icon: const Icon(Icons.swap_horiz, size: 18),
                 onSelected: (targetId) {
+                  final target = otherSections.firstWhere(
+                    (s) => s.id == targetId,
+                    orElse: () => otherSections.first,
+                  );
                   Future.microtask(() => dropsheet.moveTask(
                         fromSectionId: sectionId,
                         fromIndex: absoluteIndex,
                         toSectionId: targetId,
-                        toIndex: 0,
+                        toIndex: target.tasks.length,
                       ));
                 },
                 itemBuilder: (_) => otherSections

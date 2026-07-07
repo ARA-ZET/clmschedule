@@ -44,10 +44,26 @@ class CustomJobType {
   /// Optional ARGB colour as an int (matches `Color.value`).
   final int? colorValue;
 
+  /// When true, adding a job-list item of this type automatically creates a
+  /// corresponding assignment entry on the Schedule grid for the same date,
+  /// ready to be assigned a distributor. Controlled entirely by the job type
+  /// settings — no code change needed when enabling this for a new type.
+  final bool autoAllocatesToSchedule;
+
+  /// When true, the job add/edit form shows separate **Loading address** and
+  /// **Offloading address** fields (two-stop jobs such as furniture moves or
+  /// trailer towing) instead of the single collection address field.
+  final bool hasTwoStops;
+
   /// When true, job-list items of this type are automatically mirrored as
   /// tasks in the Dropsheet for the same date (today / next planning day
   /// window). The dropsheet task type is given by [dropsheetTaskTypeKey].
   final bool appearsOnDropsheet;
+
+  /// When true, this job type charges VAT. The add/edit dialog shows the
+  /// incl/excl VAT toggle and the job list shows the coloured VAT badge.
+  /// Defaults to false so all existing job types are treated as no-VAT.
+  final bool chargesVat;
 
   /// The [DropsheetTaskType.storageKey] used when auto-creating a Dropsheet
   /// task from a job-list item of this type. Null → `custom`.
@@ -71,9 +87,12 @@ class CustomJobType {
     this.createsCloudFolder = false,
     this.iconName,
     this.colorValue,
+    this.autoAllocatesToSchedule = false,
+    this.hasTwoStops = false,
     this.appearsOnDropsheet = false,
     this.dropsheetTaskTypeKey,
     this.defaultTools = const [],
+    this.chargesVat = false,
   });
 
   factory CustomJobType.fromMap(Map<String, dynamic> data) {
@@ -91,11 +110,14 @@ class CustomJobType {
       createsCloudFolder: data['createsCloudFolder'] as bool? ?? false,
       iconName: data['iconName'] as String?,
       colorValue: (data['colorValue'] as num?)?.toInt(),
+      autoAllocatesToSchedule: data['autoAllocatesToSchedule'] as bool? ?? false,
+      hasTwoStops: data['hasTwoStops'] as bool? ?? false,
       appearsOnDropsheet: data['appearsOnDropsheet'] as bool? ?? false,
       dropsheetTaskTypeKey: data['dropsheetTaskTypeKey'] as String?,
       defaultTools:
           (data['defaultTools'] as List?)?.map((e) => e.toString()).toList() ??
               const [],
+      chargesVat: data['chargesVat'] as bool? ?? false,
     );
   }
 
@@ -113,9 +135,12 @@ class CustomJobType {
       'createsCloudFolder': createsCloudFolder,
       'iconName': iconName,
       'colorValue': colorValue,
+      'autoAllocatesToSchedule': autoAllocatesToSchedule,
+      'hasTwoStops': hasTwoStops,
       'appearsOnDropsheet': appearsOnDropsheet,
       if (dropsheetTaskTypeKey != null) 'dropsheetTaskTypeKey': dropsheetTaskTypeKey,
       'defaultTools': defaultTools,
+      'chargesVat': chargesVat,
     };
   }
 
@@ -132,12 +157,15 @@ class CustomJobType {
     bool? createsCloudFolder,
     String? iconName,
     int? colorValue,
+    bool? autoAllocatesToSchedule,
+    bool? hasTwoStops,
     List<String>? defaultTools,
     bool? appearsOnDropsheet,
     String? dropsheetTaskTypeKey,
     bool clearDropsheetTaskTypeKey = false,
     bool clearIcon = false,
     bool clearColor = false,
+    bool? chargesVat,
   }) {
     return CustomJobType(
       id: id ?? this.id,
@@ -153,11 +181,14 @@ class CustomJobType {
       createsCloudFolder: createsCloudFolder ?? this.createsCloudFolder,
       iconName: clearIcon ? null : (iconName ?? this.iconName),
       colorValue: clearColor ? null : (colorValue ?? this.colorValue),
+      autoAllocatesToSchedule: autoAllocatesToSchedule ?? this.autoAllocatesToSchedule,
+      hasTwoStops: hasTwoStops ?? this.hasTwoStops,
       appearsOnDropsheet: appearsOnDropsheet ?? this.appearsOnDropsheet,
       dropsheetTaskTypeKey: clearDropsheetTaskTypeKey
           ? null
           : (dropsheetTaskTypeKey ?? this.dropsheetTaskTypeKey),
       defaultTools: defaultTools ?? this.defaultTools,
+      chargesVat: chargesVat ?? this.chargesVat,
     );
   }
 
@@ -176,11 +207,13 @@ class CustomJobType {
         other.quantityLabel == quantityLabel &&
         other.createsCloudFolder == createsCloudFolder &&
         other.iconName == iconName &&
-        other.colorValue == colorValue;
+        other.colorValue == colorValue &&
+        other.autoAllocatesToSchedule == autoAllocatesToSchedule &&
+        other.hasTwoStops == hasTwoStops;
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
         id,
         label,
         isDefault,
@@ -193,7 +226,9 @@ class CustomJobType {
         createsCloudFolder,
         iconName,
         colorValue,
-      );
+        autoAllocatesToSchedule,
+        hasTwoStops,
+      ]);
 
   @override
   String toString() =>

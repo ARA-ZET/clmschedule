@@ -58,6 +58,11 @@ class _DropsheetTaskEditorDialogState
 
   late Map<String, dynamic> _typeData;
 
+  /// The distributor [Job] backing a dropOff/pickUp task, used to populate the
+  /// work-area picker. Loaded lazily for already-saved tasks; set directly when
+  /// the user picks a distributor.
+  Job? _distributorJob;
+
   @override
   void initState() {
     super.initState();
@@ -111,6 +116,25 @@ class _DropsheetTaskEditorDialogState
     _collectionAddress.text = (_typeData['address'] as String?) ?? '';
     _serviceTime.text =
         t.serviceTimeMinutes == null ? '' : '${t.serviceTimeMinutes}';
+
+    // For an already-saved distributor task, load its backing job so the
+    // work-area picker can offer the distributor's areas / polygon centroids.
+    if ((t.type == DropsheetTaskType.dropOff ||
+            t.type == DropsheetTaskType.pickUp) &&
+        (_typeData['distributorJobId'] as String?)?.isNotEmpty == true) {
+      _loadDistributorJob(_typeData['distributorJobId'] as String);
+    }
+  }
+
+  Future<void> _loadDistributorJob(String jobId) async {
+    try {
+      final jobs = await FirestoreService().fetchJobsForDate(widget.sheetDate);
+      if (!mounted) return;
+      final job = jobs.where((j) => j.id == jobId).firstOrNull;
+      if (job != null) setState(() => _distributorJob = job);
+    } catch (_) {
+      // Best-effort: the picker simply won't show extra work areas.
+    }
   }
 
   @override
@@ -286,12 +310,10 @@ class _DropsheetTaskEditorDialogState
             ? 'Choose distributor for ${widget.sheetDate.toIso8601String().substring(0, 10)}'
             : 'Distributor: $selectedName'),
       ),
-      if (workArea.isNotEmpty)
-        Padding(
-          padding: const EdgeInsets.only(top: 6),
-          child: Text('Work area: $workArea',
-              style: const TextStyle(color: Colors.black87)),
-        ),
+      if (selectedName.isNotEmpty) ...[
+        const SizedBox(height: 6),
+        _workAreaPicker(workArea),
+      ],
       if (selectedName.isNotEmpty && !hasCoord)
         const Padding(
           padding: EdgeInsets.only(top: 6),
@@ -313,6 +335,84 @@ class _DropsheetTaskEditorDialogState
       const SizedBox(height: 8),
       _contactTelRow(),
     ];
+  }
+
+  /// Sentinel value for the "All areas" choice in the work-area dropdown.
+  static const String _allAreasValue = '__all_areas__';
+
+  /// Shows the current work area. When the backing distributor job covers more
+  /// than one area, renders a dropdown so the user can pin this drop-off to a
+  /// single area (its pin then lands in that area's polygon).
+  Widget _workAreaPicker(String workArea) {
+    final job = _distributorJob;
+    final areas = job?.workingAreas.where((a) => a.trim().isNotEmpty).toList() ??
+        const <String>[];
+    if (areas.length < 2) {
+      return workArea.isEmpty
+          ? const SizedBox.shrink()
+          : Text('Work area: $workArea',
+              style: const TextStyle(color: Colors.black87));
+    }
+    final isPinned = _typeData['workAreaPin'] == true;
+    final current = isPinned && areas.contains(workArea.trim())
+        ? workArea.trim()
+        : _allAreasValue;
+    return InputDecorator(
+      decoration: const InputDecoration(
+        labelText: 'Work area',
+        isDense: true,
+        border: OutlineInputBorder(),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          isExpanded: true,
+          value: current,
+          items: [
+            const DropdownMenuItem(
+                value: _allAreasValue, child: Text('All areas')),
+            for (final a in areas) DropdownMenuItem(value: a, child: Text(a)),
+          ],
+          onChanged: (v) => _selectWorkArea(v),
+        ),
+      ),
+    );
+  }
+
+  /// Applies a work-area choice: "All areas" restores the job-wide drop-off
+  /// (joined names + job.dropOffPoint, no flag); a single area pins the task to
+  /// that area's polygon centroid and stamps `workAreaPin`.
+  void _selectWorkArea(String? value) {
+    final job = _distributorJob;
+    if (job == null || value == null) return;
+    setState(() {
+      _typeData = Map<String, dynamic>.from(_typeData);
+      if (value == _allAreasValue) {
+        final joined = job.workingAreas.join(', ');
+        _typeData['workArea'] = joined;
+        _typeData.remove('workAreaPin');
+        final dop = job.dropOffPoint;
+        if (dop != null) {
+          _typeData['lat'] = dop.latitude;
+          _typeData['lng'] = dop.longitude;
+        } else {
+          _typeData.remove('lat');
+          _typeData.remove('lng');
+        }
+        _location.text = joined;
+      } else {
+        _typeData['workArea'] = value;
+        _typeData['workAreaPin'] = true;
+        final centroid = Job.centroidForWorkArea(job.workMaps, value);
+        if (centroid != null) {
+          _typeData['lat'] = centroid.latitude;
+          _typeData['lng'] = centroid.longitude;
+        }
+        _location.text = value;
+      }
+      // Stored coordinates changed → any cached ETA/leg data is stale.
+      _typeData.remove('eta');
+      _typeData.remove('legDurationS');
+    });
   }
 
   List<Widget> _collectionFields(DropsheetTaskType type,
@@ -542,6 +642,7 @@ class _DropsheetTaskEditorDialogState
     final distPhone = dist?.phone1 ?? '';
     final workArea = selected.workingAreas.join(', ');
 
+    _distributorJob = selected;
     setState(() {
       // Mirror the same typeData shape that _buildDistributorDropOffTask
       // produces during schedule sync so every downstream consumer
@@ -744,11 +845,14 @@ class _DropsheetTaskEditorDialogState
           _typeData['loadingAddress'] = address;
           _loadingAddress.text = address;
         }
-        // Offload: if area filled loading use collectionAddress,
-        // otherwise fall back to specialInstructions, only if currently empty
+        // Offload: prefer the dedicated offloadingAddress (two-stop jobs);
+        // otherwise if area filled loading use collectionAddress, else fall
+        // back to specialInstructions. Only when currently empty.
         if (_offloadAddress.text.trim().isEmpty) {
-          final offload =
-              (area.isNotEmpty && !_isMapLinkOrUrl(area) && colAddr.isNotEmpty)
+          final dedicatedOffload = selected.offloadingAddress.trim();
+          final offload = dedicatedOffload.isNotEmpty
+              ? dedicatedOffload
+              : (area.isNotEmpty && !_isMapLinkOrUrl(area) && colAddr.isNotEmpty)
                   ? colAddr
                   : si.isNotEmpty
                       ? si

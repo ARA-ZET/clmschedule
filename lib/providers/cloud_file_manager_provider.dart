@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../services/file_search_service.dart';
 import '../services/gpx_storage_service.dart';
 import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 
@@ -21,6 +22,7 @@ enum FolderLevel { root, year, month, client, round, sub }
 
 class CloudFileManagerProvider with ChangeNotifier {
   final GpxStorageService _storage = GpxStorageService();
+  final FileSearchService _search = FileSearchService();
 
   static const String rootPath = 'Distribution';
 
@@ -43,6 +45,14 @@ class CloudFileManagerProvider with ChangeNotifier {
   String _taskCurrentItem = '';
   String _taskDetail = '';
 
+  // Search state — a search query is resolved against the `fileSearchIndex`
+  // Firestore collection (see FileSearchService) instead of walking Storage
+  // folders, so it stays fast and cheap however deep the tree is.
+  String _searchQuery = '';
+  List<FileSearchResult> _searchResults = [];
+  bool _searchLoading = false;
+  int _searchRequestId = 0;
+
   // Getters
   List<({String path, String name})> get breadcrumbs =>
       List.unmodifiable(_breadcrumbs);
@@ -64,6 +74,66 @@ class CloudFileManagerProvider with ChangeNotifier {
   String get taskDetail => _taskDetail;
   double get taskProgress =>
       _taskTotal == 0 ? 0.0 : (_taskCompleted / _taskTotal).clamp(0.0, 1.0);
+
+  // Search getters.
+  String get searchQuery => _searchQuery;
+  bool get isSearching => _searchQuery.isNotEmpty;
+  bool get isSearchLoading => _searchLoading;
+  List<FileSearchResult> get searchResults => _searchResults;
+
+  /// Folder the current/last search was (or will be) scoped to. Captured
+  /// once when search mode is entered so it stays fixed even though
+  /// [currentPath] getter itself doesn't change while the search UI is open
+  /// (folder navigation is hidden while searching).
+  String? _searchScopeFolderPath;
+  String get searchScopeFolderPath => _searchScopeFolderPath ?? currentPath;
+
+  /// Enter search mode scoped to the current folder (and every subfolder
+  /// beneath it). Call this once when the search bar opens, before [search].
+  void beginSearch() {
+    _searchScopeFolderPath = currentPath;
+  }
+
+  /// Search for files whose name contains [query] (case-insensitive,
+  /// anywhere in the name), scoped to [searchScopeFolderPath] and every
+  /// subfolder beneath it. Backed by a single indexed `array-contains`
+  /// Firestore query (see [FileSearchService]) rather than a recursive
+  /// Storage listAll() walk, so it stays fast and cheap regardless of how
+  /// many folders exist.
+  ///
+  /// Safe to call on every keystroke — stale responses (from a query that's
+  /// since been superseded) are discarded.
+  Future<void> search(String query) async {
+    final trimmed = query.trim();
+    _searchQuery = trimmed;
+    if (trimmed.isEmpty) {
+      _searchResults = [];
+      _searchLoading = false;
+      notifyListeners();
+      return;
+    }
+
+    final requestId = ++_searchRequestId;
+    _searchLoading = true;
+    notifyListeners();
+
+    final results = await _search.search(trimmed, searchScopeFolderPath);
+
+    if (requestId != _searchRequestId) return; // superseded by a newer query
+    _searchResults = results;
+    _searchLoading = false;
+    notifyListeners();
+  }
+
+  /// Exit search mode and return to normal folder browsing.
+  void clearSearch() {
+    _searchRequestId++;
+    _searchQuery = '';
+    _searchResults = [];
+    _searchLoading = false;
+    _searchScopeFolderPath = null;
+    notifyListeners();
+  }
 
   void _beginTask(String label, int total) {
     _taskLabel = label;
@@ -319,9 +389,8 @@ class CloudFileManagerProvider with ChangeNotifier {
 
   /// Copy files into [destinationFolder] in parallel.
   /// Returns how many succeeded.
-  /// The Cloud Function compiles `_compiled_*.json` in the destination
-  /// folder automatically as the new GPX files land there. We also trigger
-  /// a client-side rebuild for immediate feedback.
+  /// After all GPX files land in the destination, explicitly invokes the
+  /// `compileGpxFolder` Cloud Function to rebuild `_compiled_*.json`.
   Future<int> copyFiles(
     Iterable<StorageFileItem> files,
     String destinationFolder,
@@ -357,9 +426,9 @@ class CloudFileManagerProvider with ChangeNotifier {
   }
 
   /// Move files into [destinationFolder] in parallel.
-  /// Returns how many succeeded. The Cloud Function rebuilds compiled JSON
-  /// in both the source and destination folders automatically. We also
-  /// trigger a client-side rebuild for immediate feedback.
+  /// Returns how many succeeded. After all GPX files are moved, explicitly
+  /// invokes `compileGpxFolder` for both the source folder (to remove the
+  /// moved tracks) and the destination folder (to add them).
   Future<int> moveFiles(
     Iterable<StorageFileItem> files,
     String destinationFolder,
@@ -415,15 +484,16 @@ class CloudFileManagerProvider with ChangeNotifier {
   Future<List<StorageFolderItem>> listSubfolders(String folderPath) =>
       _storage.listSubfolders(folderPath);
 
-  /// Trigger a compiled-tracks + compiled-waypoints rebuild for each folder.
-  /// Used by callers (e.g. the track editor) that want an immediate local
-  /// rebuild without waiting for the Storage Cloud Function. Skipped on
-  /// failure rather than failing the surrounding operation.
+  /// Trigger a compiled-tracks + compiled-waypoints rebuild for each folder
+  /// by invoking the server-side `compileGpxFolder` Cloud Function. All GPX
+  /// parsing and JSON writing happen on Google's servers — no client-side
+  /// download/upload. Skipped on failure rather than failing the surrounding
+  /// operation.
   Future<void> _rebuildCompiledFor(Iterable<String> folders) async {
     for (final f in folders) {
       if (f.isEmpty) continue;
       try {
-        await _storage.regenerateCompiledFiles(f);
+        await _storage.callCompileGpxFolder(f);
       } catch (e) {
         debugPrint('_rebuildCompiledFor($f): $e');
       }

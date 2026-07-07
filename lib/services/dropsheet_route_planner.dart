@@ -118,6 +118,15 @@ class DropsheetRoutePlanner {
   final DropsheetTaskConfigProvider _config;
   final DayPlannerCloudFunctions? _cloud;
 
+  /// Provisional clock used **only** as the Directions API traffic-departure
+  /// hint for the afternoon pick-up leg. Pick-ups typically begin mid-afternoon
+  /// (~15:00–16:00, depending on how far the stops are from the office), so
+  /// this lands the traffic estimates in a realistic window rather than the
+  /// evening peak implied by the Arrive target. The absolute ETAs are
+  /// re-anchored backwards to the Arrive task's target time afterwards, so this
+  /// value affects traffic estimation only — never the times shown to drivers.
+  static const String _afternoonStartEstimate = '15:00';
+
   /// When true, [optimizeSection] delegates to the
   /// `optimizeDropsheetRoute` Cloud Function instead of running the
   /// greedy nearest-neighbour locally. The cloud variant uses the
@@ -383,7 +392,12 @@ class DropsheetRoutePlanner {
     }
 
     // Return leg: last morning stop → depot so the arrive task ETA is set.
-    if (ordered.isNotEmpty) {
+    // Skipped when pick-ups follow (separator + routable afternoon stops): the
+    // driver does NOT return to the office between drops and pick-ups — he
+    // continues straight from his last drop-off, and the afternoon leg ends
+    // with the real return-to-office leg instead.
+    final continuesToPickups = hasSeparator && afternoonStops.isNotEmpty;
+    if (ordered.isNotEmpty && !continuesToPickups) {
       final lastAddr =
           _addressFor(id: currentId!, lat: currentLat, lng: currentLng);
       final returnSeg = await _matrix.getRouteSegment(
@@ -409,14 +423,17 @@ class DropsheetRoutePlanner {
 
     // ── Afternoon sequential leg ──────────────────────────────────────────
     // When a pickup separator exists, process afternoon tasks in their
-    // original section order, starting at the depot at the separator's
-    // departure time. Tasks without geolocation are kept in taskOrder but
-    // receive no ETA update.
-    if (hasSeparator && afternoonStops.isNotEmpty) {
-      final sepTimeStr = separatorTask!.startTime.isNotEmpty
-          ? separatorTask.startTime
-          : '17:30';
-      final sepStart = _parseStartTime(sepTimeStr);
+    // original section order. The driver continues from his last morning
+    // drop-off (not the office), so the first afternoon leg starts there;
+    // tasks without geolocation are kept in taskOrder but receive no ETA.
+    if (continuesToPickups) {
+      // The afternoon leg is routed forward purely to obtain real leg
+      // durations and relative spacing; the absolute ETAs are then shifted so
+      // the final depot arrival lands on the Arrive task's target time. The
+      // provisional forward start is a mid-afternoon estimate (used only as the
+      // traffic departure hint); the shift re-anchors everything to the target.
+      final targetArrive = _arriveTargetTime(section);
+      final sepStart = _parseStartTime(_afternoonStartEstimate);
       var afClock = DateTime(
         baseDate.year,
         baseDate.month,
@@ -424,9 +441,11 @@ class DropsheetRoutePlanner {
         sepStart.hour,
         sepStart.minute,
       );
-      var afLat = depot.lat!;
-      var afLng = depot.lng!;
-      String? afCurrentId; // null = at depot
+      // Continue from the last morning stop; fall back to the depot only if
+      // there were no routable morning stops.
+      var afLat = ordered.isNotEmpty ? currentLat : depot.lat!;
+      var afLng = ordered.isNotEmpty ? currentLng : depot.lng!;
+      String? afCurrentId = ordered.isNotEmpty ? currentId : null;
 
       for (final stop in afternoonStops) {
         final fromAddr = afCurrentId == null
@@ -461,8 +480,38 @@ class DropsheetRoutePlanner {
         afLng = stop.lng;
       }
 
-      debugPrint(
-          '[DropsheetRoute] afternoon leg: ${afternoonStops.length} stops');
+      // Return leg: last afternoon stop → depot, so we know the provisional
+      // depot arrival used to re-anchor the whole leg to the target time.
+      if (afCurrentId != null) {
+        final lastAddr =
+            _addressFor(id: afCurrentId, lat: afLat, lng: afLng);
+        final returnSeg = await _matrix.getRouteSegment(lastAddr, depotAddr,
+            departureTime: afClock);
+        if (returnSeg != null) {
+          final returnLeg = RouteLeg(
+            fromStopKey: afCurrentId,
+            toStopKey: '__depot',
+            distanceMeters: returnSeg.distanceMeters,
+            durationSeconds: returnSeg.durationInTrafficSeconds,
+            polyline: returnSeg.polylinePoints,
+          );
+          legs.add(returnLeg);
+          legBeforeStopMap['__depot'] = returnLeg;
+          afClock =
+              afClock.add(Duration(seconds: returnSeg.durationInTrafficSeconds));
+          arrivalTimes['__depot'] = _fmtHHmm(afClock);
+        }
+      }
+
+      // Re-anchor: shift afternoon ETAs so depot arrival == target arrive time.
+      _anchorAfternoonToArrive(
+        arrivalTimes: arrivalTimes,
+        afternoonStops: afternoonStops,
+        targetArrive: targetArrive,
+      );
+
+      debugPrint('[DropsheetRoute] afternoon leg: ${afternoonStops.length} '
+          'stops, anchored to arrive=$targetArrive');
     }
 
     // Deduplicate morning task order (furniture-move contributes 2 stops).
@@ -846,9 +895,12 @@ class DropsheetRoutePlanner {
     }
 
     // Return leg after morning so the arrive task gets an ETA even if no
-    // afternoon leg follows.  When there IS an afternoon leg this ETA is
-    // overwritten by the afternoon return below.
-    if (currentId != null) {
+    // afternoon leg follows. Skipped when pick-ups follow: the driver does NOT
+    // return to the office between drops and pick-ups — he continues straight
+    // from his last drop-off, and the afternoon leg ends with the real
+    // return-to-office leg instead.
+    final continuesToPickups = hasSeparator && afternoonRoutable > 0;
+    if (currentId != null && !continuesToPickups) {
       final lastAddr =
           _addressFor(id: currentId, lat: currentLat, lng: currentLng);
       final returnSeg = await _matrix.getRouteSegment(lastAddr, depotAddr,
@@ -865,10 +917,7 @@ class DropsheetRoutePlanner {
         legBeforeStopMap['__depot'] = returnLeg;
         clock =
             clock.add(Duration(seconds: returnSeg.durationInTrafficSeconds));
-        // Only commit this as the arrive ETA when no afternoon leg follows.
-        if (!hasSeparator || afternoonRoutable == 0) {
-          arrivalTimes['__depot'] = _fmtHHmm(clock);
-        }
+        arrivalTimes['__depot'] = _fmtHHmm(clock);
       }
     }
 
@@ -877,16 +926,17 @@ class DropsheetRoutePlanner {
       taskOrder.add(separatorTask!.id);
 
       if (afternoonData.isNotEmpty) {
-        // Reset clock to separator's departure time; reset position to depot.
-        final sepTimeStr = separatorTask.startTime.isNotEmpty
-            ? separatorTask.startTime
-            : '17:30';
-        final sepStart = _parseStartTime(sepTimeStr);
+        // The driver continues from his last morning drop-off (not the office),
+        // so the afternoon leg starts there. We only reset the clock to a
+        // mid-afternoon estimate (traffic hint only); the absolute ETAs are
+        // re-anchored afterwards so the final depot arrival equals the Arrive
+        // task's target time. currentId/currentLat/currentLng are intentionally
+        // carried over from the morning leg — fall back to the depot only when
+        // there were no routable morning stops.
+        final targetArrive = _arriveTargetTime(section);
+        final sepStart = _parseStartTime(_afternoonStartEstimate);
         clock = DateTime(baseDate.year, baseDate.month, baseDate.day,
             sepStart.hour, sepStart.minute);
-        currentId = null;
-        currentLat = depot.lat!;
-        currentLng = depot.lng!;
 
         final afOrdered = <RouteStop>[];
 
@@ -954,8 +1004,15 @@ class DropsheetRoutePlanner {
           }
         }
 
-        debugPrint(
-            '[DropsheetRoute] afternoon in-place: ${afOrdered.length} stops');
+        // Re-anchor afternoon ETAs so depot arrival == target arrive time.
+        _anchorAfternoonToArrive(
+          arrivalTimes: arrivalTimes,
+          afternoonStops: afOrdered,
+          targetArrive: targetArrive,
+        );
+
+        debugPrint('[DropsheetRoute] afternoon in-place: ${afOrdered.length} '
+            'stops, anchored to arrive=$targetArrive');
       }
     }
 
@@ -1022,4 +1079,49 @@ class DropsheetRoutePlanner {
 
   String _fmtHHmm(DateTime d) =>
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+
+  /// The target time the driver should arrive back at the office, taken from
+  /// the Arrive task's `startTime`. Defaults to `17:30` when unset. Afternoon
+  /// pick-up ETAs are anchored to this value and computed backwards.
+  String _arriveTargetTime(DropsheetDriverSection section) {
+    final arrive = section.tasks
+        .where((t) =>
+            t.type == DropsheetTaskType.arrive && t.startTime.isNotEmpty)
+        .firstOrNull;
+    return arrive?.startTime ?? '17:30';
+  }
+
+  int _minutesOfHHmm(String hhmm) {
+    final p = _parseStartTime(hhmm);
+    return p.hour * 60 + p.minute;
+  }
+
+  String _shiftHHmm(String hhmm, int deltaMinutes) {
+    final total = (_minutesOfHHmm(hhmm) + deltaMinutes).clamp(0, 23 * 60 + 59);
+    return '${(total ~/ 60).toString().padLeft(2, '0')}:'
+        '${(total % 60).toString().padLeft(2, '0')}';
+  }
+
+  /// Re-anchors the afternoon (post-separator) leg so the final depot arrival
+  /// equals [targetArrive]. The afternoon leg is routed forward to obtain the
+  /// real leg durations and relative spacing; this shifts every afternoon stop
+  /// ETA by the same delta so the driver arrives at the office on time, then
+  /// pins the depot arrival to the target. Mutates [arrivalTimes] in place.
+  void _anchorAfternoonToArrive({
+    required Map<String, String> arrivalTimes,
+    required Iterable<RouteStop> afternoonStops,
+    required String targetArrive,
+  }) {
+    final computedDepot = arrivalTimes['__depot'];
+    if (computedDepot != null) {
+      final delta = _minutesOfHHmm(targetArrive) - _minutesOfHHmm(computedDepot);
+      if (delta != 0) {
+        for (final stop in afternoonStops) {
+          final eta = arrivalTimes[stop.stopKey];
+          if (eta != null) arrivalTimes[stop.stopKey] = _shiftHHmm(eta, delta);
+        }
+      }
+    }
+    arrivalTimes['__depot'] = targetArrive;
+  }
 }

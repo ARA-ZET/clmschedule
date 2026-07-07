@@ -183,12 +183,17 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
 
   // Global polygon settings
   bool _useBlackBorders = false;
-  int _globalBorderWidth = 3;
+  int _globalBorderWidth = 4;
 
   // Position and size of the movable info box
   Offset _infoBoxPosition = const Offset(20, 20);
   Size _infoBoxSize = const Size(250, 300); // Default size
   double _fontScale = 1.0; // Font scale factor
+
+  // Indices (into _job.clients) of clients hidden from the distributor info
+  // box. Hidden clients are excluded from the on-screen box (and screenshots)
+  // and the printed PDF, but can be brought back from the visibility dialog.
+  final Set<int> _hiddenClientIndices = {};
 
   // Position and size of the work areas box (when multiple areas exist)
   Offset _workAreasBoxPosition = const Offset(20, 220);
@@ -228,7 +233,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
   // Keyed by the polygon's index in `_job.workMaps`. Created lazily so that
   // existing anchor/text edits are preserved across rebuilds.
   final Map<int, _PolygonLabel> _polygonLabels = {};
-  bool _showPolygonLabels = true;
+  bool _showPolygonLabels = false;
   int? _editingLabelIndex;
   int? _draggingLabelIndex;
   TextEditingController? _labelEditController;
@@ -946,6 +951,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
           job: _job,
           distributorName: widget.distributorName,
           isLandscape: isLandscape,
+          hiddenClientIndices: _hiddenClientIndices,
         ),
         debugLabel: 'distribution-map-pdf',
       );
@@ -1668,6 +1674,50 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
             },
           ),
 
+          // Client visibility (hide/show clients in the info box)
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              IconButton(
+                icon: Icon(
+                  _hiddenClientIndices.isEmpty
+                      ? Icons.people_outline
+                      : Icons.people,
+                  color: _hiddenClientIndices.isEmpty
+                      ? null
+                      : const Color(0xFF1967D2),
+                ),
+                tooltip: _hiddenClientIndices.isEmpty
+                    ? 'Show/hide clients in info box'
+                    : '${_hiddenClientIndices.length} client(s) hidden',
+                onPressed: _showClientVisibilityDialog,
+              ),
+              if (_hiddenClientIndices.isNotEmpty)
+                Positioned(
+                  right: 6,
+                  top: 6,
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: const BoxDecoration(
+                      color: Colors.orange,
+                      shape: BoxShape.circle,
+                    ),
+                    constraints:
+                        const BoxConstraints(minWidth: 16, minHeight: 16),
+                    child: Text(
+                      '${_hiddenClientIndices.length}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+
           // Print button
           IconButton(
             icon: const Icon(Icons.print),
@@ -2262,6 +2312,109 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
     );
   }
 
+  /// Clients that should appear in the distributor info box, paired with their
+  /// original index in `_job.clients`. Excludes blank names and any client the
+  /// user has hidden via the visibility dialog.
+  List<MapEntry<int, String>> _visibleClientEntries() {
+    return _job.clients
+        .asMap()
+        .entries
+        .where((e) =>
+            e.value.trim().isNotEmpty && !_hiddenClientIndices.contains(e.key))
+        .toList();
+  }
+
+  /// Dialog listing every client with a checkbox. Unticking hides the client
+  /// from the info box (and printout); re-ticking brings it back.
+  Future<void> _showClientVisibilityDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            void toggle(int index, bool visible) {
+              setState(() {
+                if (visible) {
+                  _hiddenClientIndices.remove(index);
+                } else {
+                  _hiddenClientIndices.add(index);
+                }
+              });
+              setDialogState(() {});
+            }
+
+            final entries = _job.clients
+                .asMap()
+                .entries
+                .where((e) => e.value.trim().isNotEmpty)
+                .toList();
+
+            return AlertDialog(
+              title: const Text('Clients in info box'),
+              content: SizedBox(
+                width: 360,
+                child: entries.isEmpty
+                    ? const Text('This job has no clients.')
+                    : Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              'Untick a client to hide it from the map info '
+                              'box. Re-tick to bring it back.',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Flexible(
+                            child: ListView(
+                              shrinkWrap: true,
+                              children: entries.map((entry) {
+                                final visible =
+                                    !_hiddenClientIndices.contains(entry.key);
+                                return CheckboxListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  value: visible,
+                                  title: Text(
+                                    entry.value.trim(),
+                                    style: TextStyle(
+                                      decoration: visible
+                                          ? null
+                                          : TextDecoration.lineThrough,
+                                      color: visible ? null : Colors.grey,
+                                    ),
+                                  ),
+                                  onChanged: (v) => toggle(entry.key, v ?? true),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+              actions: [
+                if (_hiddenClientIndices.isNotEmpty)
+                  TextButton(
+                    onPressed: () {
+                      setState(() => _hiddenClientIndices.clear());
+                      setDialogState(() {});
+                    },
+                    child: const Text('Show all'),
+                  ),
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Done'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _buildInfoBox() {
     final dateFormatter = DateFormat('dd MMM yyyy');
 
@@ -2313,9 +2466,10 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
             ),
           ),
           SizedBox(height: 3 * _fontScale),
-          ..._job.clients.asMap().entries.map((entry) {
-            final i = entry.key;
-            final client = entry.value;
+          ..._visibleClientEntries().asMap().entries.map((display) {
+            final displayNumber = display.key + 1;
+            final i = display.value.key;
+            final client = display.value.value;
             final instruction = i < _job.clientInstructions.length
                 ? _job.clientInstructions[i].trim()
                 : '';
@@ -2326,7 +2480,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '${i + 1}. ',
+                    '$displayNumber. ',
                     style: TextStyle(
                       fontSize: 10 * _fontScale,
                       fontWeight: FontWeight.bold,
@@ -2362,7 +2516,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
             );
           }),
 
-          if (_job.clients.isEmpty)
+          if (_visibleClientEntries().isEmpty)
             Padding(
               padding: EdgeInsets.only(left: 12 * _fontScale),
               child: Text(

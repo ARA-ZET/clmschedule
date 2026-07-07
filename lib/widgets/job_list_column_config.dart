@@ -15,7 +15,7 @@ class JobListColumnConfig {
     'specialInstructions': 200,
     'collectionDate': 100,
     'invoice': 100,
-    'amount': 100,
+    'amount': 130,
     'quantityDistributed': 110,
     'invoiceDetails': 120,
     'reportAddresses': 150,

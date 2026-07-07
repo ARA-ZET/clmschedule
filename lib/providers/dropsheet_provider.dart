@@ -31,6 +31,9 @@ const List<String> _distributorTaskDataKeys = [
   'workArea',
   'lat',
   'lng',
+  // Carried so a pick-up built from a per-area drop-off renders at that same
+  // per-area coordinate (see day_planner_page _stopPointsFor).
+  'workAreaPin',
 ];
 
 class DropsheetPickupSyncResult {
@@ -346,13 +349,28 @@ class DropsheetProvider extends ChangeNotifier {
     if (jtp == null) return;
 
     final jobListItems = items ?? _pendingJobListItems;
+
+    // Snapshot _day once before any async work so Pass A and the final
+    // _save both operate on the same base. Without this, a concurrent
+    // schedule sync could write to _day between our computation and save,
+    // and the copyWith at the end would silently discard that write.
+    final daySnapshot = _day;
+
+    // Guard: if the item list is empty we cannot distinguish "stream not
+    // yet loaded" from "genuinely zero items for this date". Allowing
+    // Pass A to run against an empty list would delete every linked task
+    // the moment the JLP listener fires before its first Firestore
+    // snapshot — a silent data-loss bug. Skip the sync; the debounced
+    // listener will retry as soon as the stream delivers real data.
+    if (jobListItems.isEmpty) return;
+
     final itemsById = <String, JobListItem>{
       for (final item in jobListItems) item.id: item,
     };
 
     // ── Pass A: update / remove existing jl-sourced tasks ─────────────────
     var changed = false;
-    var nextSections = _day.sections.map((section) {
+    var nextSections = daySnapshot.sections.map((section) {
       final nextTasks = <DropsheetTask>[];
       for (final task in section.tasks) {
         final srcId = task.sourceJobListItemId;
@@ -393,24 +411,55 @@ class DropsheetProvider extends ChangeNotifier {
 
     if (newItems.isNotEmpty) {
       changed = true;
-      final newTasks = <DropsheetTask>[];
-      for (final item in newItems) {
+      // Geocode all new items in parallel rather than sequentially so
+      // N new items cost one round-trip's worth of latency, not N×latency.
+      final newTasks = await Future.wait(newItems.map((item) async {
         var task = _buildJobListTask(item, jtp);
-        // Geocode the address before persisting so the route optimiser and
-        // map view have coordinates immediately.
-        final address = task.location.trim();
-        if (address.isNotEmpty && !task.typeData.containsKey('lat')) {
-          final query = '$address, Western Cape, South Africa';
-          final coords = await GeocodingService().geocodeAddress(query);
-          if (coords != null) {
-            final td = Map<String, dynamic>.from(task.typeData)
-              ..['lat'] = coords['lat']
-              ..['lng'] = coords['lng'];
-            task = task.copyWith(typeData: td);
+        final td = Map<String, dynamic>.from(task.typeData);
+        if (task.type == DropsheetTaskType.furnitureMove) {
+          // Two-stop tasks need separate coords for each stop.
+          final loadAddr =
+              (td['loadingAddress'] as String?)?.trim() ?? '';
+          final offAddr =
+              (td['offloadAddress'] as String?)?.trim() ?? '';
+          final results = await Future.wait([
+            if (loadAddr.isNotEmpty && !td.containsKey('loadingLat'))
+              GeocodingService()
+                  .geocodeAddress('$loadAddr, Western Cape, South Africa')
+            else
+              Future.value(null),
+            if (offAddr.isNotEmpty && !td.containsKey('offloadLat'))
+              GeocodingService()
+                  .geocodeAddress('$offAddr, Western Cape, South Africa')
+            else
+              Future.value(null),
+          ]);
+          final loadCoords = results[0];
+          final offCoords = results[1];
+          if (loadCoords != null) {
+            td['loadingLat'] = loadCoords['lat'];
+            td['loadingLng'] = loadCoords['lng'];
+            td['lat'] = loadCoords['lat'];
+            td['lng'] = loadCoords['lng'];
+          }
+          if (offCoords != null) {
+            td['offloadLat'] = offCoords['lat'];
+            td['offloadLng'] = offCoords['lng'];
+          }
+        } else {
+          final address = task.location.trim();
+          if (address.isNotEmpty && !td.containsKey('lat')) {
+            final coords = await GeocodingService()
+                .geocodeAddress('$address, Western Cape, South Africa');
+            if (coords != null) {
+              td['lat'] = coords['lat'];
+              td['lng'] = coords['lng'];
+            }
           }
         }
-        newTasks.add(task);
-      }
+        task = task.copyWith(typeData: td);
+        return task;
+      }));
 
       final idx = nextSections.indexWhere((s) => s.id == kUnassignedSectionId);
       if (idx == -1) {
@@ -434,8 +483,74 @@ class DropsheetProvider extends ChangeNotifier {
       }
     }
 
+    // ── Pass C: backfill two-stop coords on existing furnitureMove tasks ──────
+    // Handles tasks that were created before the two-stop geocoding was
+    // introduced. They have loadingAddress/offloadAddress but no
+    // loadingLat/offloadLat. Pass B only runs for truly new items, so these
+    // tasks are never re-geocoded through normal sync — this pass catches them.
+    final fmNeedingGeo = [
+      for (var si = 0; si < nextSections.length; si++)
+        for (var ti = 0; ti < nextSections[si].tasks.length; ti++)
+          for (final t in [nextSections[si].tasks[ti]])
+            if (t.type == DropsheetTaskType.furnitureMove &&
+                ((!t.typeData.containsKey('loadingLat') &&
+                        (t.typeData['loadingAddress'] as String?)?.isNotEmpty ==
+                            true) ||
+                    (!t.typeData.containsKey('offloadLat') &&
+                        (t.typeData['offloadAddress'] as String?)?.isNotEmpty ==
+                            true)))
+              (si: si, ti: ti, task: t),
+    ];
+
+    if (fmNeedingGeo.isNotEmpty) {
+      changed = true;
+      final geocoded = await Future.wait(fmNeedingGeo.map((e) async {
+        final td = Map<String, dynamic>.from(e.task.typeData);
+        final loadAddr = !td.containsKey('loadingLat')
+            ? (td['loadingAddress'] as String?)?.trim() ?? ''
+            : '';
+        final offAddr = !td.containsKey('offloadLat')
+            ? (td['offloadAddress'] as String?)?.trim() ?? ''
+            : '';
+        final results = await Future.wait([
+          if (loadAddr.isNotEmpty)
+            GeocodingService()
+                .geocodeAddress('$loadAddr, Western Cape, South Africa')
+          else
+            Future.value(null),
+          if (offAddr.isNotEmpty)
+            GeocodingService()
+                .geocodeAddress('$offAddr, Western Cape, South Africa')
+          else
+            Future.value(null),
+        ]);
+        final loadCoords = results[0];
+        final offCoords = results[1];
+        if (loadCoords != null) {
+          td['loadingLat'] = loadCoords['lat'];
+          td['loadingLng'] = loadCoords['lng'];
+          td['lat'] = loadCoords['lat'];
+          td['lng'] = loadCoords['lng'];
+        }
+        if (offCoords != null) {
+          td['offloadLat'] = offCoords['lat'];
+          td['offloadLng'] = offCoords['lng'];
+        }
+        return (si: e.si, ti: e.ti, td: td);
+      }));
+      final sections = nextSections.toList();
+      for (final r in geocoded) {
+        final s = sections[r.si];
+        final tasks = [...s.tasks];
+        tasks[r.ti] = tasks[r.ti].copyWith(typeData: r.td);
+        sections[r.si] = s.copyWith(tasks: tasks);
+      }
+      nextSections = sections;
+    }
+
     if (!changed) return;
-    await _save(_day.copyWith(sections: nextSections), skipIfUnchanged: true);
+    await _save(daySnapshot.copyWith(sections: nextSections),
+        skipIfUnchanged: true);
   }
 
   /// Build a [DropsheetTask] from a [JobListItem] that has [appearsOnDropsheet].
@@ -454,8 +569,14 @@ class DropsheetProvider extends ChangeNotifier {
     JobTypeProvider jtp, {
     DropsheetTask? existingTask,
   }) {
-    final taskType =
-        DropsheetTaskType.fromKey(jtp.dropsheetTaskTypeKey(item.jobTypeId));
+    // Two-stop job types (e.g. trailer towing, furniture moves) must render as
+    // a furnitureMove dropsheet task — it is the only task type that carries a
+    // loading + offloading address and two routing stops. Force the mapping so
+    // a two-stop job never collapses to a single-stop collection/custom task.
+    final isTwoStop = jtp.hasTwoStops(item.jobTypeId);
+    final taskType = isTwoStop
+        ? DropsheetTaskType.furnitureMove
+        : DropsheetTaskType.fromKey(jtp.dropsheetTaskTypeKey(item.jobTypeId));
     final label = jtp.getJobTypeLabel(item.jobTypeId);
 
     // Address: prefer area unless it is a map link (mirrors _addressForJobListItem).
@@ -468,7 +589,9 @@ class DropsheetProvider extends ChangeNotifier {
     // Use a human-friendly type label that matches the dialog's task title.
     final typeLabel = switch (taskType) {
       DropsheetTaskType.collection => 'Collection',
-      DropsheetTaskType.furnitureMove => 'Furniture move',
+      // For a forced two-stop mapping keep the job type's own label (e.g.
+      // "Trailer Towing"); only the genuine furniture-move type reads "Furniture move".
+      DropsheetTaskType.furnitureMove => isTwoStop ? label : 'Furniture move',
       _ => label,
     };
 
@@ -478,9 +601,61 @@ class DropsheetProvider extends ChangeNotifier {
             '${item.date.minute.toString().padLeft(2, '0')}'
         : '';
 
-    // Preserve geocoded coordinates so re-syncs don't erase them.
-    final lat = (existingTask?.typeData['lat'] as num?)?.toDouble();
-    final lng = (existingTask?.typeData['lng'] as num?)?.toDouble();
+    final isTwoStopTask = taskType == DropsheetTaskType.furnitureMove;
+
+    // Two-stop addresses, kept in sync with the job list:
+    //   loading  ← the job's "Loading Address" (stored in `area`)
+    //   offload  ← the dedicated `offloadingAddress` field
+    final loadingAddress = address;
+    final offloadAddress = () {
+      // Prefer the dedicated offloadingAddress field so edits on the job list
+      // propagate to the dropsheet task.
+      final offload = item.offloadingAddress.trim();
+      if (offload.isNotEmpty) return offload;
+      // Otherwise keep any offload the user typed directly on the task.
+      final existing =
+          (existingTask?.typeData['offloadAddress'] as String?)?.trim();
+      if (existing != null && existing.isNotEmpty) return existing;
+      // Legacy fallback: collectionAddress when area was used as loading.
+      final area = item.area.trim();
+      final col = item.collectionAddress.trim();
+      if (area.isNotEmpty && !_isMapLinkOrUrl(area) && col.isNotEmpty) {
+        return col;
+      }
+      return item.specialInstructions.trim();
+    }();
+
+    // Preserve geocoded coordinates across re-syncs — but only while the
+    // matching address is unchanged. When the job list address changes the
+    // stale coords are dropped so the sync re-geocodes them (Pass C / Pass B).
+    final prevLoading =
+        (existingTask?.typeData['loadingAddress'] as String?)?.trim() ?? '';
+    final prevOffload =
+        (existingTask?.typeData['offloadAddress'] as String?)?.trim() ?? '';
+    final loadingUnchanged = prevLoading == loadingAddress.trim();
+    final offloadUnchanged = prevOffload == offloadAddress.trim();
+
+    // Single-stop tasks track the primary address in `lat`/`lng`; two-stop
+    // tasks track the loading stop there.
+    final keepPrimaryCoords = !isTwoStopTask || loadingUnchanged;
+    final lat = keepPrimaryCoords
+        ? (existingTask?.typeData['lat'] as num?)?.toDouble()
+        : null;
+    final lng = keepPrimaryCoords
+        ? (existingTask?.typeData['lng'] as num?)?.toDouble()
+        : null;
+    final loadingLat = loadingUnchanged
+        ? (existingTask?.typeData['loadingLat'] as num?)?.toDouble()
+        : null;
+    final loadingLng = loadingUnchanged
+        ? (existingTask?.typeData['loadingLng'] as num?)?.toDouble()
+        : null;
+    final offloadLat = offloadUnchanged
+        ? (existingTask?.typeData['offloadLat'] as num?)?.toDouble()
+        : null;
+    final offloadLng = offloadUnchanged
+        ? (existingTask?.typeData['offloadLng'] as num?)?.toDouble()
+        : null;
 
     // Build type-specific typeData (matches dialog setState block).
     final typeData = <String, dynamic>{
@@ -497,21 +672,14 @@ class DropsheetProvider extends ChangeNotifier {
       '_jlFp': _jobListTaskFingerprint(item),
       if (lat != null) 'lat': lat,
       if (lng != null) 'lng': lng,
-      if (taskType == DropsheetTaskType.furnitureMove) ...{
-        'loadingAddress': address,
-        // Offload: if area filled loading, use collectionAddress; otherwise
-        // fall back to specialInstructions — same logic as the dialog picker.
-        'offloadAddress': existingTask?.typeData['offloadAddress'] as String? ??
-            () {
-              final area = item.area.trim();
-              final col = item.collectionAddress.trim();
-              final si = item.specialInstructions.trim();
-              if (area.isNotEmpty && !_isMapLinkOrUrl(area) && col.isNotEmpty) {
-                return col;
-              }
-              return si.isNotEmpty ? si : '';
-            }(),
+      if (isTwoStopTask) ...{
+        'loadingAddress': loadingAddress,
+        'offloadAddress': offloadAddress,
         'notes': item.specialInstructions,
+        if (loadingLat != null) 'loadingLat': loadingLat,
+        if (loadingLng != null) 'loadingLng': loadingLng,
+        if (offloadLat != null) 'offloadLat': offloadLat,
+        if (offloadLng != null) 'offloadLng': offloadLng,
       },
     };
 
@@ -570,7 +738,8 @@ class DropsheetProvider extends ChangeNotifier {
   /// Dropsheet task. Used by [syncJobListTasks] to skip no-op updates.
   static String _jobListTaskFingerprint(JobListItem item) {
     return '${item.jobTypeId}|${item.client}|${item.area}|'
-        '${item.collectionAddress}|${item.date.millisecondsSinceEpoch}|'
+        '${item.collectionAddress}|${item.offloadingAddress}|'
+        '${item.date.millisecondsSinceEpoch}|'
         '${item.specialInstructions}|${item.jobStatusId}';
   }
 
@@ -712,6 +881,28 @@ class DropsheetProvider extends ChangeNotifier {
           continue;
         }
 
+        // Per-area drop-off (added manually for a specific work area): keep its
+        // pinned work area + coordinate intact; only refresh the distributor's
+        // name/phone so the row stays current. The job is still consumed so
+        // Pass 2 doesn't re-add a default drop-off for it.
+        if (task.typeData['workAreaPin'] == true) {
+          consumedJobIds.add(match.id);
+          final dist = byId[match.distributorId];
+          final name = dist?.name ?? match.distributorId;
+          final phone = dist?.phone1 ?? '';
+          final td = Map<String, dynamic>.from(task.typeData)
+            ..['distributorJobId'] = match.id
+            ..['distributorId'] = match.distributorId
+            ..['distributorName'] = name;
+          updatedTasks.add(task.copyWith(
+            details: name,
+            contact: name,
+            tel: phone,
+            typeData: td,
+          ));
+          continue;
+        }
+
         consumedJobIds.add(match.id);
         final dist = byId[match.distributorId];
         final name = dist?.name ?? match.distributorId;
@@ -790,16 +981,20 @@ class DropsheetProvider extends ChangeNotifier {
     return encA == encB;
   }
 
-  /// Creates one pick-up task for each assigned drop-off task that does not
-  /// already have a matching pick-up anywhere on the current day's dropsheet.
+  /// Creates a single pick-up task per **distributor** that has assigned
+  /// drop-offs but no matching pick-up yet anywhere on the day's dropsheet.
+  /// When a distributor has multiple drop-offs (e.g. several work areas), the
+  /// one pick-up is collected at their **last** drop-off in route order.
   /// The unassigned bucket is ignored until those stops are placed on drivers.
   Future<DropsheetPickupSyncResult> syncPickupsFromDropOffs(
       {bool reversed = true}) async {
+    // Existing pick-ups anywhere on the day, keyed by distributor — so at most
+    // one pick-up per distributor is ever created.
     final existingPickupKeys = <String>{};
     for (final section in _day.sections) {
       for (final task in section.tasks) {
         if (task.type != DropsheetTaskType.pickUp) continue;
-        final key = _pickupSyncKey(task);
+        final key = _distributorGroupKey(task);
         if (key != null) existingPickupKeys.add(key);
       }
     }
@@ -815,48 +1010,56 @@ class DropsheetProvider extends ChangeNotifier {
     final updatedSections = _day.sections.map((section) {
       if (section.id == kUnassignedSectionId) return section;
 
+      // Pick-ups already in this section, keyed by distributor.
       final localPickupsByKey = <String, DropsheetTask>{};
       for (final task in section.tasks) {
         if (task.type != DropsheetTaskType.pickUp) continue;
-        final key = _pickupSyncKey(task);
+        final key = _distributorGroupKey(task);
         if (key != null) localPickupsByKey.putIfAbsent(key, () => task);
       }
 
+      // The LAST drop-off (in section/route order) per distributor — the single
+      // pick-up for that distributor is built from it.
+      final lastDropByDist = <String, ({DropsheetTask task, int index})>{};
+      for (var i = 0; i < section.tasks.length; i++) {
+        final task = section.tasks[i];
+        if (task.type != DropsheetTaskType.dropOff) continue;
+        dropOffCount++;
+        final key = _distributorGroupKey(task);
+        if (key == null) continue;
+        lastDropByDist[key] = (task: task, index: i);
+      }
+
+      // Order distributors by their last drop-off position; `reversed` flips it
+      // (default: pick up in the reverse of drop order).
+      var groups = lastDropByDist.entries.toList()
+        ..sort((a, b) => a.value.index.compareTo(b.value.index));
+      if (reversed) groups = groups.reversed.toList();
+
       final orderedPickups = <DropsheetTask>[];
       final movedPickupIds = <String>{};
-      final processedDropOffKeys = <String>{};
-      final taskIter =
-          reversed ? section.tasks.reversed.toList() : section.tasks.toList();
-      for (final task in taskIter) {
-        if (task.type != DropsheetTaskType.dropOff) continue;
+      for (final entry in groups) {
+        final distKey = entry.key;
+        final lastDrop = entry.value.task;
 
-        dropOffCount++;
-        final dropOffKey = _dropOffSyncKey(task);
-        if (!processedDropOffKeys.add(dropOffKey)) {
-          skippedCount++;
-          continue;
-        }
-
-        final localPickup = localPickupsByKey[dropOffKey];
+        final localPickup = localPickupsByKey[distKey];
         if (localPickup != null) {
           orderedPickups.add(localPickup);
           movedPickupIds.add(localPickup.id);
           skippedCount++;
           continue;
         }
-
-        if (existingPickupKeys.contains(dropOffKey)) {
+        if (existingPickupKeys.contains(distKey)) {
           skippedCount++;
           continue;
         }
-
         orderedPickups.add(_buildPickUpTaskFromDropOff(
-          task,
+          lastDrop,
           timestamp: timestamp,
           sequence: sequence,
         ));
         sequence++;
-        existingPickupKeys.add(dropOffKey);
+        existingPickupKeys.add(distKey);
         createdCount++;
       }
 
@@ -872,23 +1075,18 @@ class DropsheetProvider extends ChangeNotifier {
 
       // Insert a "Leave (start pickups)" divider once, just before the pickups.
       // Recognised by typeData['isPickupDivider'] == true; only one per section.
+      // The divider is a purely visual marker — it carries no time or location.
+      // Afternoon pick-up ETAs are anchored to the Arrive task's target time
+      // and computed backwards (see DropsheetRoutePlanner).
       final hasDivider = nonTrailing.any((t) =>
           t.type == DropsheetTaskType.leave &&
           t.typeData['isPickupDivider'] == true);
-      // Default departure time: use the arrive task's existing time if
-      // calculated, otherwise fall back to 17:30.
-      final arriveTime = section.tasks
-              .where((t) => t.type == DropsheetTaskType.arrive)
-              .firstOrNull
-              ?.startTime ??
-          '';
       final divider = hasDivider
           ? null
           : DropsheetTask(
               id: '${section.id}_pickup_div_$timestamp',
               type: DropsheetTaskType.leave,
               job: 'Leave',
-              startTime: arriveTime.isNotEmpty ? arriveTime : '17:30',
               isMandatory: false,
               typeData: const {'isPickupDivider': true},
             );
@@ -928,6 +1126,7 @@ class DropsheetProvider extends ChangeNotifier {
   static List<DropsheetTask> _buildDropOffTasksStatic(
       List<Job> jobs, Map<String, Distributor> byId) {
     final out = <DropsheetTask>[];
+    final timestamp = DateTime.now().microsecondsSinceEpoch;
     for (final j in jobs) {
       final dist = byId[j.distributorId];
       final name = dist?.name ?? j.distributorId;
@@ -935,7 +1134,7 @@ class DropsheetProvider extends ChangeNotifier {
       final wa = j.workingAreas.join(', ');
       out.add(
         DropsheetTask(
-          id: 't_dropoff_${j.id}_${DateTime.now().microsecondsSinceEpoch}_${out.length}',
+          id: 't_dropoff_${j.id}_${timestamp}_${out.length}',
           type: DropsheetTaskType.dropOff,
           job: wa.isEmpty ? 'Drop off' : 'Drop off: $wa',
           details: name,
@@ -999,17 +1198,16 @@ class DropsheetProvider extends ChangeNotifier {
     return 'Pick up: $sourceLabel';
   }
 
-  String _dropOffSyncKey(DropsheetTask task) =>
-      _distributorSyncKey(task) ?? 'dropoff:${_normaliseTaskKeyPart(task.id)}';
-
-  String? _pickupSyncKey(DropsheetTask task) {
-    final distributorKey = _distributorSyncKey(task);
-    if (distributorKey != null) return distributorKey;
-    final sourceDropOffTaskId =
-        _normaliseTaskKeyPart(task.typeData['sourceDropOffTaskId']);
-    if (sourceDropOffTaskId.isNotEmpty) {
-      return 'dropoff:$sourceDropOffTaskId';
-    }
+  /// Distributor-level grouping key (ignores work area / job) so all of a
+  /// distributor's drop-offs collapse to one pick-up. Falls back to the
+  /// distributor name / contact for hand-entered tasks without an id.
+  String? _distributorGroupKey(DropsheetTask task) {
+    final distributorId = _normaliseTaskKeyPart(task.typeData['distributorId']);
+    if (distributorId.isNotEmpty) return 'dist:$distributorId';
+    final name = _normaliseTaskKeyPart(task.typeData['distributorName']);
+    if (name.isNotEmpty) return 'distname:$name';
+    final contact = _normaliseTaskKeyPart(task.contact);
+    if (contact.isNotEmpty) return 'distname:$contact';
     return null;
   }
 
@@ -1155,12 +1353,15 @@ class DropsheetProvider extends ChangeNotifier {
     if (_day.sections.any((s) => s.driverId == driver.id)) return;
     final taskConfig = _ref?.read(dropsheetTaskConfigRiverpod);
     final depot = taskConfig?.depot;
+    final packDefault =
+        taskConfig?.configFor(DropsheetTaskType.pack).defaultDetails;
     final section = DropsheetDriverSection.create(
       driverId: driver.id,
       driverName: driver.name,
       vehicle: vehicle ?? driver.defaultVehicle,
       trailer: trailer ?? driver.defaultTrailer,
       depot: depot,
+      packDetails: packDefault?.isNotEmpty == true ? packDefault : null,
     );
     await _save(_day.copyWith(sections: [..._day.sections, section]));
   }
@@ -1291,9 +1492,10 @@ class DropsheetProvider extends ChangeNotifier {
         continue;
       }
 
-      // Afternoon tasks (after separator) are handled in the second leg below.
+      // Afternoon tasks (after separator) are anchored to the Arrive target
+      // time, not the morning leave time — leave them unchanged here.
       if (separatorIdx != -1 && i > separatorIdx) {
-        updatedTasks.add(task); // placeholder; will be replaced below
+        updatedTasks.add(task);
         continue;
       }
 
@@ -1333,8 +1535,13 @@ class DropsheetProvider extends ChangeNotifier {
     }
 
     // Apply return-leg ETA to the arrive task using its stored leg duration.
+    // Skipped when a separator exists: the afternoon leg (and therefore the
+    // depot arrival) is anchored to the Arrive task's user-specified target
+    // time, not derived from the morning leave time. The afternoon is
+    // recomputed separately by [recalculateAfternoonFromArrive].
     final withArrive = updatedTasks.map((task) {
       if (task.type != DropsheetTaskType.arrive) return task;
+      if (separatorIdx != -1) return task;
       final legS = (task.typeData['legDurationS'] as num?)?.toInt() ?? 0;
       if (legS == 0) return task;
       final arriveEta = fmtHHmm(clock.add(Duration(seconds: legS)));
@@ -1343,60 +1550,10 @@ class DropsheetProvider extends ChangeNotifier {
       return task.copyWith(startTime: arriveEta, typeData: newData);
     }).toList();
 
-    // ── Afternoon leg replay ──────────────────────────────────────────────
-    // If there's a separator, replay afternoon tasks from its departure time.
-    final finalTasks = separatorIdx == -1
-        ? withArrive
-        : () {
-            // Reset clock to separator's departure time.
-            final sepTime = (withArrive[separatorIdx].startTime.isNotEmpty)
-                ? withArrive[separatorIdx].startTime
-                : '17:30';
-            final sepParts = sepTime.split(':');
-            final sh = int.tryParse(sepParts.elementAtOrNull(0) ?? '') ?? 17;
-            final sm = int.tryParse(sepParts.elementAtOrNull(1) ?? '') ?? 30;
-            var afClock = DateTime(_date.year, _date.month, _date.day, sh, sm);
-
-            return withArrive.asMap().entries.map((entry) {
-              final i = entry.key;
-              final task = entry.value;
-              if (i <= separatorIdx) return task; // morning already done
-              if (task.isMandatory) return task;
-              if (task.typeData['isPickupDivider'] == true) return task;
-
-              if (task.type == DropsheetTaskType.furnitureMove) {
-                final loadLegS =
-                    (task.typeData['loadingLegDurationS'] as num?)?.toInt() ??
-                        0;
-                final offLegS =
-                    (task.typeData['offloadLegDurationS'] as num?)?.toInt() ??
-                        0;
-                if (loadLegS == 0 && offLegS == 0) return task;
-                final svc = serviceMinutes(task);
-                afClock = afClock.add(Duration(seconds: loadLegS));
-                final loadEta = fmtHHmm(afClock);
-                afClock = afClock.add(Duration(minutes: svc ~/ 2));
-                afClock = afClock.add(Duration(seconds: offLegS));
-                final offEta = fmtHHmm(afClock);
-                afClock = afClock.add(Duration(minutes: svc - (svc ~/ 2)));
-                final newData = Map<String, dynamic>.from(task.typeData)
-                  ..['loadingEta'] = loadEta
-                  ..['offloadEta'] = offEta
-                  ..['eta'] = offEta;
-                return task.copyWith(startTime: offEta, typeData: newData);
-              } else {
-                final legS =
-                    (task.typeData['legDurationS'] as num?)?.toInt() ?? 0;
-                if (legS == 0) return task;
-                afClock = afClock.add(Duration(seconds: legS));
-                final eta = fmtHHmm(afClock);
-                afClock = afClock.add(Duration(minutes: serviceMinutes(task)));
-                final newData = Map<String, dynamic>.from(task.typeData)
-                  ..['eta'] = eta;
-                return task.copyWith(startTime: eta, typeData: newData);
-              }
-            }).toList();
-          }();
+    // When a separator exists the afternoon tasks are left untouched here —
+    // changing the morning departure does not move the afternoon pick-ups,
+    // which are pinned backwards from the Arrive target time.
+    final finalTasks = withArrive;
 
     final updatedSections = [
       ..._day.sections.sublist(0, sectionIndex),
@@ -1407,6 +1564,115 @@ class DropsheetProvider extends ChangeNotifier {
     debugPrint('[Dropsheet] recalculateETAsFromLegs section=$sectionId '
         'leaveTime=$startTime hasSeparator=${separatorIdx != -1}');
 
+    await _save(_day.copyWith(sections: updatedSections));
+  }
+
+  /// Recomputes the afternoon (post-separator) pick-up ETAs by walking
+  /// **backwards** from the Arrive task's target [arriveTime], using each
+  /// stop's stored leg duration (`typeData['legDurationS']`) and service
+  /// minutes. Each stop's `startTime` becomes the time the driver must reach
+  /// it so they get back to the office at [arriveTime].
+  ///
+  /// Runs entirely offline (no Directions API call) by replaying stored legs.
+  /// Only applies when the section has a pickup separator. When no leg data is
+  /// stored yet (the route hasn't been calculated), only the Arrive task's
+  /// time is pinned and the pick-up ETAs are left untouched.
+  Future<void> recalculateAfternoonFromArrive(
+    String sectionId,
+    String arriveTime,
+    int Function(DropsheetTask) serviceMinutes,
+  ) async {
+    final sectionIndex = _day.sections.indexWhere((s) => s.id == sectionId);
+    if (sectionIndex == -1) return;
+    final section = _day.sections[sectionIndex];
+
+    final separatorIdx = section.tasks.indexWhere((t) =>
+        t.type == DropsheetTaskType.leave &&
+        t.typeData['isPickupDivider'] == true);
+    if (separatorIdx == -1) return;
+
+    final arriveTask = section.tasks
+        .where((t) => t.type == DropsheetTaskType.arrive)
+        .firstOrNull;
+    // The return leg (last pick-up → office) is stored on the Arrive task.
+    final returnLegS =
+        (arriveTask?.typeData['legDurationS'] as num?)?.toInt() ?? 0;
+
+    final parts = arriveTime.split(':');
+    final h = int.tryParse(parts.elementAtOrNull(0) ?? '') ?? 17;
+    final m = int.tryParse(parts.elementAtOrNull(1) ?? '') ?? 30;
+    var clock = DateTime(_date.year, _date.month, _date.day, h, m);
+
+    String fmtHHmm(DateTime d) =>
+        '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+
+    // Step back over the return leg → departure time from the last pick-up.
+    clock = clock.subtract(Duration(seconds: returnLegS));
+
+    // Walk the afternoon tasks in reverse, assigning each its arrival ETA.
+    final etaUpdates = <String, Map<String, String>>{}; // taskId -> field->eta
+    var hasLegs = returnLegS != 0;
+    for (var i = section.tasks.length - 1; i > separatorIdx; i--) {
+      final task = section.tasks[i];
+      if (task.isMandatory) continue; // the Arrive task itself
+      if (task.typeData['isPickupDivider'] == true) continue;
+
+      if (task.type == DropsheetTaskType.furnitureMove) {
+        final loadLegS =
+            (task.typeData['loadingLegDurationS'] as num?)?.toInt() ?? 0;
+        final offLegS =
+            (task.typeData['offloadLegDurationS'] as num?)?.toInt() ?? 0;
+        final svc = serviceMinutes(task);
+        // Reverse of forward order: loadingLeg, svc/2, offloadLeg, svc-svc/2.
+        clock = clock.subtract(Duration(minutes: svc - (svc ~/ 2)));
+        final offEta = fmtHHmm(clock);
+        clock = clock.subtract(Duration(seconds: offLegS));
+        clock = clock.subtract(Duration(minutes: svc ~/ 2));
+        final loadEta = fmtHHmm(clock);
+        clock = clock.subtract(Duration(seconds: loadLegS));
+        if (loadLegS != 0 || offLegS != 0) hasLegs = true;
+        etaUpdates[task.id] = {
+          'eta': offEta,
+          'offloadEta': offEta,
+          'loadingEta': loadEta,
+        };
+      } else {
+        final legS = (task.typeData['legDurationS'] as num?)?.toInt() ?? 0;
+        final svc = serviceMinutes(task);
+        clock = clock.subtract(Duration(minutes: svc));
+        final eta = fmtHHmm(clock);
+        clock = clock.subtract(Duration(seconds: legS));
+        if (legS != 0) hasLegs = true;
+        etaUpdates[task.id] = {'eta': eta};
+      }
+    }
+
+    final applyEtas = hasLegs;
+    final updatedTasks = section.tasks.map((task) {
+      // Always pin the Arrive task's own time/ETA to the target.
+      if (task.type == DropsheetTaskType.arrive) {
+        final td = Map<String, dynamic>.from(task.typeData)..['eta'] = arriveTime;
+        return task.copyWith(startTime: arriveTime, typeData: td);
+      }
+      if (!applyEtas) return task;
+      final fields = etaUpdates[task.id];
+      if (fields == null) return task;
+      final td = Map<String, dynamic>.from(task.typeData);
+      fields.forEach((k, v) => td[k] = v);
+      return task.copyWith(
+        startTime: fields['eta'] ?? task.startTime,
+        typeData: td,
+      );
+    }).toList();
+
+    debugPrint('[Dropsheet] recalculateAfternoonFromArrive section=$sectionId '
+        'arrive=$arriveTime hasLegs=$hasLegs');
+
+    final updatedSections = [
+      ..._day.sections.sublist(0, sectionIndex),
+      section.copyWith(tasks: updatedTasks),
+      ..._day.sections.sublist(sectionIndex + 1),
+    ];
     await _save(_day.copyWith(sections: updatedSections));
   }
 

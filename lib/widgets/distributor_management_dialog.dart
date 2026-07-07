@@ -20,6 +20,7 @@ class _DistributorManagementDialogState
   final Set<String> _deletedDistributorIds = {};
   bool _hasChanges = false;
   bool _isLoading = false;
+  String? _expandedDistributorId;
 
   @override
   void initState() {
@@ -136,9 +137,28 @@ class _DistributorManagementDialogState
                           const Divider(height: 1),
                       itemBuilder: (context, index) {
                         final distributor = _localDistributors[index];
+                        final activeCount = _localDistributors
+                            .where(
+                                (d) => d.status == DistributorStatus.active)
+                            .length;
+                        final isActive =
+                            distributor.status == DistributorStatus.active;
+                        final canMoveUp = isActive
+                            ? distributor.index > 0
+                            : distributor.index > activeCount;
+                        final canMoveDown = isActive
+                            ? distributor.index < activeCount - 1
+                            : distributor.index < _localDistributors.length - 1;
                         return Card(
+                          key: ValueKey(distributor.id),
                           margin: const EdgeInsets.only(bottom: 8),
                           child: ExpansionTile(
+                            initiallyExpanded:
+                                distributor.id == _expandedDistributorId,
+                            onExpansionChanged: (expanded) {
+                              _expandedDistributorId =
+                                  expanded ? distributor.id : null;
+                            },
                             leading: Stack(
                               children: [
                                 CircleAvatar(
@@ -236,7 +256,7 @@ class _DistributorManagementDialogState
                                     Row(
                                       mainAxisAlignment: MainAxisAlignment.end,
                                       children: [
-                                        if (distributor.index > 0)
+                                        if (canMoveUp)
                                           IconButton(
                                             icon: const Icon(
                                                 Icons.keyboard_arrow_up),
@@ -245,8 +265,7 @@ class _DistributorManagementDialogState
                                                 _swapDistributorPositions(
                                                     distributor, true),
                                           ),
-                                        if (distributor.index <
-                                            _localDistributors.length - 1)
+                                        if (canMoveDown)
                                           IconButton(
                                             icon: const Icon(
                                                 Icons.keyboard_arrow_down),
@@ -361,45 +380,38 @@ class _DistributorManagementDialogState
 
   void _swapDistributorPositions(Distributor distributor, bool moveUp) {
     setState(() {
-      final currentIndex = distributor.index;
-      final targetIndex = moveUp ? currentIndex - 1 : currentIndex + 1;
-
-      // Find the distributor at the target position
-      final targetDistributor = _localDistributors.firstWhere(
-        (d) => d.index == targetIndex,
-        orElse: () => throw StateError('Target distributor not found'),
-      );
-
-      // Find the indices in the list for both distributors
-      final currentDistributorListIndex =
-          _localDistributors.indexWhere((d) => d.id == distributor.id);
-      final targetDistributorListIndex =
-          _localDistributors.indexWhere((d) => d.id == targetDistributor.id);
-
-      if (currentDistributorListIndex == -1 ||
-          targetDistributorListIndex == -1) {
-        return; // Safety check
-      }
-
-      // Swap the indices
-      _localDistributors[currentDistributorListIndex] =
-          distributor.copyWith(index: targetIndex);
-      _localDistributors[targetDistributorListIndex] =
-          targetDistributor.copyWith(index: currentIndex);
-
-      // Sort by index to maintain display order
       _localDistributors.sort((a, b) => a.index.compareTo(b.index));
+      final listIndex =
+          _localDistributors.indexWhere((d) => d.id == distributor.id);
+      final swapIndex = moveUp ? listIndex - 1 : listIndex + 1;
+
+      if (swapIndex < 0 || swapIndex >= _localDistributors.length) return;
+
+      final temp = _localDistributors[listIndex];
+      _localDistributors[listIndex] = _localDistributors[swapIndex];
+      _localDistributors[swapIndex] = temp;
+
+      _normalizeIndexes();
       _markAsChanged();
     });
   }
 
-  void _reindexDistributors() {
-    // Only use this for cleanup operations like after deletion
-    // Sort by index and reassign sequential indices starting from 0
-    _localDistributors.sort((a, b) => a.index.compareTo(b.index));
-    for (int i = 0; i < _localDistributors.length; i++) {
-      _localDistributors[i] = _localDistributors[i].copyWith(index: i);
+  void _normalizeIndexes() {
+    // Active distributors keep their relative order; all non-active go to the end.
+    // Always produces sequential, gap-free indexes with no duplicates.
+    final active = <Distributor>[];
+    final inactive = <Distributor>[];
+    for (final d in _localDistributors) {
+      if (d.status == DistributorStatus.active) {
+        active.add(d);
+      } else {
+        inactive.add(d);
+      }
     }
+    final ordered = [...active, ...inactive];
+    _localDistributors = [
+      for (int i = 0; i < ordered.length; i++) ordered[i].copyWith(index: i),
+    ];
   }
 
   Future<void> _editDistributorLocal(Distributor distributor) async {
@@ -414,51 +426,24 @@ class _DistributorManagementDialogState
     if (result != null) {
       final updatedDistributor = result['distributor'] as Distributor;
       final oldIndex = (result['oldIndex'] as num).toInt();
+      final newIndex = updatedDistributor.index;
 
       setState(() {
-        final distributorIndex =
+        _localDistributors.sort((a, b) => a.index.compareTo(b.index));
+        final listIndex =
             _localDistributors.indexWhere((d) => d.id == distributor.id);
-        if (distributorIndex != -1) {
-          // If index changed, use smart move logic
-          if (oldIndex != updatedDistributor.index) {
-            // Remove the distributor temporarily
-            _localDistributors.removeAt(distributorIndex);
+        if (listIndex == -1) return;
 
-            // Update other distributors using smart indexing logic
-            final currentIndex = oldIndex;
-            final newIndex = updatedDistributor.index;
-
-            if (currentIndex < newIndex) {
-              // Moving down: shift distributors up
-              for (int i = 0; i < _localDistributors.length; i++) {
-                final other = _localDistributors[i];
-                if (other.index > currentIndex && other.index <= newIndex) {
-                  _localDistributors[i] =
-                      other.copyWith(index: other.index - 1);
-                }
-              }
-            } else {
-              // Moving up: shift distributors down
-              for (int i = 0; i < _localDistributors.length; i++) {
-                final other = _localDistributors[i];
-                if (other.index >= newIndex && other.index < currentIndex) {
-                  _localDistributors[i] =
-                      other.copyWith(index: other.index + 1);
-                }
-              }
-            }
-
-            // Add the updated distributor back
-            _localDistributors.add(updatedDistributor);
-          } else {
-            // Just update name if index didn't change
-            _localDistributors[distributorIndex] = updatedDistributor;
-          }
-
-          // Sort by index to maintain display order
-          _localDistributors.sort((a, b) => a.index.compareTo(b.index));
-          _markAsChanged();
+        if (oldIndex != newIndex) {
+          _localDistributors.removeAt(listIndex);
+          final insertAt = newIndex.clamp(0, _localDistributors.length);
+          _localDistributors.insert(insertAt, updatedDistributor);
+        } else {
+          _localDistributors[listIndex] = updatedDistributor;
         }
+
+        _normalizeIndexes();
+        _markAsChanged();
       });
     }
   }
@@ -481,7 +466,7 @@ class _DistributorManagementDialogState
               setState(() {
                 _localDistributors.removeWhere((d) => d.id == distributor.id);
                 _deletedDistributorIds.add(distributor.id);
-                _reindexDistributors();
+                _normalizeIndexes();
                 _markAsChanged();
               });
             },
@@ -507,70 +492,18 @@ class _DistributorManagementDialogState
   }
 
   Future<void> _saveChanges() async {
-    setState(() {
-      _isLoading = true;
-    });
+    setState(() => _isLoading = true);
 
     try {
-      final provider = ref.read(scheduleRiverpod);
-
-      // Delete distributors first
-      for (String deletedId in _deletedDistributorIds) {
-        await provider.deleteDistributorSmart(deletedId);
-      }
-
-      // For updates, we need to be more careful about batch operations
-      // Let's create a mapping of current state vs what we want
-      final currentDistributors = provider.distributors
-          .where((d) => !_deletedDistributorIds.contains(d.id))
-          .toList();
-      final distributorsToUpdate = <Distributor>[];
-
-      for (Distributor localDistributor in _localDistributors) {
-        final currentDistributor = currentDistributors.firstWhere(
-          (d) => d.id == localDistributor.id,
-          orElse: () => localDistributor,
-        );
-
-        // Only update if there are actual changes
-        if (currentDistributor.name != localDistributor.name ||
-            currentDistributor.index != localDistributor.index ||
-            currentDistributor.phone1 != localDistributor.phone1 ||
-            currentDistributor.phone2 != localDistributor.phone2 ||
-            currentDistributor.status != localDistributor.status ||
-            currentDistributor.imageUrl != localDistributor.imageUrl ||
-            currentDistributor.role != localDistributor.role) {
-          distributorsToUpdate.add(localDistributor);
-        }
-      }
-
-      // Update distributors with smart indexing
-      for (final distributor in distributorsToUpdate) {
-        final currentDistributor =
-            currentDistributors.firstWhere((d) => d.id == distributor.id);
-        await provider.updateDistributorSmart(
-            distributor, currentDistributor.index);
-
-        // Update the current distributors list to reflect the change
-        final index =
-            currentDistributors.indexWhere((d) => d.id == distributor.id);
-        if (index != -1) {
-          currentDistributors[index] = distributor;
-        }
-      }
+      await ref.read(scheduleRiverpod).saveDistributorChanges(
+            finalState: _localDistributors,
+            deletedIds: Set.of(_deletedDistributorIds),
+          );
 
       setState(() {
         _hasChanges = false;
         _deletedDistributorIds.clear();
         _isLoading = false;
-      });
-
-      // Refresh local distributors from provider after successful save
-      final updatedDistributors =
-          provider.distributors.map((d) => d.copyWith()).toList();
-      updatedDistributors.sort((a, b) => a.index.compareTo(b.index));
-      setState(() {
-        _localDistributors = updatedDistributors;
       });
 
       if (mounted) {
@@ -583,9 +516,7 @@ class _DistributorManagementDialogState
         );
       }
     } catch (e) {
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

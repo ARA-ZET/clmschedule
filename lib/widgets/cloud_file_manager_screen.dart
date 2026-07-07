@@ -3,6 +3,7 @@
 // Full-screen Cloud Storage file browser.
 // Shows folder tree under Distribution/, lets users navigate, open files
 // in the Track Editor, delete files, and upload new ones.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -15,6 +16,7 @@ import 'package:intl/intl.dart';
 
 import '../providers/cloud_file_manager_provider.dart';
 import '../providers/job_list_provider.dart';
+import '../services/file_search_service.dart';
 import '../services/gpx_storage_service.dart';
 import '../utils/web_file_download.dart';
 
@@ -56,6 +58,12 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
   /// Full paths of currently selected files.
   final Set<String> _selectedFilePaths = {};
 
+  /// Whether the search bar is expanded in the app bar.
+  bool _searchBarOpen = false;
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
+  Timer? _searchDebounce;
+
   static const String _compiledWaypointsFileName = '_compiled_waypoints.json';
 
   List<StorageFileItem> get _selectedFiles => _provider.files
@@ -77,7 +85,51 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
   @override
   void dispose() {
     _provider.removeListener(_onProviderChanged);
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
+  }
+
+  // ── Search ──────────────────────────────────────────────────────────────
+
+  void _openSearchBar() {
+    _provider.beginSearch();
+    setState(() => _searchBarOpen = true);
+    // Wait a frame so the TextField exists before requesting focus.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchFocusNode.requestFocus();
+    });
+  }
+
+  void _closeSearchBar() {
+    _searchDebounce?.cancel();
+    _searchController.clear();
+    _provider.clearSearch();
+    setState(() => _searchBarOpen = false);
+  }
+
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      _provider.search(value);
+    });
+  }
+
+  StorageFileItem _toStorageFileItem(FileSearchResult r) => StorageFileItem(
+        name: r.name,
+        fullPath: r.fullPath,
+        lastModified: r.updatedAt,
+        sizeBytes: r.sizeBytes,
+      );
+
+  /// Exit search and navigate the browser to the folder containing [result].
+  Future<void> _goToSearchResultFolder(FileSearchResult result) async {
+    _searchDebounce?.cancel();
+    _searchController.clear();
+    _provider.clearSearch();
+    setState(() => _searchBarOpen = false);
+    await _provider.navigateToPath(result.folderPath);
   }
 
   void _onProviderChanged() {
@@ -906,62 +958,208 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
       backgroundColor: Colors.grey[50],
       appBar: _selectionMode
           ? _buildSelectionAppBar()
-          : AppBar(
-              backgroundColor: colorScheme.inversePrimary,
-              title: const Text('Cloud Files',
-                  style: TextStyle(fontWeight: FontWeight.bold)),
-              actions: [
-                if (_provider.files.isNotEmpty)
-                  IconButton(
-                    icon: const Icon(Icons.check_box_outlined),
-                    tooltip: 'Select files',
-                    onPressed: () => _enterSelectionMode(),
-                  ),
-                IconButton(
-                  icon: const Icon(Icons.create_new_folder),
-                  tooltip: 'New ${_provider.newFolderLabel}',
-                  onPressed: _createFolder,
+          : _searchBarOpen
+              ? _buildSearchAppBar(colorScheme)
+              : AppBar(
+                  backgroundColor: colorScheme.inversePrimary,
+                  title: const Text('Cloud Files',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  actions: [
+                    IconButton(
+                      icon: const Icon(Icons.search),
+                      tooltip: 'Search files',
+                      onPressed: _openSearchBar,
+                    ),
+                    if (_provider.files.isNotEmpty)
+                      IconButton(
+                        icon: const Icon(Icons.check_box_outlined),
+                        tooltip: 'Select files',
+                        onPressed: () => _enterSelectionMode(),
+                      ),
+                    IconButton(
+                      icon: const Icon(Icons.create_new_folder),
+                      tooltip: 'New ${_provider.newFolderLabel}',
+                      onPressed: _createFolder,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.upload_file),
+                      tooltip: 'Upload file',
+                      onPressed: _uploadFile,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.refresh),
+                      tooltip: 'Refresh',
+                      onPressed: _provider.loadCurrentFolder,
+                    ),
+                  ],
                 ),
-                IconButton(
-                  icon: const Icon(Icons.upload_file),
-                  tooltip: 'Upload file',
-                  onPressed: _uploadFile,
-                ),
-                IconButton(
-                  icon: const Icon(Icons.refresh),
-                  tooltip: 'Refresh',
-                  onPressed: _provider.loadCurrentFolder,
+      body: _searchBarOpen
+          ? _buildSearchBody()
+          : Column(
+              children: [
+                _buildBreadcrumbs(colorScheme),
+                const Divider(height: 1),
+                Expanded(
+                  child: _provider.isLoading
+                      ? const Center(child: CircularProgressIndicator())
+                      : _provider.error != null
+                          ? Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.error_outline,
+                                      size: 48, color: Colors.red[300]),
+                                  const SizedBox(height: 12),
+                                  Text(_provider.error!,
+                                      style:
+                                          TextStyle(color: Colors.red[700])),
+                                  const SizedBox(height: 12),
+                                  OutlinedButton(
+                                    onPressed: _provider.loadCurrentFolder,
+                                    child: const Text('Retry'),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : _buildFolderContents(),
                 ),
               ],
             ),
-      body: Column(
-        children: [
-          _buildBreadcrumbs(colorScheme),
-          const Divider(height: 1),
-          Expanded(
-            child: _provider.isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : _provider.error != null
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.error_outline,
-                                size: 48, color: Colors.red[300]),
-                            const SizedBox(height: 12),
-                            Text(_provider.error!,
-                                style: TextStyle(color: Colors.red[700])),
-                            const SizedBox(height: 12),
-                            OutlinedButton(
-                              onPressed: _provider.loadCurrentFolder,
-                              child: const Text('Retry'),
-                            ),
-                          ],
-                        ),
-                      )
-                    : _buildFolderContents(),
+    );
+  }
+
+  /// Short label for the folder a search is scoped to, e.g. "Distribution"
+  /// (whole tree) or "Kendal Mica" (that folder and its subfolders).
+  String get _searchScopeLabel {
+    final scope = _provider.searchScopeFolderPath;
+    if (scope == CloudFileManagerProvider.rootPath) return 'Distribution';
+    final slash = scope.lastIndexOf('/');
+    return slash >= 0 ? scope.substring(slash + 1) : scope;
+  }
+
+  PreferredSizeWidget _buildSearchAppBar(ColorScheme colorScheme) {
+    final scopeLabel = _searchScopeLabel;
+    return AppBar(
+      backgroundColor: colorScheme.inversePrimary,
+      leading: IconButton(
+        icon: const Icon(Icons.arrow_back),
+        tooltip: 'Close search',
+        onPressed: _closeSearchBar,
+      ),
+      title: TextField(
+        controller: _searchController,
+        focusNode: _searchFocusNode,
+        textInputAction: TextInputAction.search,
+        decoration: InputDecoration(
+          hintText: 'Search in $scopeLabel…',
+          border: InputBorder.none,
+        ),
+        style: const TextStyle(fontSize: 16),
+        onChanged: _onSearchChanged,
+      ),
+      actions: [
+        if (_searchController.text.isNotEmpty)
+          IconButton(
+            icon: const Icon(Icons.clear),
+            tooltip: 'Clear',
+            onPressed: () {
+              _searchController.clear();
+              _searchDebounce?.cancel();
+              _provider.search('');
+              setState(() {});
+            },
           ),
-        ],
+      ],
+    );
+  }
+
+  Widget _buildSearchBody() {
+    if (!_provider.isSearching) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search, size: 64, color: Colors.grey[300]),
+            const SizedBox(height: 12),
+            Text('Search by file name in "$_searchScopeLabel" and its subfolders',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.grey[500], fontSize: 14)),
+          ],
+        ),
+      );
+    }
+
+    if (_provider.isSearchLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final results = _provider.searchResults;
+    if (results.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search_off, size: 64, color: Colors.grey[300]),
+            const SizedBox(height: 12),
+            Text(
+                'No files match "${_provider.searchQuery}" in "$_searchScopeLabel"',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.grey[500], fontSize: 14)),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(8),
+      itemCount: results.length,
+      itemBuilder: (_, i) => _buildSearchResultTile(results[i]),
+    );
+  }
+
+  Widget _buildSearchResultTile(FileSearchResult result) {
+    final item = _toStorageFileItem(result);
+    final canOpen = _canOpenInTrackEditor(item);
+    final subtitleParts = <String>[
+      result.folderPath.replaceFirst('${CloudFileManagerProvider.rootPath}/',
+          ''),
+      if (result.sizeLabel != null) result.sizeLabel!,
+    ];
+
+    return Card(
+      elevation: 0,
+      color: Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(color: Colors.grey.shade200),
+      ),
+      child: ListTile(
+        leading: Icon(_iconForFile(item), color: _colorForFile(item), size: 28),
+        title: Text(result.name, style: const TextStyle(fontSize: 14)),
+        subtitle: Text(
+          subtitleParts.join('  ·  '),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (canOpen)
+              IconButton(
+                icon: const Icon(Icons.open_in_new, size: 20),
+                tooltip: 'Open in Track Editor',
+                color: Colors.blue,
+                onPressed: () => _openFile(item),
+              ),
+            IconButton(
+              icon: const Icon(Icons.folder_open, size: 20),
+              tooltip: 'Go to folder',
+              onPressed: () => _goToSearchResultFolder(result),
+            ),
+          ],
+        ),
+        onTap: () => _goToSearchResultFolder(result),
       ),
     );
   }

@@ -73,19 +73,27 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
                           // Auto-open every matched pair as a tab so the
                           // user doesn't need a second click for files
                           // that already have a clean Track/Waypoints pair.
-                          if (proc.matchedPairs.isNotEmpty) {
-                            final count = proc.matchedPairs.length;
+                          final matchedCount = proc.matchedPairs.length;
+                          if (matchedCount > 0) {
                             await proc.openMatchedTabs(
                                 tabsProvider, scheduleProvider);
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                      'Opened $count tab${count == 1 ? '' : 's'} for matched pairs'),
-                                  duration: const Duration(seconds: 2),
-                                ),
-                              );
-                            }
+                          }
+                          // Also auto-open combined Track files that already
+                          // carry both tracks and waypoints in one file (the
+                          // new single-file format) — no pairing or confirm
+                          // needed.
+                          final combinedCount =
+                              await proc.openSelfContainedTabs(
+                                  tabsProvider, scheduleProvider);
+                          final total = matchedCount + combinedCount;
+                          if (context.mounted && total > 0) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                    'Opened $total tab${total == 1 ? '' : 's'}'),
+                                duration: const Duration(seconds: 2),
+                              ),
+                            );
                           }
                         },
                   style: FilledButton.styleFrom(
@@ -192,7 +200,7 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
           if (!hasFiles)
             _EmptyHint(
               text:
-                  'Select Track and Waypoints .gpx files.\nMatching pairs open automatically; unmatched files can be paired or opened as-is.',
+                  'Select Track and Waypoints .gpx files.\nMatching pairs and combined files (track + waypoints in one file) open automatically; remaining files can be paired or opened as-is.',
             ),
 
           // ── Matched pairs ───────────────────────────────────────────────

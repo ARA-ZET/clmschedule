@@ -250,6 +250,8 @@ class DropsheetTask {
     double? depotLat,
     double? depotLng,
     String? depotStartTime,
+    // Per-type defaults from DropsheetTaskTypeConfig (Task Manager settings).
+    String? packDetails,
   }) {
     final depotTypeData = <String, dynamic>{
       if (depotLat != null) 'lat': depotLat,
@@ -269,7 +271,7 @@ class DropsheetTask {
         id: '${idPrefix}_m2',
         type: DropsheetTaskType.pack,
         job: 'Pack',
-        details: 'Raincoats; bank card',
+        details: packDetails ?? '',
         startTime: '07:15',
         isMandatory: true,
       ),
@@ -286,6 +288,9 @@ class DropsheetTask {
         id: '${idPrefix}_m4',
         type: DropsheetTaskType.arrive,
         job: 'Arrive',
+        // Default target arrival time at the office. Afternoon pick-up ETAs
+        // are computed backwards from this value (see DropsheetRoutePlanner).
+        startTime: '17:30',
         location: depotAddress ?? '',
         isMandatory: true,
         typeData: depotTypeData,

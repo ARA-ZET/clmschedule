@@ -95,6 +95,14 @@ class TEProcessingProvider extends ChangeNotifier {
     }).toList();
   }
 
+  /// Unmatched files that already carry BOTH tracks and waypoints inside a
+  /// single file (the new combined Track-file export). These have no pair,
+  /// but they are complete on their own, so they can be opened automatically
+  /// as-is without asking the user to confirm.
+  List<TEGpxFileEntry> get selfContainedFiles => unmatchedFiles
+      .where((f) => f.tracks.isNotEmpty && f.waypoints.isNotEmpty)
+      .toList();
+
   // ── Actions ────────────────────────────────────────────────────────────────
 
   /// Open a multi-file picker, parse every .gpx file and stage them.
@@ -258,6 +266,69 @@ class TEProcessingProvider extends ChangeNotifier {
       _tabsOpened = true;
       _safeNotify();
     }
+  }
+
+  /// Auto-open every unmatched file that already contains both tracks and
+  /// waypoints (the new combined Track-file format) as its own tab, without
+  /// asking the user to confirm. Each opened file is removed from the staged
+  /// list. Returns the number of tabs opened.
+  Future<int> openSelfContainedTabs(
+    TETabsProvider tabsProvider,
+    ScheduleProvider scheduleProvider,
+  ) async {
+    final files = selfContainedFiles;
+    if (files.isEmpty) return 0;
+
+    _openingTabs = true;
+    _openProgress = 0;
+    _progressMessage = 'Opening combined files...';
+    _safeNotify();
+
+    final newTabs = <TETabItem>[];
+    final opened = <TEGpxFileEntry>[];
+    try {
+      for (var i = 0; i < files.length; i++) {
+        if (_disposed) return opened.length;
+        _openProgress = (i + 1) / files.length;
+        _progressMessage = 'Loading ${i + 1} of ${files.length}...';
+        _safeNotify();
+        final entry = files[i];
+        // A combined file is its own track AND waypoints source.
+        final key = entry.matchKey.isEmpty
+            ? '_single_${entry.filename}'
+            : entry.matchKey;
+        try {
+          final tab = await _buildTabForPair(
+            TEGpxMatchedPair(
+              trackFile: entry,
+              waypointsFile: entry,
+              matchKey: key,
+            ),
+            scheduleProvider,
+          );
+          if (_disposed) return opened.length;
+          newTabs.add(tab);
+          opened.add(entry);
+        } catch (e) {
+          debugPrint(
+              '⚠️ Failed to open combined file "${entry.filename}": $e');
+        }
+      }
+
+      if (newTabs.isNotEmpty && !_disposed) {
+        tabsProvider.addTabsBatch(newTabs);
+        for (final entry in opened) {
+          _files.remove(entry);
+        }
+      }
+    } finally {
+      _openingTabs = false;
+      _openProgress = 0;
+      _progressMessage = '';
+      _tabsOpened = true;
+      _safeNotify();
+    }
+    return opened.length;
   }
 
   Future<void> _openPairAsTab(
