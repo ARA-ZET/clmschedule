@@ -7,7 +7,10 @@ import '../models/schedule.dart';
 import '../models/work_area.dart';
 import '../models/work_suburb.dart';
 import '../models/custom_polygon.dart';
+import '../models/schedule_confirmation_status.dart';
 import '../services/firestore_service.dart';
+import '../services/schedule_mutation_types.dart';
+import 'auth_provider.dart';
 import 'dropsheet_provider.dart';
 
 final scheduleRiverpod = riverpod.ChangeNotifierProvider<ScheduleProvider>(
@@ -143,6 +146,61 @@ class ScheduleProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Snapshot of the local job lists. The optimistic helpers replace the
+  /// lists copy-on-write (never mutate in place), so holding the current
+  /// references is an exact snapshot.
+  ({List<Job> current, List<Job> next}) _captureLocalState() =>
+      (current: _currentMonthJobs, next: _nextMonthJobs);
+
+  void _restoreLocalState(({List<Job> current, List<Job> next}) snapshot) {
+    _currentMonthJobs = snapshot.current;
+    _nextMonthJobs = snapshot.next;
+    _invalidateCaches();
+    notifyListeners();
+  }
+
+  /// Uniform pattern for every schedule mutation: capture local state,
+  /// apply the optimistic update, persist via the transactional service,
+  /// and on any failure restore the exact pre-mutation local state before
+  /// rethrowing so the UI can surface the error. The Firestore stream
+  /// remains the source of truth and reconciles on its next emission.
+  Future<T> _guardedMutation<T>({
+    void Function()? applyOptimistic,
+    required Future<T> Function() persist,
+  }) async {
+    final snapshot = _captureLocalState();
+    applyOptimistic?.call();
+    try {
+      return await persist();
+    } catch (e) {
+      _restoreLocalState(snapshot);
+      rethrow;
+    }
+  }
+
+  /// Attaches the next-month job stream before a write that targets a date
+  /// in that month, so the written job doesn't vanish from the local cache
+  /// (the current-month stream drops it and nothing else would pick it up).
+  Future<void> _ensureMonthStreamsCover(DateTime date) async {
+    final next = DateTime(_currentMonth.year, _currentMonth.month + 1);
+    if (date.year == next.year && date.month == next.month) {
+      await ensureNextMonthLoaded();
+    }
+  }
+
+  /// When true (set via `--dart-define=REPAIR_SCHEDULE=true`), the provider
+  /// runs a one-time schedule integrity repair after the first data load.
+  /// Defaults to false, so normal runs never touch data on load.
+  static const bool _repairScheduleOnLoad =
+      bool.fromEnvironment('REPAIR_SCHEDULE');
+  bool _integrityRepairAttempted = false;
+
+  /// One-time no-area duplicate cleanup, requested via
+  /// `--dart-define=CLEAN_DUPS=dry` (report only) or `=apply` (write).
+  /// Empty (the default) means never run.
+  static const String _cleanDupsMode = String.fromEnvironment('CLEAN_DUPS');
+  bool _cleanDupsAttempted = false;
+
   // Streams subscriptions
   StreamSubscription<List<Distributor>>? _distributorsSubscription;
   StreamSubscription<List<Job>>? _currentMonthJobsSubscription;
@@ -221,7 +279,23 @@ class ScheduleProvider extends ChangeNotifier {
 
   ScheduleProvider({FirestoreService? firestoreService, riverpod.Ref? ref})
       : _firestoreService = firestoreService ?? FirestoreService(),
-        _ref = ref;
+        _ref = ref {
+    final r = _ref;
+    if (r != null) {
+      // Attach the signed-in user's identity to every schedule audit-log
+      // entry. Resolved lazily at mutation time, not at construction.
+      _firestoreService.logUserResolver = () {
+        final auth = r.read(authRiverpod);
+        return ScheduleLogUser(
+          uid: auth.user?.uid,
+          email: auth.user?.email,
+          name: auth.appUser?.name ??
+              auth.user?.displayName ??
+              auth.user?.email,
+        );
+      };
+    }
+  }
 
   /// Optional riverpod ref so the provider can notify peer providers
   /// (currently the dropsheet) about distributor coordinate changes.
@@ -389,6 +463,17 @@ class ScheduleProvider extends ChangeNotifier {
         debugPrint(
             'ScheduleProvider: Received ${jobs.length} jobs for current month ${_firestoreService.getMonthlyDocumentId(month)}');
         notifyListeners();
+        // One-time integrity repair, only when explicitly requested via
+        // --dart-define=REPAIR_SCHEDULE=true. No-op in normal runs.
+        if (_repairScheduleOnLoad && !_integrityRepairAttempted) {
+          _integrityRepairAttempted = true;
+          unawaited(repairIntegrityForLoadedMonths());
+        }
+        if (_cleanDupsMode.isNotEmpty && !_cleanDupsAttempted) {
+          _cleanDupsAttempted = true;
+          unawaited(cleanNoAreaDuplicatesForLoadedMonths(
+              dryRun: _cleanDupsMode != 'apply'));
+        }
       },
       onError: (error) {
         debugPrint('ScheduleProvider: Current month jobs stream error: $error');
@@ -487,6 +572,30 @@ class ScheduleProvider extends ChangeNotifier {
     }
   }
 
+  // Jump the grid to whichever month contains [date] (used by the
+  // Today/Tomorrow confirmation quick buttons).
+  void goToMonthContaining(DateTime date) {
+    setCurrentMonth(DateTime(date.year, date.month));
+  }
+
+  // Streams the admin confirmation status for a single schedule day.
+  Stream<ScheduleDayConfirmation> watchDayConfirmation(DateTime date) {
+    return _firestoreService.streamScheduleDayConfirmation(date);
+  }
+
+  // Sets the admin confirmation status for a single schedule day.
+  Future<void> setDayConfirmation(
+    DateTime date,
+    ScheduleConfirmationStatus status, {
+    String? confirmedBy,
+  }) {
+    return _firestoreService.setScheduleDayConfirmation(
+      date,
+      status,
+      confirmedBy: confirmedBy,
+    );
+  }
+
   // Helper method to parse month string back to DateTime
   DateTime? _parseMonthString(String monthString) {
     final parts = monthString.split(' ');
@@ -552,36 +661,37 @@ class ScheduleProvider extends ChangeNotifier {
     await _firestoreService.deleteDistributor(distributorId);
   }
 
-  // Smart delete that reindexes remaining distributors
+  // Smart delete that reindexes remaining distributors.
+  // Delete + reindex commit in a single batch so a mid-operation failure
+  // can't leave the index ordering corrupted.
   Future<void> deleteDistributorSmart(String distributorId) async {
-    // Find the distributor being deleted
     final distributorToDelete =
-        _distributors.firstWhere((d) => d.id == distributorId);
+        _distributors.where((d) => d.id == distributorId).firstOrNull;
+    if (distributorToDelete == null) return;
 
-    // Delete the distributor
-    await _firestoreService.deleteDistributor(distributorId);
-
-    // Reindex remaining distributors with higher indices
-    final distributorsToUpdate = _distributors
+    final toUpdate = _distributors
         .where(
             (d) => d.id != distributorId && d.index > distributorToDelete.index)
+        .map((d) => d.copyWith(index: d.index - 1))
         .toList();
 
-    for (final distributor in distributorsToUpdate) {
-      final updatedDistributor =
-          distributor.copyWith(index: distributor.index - 1);
-      await _firestoreService.updateDistributor(updatedDistributor);
-    }
+    await _firestoreService.batchSaveDistributors(
+      toUpdate: toUpdate,
+      toDelete: {distributorId},
+    );
   }
 
-  // Reorder distributors by updating their index values
+  // Reorder distributors by updating their index values in a single batch.
   Future<void> reorderDistributors(
       List<Distributor> reorderedDistributors) async {
-    // Update each distributor with new index
-    for (int i = 0; i < reorderedDistributors.length; i++) {
-      final distributor = reorderedDistributors[i].copyWith(index: i);
-      await _firestoreService.updateDistributor(distributor);
-    }
+    final toUpdate = <Distributor>[
+      for (int i = 0; i < reorderedDistributors.length; i++)
+        reorderedDistributors[i].copyWith(index: i),
+    ];
+    await _firestoreService.batchSaveDistributors(
+      toUpdate: toUpdate,
+      toDelete: const {},
+    );
   }
 
   // Commit all pending distributor edits (reorders, field changes, deletes)
@@ -630,82 +740,64 @@ class ScheduleProvider extends ChangeNotifier {
     final normalized = _normalizeDropOffPoint(job);
     // Optimistic UI: surface the change locally before the Firestore
     // round-trip so the calling screen (work-areas map, print map, day
-    // planner, etc.) reflects the new state instantly. The Firestore
-    // stream listener will reconcile if the server-side write differs.
-    Job? previous;
-    for (final j in jobs) {
-      if (j.id == normalized.id) {
-        previous = j;
-        break;
-      }
-    }
-    if (previous != null) {
-      _optimisticUpdateJob(normalized);
-    }
-    try {
-      await _firestoreService.updateJob(normalized, normalized.date);
-      _notifyDropsheetOfCoordChanges(previous, normalized);
-      debugPrint('Successfully updated job ${job.id}');
-    } catch (e) {
-      debugPrint('Error updating job: $e');
-      // Roll back the optimistic update so the UI returns to the last
-      // known-good state instead of showing the failed write.
-      if (previous != null) {
-        _optimisticUpdateJob(previous);
-      }
-      rethrow;
-    }
+    // planner, etc.) reflects the new state instantly; rolled back
+    // exactly if the transactional write fails.
+    final previous = jobs.where((j) => j.id == normalized.id).firstOrNull;
+    await _guardedMutation<void>(
+      applyOptimistic:
+          previous != null ? () => _optimisticUpdateJob(normalized) : null,
+      persist: () => _firestoreService.updateJob(normalized, normalized.date),
+    );
+    _notifyDropsheetOfCoordChanges(previous, normalized);
   }
 
   Future<void> deleteJob(String jobId, [DateTime? targetDate]) async {
-    try {
-      // Find the job to get its date for proper monthly context
-      final job = jobs.where((j) => j.id == jobId).firstOrNull;
-      final jobDate = targetDate ?? job?.date ?? _currentMonth;
-      await _firestoreService.deleteJob(jobId, jobDate);
-      // Scrub any orphaned dropoff task from the affected date's
-      // dropsheet — the live `DropsheetProvider` only auto-syncs for
-      // today + next planning day, so this catches every other date.
-      unawaited(DropsheetProvider.syncDateOneShot(
-        jobDate,
-        firestoreService: _firestoreService,
-        distributors: _distributors.isNotEmpty ? _distributors : null,
-      ));
-      debugPrint('Successfully deleted job $jobId');
-    } catch (e) {
-      debugPrint('Error deleting job: $e');
-      rethrow;
-    }
+    // Find the job to get its date for proper monthly context
+    final job = jobs.where((j) => j.id == jobId).firstOrNull;
+    final jobDate = targetDate ?? job?.date ?? _currentMonth;
+    await _guardedMutation<void>(
+      // Remove locally right away so the cell empties without waiting for
+      // the stream; restored if the delete fails.
+      applyOptimistic: () => _optimisticRemoveJob(jobId),
+      persist: () => _firestoreService.deleteJob(jobId, jobDate),
+    );
+    // Scrub any orphaned dropoff task from the affected date's
+    // dropsheet — the live `DropsheetProvider` only auto-syncs for
+    // today + next planning day, so this catches every other date.
+    unawaited(DropsheetProvider.syncDateOneShot(
+      jobDate,
+      firestoreService: _firestoreService,
+      distributors: _distributors.isNotEmpty ? _distributors : null,
+    ));
   }
 
   Future<void> moveJobBetweenDates(Job originalJob, Job movedJob) async {
-    try {
-      await _firestoreService.moveJobBetweenDates(
+    // Attach the destination month's stream first so the moved job stays
+    // visible in the local cache after the current-month stream drops it.
+    await _ensureMonthStreamsCover(movedJob.date);
+    await _guardedMutation<void>(
+      persist: () => _firestoreService.moveJobBetweenDates(
         originalJob,
         movedJob,
         originalJob.date,
         movedJob.date,
-      );
-      // Sync the dropsheets for BOTH the source and destination dates so
-      // the dropoff task moves with the job — even when neither date is
-      // inside the auto-sync window of the live DropsheetProvider.
-      final dists = _distributors.isNotEmpty ? _distributors : null;
+      ),
+    );
+    // Sync the dropsheets for BOTH the source and destination dates so
+    // the dropoff task moves with the job — even when neither date is
+    // inside the auto-sync window of the live DropsheetProvider.
+    final dists = _distributors.isNotEmpty ? _distributors : null;
+    unawaited(DropsheetProvider.syncDateOneShot(
+      originalJob.date,
+      firestoreService: _firestoreService,
+      distributors: dists,
+    ));
+    if (!_isSameDay(originalJob.date, movedJob.date)) {
       unawaited(DropsheetProvider.syncDateOneShot(
-        originalJob.date,
+        movedJob.date,
         firestoreService: _firestoreService,
         distributors: dists,
       ));
-      if (!_isSameDay(originalJob.date, movedJob.date)) {
-        unawaited(DropsheetProvider.syncDateOneShot(
-          movedJob.date,
-          firestoreService: _firestoreService,
-          distributors: dists,
-        ));
-      }
-      debugPrint('Successfully moved job ${originalJob.id}');
-    } catch (e) {
-      debugPrint('Error moving job: $e');
-      rethrow;
     }
   }
 
@@ -749,22 +841,27 @@ class ScheduleProvider extends ChangeNotifier {
   Future<void> updateJobWithUndo(
       Job originalJob, Job modifiedJob, DateTime targetDate) async {
     final normalized = _normalizeDropOffPoint(modifiedJob);
-    // Optimistic UI update — show change instantly before Firestore write
-    _optimisticUpdateJob(normalized);
-    _notifyDropsheetOfCoordChanges(originalJob, normalized);
 
     // Check if we're moving the job to a different date
     if (!_isSameDay(originalJob.date, normalized.date)) {
-      await moveJobBetweenDates(originalJob, normalized);
+      await _guardedMutation<void>(
+        applyOptimistic: () => _optimisticUpdateJob(normalized),
+        persist: () => moveJobBetweenDates(originalJob, normalized),
+      );
+      _notifyDropsheetOfCoordChanges(originalJob, normalized);
     } else {
+      // updateJob applies its own optimistic update, rollback, and
+      // dropsheet coordinate notification.
       await updateJob(normalized);
     }
   }
 
   Future<void> moveJobBetweenDatesWithUndo(Job originalJob, Job movedJob,
       DateTime originalDate, DateTime newDate) async {
-    _optimisticUpdateJob(movedJob);
-    await moveJobBetweenDates(originalJob, movedJob);
+    await _guardedMutation<void>(
+      applyOptimistic: () => _optimisticUpdateJob(movedJob),
+      persist: () => moveJobBetweenDates(originalJob, movedJob),
+    );
   }
 
   Future<void> deleteJobWithUndo(Job job, DateTime targetDate) async {
@@ -818,11 +915,64 @@ class ScheduleProvider extends ChangeNotifier {
     return added;
   }
 
+  /// Maintenance: heals legacy data-integrity issues (misfiled `date` fields
+  /// and within-day duplicate job ids) for the current and next month by
+  /// running each populated day document back through the transactional
+  /// integrity pass. Safe to re-run — clean days are skipped. Distinct jobs
+  /// sharing a distributor-day are preserved, never merged.
+  Future<String> repairIntegrityForLoadedMonths() async {
+    final parts = <String>[];
+    for (final month in [
+      _currentMonth,
+      DateTime(_currentMonth.year, _currentMonth.month + 1),
+    ]) {
+      final label = _firestoreService.getMonthlyDocumentId(month);
+      // Repair each month independently so an unrelated failure on one
+      // (e.g. a transient Firestore timeout) can't abort the other.
+      try {
+        final days = await _firestoreService.repairScheduleMonth(month);
+        parts.add('${days.length} day(s) in $label');
+      } catch (e) {
+        parts.add('FAILED for $label: $e');
+      }
+    }
+    final summary = '🛠️ Integrity repair: ${parts.join(', ')}';
+    debugPrint('ScheduleProvider: $summary');
+    return summary;
+  }
+
+  /// Maintenance: clears no-area duplicate jobs (see
+  /// [FirestoreService.cleanNoAreaDuplicates]) for the current and next month.
+  /// [dryRun] true only reports; false writes. Jobs with real work areas are
+  /// never touched.
+  Future<String> cleanNoAreaDuplicatesForLoadedMonths(
+      {bool dryRun = true}) async {
+    final parts = <String>[];
+    for (final month in [
+      _currentMonth,
+      DateTime(_currentMonth.year, _currentMonth.month + 1),
+    ]) {
+      final label = _firestoreService.getMonthlyDocumentId(month);
+      try {
+        final ids = await _firestoreService.cleanNoAreaDuplicates(month,
+            dryRun: dryRun);
+        parts.add('${ids.length} in $label');
+      } catch (e) {
+        parts.add('FAILED for $label: $e');
+      }
+    }
+    final summary =
+        '🧹 No-area duplicate cleanup (${dryRun ? "DRY-RUN" : "APPLIED"}): ${parts.join(', ')}';
+    debugPrint('ScheduleProvider: $summary');
+    return summary;
+  }
+
   Future<void> updateJobStatusWithUndo(String jobId, String newStatusId,
       String originalStatusId, DateTime targetDate) async {
-    final job = jobs.firstWhere((j) => j.id == jobId);
+    final job = jobs.where((j) => j.id == jobId).firstOrNull;
+    if (job == null) throw JobNotFoundException(jobId);
     final updatedJob = job.copyWith(statusId: newStatusId);
-    _optimisticUpdateJob(updatedJob);
+    // updateJob handles optimistic apply + rollback.
     await updateJob(updatedJob);
   }
 
@@ -838,47 +988,53 @@ class ScheduleProvider extends ChangeNotifier {
       date: draggedJob.date,
     );
 
-    // Optimistic UI update — show change instantly
-    _optimisticUpdateJob(newDraggedJob);
-    _optimisticUpdateJob(newTargetJob);
-
-    // Persist atomically to Firestore
-    if (_isSameDay(draggedJob.date, targetJob.date)) {
-      await _firestoreService.swapJobsOnSameDate(
-          newDraggedJob, newTargetJob, draggedJob.date);
-    } else {
-      await _firestoreService.swapJobsBetweenDates(
-        draggedJob,
-        newDraggedJob,
-        targetJob,
-        newTargetJob,
-        draggedJob.date,
-        targetJob.date,
-      );
-    }
+    await _guardedMutation<void>(
+      applyOptimistic: () {
+        _optimisticUpdateJob(newDraggedJob);
+        _optimisticUpdateJob(newTargetJob);
+      },
+      persist: () async {
+        if (_isSameDay(draggedJob.date, targetJob.date)) {
+          await _firestoreService.swapJobsOnSameDate(
+              newDraggedJob, newTargetJob, draggedJob.date);
+        } else {
+          await _ensureMonthStreamsCover(targetJob.date);
+          await _ensureMonthStreamsCover(draggedJob.date);
+          await _firestoreService.swapJobsBetweenDates(
+            draggedJob,
+            newDraggedJob,
+            targetJob,
+            newTargetJob,
+            draggedJob.date,
+            targetJob.date,
+          );
+        }
+      },
+    );
   }
 
   Future<void> combineJobsWithUndo(Job draggedJob, Job targetJob,
       Job combinedJob, DateTime targetDate) async {
-    // Optimistic UI update — show change instantly
-    _optimisticRemoveJob(draggedJob.id);
-    _optimisticUpdateJob(combinedJob);
-
-    // Persist atomically to Firestore
-    if (_isSameDay(draggedJob.date, targetJob.date)) {
-      await _firestoreService.combineJobsOnSameDate(
-          draggedJob.id, combinedJob, draggedJob.date);
-    } else {
-      await _firestoreService.combineJobsBetweenDates(
-          draggedJob.id, combinedJob, draggedJob.date, targetJob.date);
-    }
+    await _guardedMutation<void>(
+      applyOptimistic: () {
+        _optimisticRemoveJob(draggedJob.id);
+        _optimisticUpdateJob(combinedJob);
+      },
+      persist: () async {
+        if (_isSameDay(draggedJob.date, targetJob.date)) {
+          await _firestoreService.combineJobsOnSameDate(
+              draggedJob.id, combinedJob, draggedJob.date);
+        } else {
+          await _firestoreService.combineJobsBetweenDates(
+              draggedJob.id, combinedJob, draggedJob.date, targetJob.date);
+        }
+      },
+    );
   }
 
   Future<void> copyAndCombineJobsWithUndo(
       Job targetJob, Job combinedJob, DateTime targetDate) async {
-    // Optimistic UI update — show change instantly
-    _optimisticUpdateJob(combinedJob);
-
+    // updateJob handles optimistic apply + rollback.
     await updateJob(combinedJob);
   }
 

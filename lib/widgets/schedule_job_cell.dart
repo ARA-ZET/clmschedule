@@ -32,6 +32,22 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
     required this.isFullscreen,
   });
 
+  /// Shown when a drag/drop refers to a job that no longer exists in the
+  /// provider (deleted or moved by another user while the gesture was in
+  /// flight). Aborting instead of falling back to the stale copy prevents
+  /// deleted jobs from being re-written to Firestore.
+  static void _showJobGoneSnackBar(BuildContext context) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Job no longer exists — it was changed or deleted'),
+        backgroundColor: Colors.orange,
+        duration: Duration(seconds: 3),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
   /// Handles a drop from the unfinished work areas panel into this cell.
   Future<void> _handleUnfinishedDrop(
     BuildContext context,
@@ -44,11 +60,16 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
 
       // Step 1: Add to schedule (destination) first
       if (jobs.isNotEmpty) {
-        // Cell already has a job — combine the unfinished item into it
-        final targetJob = scheduleProvider.jobs.firstWhere(
-          (j) => j.id == jobs.first.id,
-          orElse: () => jobs.first,
-        );
+        // Cell already has a job — combine the unfinished item into it.
+        // Must be fresh from the provider; a stale copy could resurrect a
+        // deleted job.
+        final targetJob = scheduleProvider.jobs
+            .where((j) => j.id == jobs.first.id)
+            .firstOrNull;
+        if (targetJob == null) {
+          _showJobGoneSnackBar(context);
+          return;
+        }
 
         final combinedJob = _mergeScheduleJobs(
           targetJob: targetJob,
@@ -267,10 +288,14 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
           return;
         }
 
-        final draggedJob = scheduleProvider.jobs.firstWhere(
-          (j) => j.id == draggedJobId,
-          orElse: () => jobDetails.data, // Fallback to original if not found
-        );
+        final draggedJob = scheduleProvider.jobs
+            .where((j) => j.id == draggedJobId)
+            .firstOrNull;
+        if (draggedJob == null) {
+          // The dragged job vanished mid-gesture (deleted/moved elsewhere).
+          _showJobGoneSnackBar(context);
+          return;
+        }
 
         // Check if dropping on the same day and distributor (no changes)
         final isSameDayAndDistributor =
@@ -308,18 +333,21 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
           // If there's already a job in the target cell
           if (jobs.isNotEmpty) {
             // Get fresh target job data from provider to avoid stale state
-            final targetJobId = jobs.first.id;
-            final targetJob = scheduleProvider.jobs.firstWhere(
-              (j) => j.id == targetJobId,
-              orElse: () => jobs.first,
-            );
+            final staleTargetJob = scheduleProvider.jobs
+                .where((j) => j.id == jobs.first.id)
+                .firstOrNull;
+            if (staleTargetJob == null) {
+              _showJobGoneSnackBar(context);
+              return;
+            }
 
             // Show confirmation dialog
+            if (!context.mounted) return;
             final action = await showDialog<DropAction>(
               context: context,
               builder: (context) => JobDropConfirmationDialog(
                 draggedJob: draggedJob,
-                targetJob: targetJob,
+                targetJob: staleTargetJob,
                 distributorName: distributor.name,
                 targetDate: date,
               ),
@@ -327,9 +355,23 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
 
             if (action == null) return; // User cancelled
 
+            // Re-validate after the dialog's async gap — the stream may have
+            // removed or changed either job while the dialog was open.
+            final freshDragged = scheduleProvider.jobs
+                .where((j) => j.id == draggedJob.id)
+                .firstOrNull;
+            final targetJob = scheduleProvider.jobs
+                .where((j) => j.id == staleTargetJob.id)
+                .firstOrNull;
+            if (freshDragged == null || targetJob == null) {
+              if (context.mounted) _showJobGoneSnackBar(context);
+              return;
+            }
+            final confirmedDraggedJob = freshDragged;
+
             if (action == DropAction.swap) {
               await scheduleProvider.swapJobsWithUndo(
-                draggedJob,
+                confirmedDraggedJob,
                 targetJob,
                 date,
               );
@@ -352,11 +394,11 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
             } else if (action == DropAction.addToExisting) {
               final combinedJob = _mergeScheduleJobs(
                 targetJob: targetJob,
-                incomingJob: draggedJob,
+                incomingJob: confirmedDraggedJob,
               );
 
               await scheduleProvider.combineJobsWithUndo(
-                draggedJob,
+                confirmedDraggedJob,
                 targetJob,
                 combinedJob,
                 date,
@@ -380,7 +422,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
             } else if (action == DropAction.copy) {
               final combinedJob = _mergeScheduleJobs(
                 targetJob: targetJob,
-                incomingJob: draggedJob,
+                incomingJob: confirmedDraggedJob,
               );
 
               await scheduleProvider.copyAndCombineJobsWithUndo(
@@ -459,31 +501,56 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
                   date: date,
                   scaleProvider: scaleProvider,
                 )
-              : LongPressDraggable<Job>(
-                  data: jobs.first,
-                  delay: const Duration(milliseconds: 250),
-                  hapticFeedbackOnStart: true,
-                  feedback: Material(
-                    elevation: 8.0,
-                    color: Colors.transparent,
-                    child: SizedBox(
-                      width: cellWidth - 8,
-                      height: rowHeight - 8,
-                      child: Opacity(
-                        opacity: 0.7,
-                        child: JobCard(
-                            job: jobs.first, isFullscreen: isFullscreen),
-                      ),
-                    ),
-                  ),
-                  childWhenDragging: Opacity(
-                    opacity: 0.2,
-                    child: JobCard(job: jobs.first, isFullscreen: isFullscreen),
-                  ),
-                  child: JobCard(job: jobs.first, isFullscreen: isFullscreen),
-                ),
+              : _buildCellContent(),
         );
       },
+    );
+  }
+
+  /// Cell body. A single job fills the cell (unchanged behaviour); a cell
+  /// holding more than one job splits vertically into one independently
+  /// draggable card per job, so no job is hidden and each can be moved on its
+  /// own. Each card is clipped to its slot to avoid overflow paint.
+  Widget _buildCellContent() {
+    if (jobs.length == 1) return _buildDraggableJob(jobs.first);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final job in jobs)
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 1),
+              child: ClipRect(child: _buildDraggableJob(job)),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// One job rendered as a long-press draggable card carrying that job as its
+  /// drag payload.
+  Widget _buildDraggableJob(Job job) {
+    return LongPressDraggable<Job>(
+      data: job,
+      delay: const Duration(milliseconds: 250),
+      hapticFeedbackOnStart: true,
+      feedback: Material(
+        elevation: 8.0,
+        color: Colors.transparent,
+        child: SizedBox(
+          width: cellWidth - 8,
+          height: rowHeight - 8,
+          child: Opacity(
+            opacity: 0.7,
+            child: JobCard(job: job, isFullscreen: isFullscreen),
+          ),
+        ),
+      ),
+      childWhenDragging: Opacity(
+        opacity: 0.2,
+        child: JobCard(job: job, isFullscreen: isFullscreen),
+      ),
+      child: JobCard(job: job, isFullscreen: isFullscreen),
     );
   }
 }

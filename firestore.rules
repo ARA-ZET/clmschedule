@@ -1,0 +1,99 @@
+rules_version = '2';
+
+// CLM Schedule Firestore security rules.
+//
+// Principles:
+// - Everything requires a signed-in user, except the few collections the
+//   unauthenticated map share-link viewer (/map/{code}) needs to READ.
+// - Schedule audit logs (schedules/{month}/logs) are append-only: any
+//   signed-in user can create/read them, nobody can edit or delete —
+//   that guarantee is why there is NO catch-all match block (Firestore
+//   grants access if ANY overlapping match allows it).
+// - Collections are enumerated explicitly; anything not listed is DENIED.
+//   A new feature that adds a collection must add a rule here.
+// - The public clmworking.web.app roster reads via the getWorkingRoster
+//   Cloud Function (Admin SDK), which bypasses these rules entirely.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // ── Public read: unauthenticated map share links (/map/{code})
+    //    and the public maps viewer's suburb layers ──
+    match /mapLinks/{code} {
+      allow read: if true;
+      allow write: if signedIn();
+    }
+    match /shareableMaps/{document=**} {
+      allow read: if true;
+      allow write: if signedIn();
+    }
+    match /maps/{document=**} {
+      allow read: if true;
+      allow write: if signedIn();
+    }
+    match /workSuburbs/{document=**} {
+      allow read: if true;
+      allow write: if signedIn();
+    }
+    match /cloudDatasets/{document=**} {
+      allow read: if true;
+      allow write: if signedIn();
+    }
+
+    // ── Schedules: staff only; audit logs append-only ──
+    match /schedules/{month} {
+      allow read, write: if signedIn();
+      match /days/{day} { allow read, write: if signedIn(); }
+      match /meta/{doc} { allow read, write: if signedIn(); }
+      match /logs/{logId} {
+        allow read, create: if signedIn();
+        allow update, delete: if false;
+      }
+    }
+
+    // ── Staff-only collections (recursive: covers subcollections such as
+    //    days/meta/items/advances/repayments/deposits/withdrawals) ──
+    match /distributors/{document=**}          { allow read, write: if signedIn(); }
+    match /distributorDaysOff/{document=**}    { allow read, write: if signedIn(); }
+    match /workAreas/{document=**}             { allow read, write: if signedIn(); }
+    match /users/{document=**}                 { allow read, write: if signedIn(); }
+    match /userPreferences/{document=**}       { allow read, write: if signedIn(); }
+    match /user_status/{document=**}           { allow read, write: if signedIn(); }
+    match /jobLists/{document=**}              { allow read, write: if signedIn(); }
+    match /jobList/{document=**}               { allow read, write: if signedIn(); }
+    match /jobs/{document=**}                  { allow read, write: if signedIn(); }
+    match /collectionSchedules/{document=**}   { allow read, write: if signedIn(); }
+    match /dropsheet/{document=**}             { allow read, write: if signedIn(); }
+    match /unfinishedWorkAreas/{document=**}   { allow read, write: if signedIn(); }
+    match /chat_months/{document=**}           { allow read, write: if signedIn(); }
+    match /inventoryTools/{document=**}        { allow read, write: if signedIn(); }
+    match /home_choice/{document=**}           { allow read, write: if signedIn(); }
+    match /drivers/{document=**}               { allow read, write: if signedIn(); }
+    match /vehicles/{document=**}              { allow read, write: if signedIn(); }
+    match /vehicle_assignments/{document=**}   { allow read, write: if signedIn(); }
+    match /tracking_entries/{document=**}      { allow read, write: if signedIn(); }
+    match /payroll/{document=**}               { allow read, write: if signedIn(); }
+    match /payrollSettings/{document=**}       { allow read, write: if signedIn(); }
+    match /payrollAdvances/{document=**}       { allow read, write: if signedIn(); }
+    match /payrollSavings/{document=**}        { allow read, write: if signedIn(); }
+    match /monthSummaries/{document=**}        { allow read, write: if signedIn(); }
+    match /appConfig/{document=**}             { allow read, write: if signedIn(); }
+    match /aiConfig/{document=**}              { allow read, write: if signedIn(); }
+    match /customJobListStatuses/{document=**} { allow read, write: if signedIn(); }
+    match /customJobTypes/{document=**}        { allow read, write: if signedIn(); }
+    match /customJobStatuses/{document=**}     { allow read, write: if signedIn(); }
+    match /customInvoiceStatuses/{document=**} { allow read, write: if signedIn(); }
+    match /jobStatuses/{document=**}           { allow read, write: if signedIn(); }
+    match /settings/{document=**}              { allow read, write: if signedIn(); }
+    match /happySunProjects/{document=**}      { allow read, write: if signedIn(); }
+    match /erfProperties/{document=**}         { allow read, write: if signedIn(); }
+    match /projects/{document=**}              { allow read, write: if signedIn(); }
+    match /routeCache/{document=**}            { allow read, write: if signedIn(); }
+
+    // Everything not matched above is DENIED (fail-closed).
+  }
+}

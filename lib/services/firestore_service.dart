@@ -1,19 +1,289 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import '../models/distributor.dart';
 import '../models/job.dart';
-import '../models/custom_polygon.dart';
 import '../models/work_area.dart';
 import '../models/work_suburb.dart';
 import '../models/collection_job.dart';
+import '../models/schedule_confirmation_status.dart';
 import 'daily_service.dart';
+import 'schedule_mutation_types.dart';
 
 class FirestoreService {
   final DailyService _dailyService;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   FirestoreService() : _dailyService = DailyService(FirebaseFirestore.instance);
+
+  /// Resolves the identity recorded on schedule audit logs. Set by
+  /// ScheduleProvider (which knows the app user's display name); other
+  /// FirestoreService instances fall back to FirebaseAuth.
+  ScheduleLogUser Function()? logUserResolver;
+
+  /// Resolves the signed-in user for the audit log. Throws
+  /// [ScheduleAuthRequiredException] when nobody is signed in — every
+  /// schedule change must be attributable, so unauthenticated writes are
+  /// rejected before the transaction starts (the provider rolls back its
+  /// optimistic state and the UI surfaces the error).
+  ScheduleLogUser _resolveLogUser() {
+    final resolved = logUserResolver?.call();
+    if (resolved != null && resolved.uid != null) return resolved;
+
+    // Resolver missing or its auth state not yet populated — fall back to
+    // FirebaseAuth directly.
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw ScheduleAuthRequiredException();
+    }
+    return ScheduleLogUser(
+      uid: user.uid,
+      email: user.email,
+      name: resolved?.name ?? user.displayName ?? user.email,
+    );
+  }
+
+  // Transactions are capped at 500 writes; each affected day costs two
+  // (day doc + log doc).
+  static const int _maxMutationDates = 250;
+
+  /// Runs a schedule mutation as a single Firestore transaction:
+  /// reads every affected day doc, applies [mutate] to the in-memory state,
+  /// writes back the changed day docs and one audit-log doc per changed day
+  /// (in `schedules/{month}/logs`) — all atomically. Either everything
+  /// commits or nothing does.
+  ///
+  /// [mutate] must be pure over the [ScheduleTxContext]: the context is
+  /// rebuilt from fresh reads whenever the transaction retries on contention.
+  /// Days whose content is unchanged after [mutate] are neither written nor
+  /// logged, making no-op mutations (e.g. deleting an already-deleted job)
+  /// idempotent.
+  Future<T> _runScheduleMutation<T>({
+    required String action,
+    required List<DateTime> dates,
+    required T Function(ScheduleTxContext ctx) mutate,
+    List<String> affectedJobIds = const [],
+  }) async {
+    final datesByKey = <String, DateTime>{};
+    for (final d in dates) {
+      final normalized = DateTime(d.year, d.month, d.day);
+      datesByKey[_dailyService.getDailyDocumentId(normalized)] = normalized;
+    }
+    if (datesByKey.isEmpty) {
+      throw ArgumentError('Schedule mutation "$action" has no affected dates');
+    }
+    if (datesByKey.length > _maxMutationDates) {
+      throw ArgumentError(
+        'Schedule mutation "$action" touches ${datesByKey.length} days; '
+        'maximum is $_maxMutationDates per operation',
+      );
+    }
+
+    // Kept for the monthly meta/index side effect (month pickers depend on
+    // it); the transaction itself tolerates missing day docs.
+    await Future.wait(
+      datesByKey.values.map(_dailyService.ensureScheduleDailyDocExists),
+    );
+
+    final user = _resolveLogUser();
+    final opId = _newJobId();
+    final allDateKeys = datesByKey.keys.toList()..sort();
+
+    return _firestore.runTransaction<T>((tx) async {
+      // All reads must happen before any write.
+      final refsByKey = <String, DocumentReference>{};
+      final beforeByKey = <String, Map<String, dynamic>?>{};
+      final jobsByKey = <String, List<Map<String, dynamic>>>{};
+
+      for (final entry in datesByKey.entries) {
+        final ref = _dailyService.getScheduleDailyDoc(entry.value);
+        refsByKey[entry.key] = ref;
+        final snap = await tx.get(ref);
+        final data = snap.exists && snap.data() != null
+            ? deepCopyMap(snap.data() as Map)
+            : null;
+        beforeByKey[entry.key] = data;
+        jobsByKey[entry.key] = data == null
+            ? <Map<String, dynamic>>[]
+            : (data['jobs'] as List? ?? const [])
+                .map((e) => deepCopyMap(e as Map))
+                .toList();
+      }
+
+      final ctx = ScheduleTxContext(
+        jobsByDateKey: jobsByKey,
+        beforeByDateKey: beforeByKey,
+        dateKeyFor: _dailyService.getDailyDocumentId,
+      );
+      final result = mutate(ctx);
+
+      // ── Enforce schedule invariants on the mutation result ──
+      // Runs on EVERY schedule mutation, so add/update/delete/move/swap/
+      // combine/reallocate all inherit the same protection. Guarantees, for
+      // each affected day, that:
+      //  1. every job's `date` field matches the day document it lives in
+      //     (the key ↔ placement relationship — time-of-day is preserved);
+      //  2. no job id is duplicated within a day (the freshest write wins);
+      //  3. no job id spans two of the affected days (fail-closed guard
+      //     that aborts the whole transaction rather than persist a split).
+      _enforceScheduleInvariants(datesByKey, jobsByKey);
+
+      for (final entry in datesByKey.entries) {
+        final key = entry.key;
+        final date = entry.value;
+        final before = beforeByKey[key];
+        final newJobs = jobsByKey[key]!;
+        final fieldUpdates = ctx.dayFieldUpdates[key] ?? const {};
+
+        final jobsChanged =
+            !deepEquals((before?['jobs'] as List?) ?? const [], newJobs);
+        if (!jobsChanged && fieldUpdates.isEmpty) continue;
+
+        final after = <String, dynamic>{
+          if (before != null)
+            ...before
+          else ...{
+            'created': FieldValue.serverTimestamp(),
+            'date': key,
+            'timestamp': Timestamp.fromDate(date),
+          },
+          'jobs': newJobs,
+        };
+        fieldUpdates.forEach((field, value) {
+          if (value == null) {
+            after.remove(field);
+          } else {
+            after[field] = value;
+          }
+        });
+
+        tx.set(refsByKey[key]!, after);
+
+        final monthId = _dailyService.getMonthlyDocumentId(date);
+        final logRef = _firestore
+            .collection('schedules')
+            .doc(monthId)
+            .collection('logs')
+            .doc();
+        tx.set(logRef, {
+          'schemaVersion': 1,
+          'opId': opId,
+          'action': action,
+          'timestamp': FieldValue.serverTimestamp(),
+          'userId': user.uid,
+          'userEmail': user.email,
+          'userName': user.name,
+          'month': monthId,
+          'dateKey': key,
+          'affectedDates': allDateKeys,
+          'affectedJobIds': affectedJobIds,
+          'before': {'exists': before != null, 'data': before},
+          'after': {'data': after},
+        });
+      }
+
+      return result;
+    });
+  }
+
+  /// Post-mutation integrity pass — see the call site and rationale in
+  /// [_runScheduleMutation]. Rewrites [jobsByKey] in place so the write step
+  /// persists a normalized, de-duplicated, correctly-filed set of jobs.
+  void _enforceScheduleInvariants(
+    Map<String, DateTime> datesByKey,
+    Map<String, List<Map<String, dynamic>>> jobsByKey,
+  ) {
+    // Tracks which affected day currently owns each id, to catch an id that
+    // would straddle two of the days touched by this mutation.
+    final idToDateKey = <String, String>{};
+
+    for (final entry in datesByKey.entries) {
+      final dateKey = entry.key;
+      final dayDate = entry.value;
+      final dayJobs = jobsByKey[dateKey];
+      if (dayJobs == null) continue;
+
+      final deduped = <Map<String, dynamic>>[];
+      final indexById = <String, int>{};
+
+      for (final job in dayJobs) {
+        // (1) Key ↔ placement: stamp this day onto the job, keeping any
+        //     time-of-day component so time-slotted jobs aren't flattened.
+        _stampJobDate(job, dayDate);
+
+        final id = job['id'];
+        if (id is! String || id.isEmpty) {
+          // No usable id — can't dedupe or track it; keep it verbatim.
+          deduped.add(job);
+          continue;
+        }
+
+        // (2) No duplication within a day: a repeated id keeps its position
+        //     but takes the latest (freshest) content.
+        final existingIdx = indexById[id];
+        if (existingIdx != null) {
+          deduped[existingIdx] = job;
+          idToDateKey[id] = dateKey;
+          continue;
+        }
+        indexById[id] = deduped.length;
+        deduped.add(job);
+
+        // (3) No duplication across the affected days: fail closed.
+        final otherDay = idToDateKey[id];
+        if (otherDay != null && otherDay != dateKey) {
+          throw ScheduleIntegrityException(
+            'job $id would exist on both $otherDay and $dateKey — '
+            'aborting to prevent duplication',
+          );
+        }
+        idToDateKey[id] = dateKey;
+      }
+
+      jobsByKey[dateKey] = deduped;
+    }
+  }
+
+  /// Sets the y/m/d of a job map's `date` field to [dayDate] while preserving
+  /// its time-of-day. No-op (and no spurious diff) when the job is already
+  /// filed on the correct day.
+  void _stampJobDate(Map<String, dynamic> job, DateTime dayDate) {
+    final raw = job['date'];
+    final current = raw is Timestamp ? raw.toDate() : null;
+    if (current != null &&
+        current.year == dayDate.year &&
+        current.month == dayDate.month &&
+        current.day == dayDate.day) {
+      return; // already on the correct day — leave it untouched
+    }
+    final corrected = DateTime(
+      dayDate.year,
+      dayDate.month,
+      dayDate.day,
+      current?.hour ?? 0,
+      current?.minute ?? 0,
+      current?.second ?? 0,
+      current?.millisecond ?? 0,
+      current?.microsecond ?? 0,
+    );
+    job['date'] = Timestamp.fromDate(corrected);
+  }
+
+  /// Removes every occurrence of [jobId] from all day arrays loaded in the
+  /// transaction, regardless of which day each copy sits in. Returns true if
+  /// at least one copy was removed. Used by reallocation so a move keys the
+  /// removal off the job's real location, and so any stray duplicate of the
+  /// id is swept up in the same pass.
+  bool _removeJobFromLoadedDays(ScheduleTxContext ctx, String jobId) {
+    var removed = false;
+    for (final dayJobs in ctx.jobsByDateKey.values) {
+      final before = dayJobs.length;
+      dayJobs.removeWhere((j) => j['id'] == jobId);
+      if (dayJobs.length != before) removed = true;
+    }
+    return removed;
+  }
 
   // Root collection references (not daily)
   CollectionReference get _distributors =>
@@ -229,53 +499,171 @@ class FirestoreService {
       '[$debugTag] atomic start: remove=${removeJobs.length}, add=${resolvedAdds.length}, docs=${uniqueDates.length}',
     );
 
-    // Ensure all touched daily docs exist, then read each once.
-    await Future.wait(uniqueDates.map(_dailyService.ensureScheduleDailyDocExists));
+    await _runScheduleMutation<void>(
+      action: 'reallocateJobs',
+      dates: uniqueDates,
+      affectedJobIds: [
+        ...removeJobs.map((j) => j.id),
+        ...resolvedAdds.map((j) => j.id),
+      ],
+      mutate: (ctx) {
+        // Remove every source job by id from WHEREVER it actually sits among
+        // the loaded days — not just the day its (possibly stale) `date`
+        // field points at. A miss throws instead of being silently swallowed,
+        // so the add below can never duplicate a job the remove failed to
+        // find. This is the fix for the reallocation-duplication bug.
+        for (final job in removeJobs) {
+          final removed = _removeJobFromLoadedDays(ctx, job.id);
+          if (!removed) {
+            throw JobNotFoundException(job.id);
+          }
+        }
+        for (final job in resolvedAdds) {
+          final key = ctx.dateKeyFor(job.date);
+          final dayJobs = ctx.jobsByDateKey[key];
+          if (dayJobs == null) {
+            throw ScheduleIntegrityException(
+              'reallocation add target day $key was not loaded',
+            );
+          }
+          dayJobs.add(job.toMap());
+        }
+      },
+    );
 
-    final docByKey = <String, DocumentReference>{};
-    final jobsByKey = <String, List<Map<String, dynamic>>>{};
-
-    for (final date in uniqueDates) {
-      final key = _dailyService.getDailyDocumentId(date);
-      final doc = _dailyService.getScheduleDailyDoc(date);
-      docByKey[key] = doc;
-
-      final snapshot = await doc.get();
-      final data = Map<String, dynamic>.from(
-          (snapshot.data() as Map?) ?? <String, dynamic>{});
-      jobsByKey[key] = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
-    }
-
-    // Apply removals in-memory by source date key.
-    for (final job in removeJobs) {
-      final key = _dailyService.getDailyDocumentId(job.date);
-      final list = jobsByKey[key];
-      if (list == null) continue;
-      list.removeWhere((j) => j['id'] == job.id);
-    }
-
-    // Apply additions in-memory by target date key.
-    for (final job in resolvedAdds) {
-      final key = _dailyService.getDailyDocumentId(job.date);
-      final list = jobsByKey[key];
-      if (list == null) continue;
-      list.add(job.toMap());
-    }
-
-    final batch = _firestore.batch();
-    for (final entry in jobsByKey.entries) {
-      final doc = docByKey[entry.key];
-      if (doc == null) continue;
-      batch.update(doc, {'jobs': entry.value});
-    }
-
-    await batch.commit();
     sw.stop();
     debugPrint(
       '[$debugTag] atomic commit complete in ${sw.elapsedMilliseconds}ms',
     );
 
     return resolvedAdds;
+  }
+
+  /// One-time maintenance: rewrites every populated day document in [month]
+  /// through the standard transactional path so [_enforceScheduleInvariants]
+  /// heals legacy corruption — misfiled `date` fields and within-day duplicate
+  /// job ids — atomically and with full audit logs. Every changed day writes a
+  /// recoverable before/after log; clean days are left untouched (no write, no
+  /// log). Distinct jobs that share a distributor-day are NEVER merged: they
+  /// carry independent ids and real content, so they are preserved as-is and
+  /// left for a human to reconcile in the grid.
+  ///
+  /// Returns the day dates that had data and were run through the repair.
+  Future<List<DateTime>> repairScheduleMonth(DateTime month) async {
+    final dayDates = await _listScheduleDaysWithData(month);
+    if (dayDates.isEmpty) return const [];
+    // A calendar month has ≤31 days; each changed day costs 2 writes
+    // (doc + log), well under the 250-day / 500-write transaction cap.
+    await _runScheduleMutation<void>(
+      action: 'repairMonthIntegrity',
+      dates: dayDates,
+      // No structural edit here — the integrity pass that runs on every
+      // mutation does all the healing (date re-stamping + duplicate collapse).
+      mutate: (_) {},
+    );
+    return dayDates;
+  }
+
+  /// Dates of the day documents that actually exist for [month].
+  Future<List<DateTime>> _listScheduleDaysWithData(DateTime month) async {
+    final snap = await _dailyService.getScheduleMonthlyCollection(month).get();
+    final dates = <DateTime>[];
+    for (final doc in snap.docs) {
+      final parsed = DateTime.tryParse(doc.id); // day ids are 'YYYY-MM-DD'
+      if (parsed != null) {
+        dates.add(DateTime(parsed.year, parsed.month, parsed.day));
+      }
+    }
+    return dates;
+  }
+
+  /// Maintenance: within any distributor-day that holds more than one job,
+  /// removes redundant jobs that carry NO work areas (empty `workingAreas`
+  /// AND empty `workMaps`) — the residue of the shift/duplication bug that
+  /// slipped fresh ids past the id-based dedupe:
+  ///  • when a job WITH work areas shares the cell, every no-area job is
+  ///    dropped as a duplicate/empty placeholder;
+  ///  • when EVERY job in the cell is no-area, one is kept (the one with the
+  ///    most clients) and the rest dropped.
+  /// Jobs that carry real work areas are never touched, so genuinely distinct
+  /// jobs are preserved. With [dryRun] true (default) nothing is written — it
+  /// only logs and returns the ids it *would* delete.
+  Future<List<String>> cleanNoAreaDuplicates(
+    DateTime month, {
+    bool dryRun = true,
+  }) async {
+    final monthId = _dailyService.getMonthlyDocumentId(month);
+    final snap = await _dailyService.getScheduleMonthlyCollection(month).get();
+
+    bool hasArea(Map m) {
+      final wa = (m['workingAreas'] as List?) ?? const [];
+      final wm = (m['workMaps'] as List?) ?? const [];
+      return wa.isNotEmpty || wm.isNotEmpty;
+    }
+
+    // dateKey -> ids to delete on that day.
+    final plan = <String, List<String>>{};
+    final planDates = <String, DateTime>{};
+    final deletedIds = <String>[];
+
+    for (final doc in snap.docs) {
+      final data = doc.data() as Map<String, dynamic>?;
+      final jobsArray = (data?['jobs'] as List?) ?? const [];
+      final byDist = <String, List<Map<String, dynamic>>>{};
+      for (final j in jobsArray) {
+        final m = Map<String, dynamic>.from(j as Map);
+        (byDist[(m['distributorId'] as String?) ?? ''] ??= []).add(m);
+      }
+      for (final cellJobs in byDist.values) {
+        if (cellJobs.length <= 1) continue;
+        final withAreas = cellJobs.where(hasArea).toList();
+        final noAreas = cellJobs.where((m) => !hasArea(m)).toList();
+        final toDelete = <Map<String, dynamic>>[];
+        if (withAreas.isNotEmpty) {
+          toDelete.addAll(noAreas);
+        } else {
+          // All no-area: keep the one with the most clients, drop the rest.
+          noAreas.sort((a, b) => ((b['clients'] as List?)?.length ?? 0)
+              .compareTo(((a['clients'] as List?)?.length ?? 0)));
+          toDelete.addAll(noAreas.skip(1));
+        }
+        for (final m in toDelete) {
+          final id = m['id']?.toString() ?? '';
+          if (id.isEmpty) continue;
+          final clients = ((m['clients'] as List?) ?? const []).join(', ');
+          debugPrint('🧹 ${dryRun ? "[DRY-RUN] would delete" : "deleting"} '
+              '$monthId/${doc.id} dist=${m['distributorId']} '
+              'job=$id clients="$clients"');
+          (plan[doc.id] ??= []).add(id);
+          deletedIds.add(id);
+        }
+        if (plan.containsKey(doc.id)) {
+          final parsed = DateTime.tryParse(doc.id);
+          if (parsed != null) {
+            planDates[doc.id] =
+                DateTime(parsed.year, parsed.month, parsed.day);
+          }
+        }
+      }
+    }
+
+    if (dryRun || deletedIds.isEmpty) return deletedIds;
+
+    await _runScheduleMutation<void>(
+      action: 'cleanNoAreaDuplicates',
+      dates: planDates.values.toList(),
+      affectedJobIds: deletedIds,
+      mutate: (ctx) {
+        plan.forEach((dayKey, ids) {
+          final dayJobs = ctx.jobsByDateKey[dayKey];
+          if (dayJobs == null) return;
+          for (final id in ids) {
+            dayJobs.removeWhere((j) => j['id'] == id);
+          }
+        });
+      },
+    );
+    return deletedIds;
   }
 
   String _newJobId() => _firestore.collection('dummy').doc().id;
@@ -493,314 +881,221 @@ class FirestoreService {
   // Add a new job
   Future<String> addJob(Job job, [DateTime? date]) async {
     final targetDate = date ?? job.date;
-    final sw = Stopwatch()..start();
-
-    // Ensure daily document exists
-    await _dailyService.ensureScheduleDailyDocExists(targetDate);
-
-    final dailyDoc = _dailyService.getScheduleDailyDoc(targetDate);
 
     // Generate a unique ID for the job if it doesn't have one
-    final jobId =
-        job.id.isEmpty ? _firestore.collection('dummy').doc().id : job.id;
+    final jobId = job.id.isEmpty ? _newJobId() : job.id;
+    final updatedJob = job.id.isEmpty ? _jobWithId(job, jobId) : job;
 
-    // Create job with proper ID while preserving every field.
-    final updatedJob = Job(
-      id: jobId,
-      clients: List<String>.from(job.clients),
-      clientInstructions: List<String>.from(job.clientInstructions),
-      workingAreas: List<String>.from(job.workingAreas),
-      workMaps: List<CustomPolygon>.from(job.workMaps),
-      distributorId: job.distributorId,
-      date: job.date,
-      statusId: job.statusId,
-      mapInstructions: job.mapInstructions,
-      dropOffPoint: job.dropOffPoint,
-      pickUpPoint: job.pickUpPoint,
-    );
-
-    // Add job to the jobs array in the daily document
-    await dailyDoc.update({
-      'jobs': FieldValue.arrayUnion([updatedJob.toMap()]),
-    });
-
-    sw.stop();
-    debugPrint(
-      '[schedule-add] added ${updatedJob.id} to ${_dailyService.getDailyDocumentId(targetDate)} in ${sw.elapsedMilliseconds}ms',
+    await _runScheduleMutation<void>(
+      action: 'addJob',
+      dates: [targetDate],
+      affectedJobIds: [jobId],
+      mutate: (ctx) {
+        ctx.jobsByDateKey[ctx.dateKeyFor(targetDate)]!.add(updatedJob.toMap());
+      },
     );
 
     return jobId;
   }
 
-  // Update a job
+  // Update a job. Throws [JobNotFoundException] when the job no longer
+  // exists on the target day (deleted or moved by another user).
   Future<void> updateJob(Job job, [DateTime? date]) async {
     final targetDate = date ?? job.date;
 
-    // Ensure daily document exists before updating
-    await _dailyService.ensureScheduleDailyDocExists(targetDate);
-
-    final dailyDoc = _dailyService.getScheduleDailyDoc(targetDate);
-
-    // Get current document data
-    final snapshot = await dailyDoc.get();
-    if (!snapshot.exists) return;
-
-    final data = Map<String, dynamic>.from(snapshot.data() as Map);
-    final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
-
-    // Find and update the job in the array
-    final jobIndex = jobsArray.indexWhere((jobData) => jobData['id'] == job.id);
-    if (jobIndex != -1) {
-      jobsArray[jobIndex] = job.toMap();
-
-      // Update the document with the modified array
-      await dailyDoc.update({'jobs': jobsArray});
-    }
+    await _runScheduleMutation<void>(
+      action: 'updateJob',
+      dates: [targetDate],
+      affectedJobIds: [job.id],
+      mutate: (ctx) {
+        final key = ctx.dateKeyFor(targetDate);
+        final jobs = ctx.jobsByDateKey[key]!;
+        final idx = jobs.indexWhere((j) => j['id'] == job.id);
+        if (idx == -1) throw JobNotFoundException(job.id, key);
+        jobs[idx] = job.toMap();
+      },
+    );
   }
 
-  // Update a job using already synced data (optimized - no read operation)
-  Future<void> updateJobOptimized(Job job, List<Job> currentJobs,
-      [DateTime? date]) async {
-    final targetDate = date ?? job.date;
+  /// Sets (or clears) the admin confirmation status for a schedule day.
+  /// Confirmed stamps confirmedAt/confirmedBy; other statuses clear them so
+  /// stale confirmation info doesn't linger once a day is reopened for edits.
+  Future<void> setScheduleDayConfirmation(
+    DateTime date,
+    ScheduleConfirmationStatus status, {
+    String? confirmedBy,
+  }) async {
+    final confirmed = status == ScheduleConfirmationStatus.confirmed;
+    await _runScheduleMutation<void>(
+      action: 'dayConfirmation',
+      dates: [date],
+      mutate: (ctx) {
+        // Null values are removed from the day doc by the mutation helper.
+        ctx.dayFieldUpdates[ctx.dateKeyFor(date)] = {
+          'confirmationStatus': status.name,
+          'confirmedAt': confirmed ? FieldValue.serverTimestamp() : null,
+          'confirmedBy': confirmed ? confirmedBy : null,
+        };
+      },
+    );
+  }
 
-    // Ensure daily document exists before updating
-    await _dailyService.ensureScheduleDailyDocExists(targetDate);
-
-    final dailyDoc = _dailyService.getScheduleDailyDoc(targetDate);
-
-    // Convert current jobs to map array and update the specific job
-    final jobsArray = currentJobs.map((j) => j.toMap()).toList();
-    final jobIndex = jobsArray.indexWhere((jobData) => jobData['id'] == job.id);
-
-    if (jobIndex != -1) {
-      jobsArray[jobIndex] = job.toMap();
-
-      // Update the document with the modified array (no read operation needed)
-      await dailyDoc.update({'jobs': jobsArray});
-    }
+  /// Streams the confirmation status for a schedule day.
+  Stream<ScheduleDayConfirmation> streamScheduleDayConfirmation(
+    DateTime date,
+  ) {
+    return _dailyService.getScheduleDailyDoc(date).snapshots().map(
+          (snap) => ScheduleDayConfirmation.fromMap(
+            snap.data() as Map<String, dynamic>?,
+          ),
+        );
   }
 
   // Move a job between different dates (handles cross-day/cross-month moves)
-  // Uses WriteBatch for atomic operation - job is never lost even on failure.
+  // as a single transaction — the job is never lost or duplicated.
   Future<void> moveJobBetweenDates(Job originalJob, Job updatedJob,
       DateTime originalDate, DateTime newDate) async {
-    final sw = Stopwatch()..start();
-
     // If it's the same date, just do a regular update
     if (originalDate.year == newDate.year &&
         originalDate.month == newDate.month &&
         originalDate.day == newDate.day) {
-      debugPrint(
-        '[schedule-move] same-day update for ${originalJob.id} on ${_dailyService.getDailyDocumentId(newDate)}',
-      );
       await updateJob(updatedJob, newDate);
       return;
     }
 
-    // Different dates - need to remove from original and add to new ATOMICALLY
-    debugPrint(
-      '[schedule-move] atomic move start id=${originalJob.id} from ${_dailyService.getDailyDocumentId(originalDate)} to ${_dailyService.getDailyDocumentId(newDate)}',
-    );
-
-    // Ensure both daily documents exist
-    await _dailyService.ensureScheduleDailyDocExists(originalDate);
-    await _dailyService.ensureScheduleDailyDocExists(newDate);
-
-    final sourceDoc = _dailyService.getScheduleDailyDoc(originalDate);
-    final destDoc = _dailyService.getScheduleDailyDoc(newDate);
-
-    // Read both documents
-    final sourceSnapshot = await sourceDoc.get();
-    final destSnapshot = await destDoc.get();
-
-    // Build updated source array (remove the job)
-    final sourceData = Map<String, dynamic>.from(
-        (sourceSnapshot.data() as Map?) ?? <String, dynamic>{});
-    final sourceJobs =
-        List<Map<String, dynamic>>.from(sourceData['jobs'] ?? []);
-    sourceJobs.removeWhere((j) => j['id'] == originalJob.id);
-
-    // Build updated destination array (add the job)
-    final destData = Map<String, dynamic>.from(
-        (destSnapshot.data() as Map?) ?? <String, dynamic>{});
-    final destJobs = List<Map<String, dynamic>>.from(destData['jobs'] ?? []);
-    destJobs.add(updatedJob.toMap());
-
-    // Atomic batch write - both succeed or both fail
-    final batch = _firestore.batch();
-    batch.update(sourceDoc, {'jobs': sourceJobs});
-    batch.update(destDoc, {'jobs': destJobs});
-    await batch.commit();
-
-    sw.stop();
-    debugPrint(
-      '[schedule-move] atomic move complete id=${originalJob.id} in ${sw.elapsedMilliseconds}ms',
+    await _runScheduleMutation<void>(
+      action: 'moveJob',
+      dates: [originalDate, newDate],
+      affectedJobIds: [originalJob.id],
+      mutate: (ctx) {
+        final sourceKey = ctx.dateKeyFor(originalDate);
+        final sourceJobs = ctx.jobsByDateKey[sourceKey]!;
+        final beforeLength = sourceJobs.length;
+        sourceJobs.removeWhere((j) => j['id'] == originalJob.id);
+        // Missing on the source day means another user moved or deleted it;
+        // aborting prevents duplicating the job on the destination day.
+        if (sourceJobs.length == beforeLength) {
+          throw JobNotFoundException(originalJob.id, sourceKey);
+        }
+        ctx.jobsByDateKey[ctx.dateKeyFor(newDate)]!.add(updatedJob.toMap());
+      },
     );
   }
 
-  /// Swap two jobs on the same date in a single atomic write.
+  /// Swap two jobs on the same date atomically.
   /// Each job gets the other's distributorId.
   Future<void> swapJobsOnSameDate(
       Job newJobA, Job newJobB, DateTime date) async {
-    await _dailyService.ensureScheduleDailyDocExists(date);
-
-    final doc = _dailyService.getScheduleDailyDoc(date);
-    final snapshot = await doc.get();
-    if (!snapshot.exists) return;
-
-    final data = Map<String, dynamic>.from(
-        (snapshot.data() as Map?) ?? <String, dynamic>{});
-    final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
-
-    for (int i = 0; i < jobsArray.length; i++) {
-      if (jobsArray[i]['id'] == newJobA.id) {
-        jobsArray[i] = newJobA.toMap();
-      } else if (jobsArray[i]['id'] == newJobB.id) {
-        jobsArray[i] = newJobB.toMap();
-      }
-    }
-
-    await doc.update({'jobs': jobsArray});
+    await _runScheduleMutation<void>(
+      action: 'swapJobs',
+      dates: [date],
+      affectedJobIds: [newJobA.id, newJobB.id],
+      mutate: (ctx) {
+        final key = ctx.dateKeyFor(date);
+        final jobs = ctx.jobsByDateKey[key]!;
+        final idxA = jobs.indexWhere((j) => j['id'] == newJobA.id);
+        if (idxA == -1) throw JobNotFoundException(newJobA.id, key);
+        final idxB = jobs.indexWhere((j) => j['id'] == newJobB.id);
+        if (idxB == -1) throw JobNotFoundException(newJobB.id, key);
+        jobs[idxA] = newJobA.toMap();
+        jobs[idxB] = newJobB.toMap();
+      },
+    );
   }
 
-  /// Swap two jobs across different dates using an atomic batch write.
+  /// Swap two jobs across different dates atomically.
   /// Job A moves from dateA to dateB, Job B moves from dateB to dateA.
   Future<void> swapJobsBetweenDates(Job originalJobA, Job newJobA,
       Job originalJobB, Job newJobB, DateTime dateA, DateTime dateB) async {
-    await _dailyService.ensureScheduleDailyDocExists(dateA);
-    await _dailyService.ensureScheduleDailyDocExists(dateB);
+    await _runScheduleMutation<void>(
+      action: 'swapJobs',
+      dates: [dateA, dateB],
+      affectedJobIds: [originalJobA.id, originalJobB.id],
+      mutate: (ctx) {
+        final keyA = ctx.dateKeyFor(dateA);
+        final keyB = ctx.dateKeyFor(dateB);
+        final jobsA = ctx.jobsByDateKey[keyA]!;
+        final jobsB = ctx.jobsByDateKey[keyB]!;
 
-    final docA = _dailyService.getScheduleDailyDoc(dateA);
-    final docB = _dailyService.getScheduleDailyDoc(dateB);
+        final lenA = jobsA.length;
+        jobsA.removeWhere((j) => j['id'] == originalJobA.id);
+        if (jobsA.length == lenA) {
+          throw JobNotFoundException(originalJobA.id, keyA);
+        }
+        final lenB = jobsB.length;
+        jobsB.removeWhere((j) => j['id'] == originalJobB.id);
+        if (jobsB.length == lenB) {
+          throw JobNotFoundException(originalJobB.id, keyB);
+        }
 
-    final snapshotA = await docA.get();
-    final snapshotB = await docB.get();
-
-    final dataA = Map<String, dynamic>.from(
-        (snapshotA.data() as Map?) ?? <String, dynamic>{});
-    final jobsA = List<Map<String, dynamic>>.from(dataA['jobs'] ?? []);
-
-    final dataB = Map<String, dynamic>.from(
-        (snapshotB.data() as Map?) ?? <String, dynamic>{});
-    final jobsB = List<Map<String, dynamic>>.from(dataB['jobs'] ?? []);
-
-    // Remove Job A from dateA, add modified Job B to dateA
-    jobsA.removeWhere((j) => j['id'] == originalJobA.id);
-    jobsA.add(newJobB.toMap());
-
-    // Remove Job B from dateB, add modified Job A to dateB
-    jobsB.removeWhere((j) => j['id'] == originalJobB.id);
-    jobsB.add(newJobA.toMap());
-
-    final batch = _firestore.batch();
-    batch.update(docA, {'jobs': jobsA});
-    batch.update(docB, {'jobs': jobsB});
-    await batch.commit();
+        jobsA.add(newJobB.toMap());
+        jobsB.add(newJobA.toMap());
+      },
+    );
   }
 
-  /// Combine two jobs on the same date in a single atomic write:
+  /// Combine two jobs on the same date atomically:
   /// removes the source job and updates the target with combined data.
   Future<void> combineJobsOnSameDate(
       String removeJobId, Job combinedJob, DateTime date) async {
-    await _dailyService.ensureScheduleDailyDocExists(date);
-
-    final doc = _dailyService.getScheduleDailyDoc(date);
-    final snapshot = await doc.get();
-    if (!snapshot.exists) return;
-
-    final data = Map<String, dynamic>.from(
-        (snapshot.data() as Map?) ?? <String, dynamic>{});
-    final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
-
-    // Remove the dragged job
-    jobsArray.removeWhere((j) => j['id'] == removeJobId);
-
-    // Update the combined (target) job
-    final idx = jobsArray.indexWhere((j) => j['id'] == combinedJob.id);
-    if (idx != -1) {
-      jobsArray[idx] = combinedJob.toMap();
-    }
-
-    await doc.update({'jobs': jobsArray});
+    await _runScheduleMutation<void>(
+      action: 'combineJobs',
+      dates: [date],
+      affectedJobIds: [removeJobId, combinedJob.id],
+      mutate: (ctx) {
+        final key = ctx.dateKeyFor(date);
+        final jobs = ctx.jobsByDateKey[key]!;
+        final len = jobs.length;
+        jobs.removeWhere((j) => j['id'] == removeJobId);
+        if (jobs.length == len) {
+          throw JobNotFoundException(removeJobId, key);
+        }
+        final idx = jobs.indexWhere((j) => j['id'] == combinedJob.id);
+        if (idx == -1) throw JobNotFoundException(combinedJob.id, key);
+        jobs[idx] = combinedJob.toMap();
+      },
+    );
   }
 
-  /// Combine two jobs across different dates using an atomic batch write:
+  /// Combine two jobs across different dates atomically:
   /// removes the source job from sourceDate, updates the target job at targetDate.
   Future<void> combineJobsBetweenDates(String removeJobId, Job combinedJob,
       DateTime sourceDate, DateTime targetDate) async {
-    await _dailyService.ensureScheduleDailyDocExists(sourceDate);
-    await _dailyService.ensureScheduleDailyDocExists(targetDate);
-
-    final sourceDoc = _dailyService.getScheduleDailyDoc(sourceDate);
-    final targetDoc = _dailyService.getScheduleDailyDoc(targetDate);
-
-    final sourceSnapshot = await sourceDoc.get();
-    final targetSnapshot = await targetDoc.get();
-
-    // Remove from source
-    final sourceData = Map<String, dynamic>.from(
-        (sourceSnapshot.data() as Map?) ?? <String, dynamic>{});
-    final sourceJobs =
-        List<Map<String, dynamic>>.from(sourceData['jobs'] ?? []);
-    sourceJobs.removeWhere((j) => j['id'] == removeJobId);
-
-    // Update in target
-    final targetData = Map<String, dynamic>.from(
-        (targetSnapshot.data() as Map?) ?? <String, dynamic>{});
-    final targetJobs =
-        List<Map<String, dynamic>>.from(targetData['jobs'] ?? []);
-    final idx = targetJobs.indexWhere((j) => j['id'] == combinedJob.id);
-    if (idx != -1) {
-      targetJobs[idx] = combinedJob.toMap();
-    }
-
-    final batch = _firestore.batch();
-    batch.update(sourceDoc, {'jobs': sourceJobs});
-    batch.update(targetDoc, {'jobs': targetJobs});
-    await batch.commit();
+    await _runScheduleMutation<void>(
+      action: 'combineJobs',
+      dates: [sourceDate, targetDate],
+      affectedJobIds: [removeJobId, combinedJob.id],
+      mutate: (ctx) {
+        final sourceKey = ctx.dateKeyFor(sourceDate);
+        final targetKey = ctx.dateKeyFor(targetDate);
+        final sourceJobs = ctx.jobsByDateKey[sourceKey]!;
+        final len = sourceJobs.length;
+        sourceJobs.removeWhere((j) => j['id'] == removeJobId);
+        if (sourceJobs.length == len) {
+          throw JobNotFoundException(removeJobId, sourceKey);
+        }
+        final targetJobs = ctx.jobsByDateKey[targetKey]!;
+        final idx = targetJobs.indexWhere((j) => j['id'] == combinedJob.id);
+        if (idx == -1) throw JobNotFoundException(combinedJob.id, targetKey);
+        targetJobs[idx] = combinedJob.toMap();
+      },
+    );
   }
 
-  // Delete a job
+  // Delete a job. Deleting a job that is already gone is a no-op
+  // (no write, no log entry).
   Future<void> deleteJob(String jobId, [DateTime? date]) async {
     final targetDate = date ?? DateTime.now();
 
-    // Ensure daily document exists before deleting
-    await _dailyService.ensureScheduleDailyDocExists(targetDate);
-
-    final dailyDoc = _dailyService.getScheduleDailyDoc(targetDate);
-
-    // Get current document data
-    final snapshot = await dailyDoc.get();
-    if (!snapshot.exists) return;
-
-    final data = Map<String, dynamic>.from(snapshot.data() as Map);
-    final jobsArray = List<Map<String, dynamic>>.from(data['jobs'] ?? []);
-
-    // Remove the job from the array
-    jobsArray.removeWhere((jobData) => jobData['id'] == jobId);
-
-    // Update the document with the modified array
-    await dailyDoc.update({'jobs': jobsArray});
-  }
-
-  // Delete a job using already synced data (optimized - no read operation)
-  Future<void> deleteJobOptimized(String jobId, List<Job> currentJobs,
-      [DateTime? date]) async {
-    final targetDate = date ?? DateTime.now();
-
-    // Ensure daily document exists before deleting
-    await _dailyService.ensureScheduleDailyDocExists(targetDate);
-
-    final dailyDoc = _dailyService.getScheduleDailyDoc(targetDate);
-
-    // Convert current jobs to map array and remove the specific job
-    final jobsArray = currentJobs
-        .where((job) => job.id != jobId)
-        .map((job) => job.toMap())
-        .toList();
-
-    // Update the document with the modified array (no read operation needed)
-    await dailyDoc.update({'jobs': jobsArray});
+    await _runScheduleMutation<void>(
+      action: 'deleteJob',
+      dates: [targetDate],
+      affectedJobIds: [jobId],
+      mutate: (ctx) {
+        ctx.jobsByDateKey[ctx.dateKeyFor(targetDate)]!
+            .removeWhere((j) => j['id'] == jobId);
+      },
+    );
   }
 
   // Stream jobs for a specific distributor
