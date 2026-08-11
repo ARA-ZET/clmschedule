@@ -48,6 +48,7 @@ class _DailyEntryEditorState extends riverpod.ConsumerState<DailyEntryEditor> {
   Widget build(BuildContext context) {
     final payroll = ref.watch(payrollRiverpod);
     final payslip = payroll.week.payslips[widget.distributorId];
+    final editable = isPayrollWeekEditable(payroll.weekStart);
 
     if (!_initialized) {
       final days = daysInWeek(payroll.weekStart);
@@ -71,7 +72,8 @@ class _DailyEntryEditorState extends riverpod.ConsumerState<DailyEntryEditor> {
         title: Text('${payslip.distributorName} — daily entries'),
         actions: [
           TextButton(
-            onPressed: _saving ? null : () => _save(payroll, payslip),
+            onPressed:
+                (!editable || _saving) ? null : () => _save(payroll, payslip),
             child: _saving
                 ? const SizedBox(
                     width: 16,
@@ -82,15 +84,42 @@ class _DailyEntryEditorState extends riverpod.ConsumerState<DailyEntryEditor> {
           ),
         ],
       ),
-      body: ListView.builder(
-        padding: const EdgeInsets.all(12),
-        itemCount: _rows.length,
-        itemBuilder: (context, i) => _DayCard(
-          state: _rows[i],
-          settings: payroll.settings,
-          payslip: payslip,
-          onChanged: () => setState(() {}),
-        ),
+      body: Column(
+        children: [
+          if (!editable)
+            Container(
+              width: double.infinity,
+              color: Colors.grey.shade200,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  Icon(Icons.lock_outline,
+                      size: 16, color: Colors.grey.shade700),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'This week is more than 2 weeks old and is now read-only.',
+                      style:
+                          TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: _rows.length,
+              itemBuilder: (context, i) => _DayCard(
+                state: _rows[i],
+                settings: payroll.settings,
+                payslip: payslip,
+                editable: editable,
+                onChanged: () => setState(() {}),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -109,19 +138,21 @@ class _DayCard extends StatelessWidget {
   final DayEntryState state;
   final PayrollSettings settings;
   final PayrollPayslip payslip;
+  final bool editable;
   final VoidCallback onChanged;
 
   const _DayCard({
     required this.state,
     required this.settings,
     required this.payslip,
+    required this.editable,
     required this.onChanged,
   });
 
   double get _liveTotal => calc.dailyTotal(
         state.entry,
         dayRate: payslip.dayRateSnapshot,
-        bonusCodeAmounts: payslip.bonusCodeAmountsSnapshot,
+        bonusCodeAmounts: payslip.effectiveBonusCodeAmounts(settings),
         perSetRate: payslip.perSetRateSnapshot,
         estimateBonus: payslip.estimateBonusSnapshot,
       );
@@ -159,15 +190,17 @@ class _DayCard extends StatelessWidget {
                     value: DayMode.special, label: Text('Special code')),
               ],
               selected: {state.mode},
-              onSelectionChanged: (s) {
-                state.mode = s.first;
-                if (state.mode == DayMode.special) {
-                  state.specialCode ??= settings.bonusCodes.isNotEmpty
-                      ? settings.bonusCodes.first
-                      : null;
-                }
-                onChanged();
-              },
+              onSelectionChanged: !editable
+                  ? null
+                  : (s) {
+                      state.mode = s.first;
+                      if (state.mode == DayMode.special) {
+                        state.specialCode ??= settings.bonusCodes.isNotEmpty
+                            ? settings.bonusCodes.first
+                            : null;
+                      }
+                      onChanged();
+                    },
             ),
             const SizedBox(height: 8),
             if (state.mode == DayMode.special) _buildSpecialFields(),
@@ -176,6 +209,7 @@ class _DayCard extends StatelessWidget {
               const SizedBox(height: 8),
               TextField(
                 controller: state.notes,
+                enabled: editable,
                 decoration: const InputDecoration(
                   labelText: 'Notes / issues',
                   isDense: true,
@@ -198,13 +232,15 @@ class _DayCard extends StatelessWidget {
                 value: code,
                 child: Text(
                     '$code — ${settings.bonusCodeLabels[code] ?? code} '
-                    '(${payslip.bonusCodeAmountsSnapshot[code]?.toStringAsFixed(0) ?? '0'})'),
+                    '(${payslip.effectiveBonusCodeAmounts(settings)[code]?.toStringAsFixed(0) ?? '0'})'),
               ))
           .toList(),
-      onChanged: (v) {
-        state.specialCode = v;
-        onChanged();
-      },
+      onChanged: !editable
+          ? null
+          : (v) {
+              state.specialCode = v;
+              onChanged();
+            },
     );
   }
 
@@ -217,6 +253,7 @@ class _DayCard extends StatelessWidget {
           width: 100,
           child: TextField(
             controller: state.flyerSets,
+            enabled: editable,
             keyboardType: TextInputType.number,
             decoration: const InputDecoration(
                 labelText: 'Flyer sets', isDense: true),
@@ -227,6 +264,7 @@ class _DayCard extends StatelessWidget {
           width: 100,
           child: TextField(
             controller: state.kmWalked,
+            enabled: editable,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             decoration:
                 const InputDecoration(labelText: 'Km walked', isDense: true),
@@ -237,6 +275,7 @@ class _DayCard extends StatelessWidget {
           width: 110,
           child: TextField(
             controller: state.waypointsReached,
+            enabled: editable,
             keyboardType: TextInputType.number,
             decoration:
                 const InputDecoration(labelText: 'Waypoints', isDense: true),
@@ -247,6 +286,7 @@ class _DayCard extends StatelessWidget {
           width: 100,
           child: TextField(
             controller: state.auditScore,
+            enabled: editable,
             keyboardType: TextInputType.number,
             decoration:
                 const InputDecoration(labelText: 'Audit score', isDense: true),
@@ -257,10 +297,12 @@ class _DayCard extends StatelessWidget {
           width: 160,
           child: CheckboxListTile(
             value: state.estimateReached,
-            onChanged: (v) {
-              state.estimateReached = v ?? false;
-              onChanged();
-            },
+            onChanged: !editable
+                ? null
+                : (v) {
+                    state.estimateReached = v ?? false;
+                    onChanged();
+                  },
             controlAffinity: ListTileControlAffinity.leading,
             contentPadding: EdgeInsets.zero,
             dense: true,

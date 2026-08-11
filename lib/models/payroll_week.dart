@@ -1,7 +1,16 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../utils/payroll_week.dart' as week_util;
+import '../utils/schedule_time.dart';
 import 'payroll_payslip.dart';
+
+/// Read a stored week-boundary [Timestamp] as a SAST *civil* date, so a client
+/// in another timezone (e.g. Ireland, UTC+1) resolves the same calendar day a
+/// SAST user does — instead of a SAST-midnight week reading back as the
+/// previous day and pushing edits into the previous week. Mirrors the
+/// schedule/job-list timezone anchoring.
+DateTime? _civilDate(dynamic v) =>
+    v is Timestamp ? toScheduleCivil(v.toDate()) : null;
 
 /// The Firestore document for one pay week, at
 /// `payroll/{yearId}/{monthLabel}/{weekId}`. Holds every distributor's
@@ -47,15 +56,13 @@ class PayrollWeek {
   }
 
   factory PayrollWeek.fromMap(String docId, Map<String, dynamic> data) {
-    final weekStart = (data['weekStart'] as Timestamp?)?.toDate() ??
-        week_util.weekStartFor(DateTime.parse(docId));
+    final weekStart =
+        _civilDate(data['weekStart']) ?? week_util.weekStartFor(DateTime.parse(docId));
     final payslipsRaw = data['payslips'] as Map<String, dynamic>? ?? {};
     return PayrollWeek(
       weekStart: weekStart,
-      weekEnd: (data['weekEnd'] as Timestamp?)?.toDate() ??
-          week_util.weekEndFor(weekStart),
-      payDate: (data['payDate'] as Timestamp?)?.toDate() ??
-          week_util.payDateFor(weekStart),
+      weekEnd: _civilDate(data['weekEnd']) ?? week_util.weekEndFor(weekStart),
+      payDate: _civilDate(data['payDate']) ?? week_util.payDateFor(weekStart),
       payslips: payslipsRaw.map((id, v) => MapEntry(
           id, PayrollPayslip.fromMap(id, Map<String, dynamic>.from(v as Map)))),
       isFinalized: data['isFinalized'] as bool? ?? false,
@@ -67,9 +74,9 @@ class PayrollWeek {
   }
 
   Map<String, dynamic> toMap() => {
-        'weekStart': Timestamp.fromDate(weekStart),
-        'weekEnd': Timestamp.fromDate(weekEnd),
-        'payDate': Timestamp.fromDate(payDate),
+        'weekStart': Timestamp.fromDate(scheduleCivilToInstant(weekStart)),
+        'weekEnd': Timestamp.fromDate(scheduleCivilToInstant(weekEnd)),
+        'payDate': Timestamp.fromDate(scheduleCivilToInstant(payDate)),
         'payslips': payslips.map((id, p) => MapEntry(id, p.toMap())),
         'isFinalized': isFinalized,
         'finalizedAt':

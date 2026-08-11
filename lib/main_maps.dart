@@ -75,6 +75,23 @@ class CLMMapApp extends StatelessWidget {
           );
         }
 
+        // Admin "open in new tab" link: /admin/map?doc={docId}&month={monthKey}
+        // Loads a specific map directly by its Firestore id/month so several
+        // maps can be open in separate browser tabs at once. The persisted
+        // Firebase Auth session in the new tab unlocks the admin tools.
+        if (uri.path == '/admin/map') {
+          final docId = uri.queryParameters['doc'];
+          final monthKey = uri.queryParameters['month'];
+          if (docId != null &&
+              docId.isNotEmpty &&
+              monthKey != null &&
+              monthKey.isNotEmpty) {
+            return MaterialPageRoute(
+              builder: (_) => _AdminMapLoader(docId: docId, monthKey: monthKey),
+            );
+          }
+        }
+
         // Handle deep links: /map/{shareCode}
         if (uri.pathSegments.length == 2 && uri.pathSegments[0] == 'map') {
           final shareCode = uri.pathSegments[1];
@@ -162,6 +179,57 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
       return const ClmMapsSplash();
     }
 
+    return const CLMAdvertPage(showInvalidBanner: true);
+  }
+}
+
+/// Loads a specific map by its Firestore id/month — the target of the
+/// gallery's "Open in new tab" action — and opens the editor directly, with
+/// no share code required. Any admin tools appear via the new tab's persisted
+/// Firebase Auth session.
+class _AdminMapLoader extends StatefulWidget {
+  final String docId;
+  final String monthKey;
+  const _AdminMapLoader({required this.docId, required this.monthKey});
+
+  @override
+  State<_AdminMapLoader> createState() => _AdminMapLoaderState();
+}
+
+class _AdminMapLoaderState extends State<_AdminMapLoader> {
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolveAndOpen();
+  }
+
+  Future<void> _resolveAndOpen() async {
+    try {
+      final service = ShareableMapsFirestoreService();
+      final adapter = FirestoreMapAdapter.existing(
+        docId: widget.docId,
+        monthKey: widget.monthKey,
+        service: service,
+      );
+      final provider = riverpod.ProviderScope.containerOf(context)
+          .read(shareableMapRiverpod);
+      await provider.loadFromAdapter(adapter);
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const ShareableMapEditor()),
+        );
+      }
+    } catch (e) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) return const ClmMapsSplash();
     return const CLMAdvertPage(showInvalidBanner: true);
   }
 }

@@ -34,6 +34,7 @@ import 'work_area_picker_panel.dart';
 import 'work_area_table_panel.dart';
 import 'work_suburbs_table_panel.dart';
 import '../../widgets/cloud_file_manager_screen.dart';
+import '../../widgets/map_picker_dialog.dart';
 import '../../track_editor/pages/track_editor_screen.dart';
 
 /// Width threshold below which the standalone Maps flavor enters a
@@ -65,11 +66,21 @@ class _ShareableMapEditorState
     extends riverpod.ConsumerState<ShareableMapEditor> {
   String? _lastTitle;
 
-  /// Update the browser tab title to the map name (Maps flavor only).
-  void _syncBrowserTitle(String? mapName) {
+  /// Update the browser tab title to the map (client) name (Maps flavor
+  /// only). While the map is still loading we show "Loading…" rather than the
+  /// generic app name, so a slow open never looks like it landed on the wrong,
+  /// un-named page — and once loaded the client name shows reliably.
+  void _syncBrowserTitle(String? mapName, bool isLoading) {
     if (!FlavorConfig.instance.isMaps) return;
-    final title =
-        (mapName != null && mapName.isNotEmpty) ? mapName : 'CLM Maps';
+    final trimmed = mapName?.trim();
+    final String title;
+    if (trimmed != null && trimmed.isNotEmpty) {
+      title = trimmed;
+    } else if (isLoading) {
+      title = 'Loading… · CLM Maps';
+    } else {
+      title = 'CLM Maps';
+    }
     if (_lastTitle == title) return;
     _lastTitle = title;
     web.document.title = title;
@@ -79,7 +90,7 @@ class _ShareableMapEditorState
   Widget build(BuildContext context) {
     final provider = ref.watch(shareableMapRiverpod);
     // Keep browser tab title in sync with the open map.
-    _syncBrowserTitle(provider.currentMap?.name);
+    _syncBrowserTitle(provider.currentMap?.name, provider.isLoading);
     final mobileViewer = isMapsMobileViewer(context);
     final isMaps = FlavorConfig.instance.isMaps;
     final isAuthenticated = ref.watch(authRiverpod).isAuthenticated;
@@ -425,6 +436,35 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
             tooltip: 'Import KML/GPX',
             onPressed: () => MapEditorDialogs.showImportDialog(context),
           ),
+        // Link an existing map (admin only — adapter-specific, e.g. schedule jobs)
+        if (showAdminTools && caps.canLinkExistingMap)
+          _mapAwareAction(
+            isMaps: isMaps,
+            icon: Icons.link,
+            label: 'Link Map',
+            tooltip: 'Link an existing map',
+            onPressed: () async {
+              final result = await showDialog<MapPickerResult>(
+                context: context,
+                builder: (_) => const MapPickerDialog(),
+              );
+              if (result == null) return;
+              await provider.adapter?.onLinkExistingMap(
+                mapId: result.mapId,
+                monthKey: result.monthKey,
+                mapName: result.mapName,
+                storageFolderPath: result.storageFolderPath,
+              );
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Map "${result.mapName}" linked'),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              }
+            },
+          ),
         // Layers toggle — non-maps only; maps flavor uses a dedicated action above.
         if (!isMaps && caps.canManageLayers)
           _AppBarLabelAction(
@@ -486,7 +526,14 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
 
   Widget _buildMapsTitle(ShareableMapProvider provider, bool isAuthenticated) {
     final mapName = provider.currentMap?.name.trim();
-    final title = mapName != null && mapName.isNotEmpty ? mapName : 'CLM Maps';
+    final String title;
+    if (mapName != null && mapName.isNotEmpty) {
+      title = mapName;
+    } else if (provider.isLoading) {
+      title = 'Loading…';
+    } else {
+      title = 'CLM Maps';
+    }
 
     return Row(
       children: [

@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../providers/job_type_provider.dart';
+import '../utils/schedule_time.dart';
 import 'job_list_item_update.dart';
 import 'custom_polygon.dart';
 import 'job_reminder.dart';
@@ -119,6 +120,55 @@ class JobListItem {
   /// Old records default to false (all legacy prices were excl VAT).
   final bool priceIsInclVat;
 
+  // ── Collection Schedule fields ─────────────────────────────────────────────
+  // The Collection Schedule renders a derived `CollectionJob` view of this
+  // record (see CollectionScheduleProvider). These four fields give that view
+  // real storage. Before they existed the schedule squatted on unrelated
+  // columns — duration on `quantityDistributed` (which is also the Job List's
+  // "Qty Distributed" column), start time on the time component of `date`,
+  // staff count on `manDays`, and staff names appended into
+  // `specialInstructions`. Reads fall back to those legacy derivations so
+  // existing documents keep rendering unchanged.
+
+  /// Collection start time as "HH:MM". Empty means fall back to the time
+  /// component of [date]. Authoritative once set — schedule writes keep the
+  /// time component of [collectionDate] in sync with it.
+  final String timeSlot;
+
+  /// Duration in 30-minute slots. Zero means fall back to
+  /// [quantityDistributed], then to 1.
+  final int timeSlots;
+
+  /// Staff assigned to the collection. Empty for legacy records, whose staff
+  /// names were only ever written into [specialInstructions] as free text.
+  final List<String> assignedStaff;
+
+  /// Number of staff required. Zero means fall back to `manDays.ceil()`.
+  final int staffCount;
+
+  // ── Zoho Books links ───────────────────────────────────────────────────────
+  // These mirror Zoho state; Zoho remains the source of truth. They are kept
+  // separate from [invoice] and [invoiceStatusId] on purpose — those belong to
+  // your own numbering and your user-defined `customInvoiceStatuses`, and are
+  // never overwritten from Zoho.
+
+  /// Zoho contact_id for this job's customer. Empty until invoiced or linked.
+  final String zohoContactId;
+
+  /// Zoho invoice_id, once an invoice has been raised for this job.
+  final String zohoInvoiceId;
+
+  /// The invoice number Zoho settled on — may differ from [invoice] if Zoho
+  /// auto-numbering was left to assign it.
+  final String zohoInvoiceNumber;
+
+  /// Last known Zoho status wire value (draft/sent/overdue/paid/…).
+  /// A cache for display; re-read from Zoho before acting on it.
+  final String zohoInvoiceStatus;
+
+  /// When [zohoInvoiceStatus] was last refreshed from Zoho.
+  final DateTime? zohoSyncedAt;
+
   JobListItem({
     required this.id,
     required this.invoice,
@@ -151,7 +201,19 @@ class JobListItem {
     this.amountExclVat = 0.0,
     this.amountInclVat = 0.0,
     this.priceIsInclVat = false,
+    this.timeSlot = '', // Falls back to the time component of `date`
+    this.timeSlots = 0, // Falls back to quantityDistributed, then 1
+    this.assignedStaff = const [],
+    this.staffCount = 0, // Falls back to manDays.ceil()
+    this.zohoContactId = '',
+    this.zohoInvoiceId = '',
+    this.zohoInvoiceNumber = '',
+    this.zohoInvoiceStatus = '',
+    this.zohoSyncedAt,
   });
+
+  /// Whether an invoice has been raised in Zoho for this job.
+  bool get hasZohoInvoice => zohoInvoiceId.isNotEmpty;
 
   // Create from Firestore
   factory JobListItem.fromMap(String id, Map<String, dynamic> data) {
@@ -221,12 +283,12 @@ class JobListItem {
       quantity: (data['quantity'] as num?)?.toInt() ?? 0,
       manDays: (data['manDays'] as num?)?.toDouble() ?? 0.0,
       date: data['date'] != null
-          ? (data['date'] as Timestamp).toDate()
-          : DateTime.now(),
+          ? toScheduleCivil((data['date'] as Timestamp).toDate())
+          : scheduleToday(),
       collectionAddress: data['collectionAddress'] as String? ?? '',
       collectionDate: data['collectionDate'] != null
-          ? (data['collectionDate'] as Timestamp).toDate()
-          : DateTime.now(),
+          ? toScheduleCivil((data['collectionDate'] as Timestamp).toDate())
+          : scheduleToday(),
       specialInstructions: data['specialInstructions'] as String? ?? '',
       quantityDistributed: (data['quantityDistributed'] as num?)?.toInt() ?? 0,
       invoiceDetails: data['invoiceDetails'] as String? ?? '',
@@ -254,7 +316,41 @@ class JobListItem {
           (data['amount'] as num?)?.toDouble() ??
           0.0,
       amountInclVat: (data['amountInclVat'] as num?)?.toDouble() ?? 0.0,
+      timeSlot: data['timeSlot'] as String? ?? '',
+      timeSlots: (data['timeSlots'] as num?)?.toInt() ?? 0,
+      assignedStaff:
+          (data['assignedStaff'] as List<dynamic>?)?.cast<String>() ?? const [],
+      staffCount: (data['staffCount'] as num?)?.toInt() ?? 0,
+      zohoContactId: data['zohoContactId'] as String? ?? '',
+      zohoInvoiceId: data['zohoInvoiceId'] as String? ?? '',
+      zohoInvoiceNumber: data['zohoInvoiceNumber'] as String? ?? '',
+      zohoInvoiceStatus: data['zohoInvoiceStatus'] as String? ?? '',
+      zohoSyncedAt: data['zohoSyncedAt'] != null
+          ? (data['zohoSyncedAt'] as Timestamp).toDate()
+          : null,
     );
+  }
+
+  /// Collection start time as "HH:MM", falling back to the time component of
+  /// [date] for records written before [timeSlot] had its own field.
+  String get resolvedTimeSlot {
+    if (timeSlot.isNotEmpty) return timeSlot;
+    return '${date.hour.toString().padLeft(2, '0')}:'
+        '${date.minute.toString().padLeft(2, '0')}';
+  }
+
+  /// Duration in 30-minute slots, falling back to the legacy
+  /// [quantityDistributed] overload, then to a single slot.
+  int get resolvedTimeSlots {
+    if (timeSlots >= 1) return timeSlots;
+    if (quantityDistributed > 0) return quantityDistributed;
+    return 1;
+  }
+
+  /// Staff required, falling back to the legacy `manDays.ceil()` derivation.
+  int get resolvedStaffCount {
+    if (staffCount > 0) return staffCount;
+    return manDays.ceil();
   }
 
   /// Resolve vehicleTrailerCombo from Firestore data with legacy quantity fallback.
@@ -288,9 +384,9 @@ class JobListItem {
       'area': area,
       'quantity': quantity,
       'manDays': manDays,
-      'date': Timestamp.fromDate(date),
+      'date': Timestamp.fromDate(scheduleCivilToInstant(date)),
       'collectionAddress': collectionAddress,
-      'collectionDate': Timestamp.fromDate(collectionDate),
+      'collectionDate': Timestamp.fromDate(scheduleCivilToInstant(collectionDate)),
       'specialInstructions': specialInstructions,
       'quantityDistributed': quantityDistributed,
       'invoiceDetails': invoiceDetails,
@@ -310,6 +406,19 @@ class JobListItem {
       'priceIsInclVat': priceIsInclVat,
       'amountExclVat': amountExclVat,
       'amountInclVat': amountInclVat,
+      // Collection Schedule fields are written only when set, so records that
+      // never touch the schedule stay unchanged.
+      if (timeSlot.isNotEmpty) 'timeSlot': timeSlot,
+      if (timeSlots > 0) 'timeSlots': timeSlots,
+      if (assignedStaff.isNotEmpty) 'assignedStaff': assignedStaff,
+      if (staffCount > 0) 'staffCount': staffCount,
+      // Zoho links — written only once a job is actually linked to Zoho.
+      if (zohoContactId.isNotEmpty) 'zohoContactId': zohoContactId,
+      if (zohoInvoiceId.isNotEmpty) 'zohoInvoiceId': zohoInvoiceId,
+      if (zohoInvoiceNumber.isNotEmpty) 'zohoInvoiceNumber': zohoInvoiceNumber,
+      if (zohoInvoiceStatus.isNotEmpty) 'zohoInvoiceStatus': zohoInvoiceStatus,
+      if (zohoSyncedAt != null)
+        'zohoSyncedAt': Timestamp.fromDate(zohoSyncedAt!),
     };
   }
 
@@ -346,6 +455,15 @@ class JobListItem {
     double? amountExclVat,
     double? amountInclVat,
     bool? priceIsInclVat,
+    String? timeSlot,
+    int? timeSlots,
+    List<String>? assignedStaff,
+    int? staffCount,
+    String? zohoContactId,
+    String? zohoInvoiceId,
+    String? zohoInvoiceNumber,
+    String? zohoInvoiceStatus,
+    DateTime? zohoSyncedAt,
   }) {
     return JobListItem(
       id: id ?? this.id,
@@ -380,6 +498,15 @@ class JobListItem {
       amountExclVat: amountExclVat ?? this.amountExclVat,
       amountInclVat: amountInclVat ?? this.amountInclVat,
       priceIsInclVat: priceIsInclVat ?? this.priceIsInclVat,
+      timeSlot: timeSlot ?? this.timeSlot,
+      timeSlots: timeSlots ?? this.timeSlots,
+      assignedStaff: assignedStaff ?? this.assignedStaff,
+      staffCount: staffCount ?? this.staffCount,
+      zohoContactId: zohoContactId ?? this.zohoContactId,
+      zohoInvoiceId: zohoInvoiceId ?? this.zohoInvoiceId,
+      zohoInvoiceNumber: zohoInvoiceNumber ?? this.zohoInvoiceNumber,
+      zohoInvoiceStatus: zohoInvoiceStatus ?? this.zohoInvoiceStatus,
+      zohoSyncedAt: zohoSyncedAt ?? this.zohoSyncedAt,
     );
   }
 

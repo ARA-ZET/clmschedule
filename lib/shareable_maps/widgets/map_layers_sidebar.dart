@@ -1103,6 +1103,17 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                             ),
                             SwitchListTile.adaptive(
                               contentPadding: EdgeInsets.zero,
+                              title: const Text('Load letter boxes on open'),
+                              subtitle: const Text(
+                                  'Automatically loads cloud waypoints for the newest linked month.'),
+                              value: provider.autoLoadCloudWaypoints,
+                              onChanged: (value) {
+                                provider.setAutoLoadCloudWaypoints(value);
+                                setState(() {});
+                              },
+                            ),
+                            SwitchListTile.adaptive(
+                              contentPadding: EdgeInsets.zero,
                               title: const Text(
                                   'Show cloud data inside polygons only'),
                               subtitle: const Text(

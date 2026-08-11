@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../utils/schedule_time.dart';
 import 'custom_polygon.dart';
 
 const Object _dropOffPointUnchanged = Object();
@@ -26,6 +27,17 @@ class Job {
   final LatLng? dropOffPoint;
   final LatLng? pickUpPoint;
 
+  /// Id of a linked `ShareableMap` document (picked via `MapPickerDialog`),
+  /// empty if none linked. Mirrors `JobListItem.shareableMapId`.
+  final String linkedMapId;
+
+  /// Month key (e.g. `'03-2026'`) of the linked map's Firestore path
+  /// (`/shareableMaps/{monthKey}/maps/{linkedMapId}`), empty if none linked.
+  /// Needed to re-fetch the full document (its layers/polygons and current
+  /// cloud folder path) — deliberately not cached, so the print map always
+  /// reflects the linked map's live state rather than a stale snapshot.
+  final String linkedMapMonthKey;
+
   Job({
     required this.id,
     required this.clients,
@@ -38,6 +50,8 @@ class Job {
     this.mapInstructions = '',
     this.dropOffPoint,
     this.pickUpPoint,
+    this.linkedMapId = '',
+    this.linkedMapMonthKey = '',
   });
 
   // Create from Firestore
@@ -99,12 +113,14 @@ class Job {
           [],
       distributorId: data['distributorId'] as String? ?? '',
       date: data['date'] != null
-          ? (data['date'] as Timestamp).toDate()
-          : DateTime.now(),
+          ? toScheduleCivil((data['date'] as Timestamp).toDate())
+          : scheduleToday(),
       statusId: statusId,
       mapInstructions: data['mapInstructions'] as String? ?? '',
       dropOffPoint: dropOffPoint,
       pickUpPoint: pickUpPoint,
+      linkedMapId: data['linkedMapId'] as String? ?? '',
+      linkedMapMonthKey: data['linkedMapMonthKey'] as String? ?? '',
     );
   }
 
@@ -117,8 +133,10 @@ class Job {
       'mapInstructions': mapInstructions,
       'workingAreas': workingAreas,
       'workMaps': workMaps.map((workMap) => workMap.toMap()).toList(),
+      'linkedMapId': linkedMapId,
+      'linkedMapMonthKey': linkedMapMonthKey,
       'distributorId': distributorId,
-      'date': Timestamp.fromDate(date),
+      'date': Timestamp.fromDate(scheduleCivilToInstant(date)),
       'statusId': statusId,
       // Keep backwards compatibility
       'status': statusId, // Also store as status for backwards compatibility
@@ -158,6 +176,8 @@ class Job {
     String? mapInstructions,
     Object? dropOffPoint = _dropOffPointUnchanged,
     Object? pickUpPoint = _pickUpPointUnchanged,
+    String? linkedMapId,
+    String? linkedMapMonthKey,
   }) {
     List<CustomPolygon> cloneWorkMaps(List<CustomPolygon> maps) {
       return maps
@@ -187,6 +207,8 @@ class Job {
       pickUpPoint: identical(pickUpPoint, _pickUpPointUnchanged)
           ? this.pickUpPoint
           : pickUpPoint as LatLng?,
+      linkedMapId: linkedMapId ?? this.linkedMapId,
+      linkedMapMonthKey: linkedMapMonthKey ?? this.linkedMapMonthKey,
     );
   }
 

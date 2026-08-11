@@ -1768,13 +1768,27 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
       _sourceFileName.toLowerCase().contains('waypoint') ||
       (widget.waypoints.isNotEmpty && widget.tracks.isEmpty);
 
+  /// A file carrying both kinds of data (e.g. a "fulltrack" export) — both
+  /// must be written back on update or the missing half is silently lost.
+  bool get _hasBoth => widget.tracks.isNotEmpty && widget.waypoints.isNotEmpty;
+
+  /// Human-readable summary of what the update will write back.
+  String get _contentSummary {
+    final parts = <String>[
+      if (widget.tracks.isNotEmpty) '${widget.tracks.length} track(s)',
+      if (widget.waypoints.isNotEmpty) '${widget.waypoints.length} waypoint(s)',
+    ];
+    return parts.join(' + ');
+  }
+
   Future<void> _onUpdateInDrive(BuildContext context) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Update file in Drive?'),
         content: Text(
-          'This will overwrite "$_sourceFileName" with your current edits.\n\n'
+          'This will overwrite "$_sourceFileName" with your current edits '
+          '($_contentSummary).\n\n'
           'The previous version cannot be recovered.',
         ),
         actions: [
@@ -1797,28 +1811,28 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
       final fm = TEFileManager();
       final gpxStorage = GpxStorageService();
 
-      final String gpxContent;
-      if (_isWaypointFile && widget.waypoints.isNotEmpty) {
-        gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
-      } else if (widget.tracks.isNotEmpty) {
-        gpxContent = await fm.toGpxTracksString(widget.tracks);
-      } else if (widget.waypoints.isNotEmpty) {
-        gpxContent = await fm.toGpxWaypointsString(widget.waypoints);
-      } else {
+      if (widget.tracks.isEmpty && widget.waypoints.isEmpty) {
         throw StateError('Nothing to save: no tracks or waypoints.');
       }
+
+      // Always write BOTH tracks and waypoints. Writing only one kind drops
+      // the other from the file — a "fulltrack" file re-saved as tracks-only
+      // loses every waypoint it was opened with.
+      final gpxContent =
+          await fm.toGpxCombinedString(widget.tracks, widget.waypoints);
 
       await gpxStorage.deleteFile(widget.sourceStoragePath);
       await gpxStorage.uploadGpxFile(_folderPath, _sourceFileName, gpxContent);
 
-      if (_isWaypointFile && _folderPath.isNotEmpty) {
+      if ((_isWaypointFile || widget.waypoints.isNotEmpty) &&
+          _folderPath.isNotEmpty) {
         await gpxStorage.callCompileGpxFolder(_folderPath);
       }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Updated $_sourceFileName'),
+            content: Text('Updated $_sourceFileName ($_contentSummary)'),
             backgroundColor: Colors.green,
           ),
         );
@@ -1919,13 +1933,19 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
                           strokeWidth: 2, color: Colors.white),
                     )
                   : Icon(
-                      _isWaypointFile ? Icons.place : Icons.route,
+                      _hasBoth
+                          ? Icons.cloud_sync
+                          : _isWaypointFile
+                              ? Icons.place
+                              : Icons.route,
                       size: 16,
                     ),
               label: Text(
-                _isWaypointFile
-                    ? 'Update Waypoints in Drive'
-                    : 'Update Track in Drive',
+                _hasBoth
+                    ? 'Update Track + Waypoints in Drive'
+                    : _isWaypointFile
+                        ? 'Update Waypoints in Drive'
+                        : 'Update Track in Drive',
               ),
               style: ElevatedButton.styleFrom(
                 backgroundColor:
@@ -1937,8 +1957,8 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
               ),
             ),
           ),
-          // ── Recompile button (waypoints only) ───────────────────
-          if (_isWaypointFile) ...[
+          // ── Recompile button (any file carrying waypoints) ──────
+          if (_isWaypointFile || hasWaypoints) ...[
             const SizedBox(height: 6),
             SizedBox(
               width: double.infinity,

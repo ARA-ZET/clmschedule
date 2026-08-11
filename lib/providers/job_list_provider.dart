@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:clmschedule/utils/schedule_time.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/job_list_item.dart';
 import '../models/job_list_item_update.dart';
@@ -31,7 +32,7 @@ class JobListProvider extends ChangeNotifier {
   String _searchQuery = '';
   Set<String> _statusFilters = {};
   final Set<String> _invoiceStatusFilters = {};
-  DateTime _currentMonth = DateTime.now();
+  DateTime _currentMonth = scheduleNow();
 
   // Date filtering properties
   String _dateFilter = 'all'; // 'all', 'single', 'range'
@@ -437,7 +438,7 @@ class JobListProvider extends ChangeNotifier {
 
   // Go to current month (optimized)
   Future<void> goToCurrentMonth() async {
-    await setCurrentMonth(DateTime.now());
+    await setCurrentMonth(scheduleNow());
   }
 
   // Go to specific month by month string (e.g., "Sep 2025") (optimized)

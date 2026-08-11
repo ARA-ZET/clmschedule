@@ -1028,6 +1028,13 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
       padding: EdgeInsets.zero,
       constraints: const BoxConstraints(),
       itemBuilder: (_) => [
+        const PopupMenuItem(
+            value: 'newtab',
+            child: Row(children: [
+              Icon(Icons.open_in_new, size: 16),
+              SizedBox(width: 8),
+              Text('Open in new tab'),
+            ])),
         const PopupMenuItem(value: 'share', child: Text('Share link')),
         const PopupMenuItem(value: 'duplicate', child: Text('Duplicate')),
         const PopupMenuItem(value: 'rename', child: Text('Rename')),
@@ -1035,6 +1042,9 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
       ],
       onSelected: (value) async {
         switch (value) {
+          case 'newtab':
+            _openInNewTab();
+            break;
           case 'share':
             await _shareMap(context);
             break;
@@ -1050,6 +1060,16 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
         }
       },
     );
+  }
+
+  /// Opens this map in a separate browser tab (via the admin map route), so
+  /// several maps can be open at once. No-op off the web.
+  void _openInNewTab() {
+    final path = Uri(
+      path: '/admin/map',
+      queryParameters: {'doc': item.docId, 'month': item.monthKey},
+    ).toString();
+    url_updater.openInNewTab(path);
   }
 
   Future<void> _shareMap(BuildContext context) async {

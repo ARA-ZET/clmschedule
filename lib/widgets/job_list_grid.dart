@@ -1,13 +1,16 @@
 import 'dart:async';
 
 import 'package:clmschedule/providers/toggler_provider.dart';
+import 'package:clmschedule/utils/schedule_time.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:intl/intl.dart';
 import '../models/job_list_item.dart';
 import '../models/job_reminder.dart';
 import '../models/collection_job.dart';
+import '../providers/auth_provider.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/job_list_preferences_provider.dart';
 import '../providers/job_list_status_provider.dart';
@@ -17,6 +20,7 @@ import '../providers/job_type_provider.dart';
 import '../providers/vat_settings_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/day_off_provider.dart';
+import '../services/chat_service.dart';
 import '../services/schedule_reallocation_service.dart';
 import 'add_edit_job_dialog.dart';
 import 'editable_table_cell.dart';
@@ -2103,6 +2107,37 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     }
   }
 
+  /// Posts a system chat message announcing that a new job was added
+  /// (via the "Add Job" or "Copy Job" flow), so other departments see it
+  /// in Team Chat and get a browser notification (fired by [ChatProvider]
+  /// when the message arrives on their end). Fire-and-forget: a failure
+  /// here shouldn't block the job from having been saved successfully.
+  void _broadcastJobCreated(JobListItem job, {required String action}) {
+    try {
+      final authProvider = ref.read(authRiverpod);
+      final addedByName = authProvider.displayName;
+      final addedBy = authProvider.user?.uid ?? 'system';
+      final formattedDate = DateFormat('dd MMM yyyy').format(job.date);
+      final verb = action == 'copy' ? 'copied' : 'added';
+
+      unawaited(ref.read(chatServiceRiverpod).sendSystemMessage(
+        content:
+            'New job $verb — Client: ${job.client} • Date: $formattedDate • Added by: $addedByName',
+        metadata: {
+          'event': 'job_created',
+          'action': action,
+          'jobId': job.id,
+          'client': job.client,
+          'date': formattedDate,
+          'addedBy': addedBy,
+          'addedByName': addedByName,
+        },
+      ));
+    } catch (e) {
+      debugPrint('⚠️ [JobNotify] Failed to broadcast job-created message: $e');
+    }
+  }
+
   void _showAddJobDialog(BuildContext context) async {
     setState(() {
       _isAddingJob = true;
@@ -2134,6 +2169,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           if (skipAllocation) {
             // Job is already saved in database, just show success message
             // No database operation needed as job was saved in the dialog already
+            _broadcastJobCreated(job, action: 'add');
             if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
@@ -2145,6 +2181,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             }
           } else {
             await ref.read(jobListRiverpod).addJobListItem(job);
+            _broadcastJobCreated(job, action: 'add');
             if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
@@ -2264,7 +2301,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       return;
     }
 
-    final today = DateTime.now();
+    final today = scheduleNow();
     final todayOnly = DateTime(today.year, today.month, today.day);
     final sourceDate =
         DateTime(originalItem.date.year, originalItem.date.month, originalItem.date.day);
@@ -2593,6 +2630,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           // Dialog already saved via `addJobListItemAndReturn`, so `job`
           // already carries the new id.
           savedJob = job;
+          _broadcastJobCreated(savedJob, action: 'copy');
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
@@ -2605,6 +2643,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         } else {
           savedJob =
               await ref.read(jobListRiverpod).addJobListItemAndReturn(job);
+          _broadcastJobCreated(savedJob, action: 'copy');
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(

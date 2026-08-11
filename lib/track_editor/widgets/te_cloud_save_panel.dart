@@ -6,6 +6,7 @@
 //   2. Trim & Save — select polygons, trim tracks/waypoints to polygon
 //      boundaries, then upload trimmed data to the client folder.
 import 'package:flutter/material.dart';
+import '../../utils/schedule_time.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:gpx/gpx.dart';
@@ -14,6 +15,7 @@ import '../../providers/cloud_file_manager_provider.dart';
 import '../../providers/job_list_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../services/gpx_storage_service.dart';
+import '../../utils/payroll_week.dart';
 import '../models/styled_polygon.dart';
 import '../models/tab_item.dart';
 import '../providers/te_cloud_save_state_provider.dart';
@@ -22,6 +24,7 @@ import '../providers/te_tabs_provider.dart';
 import '../../shareable_maps/providers/map_gesture_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
+import 'te_wage_stats_box.dart';
 
 /// A panel that lists clients derived from the active tab's schedule jobs,
 /// allowing the user to save or trim-and-save GPX data to their cloud folders.
@@ -37,6 +40,56 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
   TETabItem get _tab {
     final tabs = ref.read(teTabsRiverpod);
     return tabs.tabs[tabs.currentTab];
+  }
+
+  /// Assigns [distributorId] to the current tab, re-fetches its schedule
+  /// work-maps (when the track has a date), and re-resolves its client
+  /// folders — the shared path used by both the header's person-icon menu and
+  /// the "Pick distributor" prompt shown for an unmatched track.
+  Future<void> _applyDistributor(String distributorId) async {
+    final tabsProvider = ref.read(teTabsRiverpod);
+    final currentIndex = tabsProvider.currentTab;
+    final tab = tabsProvider.tabs[currentIndex];
+    tabsProvider.replaceTabMeta(currentIndex, distributorId: distributorId);
+    final updatedTab = tabsProvider.tabs[currentIndex];
+    if (updatedTab.trackDate != null) {
+      await ref.read(teProcessingRiverpod).refreshTab(
+          currentIndex, tabsProvider, ref.read(scheduleRiverpod));
+    }
+    ref.read(teCloudSaveRiverpod).clearTab(tab);
+    if (mounted) _resolveClients(tabsProvider.tabs[currentIndex]);
+  }
+
+  /// Opens a searchable list of distributors so an UNMATCHED track (auto-match
+  /// found no name overlap, or matched the wrong person) can still be tied to
+  /// a distributor — which is what makes the wage-stats box appear so the
+  /// day's stats can reach payroll.
+  Future<void> _showDistributorPicker() async {
+    final distributors = ref.read(scheduleRiverpod).distributors;
+    if (distributors.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No distributors loaded yet.')),
+        );
+      }
+      return;
+    }
+    final sorted = [...distributors]
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Match distributor'),
+        children: [
+          for (final d in sorted)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop(d.id),
+              child: Text(d.name),
+            ),
+        ],
+      ),
+    );
+    if (picked != null) await _applyDistributor(picked);
   }
 
   @override
@@ -92,20 +145,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
                   color:
                       tab.distributorId != null ? Colors.green : Colors.black87,
                 ),
-                onSelected: (distributorId) async {
-                  final tabsProvider = ref.read(teTabsRiverpod);
-                  tabsProvider.replaceTabMeta(currentIndex,
-                      distributorId: distributorId);
-                  final updatedTab = tabsProvider.tabs[currentIndex];
-                  if (updatedTab.trackDate != null) {
-                    final proc = ref.read(teProcessingRiverpod);
-                    await proc.refreshTab(
-                        currentIndex, tabsProvider, ref.read(scheduleRiverpod));
-                  }
-                  // Force a fresh resolve for the updated tab.
-                  ref.read(teCloudSaveRiverpod).clearTab(tab);
-                  if (mounted) _resolveClients(tabsProvider.tabs[currentIndex]);
-                },
+                onSelected: (distributorId) => _applyDistributor(distributorId),
                 itemBuilder: (context) => ref
                     .read(scheduleRiverpod)
                     .distributors
@@ -125,6 +165,14 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
             ],
           ),
           const Divider(height: 16),
+          if (tab.distributorId == null)
+            _PickDistributorPrompt(onPick: _showDistributorPicker)
+          else if (!isPayrollWeekEditable(
+              weekStartFor(_extractDate() ?? scheduleNow())))
+            const _LockedWeekHint()
+          else
+            TEWageStatsBox(
+                tab: tab, suggestedDate: _extractDate() ?? scheduleNow()),
           if (loading)
             const Center(
               child: Padding(
@@ -202,7 +250,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
 
   /// Open the folder picker to add a client manually.
   Future<void> _addClient(TETabItem tab) async {
-    final date = _extractDate() ?? DateTime.now();
+    final date = _extractDate() ?? scheduleNow();
     final year = date.year.toString();
     final monthLabel = DateFormat('MMM yyyy').format(date);
     final monthPath = 'Distribution/$year/$monthLabel';
@@ -414,6 +462,82 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     } catch (e) {
       saveState.finishResolveError(tab, 'Error: $e');
     }
+  }
+}
+
+/// Shown in place of the wage-stats box when a track has no distributor yet
+/// (auto-match found none, or matched the wrong person). Makes picking one an
+/// explicit, obvious action instead of the easy-to-miss header icon — so the
+/// day's stats can still reach payroll.
+class _PickDistributorPrompt extends StatelessWidget {
+  final VoidCallback onPick;
+
+  const _PickDistributorPrompt({required this.onPick});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.amber.shade50,
+        border: Border.all(color: Colors.amber.shade200),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.person_search, size: 18, color: Colors.amber.shade800),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'No distributor matched for this track — pick one to record wage '
+              'stats to payroll.',
+              style: TextStyle(fontSize: 12, color: Colors.amber.shade900),
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: onPick,
+            style: FilledButton.styleFrom(
+                textStyle: const TextStyle(fontSize: 12),
+                visualDensity: VisualDensity.compact),
+            child: const Text('Pick'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shown in place of the wage-stats box when the track's pay week is locked
+/// (more than two weeks old, read-only).
+class _LockedWeekHint extends StatelessWidget {
+  const _LockedWeekHint();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        border: Border.all(color: Colors.grey.shade300),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.lock_outline, size: 18, color: Colors.grey.shade600),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              "This track's pay week is more than two weeks old and is now "
+              'read-only, so its wage stats can no longer be recorded here.',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -1100,70 +1224,70 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
             onEnter: (_) => widget.mapGestureProvider?.disableMapGestures(),
             onExit: (_) => widget.mapGestureProvider?.enableMapGestures(),
             child: AlertDialog(
-            title: Text('New $levelLabel Folder',
-                style: const TextStyle(fontSize: 15)),
-            content: ConstrainedBox(
-              constraints: const BoxConstraints(
-                minWidth: 360,
-                maxWidth: 360,
-                minHeight: 120,
-                maxHeight: 400,
-              ),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    TextField(
-                      controller: ctrl,
-                      autofocus: true,
-                      decoration: InputDecoration(
-                        labelText: '$levelLabel name',
-                        isDense: true,
-                        border: const OutlineInputBorder(),
+              title: Text('New $levelLabel Folder',
+                  style: const TextStyle(fontSize: 15)),
+              content: ConstrainedBox(
+                constraints: const BoxConstraints(
+                  minWidth: 360,
+                  maxWidth: 360,
+                  minHeight: 120,
+                  maxHeight: 400,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                        controller: ctrl,
+                        autofocus: true,
+                        decoration: InputDecoration(
+                          labelText: '$levelLabel name',
+                          isDense: true,
+                          border: const OutlineInputBorder(),
+                        ),
+                        onChanged: (_) => setDialogState(() {}),
+                        onSubmitted: (v) {
+                          if (v.trim().isNotEmpty) Navigator.pop(ctx, v.trim());
+                        },
                       ),
-                      onChanged: (_) => setDialogState(() {}),
-                      onSubmitted: (v) {
-                        if (v.trim().isNotEmpty) Navigator.pop(ctx, v.trim());
-                      },
-                    ),
-                    if (filtered.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      Text('Suggestions:',
-                          style: TextStyle(
-                              fontSize: 11, color: Colors.grey.shade600)),
-                      const SizedBox(height: 4),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        children: filtered.map((s) {
-                          return ActionChip(
-                            label:
-                                Text(s, style: const TextStyle(fontSize: 11)),
-                            visualDensity: VisualDensity.compact,
-                            onPressed: () => Navigator.pop(ctx, s),
-                          );
-                        }).toList(),
-                      ),
+                      if (filtered.isNotEmpty) ...[
+                        const SizedBox(height: 10),
+                        Text('Suggestions:',
+                            style: TextStyle(
+                                fontSize: 11, color: Colors.grey.shade600)),
+                        const SizedBox(height: 4),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 4,
+                          children: filtered.map((s) {
+                            return ActionChip(
+                              label:
+                                  Text(s, style: const TextStyle(fontSize: 11)),
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => Navigator.pop(ctx, s),
+                            );
+                          }).toList(),
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final name = ctrl.text.trim();
+                    if (name.isNotEmpty) Navigator.pop(ctx, name);
+                  },
+                  child: const Text('Create'),
+                ),
+              ],
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  final name = ctrl.text.trim();
-                  if (name.isNotEmpty) Navigator.pop(ctx, name);
-                },
-                child: const Text('Create'),
-              ),
-            ],
-          ),
           );
         },
       ),

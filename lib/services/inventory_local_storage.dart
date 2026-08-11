@@ -46,8 +46,18 @@ class InventoryLocalStorage {
 
   bool get isInitialized => _toolsBox != null && _imagePathsBox != null;
 
-  /// Initialize Hive and open boxes
+  /// Initialize Hive and open boxes.
+  ///
+  /// On web (compiled to WASM) Hive has no supported storage backend and
+  /// `openBox` throws `UnimplementedError`, so we skip it and run without a
+  /// local cache. Any other platform failure is caught and degraded rather
+  /// than rethrown, so a missing cache never brings the app down.
   Future<void> initialize() async {
+    if (kIsWeb) {
+      debugPrint(
+          '💾 InventoryLocalStorage: Hive unavailable on web — skipping local cache');
+      return;
+    }
     try {
       debugPrint('💾 InventoryLocalStorage: Initializing Hive...');
 
@@ -60,8 +70,8 @@ class InventoryLocalStorage {
       debugPrint('   - Tools count: ${_toolsBox?.length ?? 0}');
       debugPrint('   - Cached images: ${_imagePathsBox?.length ?? 0}');
     } catch (e) {
-      debugPrint('❌ InventoryLocalStorage: Initialization error: $e');
-      rethrow;
+      debugPrint('❌ InventoryLocalStorage: Hive unavailable, '
+          'running without local cache: $e');
     }
   }
 

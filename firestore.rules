@@ -43,6 +43,12 @@ service cloud.firestore {
       allow read: if true;
       allow write: if signedIn();
     }
+    // Version/force-update doc is checked before sign-in (on the login screen),
+    // so it must be publicly readable. It holds only a version string + flag.
+    match /appConfig/version {
+      allow read: if true;
+      allow write: if signedIn();
+    }
 
     // ── Schedules: staff only; audit logs append-only ──
     match /schedules/{month} {
@@ -76,10 +82,71 @@ service cloud.firestore {
     match /vehicles/{document=**}              { allow read, write: if signedIn(); }
     match /vehicle_assignments/{document=**}   { allow read, write: if signedIn(); }
     match /tracking_entries/{document=**}      { allow read, write: if signedIn(); }
-    match /payroll/{document=**}               { allow read, write: if signedIn(); }
+    // ── Payroll (wages & banking): staff only, plus structural validation ──
+    //
+    // A pay-week document holds every distributor's payslip in a single map
+    // field. It is NEVER deleted (deleting one would wipe a whole week of
+    // wages), and every write must keep the shape intact — a malformed write
+    // that dropped `payslips` or `weekStart` is rejected rather than silently
+    // corrupting the doc. Access stays at "any signed-in staff member"; the
+    // Payroll tab is already admin-gated in the app, but the Track Editor's
+    // wage-stats box writes here too, so we don't role-restrict at the rule
+    // layer (that would lock out non-admin track-editor users).
+    function validPayrollWeek() {
+      return request.resource.data.payslips is map
+          && request.resource.data.weekStart is timestamp;
+    }
+    // Path: payroll/{year}/{monthLabel}/{weekId}
+    match /payroll/{year}/{month}/{weekId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && validPayrollWeek();
+      allow delete: if false;
+    }
+
     match /payrollSettings/{document=**}       { allow read, write: if signedIn(); }
-    match /payrollAdvances/{document=**}       { allow read, write: if signedIn(); }
-    match /payrollSavings/{document=**}        { allow read, write: if signedIn(); }
+
+    // Enables the Payslips list's collection-group query over every
+    // distributor's advances (total outstanding balance per distributor).
+    // A collection-group query needs its OWN recursive-wildcard rule — the
+    // nested `payrollAdvances/{distId}/advances/{id}` rule below authorises
+    // direct reads but NOT the group query. Read-only, so it doesn't loosen
+    // the write validation on the specific path (writes are still only
+    // granted by that validated rule).
+    match /{path=**}/advances/{advanceId} {
+      allow read: if signedIn();
+    }
+
+    // Advance ledger. Repayment docs are created/deleted by the FIFO
+    // reverse-and-redo sync, so delete must stay allowed; every persisted
+    // advance/repayment must carry a numeric `amount`.
+    match /payrollAdvances/{distId} {
+      allow read, write: if signedIn();
+      match /advances/{advanceId} {
+        allow read, delete: if signedIn();
+        allow create, update: if signedIn()
+            && request.resource.data.amount is number;
+      }
+      match /repayments/{repaymentId} {
+        allow read, delete: if signedIn();
+        allow create, update: if signedIn()
+            && request.resource.data.amount is number;
+      }
+    }
+
+    // Savings ledger — mirror of the advance ledger above.
+    match /payrollSavings/{distId} {
+      allow read, write: if signedIn();
+      match /deposits/{depositId} {
+        allow read, delete: if signedIn();
+        allow create, update: if signedIn()
+            && request.resource.data.amount is number;
+      }
+      match /withdrawals/{withdrawalId} {
+        allow read, delete: if signedIn();
+        allow create, update: if signedIn()
+            && request.resource.data.amount is number;
+      }
+    }
     match /monthSummaries/{document=**}        { allow read, write: if signedIn(); }
     match /appConfig/{document=**}             { allow read, write: if signedIn(); }
     match /aiConfig/{document=**}              { allow read, write: if signedIn(); }
@@ -90,6 +157,7 @@ service cloud.firestore {
     match /jobStatuses/{document=**}           { allow read, write: if signedIn(); }
     match /settings/{document=**}              { allow read, write: if signedIn(); }
     match /happySunProjects/{document=**}      { allow read, write: if signedIn(); }
+    match /happy_sun_settings/{document=**}    { allow read, write: if signedIn(); }
     match /erfProperties/{document=**}         { allow read, write: if signedIn(); }
     match /projects/{document=**}              { allow read, write: if signedIn(); }
     match /routeCache/{document=**}            { allow read, write: if signedIn(); }

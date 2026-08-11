@@ -3,28 +3,27 @@ class PaymentSummaryLine {
   final String distributorId;
   final String distributorName;
   final double netWage;
-  final String? bankName;
-  final String? bankAccountHolder;
-  final String? bankAccountNumber;
-  final String? bankBranchCode;
+
+  /// 'eWallet' or 'Bank account' — from the week's selected payment account.
   final String paymentMethod;
+
+  /// Short display text for the selected account, e.g. `Nedbank · 8547 3692 4`
+  /// or `082 123 4567`. Empty if no account was selected for the week.
+  final String accountSummary;
 
   const PaymentSummaryLine({
     required this.distributorId,
     required this.distributorName,
     required this.netWage,
-    this.bankName,
-    this.bankAccountHolder,
-    this.bankAccountNumber,
-    this.bankBranchCode,
-    this.paymentMethod = 'EFT',
+    required this.paymentMethod,
+    required this.accountSummary,
   });
 }
 
 /// The EFT-run view for one payroll week — every distributor's net pay +
-/// bank details + a grand total. Purely derived client-side from an
-/// already-loaded `PayrollWeek`; not its own Firestore document (replaces
-/// the old sheet's "banking" tab).
+/// selected payment account + a grand total. Purely derived client-side
+/// from an already-loaded `PayrollWeek`; not its own Firestore document
+/// (replaces the old sheet's "banking" tab).
 class PaymentSummary {
   final DateTime weekStart;
   final DateTime payDate;

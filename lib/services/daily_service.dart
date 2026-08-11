@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../utils/schedule_time.dart';
 
 class DailyService {
   final FirebaseFirestore _firestore;
@@ -55,12 +56,12 @@ class DailyService {
 
   /// Get monthly document ID for current month
   String getCurrentMonthlyDocumentId() {
-    return getMonthlyDocumentId(DateTime.now());
+    return getMonthlyDocumentId(scheduleNow());
   }
 
   /// Get daily document ID for current date
   String getCurrentDailyDocumentId() {
-    return getDailyDocumentId(DateTime.now());
+    return getDailyDocumentId(scheduleNow());
   }
 
   // SCHEDULE COLLECTION REFERENCES
@@ -184,7 +185,7 @@ class DailyService {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
         'date': dateKey,
-        'timestamp': Timestamp.fromDate(date),
+        'timestamp': Timestamp.fromDate(scheduleCivilToInstant(date)),
         'jobs': [], // Initialize with empty jobs array
       });
 
@@ -235,7 +236,7 @@ class DailyService {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
         'date': dateKey,
-        'timestamp': Timestamp.fromDate(date),
+        'timestamp': Timestamp.fromDate(scheduleCivilToInstant(date)),
         'items': [], // Initialize with empty items array
       });
 
@@ -286,7 +287,7 @@ class DailyService {
       await doc.set({
         'created': FieldValue.serverTimestamp(),
         'date': dateKey,
-        'timestamp': Timestamp.fromDate(date),
+        'timestamp': Timestamp.fromDate(scheduleCivilToInstant(date)),
         'collectionJobs': [], // Initialize with empty collection jobs array
       });
 

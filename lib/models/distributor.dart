@@ -82,6 +82,11 @@ class Distributor {
   final DistributorRole role; // Role shown on the digital ID card
   final DistributorPayrollProfile? payroll; // Wage rates + bank details
 
+  // Formal identity details, used on payslips and other official documents.
+  final String? fullName;
+  final String? idNumber;
+  final String? homeAddress;
+
   Distributor({
     required this.id,
     required this.name,
@@ -92,6 +97,9 @@ class Distributor {
     this.imageUrl,
     this.role = DistributorRole.distributor,
     this.payroll,
+    this.fullName,
+    this.idNumber,
+    this.homeAddress,
   });
 
   // Create from Firestore
@@ -109,6 +117,9 @@ class Distributor {
           ? DistributorPayrollProfile.fromMap(
               Map<String, dynamic>.from(data['payroll'] as Map))
           : null,
+      fullName: data['fullName'] as String?,
+      idNumber: data['idNumber'] as String?,
+      homeAddress: data['homeAddress'] as String?,
     );
   }
 
@@ -123,6 +134,9 @@ class Distributor {
       'imageUrl': imageUrl,
       'role': role.name,
       'payroll': payroll?.toMap(),
+      'fullName': fullName,
+      'idNumber': idNumber,
+      'homeAddress': homeAddress,
     };
   }
 
@@ -138,6 +152,9 @@ class Distributor {
     bool clearImageUrl = false,
     DistributorRole? role,
     DistributorPayrollProfile? payroll,
+    String? fullName,
+    String? idNumber,
+    String? homeAddress,
   }) {
     return Distributor(
       id: id ?? this.id,
@@ -149,6 +166,9 @@ class Distributor {
       imageUrl: clearImageUrl ? null : (imageUrl ?? this.imageUrl),
       role: role ?? this.role,
       payroll: payroll ?? this.payroll,
+      fullName: fullName ?? this.fullName,
+      idNumber: idNumber ?? this.idNumber,
+      homeAddress: homeAddress ?? this.homeAddress,
     );
   }
 

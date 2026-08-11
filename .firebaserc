@@ -1,6 +1,6 @@
 {
   "projects": {
-    "default": "clmappdashboard"
+    "default": "clmschedule"
   },
   "targets": {
     "clmschedule": {
@@ -10,6 +10,9 @@
         ],
         "main": [
           "clmschedule"
+        ],
+        "clmworking": [
+          "clmworking"
         ]
       }
     }

@@ -39,6 +39,12 @@ class MapEditorCapabilities {
   /// When true, the map is non-editable (view only).
   final bool readOnly;
 
+  /// Can link an existing ShareableMap (picked via `MapPickerDialog`) to
+  /// whatever entity this adapter represents. Shows a "Link Map" toolbar
+  /// button that calls `MapDataAdapter.onLinkExistingMap`. Default false —
+  /// only adapters that override `onLinkExistingMap` should set this.
+  final bool canLinkExistingMap;
+
   const MapEditorCapabilities({
     this.canDrawPolygons = true,
     this.canDrawPolylines = true,
@@ -51,6 +57,7 @@ class MapEditorCapabilities {
     this.canDelete = true,
     this.showSaveButton = true,
     this.readOnly = false,
+    this.canLinkExistingMap = false,
   });
 
   /// Preset: full editing (standalone map editor).
@@ -65,7 +72,8 @@ class MapEditorCapabilities {
         canEditStyle = true,
         canDelete = true,
         showSaveButton = false,
-        readOnly = false;
+        readOnly = false,
+        canLinkExistingMap = false;
 
   /// Preset: polygon-only editing (work areas, schedule jobs).
   const MapEditorCapabilities.polygonOnly()
@@ -79,7 +87,8 @@ class MapEditorCapabilities {
         canEditStyle = true,
         canDelete = true,
         showSaveButton = true,
-        readOnly = false;
+        readOnly = false,
+        canLinkExistingMap = false;
 
   /// Preset: view-only map display (no editing).
   const MapEditorCapabilities.viewOnly()
@@ -93,7 +102,8 @@ class MapEditorCapabilities {
         canEditStyle = false,
         canDelete = false,
         showSaveButton = false,
-        readOnly = true;
+        readOnly = true,
+        canLinkExistingMap = false;
 
   /// Whether any drawing tool is available.
   bool get canDraw => canDrawPolygons || canDrawPolylines || canDrawPoints;
@@ -149,6 +159,19 @@ abstract class MapDataAdapter {
   /// When true, [save] is called on every state change automatically.
   /// Default is false (manual save via button).
   bool get autoSave => false;
+
+  /// Called when the user picks an existing map via the editor's "Link Map"
+  /// toolbar button (only shown when `capabilities.canLinkExistingMap` is
+  /// true). Adapters that support linking (e.g. `ScheduleJobAdapter`)
+  /// override this to persist the link on their backing entity. Default
+  /// no-op — takes plain fields rather than `MapPickerResult` so this
+  /// adapter-layer file doesn't need to depend on a widget-layer dialog.
+  Future<void> onLinkExistingMap({
+    required String mapId,
+    required String monthKey,
+    required String mapName,
+    String? storageFolderPath,
+  }) async {}
 
   /// Called when the editor is closed. Use for cleanup.
   Future<void> dispose() async {}

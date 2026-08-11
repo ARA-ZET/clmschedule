@@ -56,6 +56,12 @@ class ReferenceCacheService {
     if (_box != null) return _box;
     if (_hiveTried && !_hiveAvailable) return null;
     _hiveTried = true;
+    // Web is compiled to WASM, where Hive has no storage backend and throws
+    // UnimplementedError — skip straight to the in-memory fallback.
+    if (kIsWeb) {
+      _hiveAvailable = false;
+      return null;
+    }
     try {
       // Hive.initFlutter() is idempotent — safe to call even when another
       // service (e.g. HappySunLocalStorage) has already initialised Hive.

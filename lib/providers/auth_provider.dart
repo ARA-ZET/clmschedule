@@ -321,9 +321,6 @@ class AuthProvider extends ChangeNotifier {
     }
   }
 
-  /// Get demo accounts for testing
-  Map<String, String> get demoAccounts => FirebaseAuthService.demoAccounts;
-
   @override
   void dispose() {
     _authStateSubscription?.cancel();

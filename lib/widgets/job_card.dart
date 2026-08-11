@@ -6,6 +6,7 @@ import '../models/job.dart';
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
 import '../providers/job_status_provider.dart';
+import 'job_map_link.dart';
 import 'print_map_view.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/job_list_provider.dart';
@@ -14,6 +15,24 @@ import '../providers/unfinished_work_areas_provider.dart';
 import '../shareable_maps/providers/shareable_map_provider.dart';
 import '../shareable_maps/adapters/schedule_job_adapter.dart';
 import '../shareable_maps/widgets/shareable_map_editor.dart';
+
+/// Fresh copy of the job from the provider, or null when it no longer
+/// exists (deleted/moved by another user or screen). Callers must abort
+/// their write on null — saving the stale widget copy instead used to
+/// resurrect deleted jobs in Firestore.
+Job? _freshJobOrNull(ScheduleProvider scheduleProvider, String jobId) =>
+    scheduleProvider.jobs.where((j) => j.id == jobId).firstOrNull;
+
+void _showJobDeletedSnackBar(BuildContext context) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(
+      content: Text('This job was deleted — the change was not saved'),
+      backgroundColor: Colors.orange,
+      duration: Duration(seconds: 3),
+      behavior: SnackBarBehavior.floating,
+    ),
+  );
+}
 
 class JobCard extends riverpod.ConsumerWidget {
   final Job job;
@@ -146,10 +165,11 @@ class _JobClientSection extends StatelessWidget {
                 final scheduleProvider =
                     riverpod.ProviderScope.containerOf(context)
                         .read(scheduleRiverpod);
-                final freshJob = scheduleProvider.jobs.firstWhere(
-                  (j) => j.id == job.id,
-                  orElse: () => job,
-                );
+                final freshJob = _freshJobOrNull(scheduleProvider, job.id);
+                if (freshJob == null) {
+                  _showJobDeletedSnackBar(context);
+                  return;
+                }
                 final originalJob = freshJob;
                 final modifiedJob = freshJob.copyWith(
                   clients: updatedClients,
@@ -190,10 +210,11 @@ class _JobWorkAreaSection extends StatelessWidget {
                 final scheduleProvider =
                     riverpod.ProviderScope.containerOf(context)
                         .read(scheduleRiverpod);
-                final freshJob = scheduleProvider.jobs.firstWhere(
-                  (j) => j.id == job.id,
-                  orElse: () => job,
-                );
+                final freshJob = _freshJobOrNull(scheduleProvider, job.id);
+                if (freshJob == null) {
+                  _showJobDeletedSnackBar(context);
+                  return;
+                }
                 final updatedWorkingAreas =
                     updatedWorkMaps.map((polygon) => polygon.name).toList();
                 final originalJob = freshJob;
@@ -226,6 +247,41 @@ class _JobActionsSection extends riverpod.ConsumerWidget {
     required this.statusColor,
     required this.onPrintMap,
   });
+
+  Future<void> _handleLinkMapTap(
+      BuildContext context, riverpod.WidgetRef ref) async {
+    final scheduleProvider = ref.read(scheduleRiverpod);
+    if (job.linkedMapId.isNotEmpty) {
+      final action = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Map Linked'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('unlink'),
+              child: const Text('Unlink'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('relink'),
+              child: const Text('Re-link'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+      if (action == 'unlink') {
+        await unlinkMapFromScheduleJob(scheduleProvider, job);
+      } else if (action == 'relink') {
+        if (!context.mounted) return;
+        await linkExistingMapToScheduleJob(context, scheduleProvider, job);
+      }
+      return;
+    }
+    await linkExistingMapToScheduleJob(context, scheduleProvider, job);
+  }
 
   void _showMapInstructionsDialog(BuildContext context) {
     final controller = TextEditingController(text: job.mapInstructions);
@@ -263,10 +319,13 @@ class _JobActionsSection extends riverpod.ConsumerWidget {
             FilledButton(
               onPressed: () {
                 final newInstructions = controller.text.trim();
-                final freshJob = scheduleProvider.jobs.firstWhere(
-                  (j) => j.id == job.id,
-                  orElse: () => job,
-                );
+                final freshJob = _freshJobOrNull(scheduleProvider, job.id);
+                if (freshJob == null) {
+                  _showJobDeletedSnackBar(ctx);
+                  Navigator.of(ctx).pop();
+                  controller.dispose();
+                  return;
+                }
                 final modifiedJob =
                     freshJob.copyWith(mapInstructions: newInstructions);
                 scheduleProvider.updateJobWithUndo(
@@ -330,6 +389,25 @@ class _JobActionsSection extends riverpod.ConsumerWidget {
               padding: EdgeInsets.zero,
               iconSize: scaleProvider.smallIconSize,
               onPressed: () => _showMapInstructionsDialog(context),
+            ),
+          ),
+          // Link map button
+          Tooltip(
+            message: job.linkedMapId.isNotEmpty
+                ? 'Map linked — tap to unlink or relink'
+                : 'Link an existing map',
+            child: IconButton(
+              icon: Icon(
+                job.linkedMapId.isNotEmpty ? Icons.link : Icons.link_off,
+                color: job.linkedMapId.isNotEmpty
+                    ? Colors.lightBlueAccent
+                    : Colors.white54,
+                size: scaleProvider.smallIconSize,
+              ),
+              constraints: const BoxConstraints(),
+              padding: EdgeInsets.zero,
+              iconSize: scaleProvider.smallIconSize,
+              onPressed: () => _handleLinkMapTap(context, ref),
             ),
           ),
           // Status button
@@ -411,10 +489,12 @@ class _JobStatusButton extends riverpod.ConsumerWidget {
                   final scheduleProvider =
                       riverpod.ProviderScope.containerOf(context)
                           .read(scheduleRiverpod);
-                  final freshJob = scheduleProvider.jobs.firstWhere(
-                    (j) => j.id == job.id,
-                    orElse: () => job,
-                  );
+                  final freshJob = _freshJobOrNull(scheduleProvider, job.id);
+                  if (freshJob == null) {
+                    _showJobDeletedSnackBar(context);
+                    Navigator.of(context).pop();
+                    return;
+                  }
                   final originalJob = freshJob;
                   final modifiedJob = freshJob.copyWith(statusId: status.id);
                   scheduleProvider.updateJobWithUndo(
@@ -1061,10 +1141,12 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                             '  "${p.name}" type=${p.type} points=${p.points.length} '
                             'pointCategory=${p.pointCategory.id}');
                       }
-                      final freshJob = scheduleProvider.jobs.firstWhere(
-                        (j) => j.id == widget.job.id,
-                        orElse: () => widget.job,
-                      );
+                      final freshJob =
+                          _freshJobOrNull(scheduleProvider, widget.job.id);
+                      if (freshJob == null) {
+                        if (context.mounted) _showJobDeletedSnackBar(context);
+                        return;
+                      }
                       final modifiedJob = freshJob.copyWith(
                         workingAreas: workingAreaNames,
                         workMaps: polygons,
@@ -1076,6 +1158,23 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                             '  "${wm.name}" type=${wm.type} points=${wm.points.length} '
                             'pointCategory=${wm.pointCategory.id}');
                       }
+                      await scheduleProvider.updateJobWithUndo(
+                        freshJob,
+                        modifiedJob,
+                        freshJob.date,
+                      );
+                    },
+                    onLinkExistingMap: (mapId, monthKey) async {
+                      final freshJob =
+                          _freshJobOrNull(scheduleProvider, widget.job.id);
+                      if (freshJob == null) {
+                        if (context.mounted) _showJobDeletedSnackBar(context);
+                        return;
+                      }
+                      final modifiedJob = freshJob.copyWith(
+                        linkedMapId: mapId,
+                        linkedMapMonthKey: monthKey,
+                      );
                       await scheduleProvider.updateJobWithUndo(
                         freshJob,
                         modifiedJob,

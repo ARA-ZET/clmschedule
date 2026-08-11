@@ -12,3 +12,11 @@ void updateBrowserUrl(String path) {
 void resetBrowserUrl() {
   html.window.history.replaceState(null, '', '/');
 }
+
+/// Open [path] (same-origin, e.g. '/admin/map?doc=..&month=..') in a NEW
+/// browser tab, so several maps can be open at once. Resolves [path] against
+/// the current origin so a relative path lands on the right host.
+void openInNewTab(String path) {
+  final url = Uri.base.resolve(path).toString();
+  html.window.open(url, '_blank');
+}

@@ -39,6 +39,7 @@
     }
   },
   "firestore": {
+    "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
   },
   "functions": {
@@ -58,6 +59,10 @@
         "**/node_modules/**"
       ],
       "headers": [
+        {
+          "source": "/",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+        },
         {
           "source": "/index.html",
           "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
@@ -92,6 +97,10 @@
       ],
       "headers": [
         {
+          "source": "/",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+        },
+        {
           "source": "/index.html",
           "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
         },
@@ -112,6 +121,21 @@
         {
           "source": "**",
           "destination": "/index.html"
+        }
+      ]
+    },
+    {
+      "target": "clmworking",
+      "public": "clmworking_web",
+      "ignore": [
+        "firebase.json",
+        "**/.*",
+        "**/node_modules/**"
+      ],
+      "headers": [
+        {
+          "source": "**",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
         }
       ]
     }

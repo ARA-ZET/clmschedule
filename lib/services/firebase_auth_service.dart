@@ -15,15 +15,6 @@ class FirebaseAuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   late final UserService _userService;
 
-  // Demo accounts for testing
-  static const Map<String, String> demoAccounts = {
-    'admin@clm.com': 'admin123',
-    'manager@clm.com': 'manager123',
-    'supervisor@clm.com': 'supervisor123',
-    'user@clm.com': 'user123',
-    'viewer@clm.com': 'viewer123',
-  };
-
   /// Get the current authenticated user
   User? get currentUser => _auth.currentUser;
 

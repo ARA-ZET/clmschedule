@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:image_picker/image_picker.dart';
+import 'package:intl/intl.dart';
 import 'dart:typed_data';
 import '../models/chat_message.dart';
 import '../providers/chat_provider.dart';
@@ -656,25 +657,75 @@ class MessageBubble extends riverpod.ConsumerWidget {
     final isSystem = message.isSystem;
 
     if (isSystem) {
+      final systemColor = Theme.of(context).colorScheme.primary;
+      // Break "Segment one • Segment two • ..." into one line per segment
+      // so multi-part announcements (client/date/added-by, etc.) are easy
+      // to scan instead of running together on one line.
+      final contentLines = message.content.split(' • ');
+
       return Container(
         margin: const EdgeInsets.symmetric(vertical: 4),
-        child: Center(
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.grey[200],
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              message.content,
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey[600],
-                fontStyle: FontStyle.italic,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.8,
               ),
-              textAlign: TextAlign.center,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: systemColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: systemColor.withValues(alpha: 0.35)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (int i = 0; i < contentLines.length; i++)
+                    Padding(
+                      padding: EdgeInsets.only(top: i == 0 ? 0 : 3),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (i == 0) ...[
+                            Icon(Icons.info_outline,
+                                size: 14, color: systemColor),
+                            const SizedBox(width: 6),
+                          ],
+                          Flexible(
+                            child: Text(
+                              contentLines[i],
+                              style: TextStyle(
+                                fontSize: i == 0 ? 12.5 : 11.5,
+                                fontWeight:
+                                    i == 0 ? FontWeight.w700 : FontWeight.w600,
+                                color: systemColor,
+                              ),
+                              textAlign: TextAlign.left,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
             ),
-          ),
+            const SizedBox(height: 3),
+            Padding(
+              padding: const EdgeInsets.only(left: 2),
+              child: Text(
+                DateFormat('dd MMM yyyy, HH:mm').format(message.timestamp),
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                  color: Theme.of(context).colorScheme.onSurface.withValues(
+                        alpha: 0.5,
+                      ),
+                ),
+              ),
+            ),
+          ],
         ),
       );
     }

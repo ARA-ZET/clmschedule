@@ -1,10 +1,13 @@
 import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
+import 'package:clmschedule/utils/schedule_time.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 
 import '../models/distributor.dart';
+import '../models/schedule_confirmation_status.dart';
+import '../providers/auth_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/scale_provider.dart';
 import 'day_planner/day_planner_page.dart';
@@ -164,7 +167,7 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
 
   // Find the index of today's date in the dates list
   int _getTodayIndex(List<DateTime> dates) {
-    final today = DateTime.now();
+    final today = scheduleNow();
     final todayDateOnly = DateTime(today.year, today.month, today.day);
 
     for (int i = 0; i < dates.length; i++) {
@@ -261,6 +264,16 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
           onMonthSelected: scheduleProvider.goToMonth,
           availableMonths: scheduleProvider.getAvailableMonths(),
           mode: Mode.schedule,
+          extraActions: [
+            _DayConfirmationButton(
+              label: 'Today',
+              date: scheduleNow(),
+            ),
+            _DayConfirmationButton(
+              label: 'Tomorrow',
+              date: scheduleNow().add(const Duration(days: 1)),
+            ),
+          ],
         ),
 
         Expanded(
@@ -364,7 +377,7 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
                     } else {
                       // Date headers
                       final date = dates[vicinity.column - 1];
-                      final today = DateTime.now();
+                      final today = scheduleNow();
                       final isToday = date.year == today.year &&
                           date.month == today.month &&
                           date.day == today.day;
@@ -469,6 +482,136 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Quick-access badge/button for Today or Tomorrow, placed next to the
+/// month navigation's "Current" button. Tapping it jumps the grid to that
+/// date's month and opens a menu to set the admin confirmation status
+/// (Confirmed/Pending/Not Confirmed), which is surfaced to distributors on
+/// the public clmworking.web.app roster.
+class _DayConfirmationButton extends riverpod.ConsumerStatefulWidget {
+  final String label;
+  final DateTime date;
+
+  const _DayConfirmationButton({required this.label, required this.date});
+
+  @override
+  riverpod.ConsumerState<_DayConfirmationButton> createState() =>
+      _DayConfirmationButtonState();
+}
+
+class _DayConfirmationButtonState
+    extends riverpod.ConsumerState<_DayConfirmationButton> {
+  final GlobalKey _key = GlobalKey();
+  ScheduleDayConfirmation _lastKnown = const ScheduleDayConfirmation();
+  late final Stream<ScheduleDayConfirmation> _stream;
+
+  @override
+  void initState() {
+    super.initState();
+    _stream = ref.read(scheduleRiverpod).watchDayConfirmation(widget.date);
+  }
+
+  Future<void> _openMenu() async {
+    final scheduleProvider = ref.read(scheduleRiverpod);
+    scheduleProvider.goToMonthContaining(widget.date);
+
+    final renderBox = _key.currentContext!.findRenderObject() as RenderBox;
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final topLeft = renderBox.localToGlobal(Offset.zero, ancestor: overlay);
+    final bottomRight = renderBox.localToGlobal(
+      renderBox.size.bottomRight(Offset.zero),
+      ancestor: overlay,
+    );
+    final position = RelativeRect.fromRect(
+      Rect.fromPoints(topLeft, bottomRight),
+      Offset.zero & overlay.size,
+    );
+
+    final selected = await showMenu<ScheduleConfirmationStatus>(
+      context: context,
+      position: position,
+      items: ScheduleConfirmationStatus.values.map((s) {
+        return PopupMenuItem<ScheduleConfirmationStatus>(
+          value: s,
+          child: Row(
+            children: [
+              Icon(s.icon, size: 16, color: s.color),
+              const SizedBox(width: 8),
+              Text(s.displayName),
+              if (s == _lastKnown.status) ...[
+                const Spacer(),
+                const Icon(Icons.check, size: 16),
+              ],
+            ],
+          ),
+        );
+      }).toList(),
+    );
+
+    if (selected == null || !mounted) return;
+
+    final authProvider = ref.read(authRiverpod);
+    final confirmedBy = authProvider.appUser?.name ??
+        authProvider.user?.displayName ??
+        authProvider.user?.email ??
+        'Unknown';
+
+    await scheduleProvider.setDayConfirmation(
+      widget.date,
+      selected,
+      confirmedBy: confirmedBy,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<ScheduleDayConfirmation>(
+      stream: _stream,
+      builder: (context, snapshot) {
+        final confirmation = snapshot.data ?? const ScheduleDayConfirmation();
+        _lastKnown = confirmation;
+        final status = confirmation.status;
+
+        return Padding(
+          key: _key,
+          padding: const EdgeInsets.only(left: 8),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(20),
+              onTap: _openMenu,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: status.color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(20),
+                  border:
+                      Border.all(color: status.color.withValues(alpha: 0.5)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(status.icon, size: 16, color: status.color),
+                    const SizedBox(width: 6),
+                    Text(
+                      widget.label,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: status.color,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

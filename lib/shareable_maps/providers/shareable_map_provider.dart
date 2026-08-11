@@ -9,6 +9,7 @@ import '../../models/custom_polygon.dart';
 import '../../models/work_area.dart';
 import '../../models/work_suburb.dart';
 import '../../config/flavor_config.dart';
+import '../../services/compiled_tracks_parser.dart';
 import '../../services/gpx_storage_service.dart';
 import '../../services/kml_parser_service.dart';
 import '../adapters/map_data_adapter.dart';
@@ -65,49 +66,8 @@ class _IsolateFileEntry {
 }
 
 // ── Compiled JSON parsers ───────────────────────────────────────────────
-
-/// Parse a `_compiled_tracks.json` file produced by the Cloud Function.
-/// Returns a list of [MapPolyline] with metadata (distance, times, duration).
-List<MapPolyline> _parseCompiledTracks(Uint8List bytes) {
-  final json = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
-  final tracks = json['tracks'] as List<dynamic>? ?? [];
-  final now = DateTime.now();
-  final results = <MapPolyline>[];
-  int seq = 0;
-
-  for (final t in tracks) {
-    final rawPoints = t['points'] as List<dynamic>? ?? [];
-    if (rawPoints.length < 2) continue;
-    final points = rawPoints
-        .map((p) => LatLng((p[0] as num).toDouble(), (p[1] as num).toDouble()))
-        .toList();
-
-    final name = (t['name'] as String?) ?? 'Track ${seq + 1}';
-    final desc = (t['desc'] as String?) ?? '';
-    final distM = (t['distanceMeters'] as num?)?.toDouble();
-    final startMs = (t['startTime'] as num?)?.toInt();
-    final endMs = (t['endTime'] as num?)?.toInt();
-    final durMs = (t['durationMs'] as num?)?.toInt();
-
-    results.add(MapPolyline(
-      id: 'compiled_trk_${now.millisecondsSinceEpoch}_${seq++}',
-      name: name,
-      description: desc,
-      points: points,
-      color: Colors.blue,
-      strokeWidth: 3.0,
-      createdAt: now,
-      updatedAt: now,
-      distanceMeters: distM,
-      startTime:
-          startMs != null ? DateTime.fromMillisecondsSinceEpoch(startMs) : null,
-      endTime:
-          endMs != null ? DateTime.fromMillisecondsSinceEpoch(endMs) : null,
-      duration: durMs != null ? Duration(milliseconds: durMs) : null,
-    ));
-  }
-  return results;
-}
+// `_compiled_tracks.json` parsing lives in compiled_tracks_parser.dart
+// (parseCompiledTracksBytes) so it can be shared with the print-map flow.
 
 /// Parse a `_compiled_waypoints.json` file produced by the Cloud Function.
 List<MapPoint> _parseCompiledWaypoints(Uint8List bytes) {
@@ -451,13 +411,19 @@ class ShareableMapProvider extends ChangeNotifier {
     // Initialise cloud overlay shells and auto-load tracks (deferred)
     _initCloudOverlays();
     final latestFolder = latestLinkedCloudFolder;
-    if (_mapController != null &&
-        autoLoadLatestCloudFolder &&
-        latestFolder != null) {
-      Future.microtask(() {
-        if (_isDisposed) return;
-        loadCloudFolderTracks(folderPath: latestFolder);
-      });
+    if (_mapController != null && latestFolder != null) {
+      if (autoLoadLatestCloudFolder) {
+        Future.microtask(() {
+          if (_isDisposed) return;
+          loadCloudFolderTracks(folderPath: latestFolder);
+        });
+      }
+      if (autoLoadCloudWaypoints) {
+        Future.microtask(() {
+          if (_isDisposed) return;
+          loadCloudFolderWaypoints(folderPath: latestFolder);
+        });
+      }
     }
     debugPrint('[loadFromAdapter] TOTAL: ${sw.elapsedMilliseconds}ms');
   }
@@ -501,6 +467,9 @@ class ShareableMapProvider extends ChangeNotifier {
 
   bool get autoLoadLatestCloudFolder =>
       _currentMap?.autoLoadLatestCloudFolder ?? true;
+
+  bool get autoLoadCloudWaypoints =>
+      _currentMap?.autoLoadCloudWaypoints ?? false;
 
   bool get clipCloudDataToPolygons =>
       _currentMap?.clipCloudDataToPolygons ?? false;
@@ -1014,6 +983,23 @@ class ShareableMapProvider extends ChangeNotifier {
     }
   }
 
+  /// When enabled, the latest linked folder's waypoints load as soon as the
+  /// map opens. Independent of [setAutoLoadLatestCloudFolder] so maps that
+  /// only have cloud waypoints (no tracks) can still auto-load.
+  void setAutoLoadCloudWaypoints(bool value) {
+    if (_currentMap == null) return;
+    if (_currentMap!.autoLoadCloudWaypoints == value) return;
+    _currentMap = _currentMap!.copyWith(autoLoadCloudWaypoints: value);
+    _notifyAndSave();
+    final latest = latestLinkedCloudFolder;
+    if (value && latest != null) {
+      Future.microtask(() {
+        if (_isDisposed) return;
+        loadCloudFolderWaypoints(folderPath: latest);
+      });
+    }
+  }
+
   void setClipCloudDataToPolygons(bool value) {
     if (_currentMap == null) return;
     if (_currentMap!.clipCloudDataToPolygons == value) return;
@@ -1085,7 +1071,8 @@ class ShareableMapProvider extends ChangeNotifier {
       if (compiledBytes != null) {
         debugPrint(
             '[CloudTracks] compiled JSON downloaded in ${sw.elapsedMilliseconds}ms (${(compiledBytes.length / 1024).toStringAsFixed(1)}KB)');
-        final polylines = await compute(_parseCompiledTracks, compiledBytes);
+        final polylines =
+            await compute(parseCompiledTracksBytes, compiledBytes);
         debugPrint(
             '[CloudTracks] parsed ${polylines.length} tracks from compiled JSON in ${sw.elapsedMilliseconds}ms');
 
@@ -2945,13 +2932,21 @@ class ShareableMapProvider extends ChangeNotifier {
 
     // Auto-load the latest linked month once the map is ready to render it.
     final latest = latestLinkedCloudFolder;
-    if (autoLoadLatestCloudFolder &&
-        latest != null &&
-        !_loadedCloudTrackFolders.contains(latest)) {
-      Future.microtask(() {
-        if (_isDisposed) return;
-        loadCloudFolderTracks(folderPath: latest);
-      });
+    if (latest != null) {
+      if (autoLoadLatestCloudFolder &&
+          !_loadedCloudTrackFolders.contains(latest)) {
+        Future.microtask(() {
+          if (_isDisposed) return;
+          loadCloudFolderTracks(folderPath: latest);
+        });
+      }
+      if (autoLoadCloudWaypoints &&
+          !_loadedCloudWaypointFolders.contains(latest)) {
+        Future.microtask(() {
+          if (_isDisposed) return;
+          loadCloudFolderWaypoints(folderPath: latest);
+        });
+      }
     }
   }
 

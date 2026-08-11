@@ -85,21 +85,16 @@ double weeklyGross(
   return total;
 }
 
-/// Transport already paid out in cash during the week, recovered at payday.
-double transportDeduction({
-  required bool transportEligible,
-  required int trips,
-  required double farePerTrip,
-}) {
-  if (!transportEligible) return 0;
-  return trips * farePerTrip;
-}
-
-/// Gross minus transport already paid minus this week's advance deduction.
+/// Gross minus this week's deduction (advance/penalty), plus any one-off
+/// extra earnings and this week's savings withdrawal payout.
 double netWage({
   required double gross,
-  required double transportDeduction,
   required double advanceDeductionAmount,
+  double extraEarningsAmount = 0,
+  double savingsWithdrawalAmount = 0,
 }) {
-  return gross - transportDeduction - advanceDeductionAmount;
+  return gross -
+      advanceDeductionAmount +
+      extraEarningsAmount +
+      savingsWithdrawalAmount;
 }

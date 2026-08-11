@@ -199,7 +199,7 @@
   <script>
     // Load Google Maps API with key from maps_config.js
     const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${window.GOOGLE_MAPS_API_KEY}&libraries=places,marker`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${window.GOOGLE_MAPS_API_KEY}&libraries=places,marker&loading=async`;
     script.defer = true;
     script.async = true;
     script.onerror = function() {
@@ -337,35 +337,66 @@
     })();
   </script>
 
-  <!-- ── Single-tab enforcement ──────────────────────────────────────────────
-       Uses localStorage heartbeat to ensure only one tab loads Flutter (and
-       thus Firebase). The check is synchronous on page load — no timing race.
-       Duplicate tabs show an overlay WITHOUT ever starting Flutter, preventing
-       unnecessary Firestore reads.
+  <!-- ── Single-tab enforcement (per URL) ────────────────────────────────────
+       Uses a localStorage heartbeat so the SAME page isn't loaded twice (which
+       would double the Firestore reads). The check is synchronous on page load
+       — no timing race. Duplicate tabs show an overlay WITHOUT ever starting
+       Flutter.
+
+       The lock is keyed by the current route, not by the origin: on the maps
+       flavor /map/{shareCode} and /admin/map?doc=..&month=.. are different
+       maps and are meant to be open side by side (see openInNewTab in
+       lib/shareable_maps/utils/url_updater_web.dart). Only two tabs showing
+       the same map collide.
   ──────────────────────────────────────────────────────────────────────── -->
   <script>
     (function () {
       // ── Config ──────────────────────────────────────────────────────────
-      var LS_KEY        = 'clm_schedule_active_tab';
+      var LS_PREFIX     = 'clm_active_tab:';           // + route key
+      var LEGACY_LS_KEY = 'clm_schedule_active_tab';   // pre-route-scoped lock
       var HEARTBEAT_MS  = 3000;   // write heartbeat every 3 s
       var STALE_MS      = 8000;   // entry is dead if > 8 s old (> 2× heartbeat)
+      // Query params that identify WHICH document is open. Anything else
+      // (utm_*, print flags, …) is ignored so it can't split the lock.
+      var IDENT_PARAMS  = ['doc', 'month', 'map', 'code', 'share'];
 
       // ── Helpers ─────────────────────────────────────────────────────────
       var MY_ID = Math.random().toString(36).slice(2) + Date.now();
       var _heartbeatTimer = null;
+      var _claimedRoute = null;
 
-      function readEntry() {
-        try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null'); }
+      // Identity of the page this tab is showing, e.g. '/map/x7Kp2mNq',
+      // '/admin/map?doc=abc&month=2026-08' or '/' for the gallery.
+      function routeKey() {
+        var path = (window.location.pathname || '/').replace(/\/+$/, '');
+        if (!path) path = '/';
+        var ident = [];
+        try {
+          var params = new URLSearchParams(window.location.search || '');
+          for (var i = 0; i < IDENT_PARAMS.length; i++) {
+            var v = params.get(IDENT_PARAMS[i]);
+            if (v) ident.push(IDENT_PARAMS[i] + '=' + v);
+          }
+        } catch (e) {}
+        return ident.length ? path + '?' + ident.join('&') : path;
+      }
+
+      function lsKey(route) { return LS_PREFIX + route; }
+
+      function readEntry(route) {
+        try { return JSON.parse(localStorage.getItem(lsKey(route)) || 'null'); }
         catch (e) { return null; }
       }
-      function writeEntry() {
-        try { localStorage.setItem(LS_KEY, JSON.stringify({ id: MY_ID, ts: Date.now() })); }
-        catch (e) {}
-      }
-      function clearEntry() {
+      function writeEntry(route) {
         try {
-          var e = readEntry();
-          if (e && e.id === MY_ID) localStorage.removeItem(LS_KEY);
+          localStorage.setItem(lsKey(route), JSON.stringify({ id: MY_ID, ts: Date.now() }));
+        } catch (e) {}
+      }
+      function clearEntry(route) {
+        if (!route) return;
+        try {
+          var e = readEntry(route);
+          if (e && e.id === MY_ID) localStorage.removeItem(lsKey(route));
         } catch (e) {}
       }
       function isStale(entry) {
@@ -382,15 +413,29 @@
 
       // ── Become the active tab ────────────────────────────────────────────
       function becomeActive() {
-        writeEntry();
-        _heartbeatTimer = setInterval(writeEntry, HEARTBEAT_MS);
+        _claimedRoute = routeKey();
+        writeEntry(_claimedRoute);
+        _heartbeatTimer = setInterval(beat, HEARTBEAT_MS);
         loadFlutterApp();
+      }
+
+      // Heartbeat. The app rewrites the address bar as the user opens maps
+      // (replaceState in url_updater_web.dart), so re-check the route each
+      // tick: hand back the old lock and claim the new one. This never blocks
+      // — navigating inside a tab is not a duplicate.
+      function beat() {
+        var route = routeKey();
+        if (route !== _claimedRoute) {
+          clearEntry(_claimedRoute);
+          _claimedRoute = route;
+        }
+        writeEntry(_claimedRoute);
       }
 
       // ── Yield active status ──────────────────────────────────────────────
       function yieldActive() {
         clearInterval(_heartbeatTimer);
-        clearEntry();
+        clearEntry(_claimedRoute);
       }
 
       // ── Overlay for duplicate tabs ───────────────────────────────────────
@@ -413,12 +458,16 @@
           maxWidth: '400px', width: '90vw', textAlign: 'center',
           boxShadow: '0 8px 40px rgba(0,0,0,0.35)',
         });
+        // Title is rebranded per flavor at deploy time (deploy_maps.sh), so
+        // derive the app name from it instead of hard-coding "CLM Schedule".
+        var appName = (document.title || 'This app').replace(/[<>&]/g, '');
+
         card.innerHTML =
           '<div style="font-size:44px;margin-bottom:12px">&#128203;</div>' +
           '<h2 style="margin:0 0 10px;color:#0A2E6E;font-size:20px;font-weight:700">Already Open</h2>' +
           '<p style="margin:0 0 24px;color:#555;font-size:14px;line-height:1.5">' +
-            'CLM Schedule is already open in another tab.<br>' +
-            'Opening multiple tabs wastes data and may cause conflicts.' +
+            'This page is already open in another ' + appName + ' tab.<br>' +
+            'Loading it twice wastes data and may cause conflicts.' +
           '</p>' +
           '<button id="clm-dup-switch" style="' +
             'display:block;width:100%;background:#0A2E6E;color:#fff;border:none;' +
@@ -458,12 +507,26 @@
       }
 
       // ── Main: synchronous check on page load ─────────────────────────────
-      var existing = readEntry();
+      // Drop the old origin-wide lock left by pre-route-scoped builds — it
+      // would otherwise flag every map link as a duplicate.
+      try { localStorage.removeItem(LEGACY_LS_KEY); } catch (e) {}
+
+      // Sweep locks left behind by tabs that were killed without unloading, so
+      // one key per visited map doesn't pile up in localStorage.
+      try {
+        for (var i = localStorage.length - 1; i >= 0; i--) {
+          var k = localStorage.key(i);
+          if (!k || k.indexOf(LS_PREFIX) !== 0) continue;
+          if (isStale(readEntry(k.slice(LS_PREFIX.length)))) localStorage.removeItem(k);
+        }
+      } catch (e) {}
+
+      var existing = readEntry(routeKey());
       if (!isStale(existing)) {
-        // A fresh heartbeat exists from another tab — this is a duplicate.
+        // A fresh heartbeat exists for THIS route in another tab — duplicate.
         showDuplicateOverlay();
       } else {
-        // No active tab found (or its heartbeat is stale) — we become active.
+        // Nobody holds this route (or its heartbeat is stale) — take it.
         becomeActive();
       }
 
@@ -476,8 +539,8 @@
       // the stale check. The storage event fires in the tab that lost the race,
       // letting it detect the conflict and show the overlay.
       window.addEventListener('storage', function (e) {
-        if (e.key !== LS_KEY) return;
-        var entry = readEntry();
+        if (!_claimedRoute || e.key !== lsKey(_claimedRoute)) return;
+        var entry = readEntry(_claimedRoute);
         if (entry && entry.id !== MY_ID && !document.getElementById('clm-dup-overlay')) {
           // Another tab just wrote a fresher entry while we thought we were alone.
           // Yield and show overlay.

@@ -800,13 +800,24 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
     // Initial setup complete
   }
 
+  // Note: dismissing a pushed sub-page (Track Editor etc.) on tab change
+  // is handled solely by the TabBar's `onTap` below — NOT here. `onTap`
+  // fires on every tap (including re-tapping the already-selected tab),
+  // strictly after this listener already ran for the same tap when the
+  // index actually changed (TabController.animateTo updates the index and
+  // calls notifyListeners synchronously before TabBar invokes onTap, since
+  // this controller's animationDuration is zero). Calling popUntil from
+  // both places back-to-back pops the same still-transitioning route
+  // twice in one synchronous tick, which trips Navigator's reentrancy
+  // guard and leaves `_bodyNavKey`'s Navigator locked — every subsequent
+  // tab switch AND action-button push then silently does nothing (the
+  // app-wide "freeze" this caused). Keep this listener to just track the
+  // index for the guard above; the pop lives only in `onTap`.
   void _handleTabChange() {
     if (_tabController.index != _currentTabIndex) {
       setState(() {
         _currentTabIndex = _tabController.index;
       });
-      // Dismiss any open sub-page so the selected tab is visible
-      _bodyNavKey.currentState?.popUntil((route) => route.isFirst);
     }
   }
 
@@ -930,6 +941,19 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                   listenable: _tabController,
                   builder: (context, _) => TabBar(
                     controller: _tabController,
+                    // The SOLE place a tab tap dismisses a pushed sub-page
+                    // (Track Editor etc.) — fires on every tap, even
+                    // re-tapping the already-selected tab (unlike the
+                    // TabController listener in _handleTabChange, which
+                    // only fires when the index actually changes). Needed
+                    // so tapping the CURRENT tab (e.g. "Payroll" while
+                    // Track Editor is pushed on top of it) still dismisses
+                    // the pushed sub-page in one click. See the comment on
+                    // _handleTabChange for why this must NOT also be called
+                    // from there (duplicate back-to-back popUntil calls
+                    // locked the Navigator and froze the whole app).
+                    onTap: (_) =>
+                        _bodyNavKey.currentState?.popUntil((r) => r.isFirst),
                     isScrollable: isSmallScreen, // Scrollable on mobile
                     labelColor: Colors.black,
                     unselectedLabelColor: Colors.black,

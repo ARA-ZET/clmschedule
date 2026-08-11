@@ -8,6 +8,7 @@ import '../models/work_area.dart';
 import '../models/work_suburb.dart';
 import '../models/collection_job.dart';
 import '../models/schedule_confirmation_status.dart';
+import '../utils/schedule_time.dart';
 import 'daily_service.dart';
 import 'schedule_mutation_types.dart';
 
@@ -146,7 +147,7 @@ class FirestoreService {
           else ...{
             'created': FieldValue.serverTimestamp(),
             'date': key,
-            'timestamp': Timestamp.fromDate(date),
+            'timestamp': Timestamp.fromDate(scheduleCivilToInstant(date)),
           },
           'jobs': newJobs,
         };
@@ -250,7 +251,9 @@ class FirestoreService {
   /// filed on the correct day.
   void _stampJobDate(Map<String, dynamic> job, DateTime dayDate) {
     final raw = job['date'];
-    final current = raw is Timestamp ? raw.toDate() : null;
+    // Interpret the stored instant as a SAST civil date so the comparison and
+    // the preserved time-of-day are both in the business timezone.
+    final current = raw is Timestamp ? toScheduleCivil(raw.toDate()) : null;
     if (current != null &&
         current.year == dayDate.year &&
         current.month == dayDate.month &&
@@ -267,7 +270,7 @@ class FirestoreService {
       current?.millisecond ?? 0,
       current?.microsecond ?? 0,
     );
-    job['date'] = Timestamp.fromDate(corrected);
+    job['date'] = Timestamp.fromDate(scheduleCivilToInstant(corrected));
   }
 
   /// Removes every occurrence of [jobId] from all day arrays loaded in the

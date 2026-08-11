@@ -4,9 +4,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:image_picker/image_picker.dart';
 import '../models/distributor.dart';
-import '../models/distributor_payroll_profile.dart';
-import '../models/payroll_settings.dart';
-import '../providers/payroll_provider.dart';
 import '../services/storage_upload.dart';
 
 class EditDistributorDialog extends riverpod.ConsumerStatefulWidget {
@@ -30,6 +27,9 @@ class _EditDistributorDialogState
   late TextEditingController _indexController;
   late TextEditingController _phone1Controller;
   late TextEditingController _phone2Controller;
+  late TextEditingController _fullNameController;
+  late TextEditingController _idNumberController;
+  late TextEditingController _homeAddressController;
   late DistributorStatus _selectedStatus;
   late DistributorRole _selectedRole;
   final _formKey = GlobalKey<FormState>();
@@ -39,21 +39,6 @@ class _EditDistributorDialogState
   String? _pendingImageFileName;
   String? _previewImageUrl; // current or newly picked
   bool _uploading = false;
-
-  // ── Payroll section state ──────────────────────────────────────────────
-  PayrollSettings _payrollSettings = PayrollSettings.defaults();
-  late TextEditingController _dayRateController;
-  late TextEditingController _perSetRateController;
-  late TextEditingController _estimateBonusController;
-  late TextEditingController _transportFareController;
-  late bool _transportEligible;
-  late Map<String, TextEditingController> _bonusCodeControllers;
-  late TextEditingController _bankNameController;
-  late TextEditingController _bankAccountHolderController;
-  late TextEditingController _bankAccountNumberController;
-  late TextEditingController _bankBranchCodeController;
-  late TextEditingController _bankAccountTypeController;
-  late String _paymentMethod;
 
   @override
   void initState() {
@@ -65,51 +50,15 @@ class _EditDistributorDialogState
         TextEditingController(text: widget.distributor.phone1 ?? '');
     _phone2Controller =
         TextEditingController(text: widget.distributor.phone2 ?? '');
+    _fullNameController =
+        TextEditingController(text: widget.distributor.fullName ?? '');
+    _idNumberController =
+        TextEditingController(text: widget.distributor.idNumber ?? '');
+    _homeAddressController =
+        TextEditingController(text: widget.distributor.homeAddress ?? '');
     _selectedStatus = widget.distributor.status;
     _selectedRole = widget.distributor.role;
     _previewImageUrl = widget.distributor.imageUrl;
-
-    final payroll = widget.distributor.payroll;
-    _dayRateController =
-        TextEditingController(text: payroll?.dayRate?.toString() ?? '');
-    _perSetRateController =
-        TextEditingController(text: payroll?.perSetRate?.toString() ?? '');
-    _estimateBonusController =
-        TextEditingController(text: payroll?.estimateBonus?.toString() ?? '');
-    _transportFareController = TextEditingController(
-        text: payroll?.transportFarePerTrip?.toString() ?? '');
-    _transportEligible = payroll?.transportEligible ?? false;
-    _bonusCodeControllers = {
-      for (final code in _payrollSettings.bonusCodes)
-        code: TextEditingController(
-            text: payroll?.bonusCodeAmounts[code]?.toString() ?? ''),
-    };
-    _bankNameController =
-        TextEditingController(text: payroll?.bankName ?? '');
-    _bankAccountHolderController =
-        TextEditingController(text: payroll?.bankAccountHolder ?? '');
-    _bankAccountNumberController =
-        TextEditingController(text: payroll?.bankAccountNumber ?? '');
-    _bankBranchCodeController =
-        TextEditingController(text: payroll?.bankBranchCode ?? '');
-    _bankAccountTypeController =
-        TextEditingController(text: payroll?.bankAccountType ?? '');
-    _paymentMethod = payroll?.paymentMethod ?? 'EFT';
-
-    ref.read(payrollServiceRiverpod).getSettings().then((settings) {
-      if (!mounted) return;
-      setState(() {
-        _payrollSettings = settings;
-        // Add controllers for any codes not already covered above.
-        for (final code in settings.bonusCodes) {
-          _bonusCodeControllers.putIfAbsent(
-            code,
-            () => TextEditingController(
-                text: payroll?.bonusCodeAmounts[code]?.toString() ?? ''),
-          );
-        }
-      });
-    });
   }
 
   @override
@@ -118,52 +67,10 @@ class _EditDistributorDialogState
     _indexController.dispose();
     _phone1Controller.dispose();
     _phone2Controller.dispose();
-    _dayRateController.dispose();
-    _perSetRateController.dispose();
-    _estimateBonusController.dispose();
-    _transportFareController.dispose();
-    for (final c in _bonusCodeControllers.values) {
-      c.dispose();
-    }
-    _bankNameController.dispose();
-    _bankAccountHolderController.dispose();
-    _bankAccountNumberController.dispose();
-    _bankBranchCodeController.dispose();
-    _bankAccountTypeController.dispose();
+    _fullNameController.dispose();
+    _idNumberController.dispose();
+    _homeAddressController.dispose();
     super.dispose();
-  }
-
-  DistributorPayrollProfile _buildPayrollProfile() {
-    final bonusOverrides = <String, double>{};
-    for (final entry in _bonusCodeControllers.entries) {
-      final parsed = double.tryParse(entry.value.text.trim());
-      if (parsed != null) bonusOverrides[entry.key] = parsed;
-    }
-    return DistributorPayrollProfile(
-      dayRate: double.tryParse(_dayRateController.text.trim()),
-      bonusCodeAmounts: bonusOverrides,
-      perSetRate: double.tryParse(_perSetRateController.text.trim()),
-      estimateBonus: double.tryParse(_estimateBonusController.text.trim()),
-      transportEligible: _transportEligible,
-      transportFarePerTrip:
-          double.tryParse(_transportFareController.text.trim()),
-      bankName: _bankNameController.text.trim().isEmpty
-          ? null
-          : _bankNameController.text.trim(),
-      bankAccountHolder: _bankAccountHolderController.text.trim().isEmpty
-          ? null
-          : _bankAccountHolderController.text.trim(),
-      bankAccountNumber: _bankAccountNumberController.text.trim().isEmpty
-          ? null
-          : _bankAccountNumberController.text.trim(),
-      bankBranchCode: _bankBranchCodeController.text.trim().isEmpty
-          ? null
-          : _bankBranchCodeController.text.trim(),
-      bankAccountType: _bankAccountTypeController.text.trim().isEmpty
-          ? null
-          : _bankAccountTypeController.text.trim(),
-      paymentMethod: _paymentMethod,
-    );
   }
 
   Future<void> _pickImage() async {
@@ -224,138 +131,6 @@ class _EditDistributorDialogState
       case DistributorStatus.onLeave:
         return Colors.orange;
     }
-  }
-
-  Widget _buildPayrollSection() {
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        tilePadding: EdgeInsets.zero,
-        title: const Text('Payroll'),
-        leading: const Icon(Icons.payments_outlined),
-        childrenPadding: const EdgeInsets.only(bottom: 8),
-        children: [
-          TextFormField(
-            controller: _dayRateController,
-            decoration: InputDecoration(
-              labelText: 'Day rate override',
-              hintText: 'Company default: R${_payrollSettings.defaultDayRate}',
-              prefixIcon: const Icon(Icons.attach_money),
-            ),
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _perSetRateController,
-            decoration: InputDecoration(
-              labelText: 'Per-set rate override',
-              hintText:
-                  'Company default: R${_payrollSettings.defaultPerSetRate}',
-            ),
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _estimateBonusController,
-            decoration: InputDecoration(
-              labelText: 'Estimate-reached bonus override',
-              hintText:
-                  'Company default: R${_payrollSettings.defaultEstimateBonus}',
-            ),
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          ),
-          const SizedBox(height: 12),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Transport eligible'),
-            subtitle: const Text('Adds a weekly transport-fare deduction'),
-            value: _transportEligible,
-            onChanged: (v) => setState(() => _transportEligible = v),
-          ),
-          if (_transportEligible)
-            TextFormField(
-              controller: _transportFareController,
-              decoration: InputDecoration(
-                labelText: 'Fare per trip override',
-                hintText:
-                    'Company default: R${_payrollSettings.defaultTransportFare}',
-              ),
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
-            ),
-          const SizedBox(height: 16),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('Bonus code overrides',
-                style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 12,
-            runSpacing: 8,
-            children: [
-              for (final code in _payrollSettings.bonusCodes)
-                SizedBox(
-                  width: 140,
-                  child: TextFormField(
-                    controller: _bonusCodeControllers[code],
-                    decoration: InputDecoration(
-                      labelText: code,
-                      hintText: '${_payrollSettings.defaultBonusCodeAmounts[code] ?? 0}',
-                      isDense: true,
-                    ),
-                    keyboardType:
-                        const TextInputType.numberWithOptions(decimal: true, signed: true),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('Bank details',
-                style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-          const SizedBox(height: 8),
-          TextFormField(
-            controller: _bankNameController,
-            decoration: const InputDecoration(labelText: 'Bank name'),
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _bankAccountHolderController,
-            decoration: const InputDecoration(labelText: 'Account holder'),
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _bankAccountNumberController,
-            decoration: const InputDecoration(labelText: 'Account number'),
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _bankBranchCodeController,
-            decoration: const InputDecoration(labelText: 'Branch code'),
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _bankAccountTypeController,
-            decoration: const InputDecoration(
-                labelText: 'Account type (e.g. Savings)'),
-          ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            initialValue: _paymentMethod,
-            decoration: const InputDecoration(labelText: 'Payment method'),
-            items: const [
-              DropdownMenuItem(value: 'EFT', child: Text('EFT')),
-              DropdownMenuItem(value: 'Cash', child: Text('Cash')),
-              DropdownMenuItem(value: 'Other', child: Text('Other')),
-            ],
-            onChanged: (v) => setState(() => _paymentMethod = v ?? 'EFT'),
-          ),
-        ],
-      ),
-    );
   }
 
   Widget _buildPhotoSection() {
@@ -495,6 +270,38 @@ class _EditDistributorDialogState
                 ),
                 const SizedBox(height: 16),
 
+                // ── Full legal name ─────────────────────────────────────────
+                TextFormField(
+                  controller: _fullNameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Full legal name',
+                    hintText: 'Used on formal documents like payslips',
+                    prefixIcon: Icon(Icons.badge),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // ── ID number ────────────────────────────────────────────────
+                TextFormField(
+                  controller: _idNumberController,
+                  decoration: const InputDecoration(
+                    labelText: 'ID number',
+                    prefixIcon: Icon(Icons.perm_identity),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // ── Home address ─────────────────────────────────────────────
+                TextFormField(
+                  controller: _homeAddressController,
+                  decoration: const InputDecoration(
+                    labelText: 'Home address',
+                    prefixIcon: Icon(Icons.home_outlined),
+                  ),
+                  maxLines: 2,
+                ),
+                const SizedBox(height: 16),
+
                 // ── Role ───────────────────────────────────────────────────
                 DropdownButtonFormField<DistributorRole>(
                   initialValue: _selectedRole,
@@ -562,10 +369,6 @@ class _EditDistributorDialogState
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
-
-                // ── Payroll ─────────────────────────────────────────────────
-                _buildPayrollSection(),
               ],
             ),
           ),
@@ -615,7 +418,15 @@ class _EditDistributorDialogState
                     status: _selectedStatus,
                     role: _selectedRole,
                     imageUrl: finalImageUrl,
-                    payroll: _buildPayrollProfile(),
+                    fullName: _fullNameController.text.trim().isEmpty
+                        ? null
+                        : _fullNameController.text.trim(),
+                    idNumber: _idNumberController.text.trim().isEmpty
+                        ? null
+                        : _idNumberController.text.trim(),
+                    homeAddress: _homeAddressController.text.trim().isEmpty
+                        ? null
+                        : _homeAddressController.text.trim(),
                   );
 
                   if (mounted) {

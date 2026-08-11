@@ -5,11 +5,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 
 import '../models/collection_job.dart';
-import '../models/job_list_item.dart';
 import '../providers/collection_schedule_provider.dart';
-import '../providers/job_list_provider.dart';
 import '../providers/scale_provider.dart';
 import 'month_navigation_widget.dart';
+import 'zoho/job_invoice_actions.dart';
+import 'zoho/zoho_customers_screen.dart';
+import 'zoho/zoho_invoices_screen.dart';
 
 extension VehicleTypeExtension on VehicleType {
   String get displayName {
@@ -275,6 +276,34 @@ class _CollectionScheduleGridState
               availableMonths: collectionProvider.getAvailableMonths(),
               onRefresh: collectionProvider.refresh,
               mode: Mode.collection, // Add mode parameter
+            ),
+
+            // Zoho Books entry points
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+              child: Row(
+                children: [
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.receipt_long, size: 18),
+                    label: const Text('Invoices'),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const ZohoInvoicesScreen(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.people_outline, size: 18),
+                    label: const Text('Customers'),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const ZohoCustomersScreen(),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
 
             // Grid
@@ -589,103 +618,109 @@ Widget _buildCollectionJobCard(
     BuildContext context, CollectionJob job, Color color, bool isFullview) {
   return Tooltip(
     message: _buildJobTooltip(job),
-    child: Padding(
-      padding: const EdgeInsets.all(2),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          // Job Type
-          Text(
-            job.jobType,
-            style: TextStyle(
-              fontSize: 9,
-              fontWeight: FontWeight.bold,
-              color: color,
+    child: GestureDetector(
+      // Opens the Zoho invoice actions for this job (create / view invoice).
+      onTap: () => showJobInvoiceActions(context, job),
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.all(2),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // Job Type
+            Text(
+              job.jobType,
+              style: TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 1),
-          // Location
+            const SizedBox(height: 1),
+            // Location
 
-          isFullview
-              ? Column(
-                  children: [
-                    Text(
-                      job.location,
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w600,
-                        color: color.withValues(alpha: 0.9),
-                      ),
-                      textAlign: TextAlign.center,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (job.offloadLocation.isNotEmpty) ...[
-                      const SizedBox(height: 1),
+            isFullview
+                ? Column(
+                    children: [
                       Text(
-                        '→ ${job.offloadLocation}',
-                        style: TextStyle(
-                          fontSize: 9,
-                          fontWeight: FontWeight.w500,
-                          color: color.withValues(alpha: 0.75),
-                        ),
-                        textAlign: TextAlign.center,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                    if (job.clients.isNotEmpty) ...[
-                      const SizedBox(height: 1),
-                      // Client
-                      Text(
-                        job.clients.first,
-                        style: TextStyle(
-                          fontSize: 8,
-                          color: color.withValues(alpha: 0.8),
-                          fontStyle: FontStyle.italic,
-                        ),
-                        textAlign: TextAlign.center,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                    // Trailer Type
-                    if (job.trailerType != TrailerType.noTrailer) ...[
-                      const SizedBox(height: 1),
-                      Text(
-                        job.trailerType.displayName,
+                        job.location,
                         style: TextStyle(
                           fontSize: 10,
-                          color: color.withValues(alpha: 0.7),
-                          fontWeight: FontWeight.bold,
+                          fontWeight: FontWeight.w600,
+                          color: color.withValues(alpha: 0.9),
                         ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-                    // Staff info
-                    if (job.assignedStaff.isNotEmpty || job.staffCount > 0) ...[
-                      const SizedBox(height: 1),
-                      Text(
-                        job.assignedStaff.isNotEmpty
-                            ? job.assignedStaff.join(', ')
-                            : '${job.staffCount} Workers',
-                        style: TextStyle(
-                            fontSize: 8,
-                            color: color.withValues(alpha: 0.6),
-                            fontWeight: FontWeight.w800),
                         textAlign: TextAlign.center,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      if (job.offloadLocation.isNotEmpty) ...[
+                        const SizedBox(height: 1),
+                        Text(
+                          '→ ${job.offloadLocation}',
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w500,
+                            color: color.withValues(alpha: 0.75),
+                          ),
+                          textAlign: TextAlign.center,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      if (job.clients.isNotEmpty) ...[
+                        const SizedBox(height: 1),
+                        // Client
+                        Text(
+                          job.clients.first,
+                          style: TextStyle(
+                            fontSize: 8,
+                            color: color.withValues(alpha: 0.8),
+                            fontStyle: FontStyle.italic,
+                          ),
+                          textAlign: TextAlign.center,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      // Trailer Type
+                      if (job.trailerType != TrailerType.noTrailer) ...[
+                        const SizedBox(height: 1),
+                        Text(
+                          job.trailerType.displayName,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: color.withValues(alpha: 0.7),
+                            fontWeight: FontWeight.bold,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                      // Staff info
+                      if (job.assignedStaff.isNotEmpty ||
+                          job.staffCount > 0) ...[
+                        const SizedBox(height: 1),
+                        Text(
+                          job.assignedStaff.isNotEmpty
+                              ? job.assignedStaff.join(', ')
+                              : '${job.staffCount} Workers',
+                          style: TextStyle(
+                              fontSize: 8,
+                              color: color.withValues(alpha: 0.6),
+                              fontWeight: FontWeight.w800),
+                          textAlign: TextAlign.center,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
                     ],
-                  ],
-                )
-              : const SizedBox.shrink(),
-        ],
+                  )
+                : const SizedBox.shrink(),
+          ],
+        ),
       ),
     ),
   );
@@ -872,72 +907,60 @@ class _AddCollectionJobDialogState
     );
   }
 
-  void _saveCollectionJob() {
+  Future<void> _saveCollectionJob() async {
     final staff = _staffController.text
         .split(',')
         .map((s) => s.trim())
         .where((s) => s.isNotEmpty)
         .toList();
 
-    // Parse the time slot to create a proper DateTime with the specified time
-    final timeParts = widget.timeSlot.split(':');
-    final hour = int.tryParse(timeParts[0]) ?? 8;
-    final minute = int.tryParse(timeParts[1]) ?? 0;
+    final location = _locationController.text.trim();
 
-    // Create a DateTime with the specified time for the collection
-    final collectionDateTime = DateTime(
-      widget.date.year,
-      widget.date.month,
-      widget.date.day,
-      hour,
-      minute,
+    // Staff, duration and start time now live in their own JobListItem fields
+    // (see CollectionScheduleProvider.addCollectionJob), so nothing has to be
+    // smuggled through specialInstructions / quantityDistributed any more.
+    // Invoice number and client are deliberately left blank — they are the
+    // Job List's columns to fill, and a placeholder here would be pushed to
+    // Zoho as a real invoice number.
+    final job = CollectionJob(
+      id: '',
+      location: location,
+      vehicleType: widget.vehicleType,
+      trailerType: _selectedTrailerType,
+      date: widget.date,
+      timeSlot: widget.timeSlot,
+      timeSlots: _selectedTimeSlots,
+      assignedStaff: staff,
+      staffCount: staff.isNotEmpty ? staff.length : 1,
+      jobType: 'junkCollection',
+      statusId: 'scheduled',
+      clients: const [],
+      notes: '',
     );
 
-    // Create a JobListItem instead of CollectionJob (collection jobs are now derived from job list)
-    final jobListItem = JobListItem(
-      id: '', // Will be set by Firestore
-      invoice:
-          'AUTO-${DateTime.now().millisecondsSinceEpoch}', // Auto-generated invoice
-      amount: 0.0, // Default amount - can be edited later
-      client: 'COLLECTION: ${_locationController.text.trim()}',
-      jobStatusId: 'scheduled', // Default status
-      jobTypeId: 'junkCollection', // Collection job type
-      area: _locationController.text.trim(),
-      quantity: _getQuantityFromVehicleTrailer(
-          widget.vehicleType, _selectedTrailerType),
-      manDays: 1.0, // Default man days
-      date: collectionDateTime, // Use the proper DateTime with time
-      collectionAddress:
-          _locationController.text.trim(), // Use location as address
-      collectionDate: collectionDateTime, // Use the proper DateTime with time
-      specialInstructions: staff.isNotEmpty ? 'Staff: ${staff.join(', ')}' : '',
-      quantityDistributed:
-          _selectedTimeSlots, // Use selected time slots for quantityDistributed
-      invoiceDetails: '',
-      reportAddresses: '',
-      whoToInvoice: '',
-    );
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
 
-    // Add to job list provider instead of collection provider
-    final jobListProvider = ref.read(jobListRiverpod);
-    jobListProvider.addJobListItem(jobListItem);
-
-    Navigator.of(context).pop();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-            'Added ${widget.vehicleType.displayName} collection job for ${_locationController.text}'),
-        backgroundColor: Colors.green,
-      ),
-    );
-  }
-
-  // Helper method to get quantity based on vehicle and trailer combination
-  int _getQuantityFromVehicleTrailer(
-      VehicleType vehicleType, TrailerType trailerType) {
-    // This could be expanded to match the existing quantity encoding system
-    // For now, use 1 as default quantity
-    return 1;
+    try {
+      await ref.read(collectionScheduleRiverpod).addCollectionJob(
+            job,
+            jobTypeId: 'junkCollection',
+          );
+      navigator.pop();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+              'Added ${widget.vehicleType.displayName} collection job for $location'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Could not add collection job: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
 }

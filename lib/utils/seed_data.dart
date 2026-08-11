@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../services/monthly_service.dart';
+import 'schedule_time.dart';
 
 Future<void> seedData() async {
   final FirebaseFirestore firestore = FirebaseFirestore.instance;
@@ -77,7 +78,8 @@ Future<void> seedData() async {
     // Generate unique ID for each job
     job['id'] = FirebaseFirestore.instance.collection('dummy').doc().id;
     // Convert DateTime objects to Timestamps for Firestore
-    job['date'] = Timestamp.fromDate(job['date'] as DateTime);
+    job['date'] =
+        Timestamp.fromDate(scheduleCivilToInstant(job['date'] as DateTime));
     jobsWithIds.add(job);
   }
 

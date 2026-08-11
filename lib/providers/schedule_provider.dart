@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/schedule.dart';
+import '../utils/schedule_time.dart';
 import '../models/work_area.dart';
 import '../models/work_suburb.dart';
 import '../models/custom_polygon.dart';
@@ -27,7 +28,7 @@ class ScheduleProvider extends ChangeNotifier {
   List<Job> _nextMonthJobs = [];
   List<WorkArea> _workAreas = [];
   List<WorkSuburb> _workSuburbs = [];
-  DateTime _currentMonth = DateTime.now();
+  DateTime _currentMonth = scheduleNow();
 
   // Cached combined jobs list — invalidated when either month's data changes
   List<Job>? _cachedJobs;
@@ -561,7 +562,7 @@ class ScheduleProvider extends ChangeNotifier {
 
   // Go to current month
   void goToCurrentMonth() {
-    setCurrentMonth(DateTime.now());
+    setCurrentMonth(scheduleNow());
   }
 
   // Go to specific month by month string (e.g., "Sep 2025")

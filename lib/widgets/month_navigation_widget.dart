@@ -1,6 +1,7 @@
 import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:clmschedule/providers/unfinished_work_areas_provider.dart';
 import 'package:flutter/material.dart';
+import 'package:clmschedule/utils/schedule_time.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 class MonthNavigationWidget extends riverpod.ConsumerWidget {
@@ -13,6 +14,7 @@ class MonthNavigationWidget extends riverpod.ConsumerWidget {
   final VoidCallback? onRefresh;
   final Mode mode;
   // Optional refresh callback
+  final List<Widget>? extraActions; // Rendered after the Current button
 
   const MonthNavigationWidget({
     super.key,
@@ -24,6 +26,7 @@ class MonthNavigationWidget extends riverpod.ConsumerWidget {
     required this.availableMonths,
     this.onRefresh,
     required this.mode,
+    this.extraActions,
     // Optional parameter
   });
 
@@ -49,7 +52,7 @@ class MonthNavigationWidget extends riverpod.ConsumerWidget {
     if (parts.length != 2) return [currentMonth];
 
     final currentMonthName = parts[0];
-    final currentYear = int.tryParse(parts[1]) ?? DateTime.now().year;
+    final currentYear = int.tryParse(parts[1]) ?? scheduleNow().year;
     final currentMonthIndex = months.indexOf(currentMonthName);
 
     if (currentMonthIndex == -1) return [currentMonth];
@@ -173,6 +176,8 @@ class MonthNavigationWidget extends riverpod.ConsumerWidget {
               ),
             ),
           ),
+
+          if (extraActions != null) ...extraActions!,
 
           const Spacer(),
 

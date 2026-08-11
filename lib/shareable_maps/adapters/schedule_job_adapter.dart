@@ -5,6 +5,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/job.dart';
 import '../../providers/unfinished_work_areas_provider.dart';
+import '../../services/job_cloud_map_data_service.dart';
 import '../models/map_layer.dart';
 import '../models/map_point.dart';
 import '../models/map_polyline.dart';
@@ -16,6 +17,15 @@ import 'map_data_adapter.dart';
 typedef ScheduleJobSaveCallback = Future<void> Function(
   List<CustomPolygon> polygons,
   List<String> workingAreaNames,
+);
+
+/// Callback signature for linking an existing ShareableMap to the schedule
+/// job (see `MapDataAdapter.onLinkExistingMap`). Only `mapId`/`monthKey` are
+/// persisted — the map's folder path/polygons are fetched live wherever
+/// they're needed (e.g. `PrintMapView`), not cached here.
+typedef ScheduleJobLinkMapCallback = Future<void> Function(
+  String mapId,
+  String monthKey,
 );
 
 /// Fixed layer id for polygons injected from matching unfinished work areas.
@@ -39,6 +49,7 @@ const String kUnfinishedAreasLayerId = 'unfinished_work_areas_layer';
 class ScheduleJobAdapter extends MapDataAdapter {
   final Job _job;
   final ScheduleJobSaveCallback _onSave;
+  final ScheduleJobLinkMapCallback? _onLinkExistingMap;
   final String? distributorName;
   final UnfinishedWorkAreasProvider? _unfinishedProvider;
 
@@ -49,11 +60,23 @@ class ScheduleJobAdapter extends MapDataAdapter {
   ScheduleJobAdapter({
     required Job job,
     required ScheduleJobSaveCallback onSave,
+    ScheduleJobLinkMapCallback? onLinkExistingMap,
     this.distributorName,
     UnfinishedWorkAreasProvider? unfinishedProvider,
   })  : _job = job,
         _onSave = onSave,
+        _onLinkExistingMap = onLinkExistingMap,
         _unfinishedProvider = unfinishedProvider;
+
+  @override
+  Future<void> onLinkExistingMap({
+    required String mapId,
+    required String monthKey,
+    required String mapName,
+    String? storageFolderPath,
+  }) async {
+    await _onLinkExistingMap?.call(mapId, monthKey);
+  }
 
   @override
   String get adapterId => 'schedule_job';
@@ -99,6 +122,7 @@ class ScheduleJobAdapter extends MapDataAdapter {
         canDelete: true,
         showSaveButton: true,
         readOnly: false,
+        canLinkExistingMap: true,
       );
 
   @override
@@ -213,33 +237,13 @@ class ScheduleJobAdapter extends MapDataAdapter {
       if (kDebugMode) debugPrint('[UnfinishedLayer] skipped: provider is null');
       return const [];
     }
-    if (_job.clients.isEmpty) {
-      return const [];
-    }
 
-    final jobClients = _job.clients.map((c) => c.trim().toLowerCase()).toSet();
+    final match = JobCloudMapDataService.matchingGapAreas(_job, provider);
+    _polygonNameToUnfinishedId
+      ..clear()
+      ..addAll(match.polygonNameToItemId);
 
-    final matchedPolygons = <CustomPolygon>[];
-    _polygonNameToUnfinishedId.clear();
-
-    for (final item in provider.items) {
-      final itemClientsNorm =
-          item.clients.map((c) => c.trim().toLowerCase()).toList();
-      final overlap =
-          itemClientsNorm.where((c) => jobClients.contains(c)).toList();
-      final hasMatch = overlap.isNotEmpty;
-      if (!hasMatch) continue;
-
-      for (final wm in item.workMaps.where((p) => p.isPolygon)) {
-        if (wm.name.isEmpty) {
-          continue;
-        }
-        matchedPolygons.add(wm.copyWith(points: List<LatLng>.from(wm.points)));
-        _polygonNameToUnfinishedId[wm.name] = item.id;
-      }
-    }
-
-    if (matchedPolygons.isEmpty) return const [];
+    if (match.polygons.isEmpty) return const [];
 
     return [
       MapLayer(
@@ -248,7 +252,7 @@ class ScheduleJobAdapter extends MapDataAdapter {
         description: 'Matched from unfinished work areas by client name',
         order: 1,
         defaultColor: Colors.indigo.shade600,
-        polygons: matchedPolygons,
+        polygons: match.polygons,
         polylines: const [],
         points: const [],
         createdAt: now,

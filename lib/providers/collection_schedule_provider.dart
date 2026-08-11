@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/collection_job.dart';
 import '../models/job_list_item.dart';
 import '../models/work_area.dart';
+import '../utils/schedule_time.dart';
 import '../services/firestore_service.dart';
 import '../services/job_list_service.dart';
 import 'job_type_provider.dart';
@@ -25,7 +26,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   List<CollectionJob> _collectionJobs = [];
   List<WorkArea> _workAreas = [];
-  DateTime _currentMonth = DateTime.now();
+  DateTime _currentMonth = scheduleNow();
   bool _isInitialized = false;
   bool _isLoading = false;
 
@@ -94,7 +95,14 @@ class CollectionScheduleProvider extends ChangeNotifier {
             item.area.hashCode +
             item.offloadingAddress.hashCode +
             item.client.hashCode +
-            item.specialInstructions.hashCode;
+            item.specialInstructions.hashCode +
+            // Schedule-owned fields must participate, otherwise editing a job
+            // from the Collection Schedule leaves the fingerprint unchanged
+            // and the rebuild is skipped.
+            item.timeSlot.hashCode +
+            item.timeSlots +
+            item.staffCount +
+            Object.hashAll(item.assignedStaff);
       }
     }
     if (fp == _lastJobListFingerprint) {
@@ -230,14 +238,12 @@ class CollectionScheduleProvider extends ChangeNotifier {
             VehicleTrailerCombo.fromLegacyQuantity(jobListItem.quantity,
                 jobTypeId: jobListItem.jobTypeId);
 
-    // Determine timeSlots from quantityDistributed (default to 1 if not set or invalid)
-    final timeSlots = (jobListItem.quantityDistributed > 0)
-        ? jobListItem.quantityDistributed
-        : 1;
-
-    // Extract time slot from the job's date - this handles the properly formatted DateTime
-    final timeSlot =
-        '${jobListItem.date.hour.toString().padLeft(2, '0')}:${jobListItem.date.minute.toString().padLeft(2, '0')}';
+    // Duration, start time and staffing now have dedicated fields on
+    // JobListItem. The resolved* getters fall back to the legacy derivations
+    // (quantityDistributed / date's time component / manDays.ceil()) so
+    // records written before those fields existed still render identically.
+    final timeSlots = jobListItem.resolvedTimeSlots;
+    final timeSlot = jobListItem.resolvedTimeSlot;
 
     // Use collectionDate if it has a meaningful time, otherwise fall back to the main date
     final effectiveDate = (jobListItem.collectionDate.year != 2000 &&
@@ -256,8 +262,8 @@ class CollectionScheduleProvider extends ChangeNotifier {
       date: effectiveDate,
       timeSlot: timeSlot,
       timeSlots: timeSlots,
-      assignedStaff: [], // Can be populated later
-      staffCount: jobListItem.manDays.ceil(),
+      assignedStaff: jobListItem.assignedStaff,
+      staffCount: jobListItem.resolvedStaffCount,
       jobType: jobListItem.jobTypeId,
       statusId: jobListItem.jobStatusId,
       clients: [jobListItem.client],
@@ -314,7 +320,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
   }
 
   void goToCurrentMonth() {
-    setCurrentMonth(DateTime.now());
+    setCurrentMonth(scheduleNow());
   }
 
   void goToMonth(String monthString) {
@@ -359,38 +365,160 @@ class CollectionScheduleProvider extends ChangeNotifier {
   }
 
   // COLLECTION JOB OPERATIONS
+  //
+  // A CollectionJob is a derived view of a JobListItem — there is no separate
+  // collection-job document. Every write here therefore patches the underlying
+  // JobListItem, which is what keeps the job visible on the Job List: it is
+  // the same record, not a copy.
 
-  @Deprecated(
-      'Collection jobs are now derived from job list data. Modify the job list instead.')
-  Future<String> addCollectionJob(CollectionJob job) async {
-    // Collection jobs are now automatically derived from job list
-    // This method is deprecated - modify the job list instead
-    debugPrint(
-        'addCollectionJob is deprecated - collection jobs are now derived from job list data');
-    return job.id;
+  /// Apply the schedule-owned fields of [job] onto [base], leaving every
+  /// Job List field (invoice, amount, VAT, reminders, polygons, …) untouched.
+  JobListItem _applyToJobListItem(JobListItem base, CollectionJob job) {
+    final combo = VehicleTrailerCombo.fromParts(job.vehicleType, job.trailerType);
+
+    // `timeSlot` is authoritative, but the projection still reads
+    // `collectionDate` for the date, so keep its time component in sync.
+    final parts = job.timeSlot.split(':');
+    final hour = int.tryParse(parts.isNotEmpty ? parts[0] : '') ?? 8;
+    final minute = int.tryParse(parts.length > 1 ? parts[1] : '') ?? 0;
+    final collectionDateTime = DateTime(
+      job.date.year,
+      job.date.month,
+      job.date.day,
+      hour,
+      minute,
+    );
+
+    return base.copyWith(
+      collectionAddress: job.location,
+      offloadingAddress: job.offloadLocation,
+      collectionDate: collectionDateTime,
+      timeSlot: job.timeSlot,
+      timeSlots: job.timeSlots,
+      assignedStaff: job.assignedStaff,
+      staffCount: job.staffCount,
+      specialInstructions: job.notes,
+      jobStatusId: job.statusId,
+      vehicleTrailerCombo: combo?.name ?? base.vehicleTrailerCombo,
+    );
   }
 
-  @Deprecated(
-      'Collection jobs are now derived from job list data. Modify the job list instead.')
+  /// Create a new collection job. Writes a JobListItem, so the job appears on
+  /// both the Collection Schedule and the Job List.
+  ///
+  /// [jobTypeId] must be a type flagged as appearing on the Collection
+  /// Schedule, otherwise the new job will not render in the grid.
+  Future<String> addCollectionJob(
+    CollectionJob job, {
+    required String jobTypeId,
+    String client = '',
+    String invoice = '',
+    double amount = 0.0,
+  }) async {
+    try {
+      final base = JobListItem(
+        id: '', // assigned by Firestore
+        invoice: invoice,
+        amount: amount,
+        client: client,
+        jobStatusId: job.statusId,
+        jobTypeId: jobTypeId,
+        area: job.location,
+        quantity: 0,
+        manDays: 0.0,
+        date: job.date,
+        collectionAddress: job.location,
+        collectionDate: job.date,
+        specialInstructions: job.notes,
+        quantityDistributed: 0,
+        invoiceDetails: '',
+        reportAddresses: '',
+        whoToInvoice: '',
+        amountExclVat: amount,
+      );
+
+      final id = await _jobListService.addJobListItem(
+        _applyToJobListItem(base, job),
+        job.date,
+      );
+      debugPrint('Added collection job as job list item $id');
+      return id;
+    } catch (e) {
+      debugPrint('Error adding collection job: $e');
+      rethrow;
+    }
+  }
+
+  /// Persist a schedule-side edit back to the underlying JobListItem.
   Future<void> updateCollectionJob(CollectionJob job) async {
-    // Collection jobs are now automatically derived from job list
-    // This method is deprecated - modify the job list instead
-    debugPrint(
-        'updateCollectionJob is deprecated - collection jobs are now derived from job list data');
+    try {
+      final base = _ownJobListItems.where((i) => i.id == job.id).firstOrNull ??
+          await _jobListService.getJobListItemById(job.id, job.date);
+      if (base == null) {
+        throw StateError(
+            'No job list item backing collection job ${job.id} — cannot update.');
+      }
+
+      await _jobListService.updateJobListItem(
+        _applyToJobListItem(base, job),
+        base.date,
+      );
+      debugPrint('Updated collection job ${job.id}');
+    } catch (e) {
+      debugPrint('Error updating collection job: $e');
+      rethrow;
+    }
   }
 
+  /// Delete the collection job. Because the schedule and the Job List share one
+  /// record, this removes the job from **both** — there is no schedule-only
+  /// copy to drop.
   Future<void> deleteCollectionJob(String jobId) async {
     try {
-      // Find the job to get its date for proper monthly context
-      final job = collectionJobs.where((j) => j.id == jobId).firstOrNull;
-      final jobDate = job?.date ?? _currentMonth;
-      await _firestoreService.deleteCollectionJob(jobId, jobDate);
+      final base = _ownJobListItems.where((i) => i.id == jobId).firstOrNull;
+      final jobDate = base?.date ??
+          collectionJobs.where((j) => j.id == jobId).firstOrNull?.date ??
+          _currentMonth;
+      await _jobListService.deleteJobListItem(jobId, jobDate);
       debugPrint('Successfully deleted collection job $jobId');
     } catch (e) {
       debugPrint('Error deleting collection job: $e');
       rethrow;
     }
   }
+
+  /// Record the Zoho invoice raised for a collection job on its backing
+  /// JobListItem. Leaves the Job List's own `invoice` number and
+  /// `invoiceStatusId` alone — those are yours, not Zoho's.
+  Future<void> linkZohoInvoice({
+    required String jobId,
+    required String contactId,
+    required String invoiceId,
+    required String invoiceNumber,
+    required String status,
+  }) async {
+    final base = _ownJobListItems.where((i) => i.id == jobId).firstOrNull ??
+        await _jobListService.getJobListItemById(jobId, _currentMonth);
+    if (base == null) {
+      throw StateError('No job list item $jobId — cannot link Zoho invoice.');
+    }
+
+    await _jobListService.updateJobListItem(
+      base.copyWith(
+        zohoContactId: contactId,
+        zohoInvoiceId: invoiceId,
+        zohoInvoiceNumber: invoiceNumber,
+        zohoInvoiceStatus: status,
+        zohoSyncedAt: DateTime.now(),
+      ),
+      base.date,
+    );
+  }
+
+  /// The JobListItem backing a collection job, for callers that need the
+  /// commercial fields (amount, client, Zoho links) the grid does not carry.
+  JobListItem? jobListItemFor(String jobId) =>
+      _ownJobListItems.where((i) => i.id == jobId).firstOrNull;
 
   CollectionJob? getCollectionJobById(String jobId) {
     try {

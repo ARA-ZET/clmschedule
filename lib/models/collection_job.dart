@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../providers/job_type_provider.dart';
+import '../utils/schedule_time.dart';
 
 enum VehicleType {
   hyundai,
@@ -117,6 +118,19 @@ enum VehicleTrailerCombo {
     return provider.appearsOnCollectionSchedule(jobTypeId);
   }
 
+  /// Rebuild the combo from a separate vehicle + trailer pair. Used when
+  /// writing a CollectionJob (which carries the two as separate fields) back
+  /// to the JobListItem's single `vehicleTrailerCombo` field.
+  static VehicleTrailerCombo? fromParts(
+      VehicleType vehicle, TrailerType trailer) {
+    for (final combo in values) {
+      if (combo.vehicleType == vehicle && combo.trailerType == trailer) {
+        return combo;
+      }
+    }
+    return null;
+  }
+
   /// Parse from Firestore string (the enum `.name`). Returns null if not found.
   static VehicleTrailerCombo? tryParse(String? value) {
     if (value == null || value.isEmpty) return null;
@@ -210,8 +224,8 @@ class CollectionJob {
         orElse: () => TrailerType.noTrailer,
       ),
       date: data['date'] != null
-          ? (data['date'] as Timestamp).toDate()
-          : DateTime.now(),
+          ? toScheduleCivil((data['date'] as Timestamp).toDate())
+          : scheduleToday(),
       timeSlot: data['timeSlot'] is int
           ? '${((data['timeSlot'] as num).toInt()).toString().padLeft(2, '0')}:00'
           : data['timeSlot'] as String? ?? '08:00',
@@ -235,7 +249,7 @@ class CollectionJob {
       'location': location,
       'vehicleType': vehicleType.name,
       'trailerType': trailerType.name,
-      'date': Timestamp.fromDate(date),
+      'date': Timestamp.fromDate(scheduleCivilToInstant(date)),
       'timeSlot': timeSlot,
       'timeSlots': timeSlots,
       'assignedStaff': assignedStaff,

@@ -46,8 +46,19 @@ class HappySunLocalStorage {
 
   bool get isInitialized => _projectsBox != null && _pendingSyncBox != null;
 
-  /// Initialize Hive and open boxes
+  /// Initialize Hive and open boxes.
+  ///
+  /// On web (compiled to WASM) Hive has no supported storage backend and
+  /// `openBox` throws `UnimplementedError`, so we skip it and run without a
+  /// local cache — Firestore's own web persistence covers offline reads.
+  /// Any other platform failure is caught and degraded rather than rethrown,
+  /// so a missing cache never brings the app down.
   Future<void> initialize() async {
+    if (kIsWeb) {
+      debugPrint(
+          '💾 HappySunLocalStorage: Hive unavailable on web — skipping local cache');
+      return;
+    }
     try {
       debugPrint('💾 HappySunLocalStorage: Initializing Hive...');
 
@@ -62,8 +73,8 @@ class HappySunLocalStorage {
       debugPrint('   - Projects count: ${_projectsBox?.length ?? 0}');
       debugPrint('   - Pending sync count: ${_pendingSyncBox?.length ?? 0}');
     } catch (e) {
-      debugPrint('❌ HappySunLocalStorage: Initialization error: $e');
-      rethrow;
+      debugPrint('❌ HappySunLocalStorage: Hive unavailable, '
+          'running without local cache: $e');
     }
   }
 

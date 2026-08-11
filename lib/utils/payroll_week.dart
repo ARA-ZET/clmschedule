@@ -6,6 +6,8 @@
 /// Thursday end date rolls into the next month.
 library;
 
+import 'schedule_time.dart';
+
 const _monthNames = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
@@ -63,7 +65,8 @@ List<DateTime> daysInWeek(DateTime anyDate) {
 bool isSameWeek(DateTime a, DateTime b) => weekStartFor(a) == weekStartFor(b);
 
 /// The week that should open by default (initial load and "This week") for
-/// [referenceNow] (defaults to `DateTime.now()`).
+/// [referenceNow] (defaults to `scheduleNow()`, i.e. SAST "now", so clients
+/// in other timezones resolve the same current week as SAST users).
 ///
 /// Friday is a special case: it's simultaneously payday for the week that
 /// just ended (Fri-Thu) and day 1 of a brand-new week. Defaulting to
@@ -74,9 +77,26 @@ bool isSameWeek(DateTime a, DateTime b) => weekStartFor(a) == weekStartFor(b);
 /// just the ongoing week, same as [weekStartFor]. Moving on to the new week
 /// is then a deliberate action (next-week / date-picker), not automatic.
 DateTime defaultPayrollWeekStart([DateTime? referenceNow]) {
-  final today = _midnight(referenceNow ?? DateTime.now());
+  final today = _midnight(referenceNow ?? scheduleNow());
   if (today.weekday == DateTime.friday) {
     return weekStartFor(today.subtract(const Duration(days: 1)));
   }
   return weekStartFor(today);
+}
+
+/// Whether a week starting [weekStart] is still open for editing. Wages are
+/// paid weekly and rarely need correcting once payment has gone out, so
+/// only the current week plus the two immediately before it stay editable
+/// — anything older than that (more than 14 days before the real current
+/// week, not the Friday-adjusted [defaultPayrollWeekStart]) is locked.
+///
+/// This only governs whether a week's raw daily entries/deductions can
+/// still be touched — it has no bearing on `PayrollSettings`/bonus-code
+/// rate changes, which never retroactively affect old weeks anyway since
+/// each payslip snapshots its own rates at creation time (`dayRateSnapshot`
+/// etc. on `PayrollPayslip`).
+bool isPayrollWeekEditable(DateTime weekStart, {DateTime? referenceNow}) {
+  final currentWeekStart = weekStartFor(referenceNow ?? scheduleNow());
+  final start = weekStartFor(weekStart);
+  return currentWeekStart.difference(start).inDays <= 14;
 }

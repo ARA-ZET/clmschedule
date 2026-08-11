@@ -14,10 +14,14 @@ import 'package:printing/printing.dart';
 import '../models/custom_polygon.dart';
 import '../models/job.dart';
 import '../providers/schedule_provider.dart';
+import '../services/job_cloud_map_data_service.dart';
+import '../shareable_maps/models/map_polyline.dart';
 import '../shareable_maps/services/map_thumbnail_service.dart';
+import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 import '../shareable_maps/utils/point_marker_icons.dart';
 import '../utils/browser_screenshot.dart';
 import '../utils/map_pdf.dart';
+import 'job_map_link.dart';
 
 // Class to store polygon override settings
 class PolygonOverride {
@@ -216,6 +220,18 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
   late Job _job;
   String _jobSignature = '';
   String? _pendingJobSignature;
+
+  // Linked-map overlay data (recorded tracks + polygons), populated when the
+  // job has a linked map (`_job.linkedMapId` non-empty). Fetched live from
+  // the full ShareableMap document each time the link changes — not cached
+  // on the Job — so this always reflects the linked map's current state.
+  List<MapPolyline> _linkedMapTracks = [];
+  List<CustomPolygon> _linkedMapPolygons = [];
+  bool _isLoadingCloudMapData = false;
+  bool _showCloudTracks = true;
+  // Tracks which "jobId::mapId::monthKey" combination the overlay data above
+  // was last loaded for, so re-linking a different map triggers a refetch.
+  String? _cloudMapDataLoadedForJobId;
   bool _isPrintingMap = false;
   String _printProgressMessage = '';
   bool _isCapturingPrintMap = false;
@@ -254,6 +270,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
     _jobSignature = _signatureFor(_job);
     _initializeMap();
     _createMarkerIcons();
+    _maybeLoadCloudMapData();
   }
 
   @override
@@ -270,6 +287,64 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
     _dropOffPoint =
         job.dropOffPoint ?? Job.estimateDropOffPointFromWorkMaps(job.workMaps);
     _updateMapView();
+    _maybeLoadCloudMapData();
+  }
+
+  /// Fetch the linked map's polygons and (if it has a Cloud Storage folder)
+  /// its compiled GPS tracks. No-op (and the overlay UI stays entirely
+  /// hidden) when no map is linked.
+  Future<void> _maybeLoadCloudMapData() async {
+    if (_job.linkedMapId.isEmpty) {
+      if (_linkedMapTracks.isNotEmpty || _linkedMapPolygons.isNotEmpty) {
+        setState(() {
+          _linkedMapTracks = [];
+          _linkedMapPolygons = [];
+          _cloudMapDataLoadedForJobId = null;
+          _updateMapView();
+        });
+      }
+      return;
+    }
+    final loadKey = '${_job.id}::${_job.linkedMapId}::${_job.linkedMapMonthKey}';
+    if (_cloudMapDataLoadedForJobId == loadKey) return;
+
+    setState(() => _isLoadingCloudMapData = true);
+    var tracks = <MapPolyline>[];
+    var polygons = <CustomPolygon>[];
+    try {
+      final linkedMap = await ShareableMapsFirestoreService()
+          .getMap(_job.linkedMapMonthKey, _job.linkedMapId);
+      if (linkedMap != null) {
+        polygons = linkedMap.layers.expand((l) => l.polygons).toList();
+        final folderPath = linkedMap.cloudFolderPaths.isNotEmpty
+            ? linkedMap.cloudFolderPaths.first
+            : linkedMap.storageFolderPath;
+        if (folderPath != null && folderPath.isNotEmpty) {
+          tracks =
+              await JobCloudMapDataService().fetchCompiledTracks(folderPath);
+        }
+      }
+    } catch (_) {
+      // Leave tracks/polygons empty if the linked map fails to fetch/parse.
+    }
+    if (!mounted) return;
+    setState(() {
+      _linkedMapTracks = tracks;
+      _linkedMapPolygons = polygons;
+      _isLoadingCloudMapData = false;
+      _cloudMapDataLoadedForJobId = loadKey;
+      _updateMapView();
+    });
+  }
+
+  List<MapPolyline> _currentCloudTracks() {
+    if (!_showCloudTracks) return const [];
+    return _linkedMapTracks;
+  }
+
+  List<CustomPolygon> _currentLinkedMapPolygons() {
+    if (!_showCloudTracks) return const [];
+    return _linkedMapPolygons;
   }
 
   void _syncLiveJob(Job liveJob) {
@@ -317,6 +392,8 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
       job.clients.join(','),
       job.workingAreas.join(','),
       job.statusId,
+      job.linkedMapId,
+      job.linkedMapMonthKey,
       drop,
       maps,
     ].join('|');
@@ -520,6 +597,37 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
       }
     }
 
+    // Linked-map overlay: recorded GPS tracks + the linked map's own polygons.
+    final cloudTracks = _currentCloudTracks();
+    for (int i = 0; i < cloudTracks.length; i++) {
+      final track = cloudTracks[i];
+      if (track.points.length < 2) continue;
+      _polylines.add(
+        Polyline(
+          polylineId: PolylineId('cloud_track_$i'),
+          points: track.points,
+          color: Colors.blueAccent,
+          width: 3,
+          patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+        ),
+      );
+    }
+
+    final linkedMapPolygons = _currentLinkedMapPolygons();
+    for (int i = 0; i < linkedMapPolygons.length; i++) {
+      final polygon = linkedMapPolygons[i];
+      if (polygon.points.length < 3) continue;
+      _polygons.add(
+        Polygon(
+          polygonId: PolygonId('linked_map_polygon_$i'),
+          points: polygon.points,
+          fillColor: Colors.transparent,
+          strokeColor: polygon.color,
+          strokeWidth: 5,
+        ),
+      );
+    }
+
     if (_dropOffPoint != null) {
       _dropOffMarker = Marker(
         markerId: const MarkerId('dropoff_point'),
@@ -543,7 +651,13 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
   }
 
   void _updateMapCenter() {
-    if (_job.workMaps.isNotEmpty) {
+    final cloudTracks = _currentCloudTracks();
+    final linkedMapPolygons = _currentLinkedMapPolygons();
+    final hasBoundsSource = _job.workMaps.isNotEmpty ||
+        cloudTracks.isNotEmpty ||
+        linkedMapPolygons.isNotEmpty;
+
+    if (hasBoundsSource) {
       // Calculate bounds for all polygons
       double minLat = 90;
       double maxLat = -90;
@@ -553,6 +667,24 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
       // Iterate through all work maps to find overall bounds
       for (final workMap in _job.workMaps) {
         for (final point in workMap.points) {
+          minLat = min(minLat, point.latitude);
+          maxLat = max(maxLat, point.latitude);
+          minLng = min(minLng, point.longitude);
+          maxLng = max(maxLng, point.longitude);
+        }
+      }
+      // Include recorded tracks so the map frames the full covered route.
+      for (final track in cloudTracks) {
+        for (final point in track.points) {
+          minLat = min(minLat, point.latitude);
+          maxLat = max(maxLat, point.latitude);
+          minLng = min(minLng, point.longitude);
+          maxLng = max(maxLng, point.longitude);
+        }
+      }
+      // Include the linked map's own polygons too.
+      for (final polygon in linkedMapPolygons) {
+        for (final point in polygon.points) {
           minLat = min(minLat, point.latitude);
           maxLat = max(maxLat, point.latitude);
           minLng = min(minLng, point.longitude);
@@ -952,6 +1084,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
           distributorName: widget.distributorName,
           isLandscape: isLandscape,
           hiddenClientIndices: _hiddenClientIndices,
+          hasCloudTracks: _currentCloudTracks().isNotEmpty,
         ),
         debugLabel: 'distribution-map-pdf',
       );
@@ -1083,6 +1216,18 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
       );
     }
 
+    for (final polygon in _currentLinkedMapPolygons()) {
+      if (polygon.points.length < 3) continue;
+      paths.add(
+        ThumbnailPathData(
+          points: polygon.points,
+          color: polygon.color,
+          fillOpacity: 0,
+          strokeWidth: 5,
+        ),
+      );
+    }
+
     return paths.isEmpty ? null : paths;
   }
 
@@ -1097,6 +1242,18 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
           color: workMap.color,
           fillOpacity: 0,
           strokeWidth: workMap.strokeWidth,
+        ),
+      );
+    }
+
+    for (final track in _currentCloudTracks()) {
+      if (track.points.length < 2) continue;
+      paths.add(
+        ThumbnailPathData(
+          points: track.points,
+          color: Colors.blueAccent,
+          fillOpacity: 0,
+          strokeWidth: 3,
         ),
       );
     }
@@ -1398,13 +1555,56 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
     return 'Distribution Map $label ${DateFormat('yyyy-MM-dd').format(_job.date)}';
   }
 
-  Future<void> _persistDropOffPoint(LatLng point) async {
+  Job _freshJob() {
+    return ProviderScope.containerOf(context, listen: false)
+        .read(scheduleRiverpod)
+        .jobs
+        .firstWhere((j) => j.id == _job.id, orElse: () => _job);
+  }
+
+  Future<void> _saveJob(Job freshJob, Job updatedJob) async {
     final scheduleProvider = ProviderScope.containerOf(context, listen: false)
         .read(scheduleRiverpod);
-    final freshJob = scheduleProvider.jobs.firstWhere(
-      (j) => j.id == _job.id,
-      orElse: () => _job,
-    );
+    await scheduleProvider.updateJobWithUndo(
+        freshJob, updatedJob, freshJob.date);
+  }
+
+  Future<void> _handleLinkMapTap() async {
+    final scheduleProvider = ref.read(scheduleRiverpod);
+    if (_job.linkedMapId.isNotEmpty) {
+      final action = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Map Linked'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('unlink'),
+              child: const Text('Unlink'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('relink'),
+              child: const Text('Re-link'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+      if (action == 'unlink') {
+        await unlinkMapFromScheduleJob(scheduleProvider, _job);
+      } else if (action == 'relink') {
+        if (!mounted) return;
+        await linkExistingMapToScheduleJob(context, scheduleProvider, _job);
+      }
+      return;
+    }
+    await linkExistingMapToScheduleJob(context, scheduleProvider, _job);
+  }
+
+  Future<void> _persistDropOffPoint(LatLng point) async {
+    final freshJob = _freshJob();
     final updatedMaps = List<CustomPolygon>.from(freshJob.workMaps);
     final dropoffIndex = updatedMaps.indexWhere(
         (wm) => wm.isPoint && wm.pointCategory == PointCategory.dropoff);
@@ -1416,17 +1616,11 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
       workMaps: updatedMaps,
       dropOffPoint: point,
     );
-    await scheduleProvider.updateJobWithUndo(
-        freshJob, updatedJob, freshJob.date);
+    await _saveJob(freshJob, updatedJob);
   }
 
   Future<void> _persistWorkAreaChanges() async {
-    final scheduleProvider = ProviderScope.containerOf(context, listen: false)
-        .read(scheduleRiverpod);
-    final freshJob = scheduleProvider.jobs.firstWhere(
-      (j) => j.id == _job.id,
-      orElse: () => _job,
-    );
+    final freshJob = _freshJob();
     final updatedJob = freshJob.copyWith(
       workMaps: List<CustomPolygon>.from(_job.workMaps),
       workingAreas: _job.workMaps
@@ -1436,17 +1630,15 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
           .toList(),
       dropOffPoint: _dropOffPoint,
     );
-    await scheduleProvider.updateJobWithUndo(
-        freshJob, updatedJob, freshJob.date);
+    await _saveJob(freshJob, updatedJob);
   }
 
   @override
   Widget build(BuildContext context) {
-    final scheduleProvider = ref.watch(scheduleRiverpod);
-    final liveJob = scheduleProvider.jobs.firstWhere(
-      (j) => j.id == _job.id,
-      orElse: () => _job,
-    );
+    final liveJob = ref.watch(scheduleRiverpod).jobs.firstWhere(
+          (j) => j.id == _job.id,
+          orElse: () => _job,
+        );
     _syncLiveJob(liveJob);
 
     final screenHeight = MediaQuery.of(context).size.height;
@@ -1717,6 +1909,49 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                 ),
             ],
           ),
+
+          // Link an existing map (always available — provides the recorded
+          // tracks overlay below once linked).
+          IconButton(
+            icon: Icon(
+              _job.linkedMapId.isNotEmpty ? Icons.link : Icons.link_off,
+              color: _job.linkedMapId.isNotEmpty
+                  ? const Color(0xFF1967D2)
+                  : null,
+            ),
+            tooltip: _job.linkedMapId.isNotEmpty
+                ? 'Map linked — tap to unlink or relink'
+                : 'Link an existing map',
+            onPressed: _handleLinkMapTap,
+          ),
+
+          // Linked-map overlay toggle (tracks + polygons) — only shown once
+          // a map is linked and its data has loaded (or is loading).
+          if (_job.linkedMapId.isNotEmpty) ...[
+            IconButton(
+              icon: _isLoadingCloudMapData
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      Icons.route,
+                      color: _showCloudTracks ? const Color(0xFF1967D2) : null,
+                    ),
+              tooltip: _showCloudTracks
+                  ? 'Hide linked map data'
+                  : 'Show linked map data',
+              onPressed: _isLoadingCloudMapData
+                  ? null
+                  : () {
+                      setState(() {
+                        _showCloudTracks = !_showCloudTracks;
+                        _updateMapView();
+                      });
+                    },
+            ),
+          ],
 
           // Print button
           IconButton(

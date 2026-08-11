@@ -35,6 +35,7 @@ Map<String, Object?> distributionMapPdfPayload({
   required String? distributorName,
   required bool isLandscape,
   Set<int> hiddenClientIndices = const {},
+  bool hasCloudTracks = false,
 }) {
   return {
     'mapImageBytes': mapImageBytes,
@@ -57,6 +58,7 @@ Map<String, Object?> distributionMapPdfPayload({
           },
         )
         .toList(growable: false),
+    'hasCloudTracks': hasCloudTracks,
   };
 }
 
@@ -74,6 +76,7 @@ Future<Uint8List> generateDistributionMapPdfFromData(
       .whereType<Map>()
       .map(_PdfWorkMapInfo.fromMap)
       .toList(growable: false);
+  final hasCloudTracks = payload['hasCloudTracks'] as bool? ?? false;
 
   final doc = pw.Document();
   final dateLabel = DateFormat('d MMMM yyyy').format(date);
@@ -92,6 +95,7 @@ Future<Uint8List> generateDistributionMapPdfFromData(
         distributorName: distributorName,
         dateLabel: dateLabel,
         isLandscape: isLandscape,
+        hasCloudTracks: hasCloudTracks,
       ),
     ),
   );
@@ -123,6 +127,7 @@ pw.Widget _buildDistributionMapPage({
   required String? distributorName,
   required String dateLabel,
   required bool isLandscape,
+  bool hasCloudTracks = false,
 }) {
   final titleStyle = pw.TextStyle(
     fontWeight: pw.FontWeight.bold,
@@ -232,6 +237,10 @@ pw.Widget _buildDistributionMapPage({
               pw.SizedBox(height: 5),
               _workAreaLegend(workMaps, labelStyle, valueStyle),
             ],
+            if (hasCloudTracks) ...[
+              pw.SizedBox(height: 5),
+              _recordedTrackLegend(valueStyle),
+            ],
           ],
         ),
       ),
@@ -303,6 +312,21 @@ pw.Widget _workAreaLegend(
           ],
         );
       }),
+    ],
+  );
+}
+
+pw.Widget _recordedTrackLegend(pw.TextStyle valueStyle) {
+  return pw.Row(
+    mainAxisSize: pw.MainAxisSize.min,
+    children: [
+      pw.Container(
+        width: 14,
+        height: 2,
+        color: PdfColors.blueAccent700,
+      ),
+      pw.SizedBox(width: 3),
+      pw.Text('Recorded track', style: valueStyle),
     ],
   );
 }

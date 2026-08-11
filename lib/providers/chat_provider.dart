@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/chat_message.dart';
 import '../services/chat_service.dart';
+import '../utils/browser_notification.dart';
 import 'auth_provider.dart';
 
 final chatRiverpod = riverpod.ChangeNotifierProvider<ChatProvider>(
@@ -28,6 +29,8 @@ class ChatProvider extends ChangeNotifier {
   StreamSubscription<List<String>>? _onlineUsersSubscription;
   Timer? _heartbeatTimer;
   Timer? _cleanupTimer;
+  bool _isInitialMessagesLoad = true;
+  Set<String> _knownMessageIds = {};
 
   ChatProvider(this._chatService, this._authProvider) {
     _initializeChat();
@@ -51,6 +54,7 @@ class ChatProvider extends ChangeNotifier {
       _updateUserOnlineStatus(true);
       _startHeartbeat();
       _startCleanupTimer();
+      requestBrowserNotificationPermission();
     }
   }
 
@@ -91,8 +95,22 @@ class ChatProvider extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
 
+    _isInitialMessagesLoad = true;
+    _knownMessageIds = {};
+
     _messagesSubscription = _chatService.getMessages(limit: 100).listen(
       (messages) {
+        final currentIds = messages.map((m) => m.id).toSet();
+        if (!_isInitialMessagesLoad) {
+          final arrivedIds = currentIds.difference(_knownMessageIds);
+          if (arrivedIds.isNotEmpty) {
+            _notifyForNewMessages(
+                messages.where((m) => arrivedIds.contains(m.id)));
+          }
+        }
+        _isInitialMessagesLoad = false;
+        _knownMessageIds = currentIds;
+
         _messages = messages;
         _isLoading = false;
         _error = null;
@@ -105,6 +123,31 @@ class ChatProvider extends ChangeNotifier {
         print('ChatProvider: Error loading messages: $error');
       },
     );
+  }
+
+  // Fire a browser notification for freshly-arrived system messages that
+  // announce a job event (e.g. a new job added elsewhere), skipping
+  // messages triggered by the current user themselves.
+  void _notifyForNewMessages(Iterable<ChatMessage> newMessages) {
+    final currentUserId = _authProvider.user?.uid;
+
+    for (final message in newMessages) {
+      if (!message.isSystem) continue;
+
+      final metadata = message.metadata;
+      if (metadata == null || metadata['event'] != 'job_created') continue;
+      if (metadata['addedBy'] == currentUserId) continue;
+
+      final client = metadata['client'] as String? ?? 'Unknown client';
+      final date = metadata['date'] as String? ?? '';
+      final addedByName = metadata['addedByName'] as String? ?? 'A teammate';
+
+      showBrowserNotification(
+        title: 'CLM Dashboard – New Job Added',
+        body: 'Client: $client\nDate: $date\nAdded by: $addedByName',
+        tag: 'job-${metadata['jobId'] ?? message.id}',
+      );
+    }
   }
 
   // Start listening to unread count

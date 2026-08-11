@@ -25,6 +25,13 @@ class ShareableMap {
   final Map<String, String> cloudLayerNames;
 
   final bool autoLoadLatestCloudFolder;
+
+  /// When true, the latest linked folder's cloud waypoints (letter boxes) are
+  /// downloaded as soon as the map opens instead of waiting for the user to
+  /// pick "Load waypoints". Independent of [autoLoadLatestCloudFolder] so a
+  /// map with waypoints but no tracks can auto-load just the waypoints.
+  final bool autoLoadCloudWaypoints;
+
   final bool clipCloudDataToPolygons;
 
   /// Cached count of waypoints in the linked cloud folder (set whenever the
@@ -48,6 +55,7 @@ class ShareableMap {
     this.cloudTrackColors = const {},
     this.cloudLayerNames = const {},
     this.autoLoadLatestCloudFolder = true,
+    this.autoLoadCloudWaypoints = false,
     this.clipCloudDataToPolygons = false,
     this.cloudWaypointCount,
   });
@@ -180,6 +188,7 @@ class ShareableMap {
       cloudLayerNames: Map.unmodifiable(layerNames),
       autoLoadLatestCloudFolder:
           data['autoLoadLatestCloudFolder'] as bool? ?? true,
+      autoLoadCloudWaypoints: data['autoLoadCloudWaypoints'] as bool? ?? false,
       clipCloudDataToPolygons:
           data['clipCloudDataToPolygons'] as bool? ?? false,
       cloudWaypointCount: (data['cloudWaypointCount'] as num?)?.toInt(),
@@ -205,6 +214,7 @@ class ShareableMap {
       if (cloudTrackColors.isNotEmpty) 'cloudTrackColors': cloudTrackColors,
       if (cloudLayerNames.isNotEmpty) 'cloudLayerNames': cloudLayerNames,
       'autoLoadLatestCloudFolder': autoLoadLatestCloudFolder,
+      'autoLoadCloudWaypoints': autoLoadCloudWaypoints,
       'clipCloudDataToPolygons': clipCloudDataToPolygons,
       if (cloudWaypointCount != null) 'cloudWaypointCount': cloudWaypointCount,
     };
@@ -232,6 +242,7 @@ class ShareableMap {
     Map<String, int>? cloudTrackColors,
     Map<String, String>? cloudLayerNames,
     bool? autoLoadLatestCloudFolder,
+    bool? autoLoadCloudWaypoints,
     bool? clipCloudDataToPolygons,
     int? cloudWaypointCount,
     bool clearStorageFolderPath = false,
@@ -258,6 +269,8 @@ class ShareableMap {
           Map.unmodifiable(cloudLayerNames ?? this.cloudLayerNames),
       autoLoadLatestCloudFolder:
           autoLoadLatestCloudFolder ?? this.autoLoadLatestCloudFolder,
+      autoLoadCloudWaypoints:
+          autoLoadCloudWaypoints ?? this.autoLoadCloudWaypoints,
       clipCloudDataToPolygons:
           clipCloudDataToPolygons ?? this.clipCloudDataToPolygons,
       cloudWaypointCount: cloudWaypointCount ?? this.cloudWaypointCount,

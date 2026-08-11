@@ -11,6 +11,7 @@ import '../providers/te_tabs_provider.dart';
 import '../providers/te_tools_provider.dart';
 import '../providers/te_tracks_provider.dart';
 import '../providers/te_undo_provider.dart';
+import '../providers/te_wage_stats_provider.dart';
 import '../providers/te_waypoints_provider.dart';
 
 class TETopTabBar extends riverpod.ConsumerWidget {
@@ -95,7 +96,9 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                                   final tabIndex = tabsP.tabs.indexOf(tab);
                                   final mode = tabsP.activeMode;
                                   // In processing mode, warn if any clients
-                                  // haven't been saved yet.
+                                  // haven't been saved yet, or if the
+                                  // embedded wage-stats box has unsaved
+                                  // edits not yet pushed to payroll.
                                   if (mode == TEMode.processing) {
                                     final saveState =
                                         ref.read(teCloudSaveRiverpod);
@@ -104,21 +107,36 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                                         .where((c) =>
                                             !c.savedAsIs && !c.trimmedSaved)
                                         .toList();
-                                    if (unsaved.isNotEmpty && context.mounted) {
-                                      final clientNames = unsaved
-                                          .map((c) => c.clientName)
-                                          .join(', ');
+                                    final wageStatsDirty = ref
+                                        .read(teWageStatsRiverpod)
+                                        .isDirty(tab);
+                                    if ((unsaved.isNotEmpty ||
+                                            wageStatsDirty) &&
+                                        context.mounted) {
+                                      final messages = <String>[];
+                                      if (unsaved.isNotEmpty) {
+                                        final clientNames = unsaved
+                                            .map((c) => c.clientName)
+                                            .join(', ');
+                                        messages.add(
+                                          unsaved.length == clients.length
+                                              ? 'No clients have been saved yet.\n$clientNames'
+                                              : '${unsaved.length} of ${clients.length} '
+                                                  '${unsaved.length == 1 ? 'client has' : 'clients have'} '
+                                                  'not been saved:\n$clientNames',
+                                        );
+                                      }
+                                      if (wageStatsDirty) {
+                                        messages.add(
+                                          'Wage stats for this day have not '
+                                          'been saved to payroll.',
+                                        );
+                                      }
                                       final confirmed = await showDialog<bool>(
                                         context: context,
                                         builder: (ctx) => AlertDialog(
-                                          title: const Text('Unsaved clients'),
-                                          content: Text(
-                                            unsaved.length == clients.length
-                                                ? 'No clients have been saved yet.\n\n$clientNames'
-                                                : '${unsaved.length} of ${clients.length} '
-                                                    '${unsaved.length == 1 ? 'client has' : 'clients have'} '
-                                                    'not been saved:\n\n$clientNames',
-                                          ),
+                                          title: const Text('Unsaved changes'),
+                                          content: Text(messages.join('\n\n')),
                                           actions: [
                                             TextButton(
                                               onPressed: () =>
@@ -140,10 +158,12 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                                       if (confirmed != true) return;
                                     }
                                   }
-                                  // Clear cloud-save UI state for the closing
-                                  // tab and drop its undo/redo stack so the
-                                  // next tab in this slot starts fresh.
+                                  // Clear cloud-save/wage-stats UI state for
+                                  // the closing tab and drop its undo/redo
+                                  // stack so the next tab in this slot
+                                  // starts fresh.
                                   ref.read(teCloudSaveRiverpod).clearTab(tab);
+                                  ref.read(teWageStatsRiverpod).clearTab(tab);
                                   if (tabIndex >= 0) {
                                     ref
                                         .read(teUndoRiverpod)

@@ -61,6 +61,14 @@ class VersionService {
           }
         }
       }
+    }, onError: (error) {
+      // Before sign-in the appConfig/version doc is not readable, so the stream
+      // emits a permission-denied error. Swallow it here (rather than letting it
+      // surface as an uncaught exception); the listener recovers once the user
+      // authenticates and the app reloads.
+      if (kDebugMode) {
+        print('VersionService: version listener error: $error');
+      }
     });
   }
 

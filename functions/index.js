@@ -4069,3 +4069,83 @@ const routeOptimizer = require("./lib/route_optimizer");
 
 exports.getRouteSegment = distanceMatrixCache.getRouteSegment;
 exports.optimizeDropsheetRoute = routeOptimizer.optimizeDropsheetRoute;
+
+// Zoho Books API v3 proxy — holds the OAuth client secret and refresh token as
+// Firebase secrets so they never ship in the web bundle. See functions/lib/zoho_books.js.
+const zohoBooks = require("./lib/zoho_books");
+
+exports.zohoBooks = zohoBooks.zohoBooks;
+
+// ============================================================
+// PUBLIC WORKING ROSTER — backs the standalone clmworking.web.app
+// page. Shows every active distributor for today/tomorrow, flagged
+// working or not — names only, never phone numbers, IDs, or payroll.
+// ============================================================
+const SAST_OFFSET_MS = 2 * 60 * 60 * 1000; // South Africa Standard Time, no DST
+const MONTH_NAMES_SHORT = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+function sastDateParts(offsetDays) {
+  const shifted = new Date(Date.now() + SAST_OFFSET_MS + offsetDays * 24 * 60 * 60 * 1000);
+  return { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth(), day: shifted.getUTCDate() };
+}
+
+/** Active distributors ordered the same way as the schedule grid. */
+async function getActiveDistributorsOrdered() {
+  const snap = await db.collection("distributors").get();
+  return snap.docs
+    .map((doc) => ({
+      id: doc.id,
+      name: doc.data().name || "Unknown",
+      index: doc.data().index ?? 0,
+      status: doc.data().status || "active",
+    }))
+    .filter((d) => d.status === "active")
+    .sort((a, b) => a.index - b.index);
+}
+
+async function buildRosterForOffset(offsetDays, distributors) {
+  const { year, month, day } = sastDateParts(offsetDays);
+  const monthId = `${MONTH_NAMES_SHORT[month]} ${year}`;
+  const dayId = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+
+  const daySnap = await db.collection("schedules").doc(monthId).collection("days").doc(dayId).get();
+  const data = daySnap.exists ? daySnap.data() : {};
+  const jobs = data.jobs || [];
+
+  const workingIds = new Set();
+  for (const job of jobs) {
+    if (job.distributorId) workingIds.add(job.distributorId);
+  }
+
+  const roster = distributors.map((d) => ({ name: d.name, working: workingIds.has(d.id) }));
+  const confirmedAt = data.confirmedAt && typeof data.confirmedAt.toDate === "function"
+    ? data.confirmedAt.toDate().toISOString()
+    : null;
+
+  return {
+    date: dayId,
+    roster,
+    confirmationStatus: data.confirmationStatus || "notConfirmed",
+    confirmedAt,
+  };
+}
+
+exports.getWorkingRoster = onRequest(
+  { region: "us-central1", cors: true },
+  async (req, res) => {
+    try {
+      const distributors = await getActiveDistributorsOrdered();
+      const [today, tomorrow] = await Promise.all([
+        buildRosterForOffset(0, distributors),
+        buildRosterForOffset(1, distributors),
+      ]);
+      res.status(200).json({ today, tomorrow });
+    } catch (e) {
+      console.error("[getWorkingRoster] failed:", e);
+      res.status(500).json({ error: "Failed to load roster" });
+    }
+  }
+);

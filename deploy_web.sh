@@ -47,8 +47,19 @@ else
     exit 1
 fi
 
-# Step 2: Deploy to Firebase Hosting
-echo -e "\n${BLUE}Step 2: Deploying to Firebase Hosting...${NC}"
+# Step 2: Deploy Firestore security rules
+echo -e "\n${BLUE}Step 2: Deploying Firestore rules...${NC}"
+firebase deploy --only firestore:rules --project clmschedule
+
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ Firestore rules deployed${NC}"
+else
+    echo -e "${RED}✗ Firestore rules deployment failed${NC}"
+    exit 1
+fi
+
+# Step 3: Deploy to Firebase Hosting
+echo -e "\n${BLUE}Step 3: Deploying to Firebase Hosting...${NC}"
 firebase deploy --only hosting:main --project clmschedule
 
 if [ $? -eq 0 ]; then
@@ -58,8 +69,8 @@ else
     exit 1
 fi
 
-# Step 3: Update version in Firestore
-echo -e "\n${BLUE}Step 3: Updating version in Firestore...${NC}"
+# Step 4: Update version in Firestore
+echo -e "\n${BLUE}Step 4: Updating version in Firestore...${NC}"
 echo -e "${BLUE}This notifies users that version ${GREEN}${VERSION}${BLUE} is available${NC}"
 node tools/update_firestore_version.js "$VERSION"
 

@@ -19,7 +19,17 @@
       "Bash(curl -s \"https://services7.arcgis.com/oeoyTUJC8HEeYsRB/arcgis/rest/services/VotingStations_March2026/FeatureServer/0/query?where=VOTINGDIST%20IN%20\\(97090016,97090027,97090038,97090049,97090050,97090061,97090072,97090083,97090094,97090105,97090116,97090127,97090138,97090149,97090150,97090161,97090172,97090183,97090194,97091219\\)&outFields=VOTINGDIST,VOTING_STA&f=json\")",
       "Bash(curl -s \"https://services7.arcgis.com/oeoyTUJC8HEeYsRB/arcgis/rest/services/VotingStations_March2026/FeatureServer/0/query?where=MUNICIPALI+LIKE+'%25Cape+Town%25'&returnCountOnly=true&f=json\")",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('Cape Town total stations:', d.get\\('count','?'\\)\\)\")",
-      "Bash(curl -s \"https://services7.arcgis.com/oeoyTUJC8HEeYsRB/arcgis/rest/services/VotingStations_March2026/FeatureServer/0/query?geometry=18.38,-33.98,18.50,-33.88&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelContains&outFields=VOTING_STA,VOTINGDIST,WARD&f=json&resultRecordCount=5\")"
+      "Bash(curl -s \"https://services7.arcgis.com/oeoyTUJC8HEeYsRB/arcgis/rest/services/VotingStations_March2026/FeatureServer/0/query?geometry=18.38,-33.98,18.50,-33.88&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelContains&outFields=VOTING_STA,VOTINGDIST,WARD&f=json&resultRecordCount=5\")",
+      "Bash(grep -vE \"Swift Package Manager|plugin maintainers|do not support|^  - |^$|printing|mobile_scanner|google_maps|firebase_|cloud_\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(dart run *)",
+      "Bash(tee /tmp/flutter_run_ie.log)",
+      "Bash(lsof -ti:5599)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:5601/)",
+      "Bash(node -e \"console.log\\('Browser-engine TZ:', Intl.DateTimeFormat\\(\\).resolvedOptions\\(\\).timeZone, '| offset\\(min\\):', new Date\\('2026-07-20'\\).getTimezoneOffset\\(\\)\\)\")",
+      "Bash(curl -s \"https://clmschedule.web.app/version.json?t=$\\(date +%s\\)\")",
+      "Bash(curl -s \"https://firestore.googleapis.com/v1/projects/clmschedule/databases/\\(default\\)/documents/appConfig/version\")"
     ]
   }
 }
