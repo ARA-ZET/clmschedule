@@ -182,7 +182,7 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
                 decoration: const InputDecoration(
                   labelText: 'Map link',
                   hintText:
-                      'https://clm-maps.web.app/map/... or Google My Maps link',
+                      'https://${MapLinkService.shareHost}/map/... or Google My Maps link',
                   border: OutlineInputBorder(),
                   isDense: true,
                 ),
@@ -318,7 +318,7 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
     // Unrecognized
     setState(() {
       _errorMessage =
-          'Unrecognized link format. Use a CLM Maps link (clm-maps.web.app/map/...) or a Google My Maps link.';
+          'Unrecognized link format. Use a CLM Maps link (${MapLinkService.shareHost}/map/...) or a Google My Maps link.';
       _detectedLinkType = null;
       _clmElements = [];
     });

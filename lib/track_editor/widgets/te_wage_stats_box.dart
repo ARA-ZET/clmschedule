@@ -15,9 +15,13 @@ import 'package:intl/intl.dart';
 
 import '../../models/payroll_daily_entry.dart';
 import '../../models/payroll_week.dart';
+import '../../providers/dropsheet_provider.dart';
+import '../../providers/job_status_provider.dart';
 import '../../providers/payroll_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../utils/payroll_week.dart';
+import '../../utils/payroll_schedule_rules.dart';
+import '../../widgets/payroll/sets_or_code_dropdown.dart';
 import '../models/tab_item.dart';
 import '../providers/te_wage_stats_provider.dart';
 import '../utils/te_track_stats.dart';
@@ -78,6 +82,20 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
   /// admin can tell at a glance whether they're creating or overwriting.
   bool _hasExisting = false;
   late DateTime _date;
+
+  /// What the last save did to the schedule jobs, kept under the button —
+  /// a snackbar is easy to miss. [_scheduleNoteFailed] colours it.
+  String? _scheduleNote;
+  bool _scheduleNoteFailed = false;
+
+  /// Status ids of the distributor's schedule jobs on [_date], shown beside
+  /// the payroll button. Null while loading or when it could not be read.
+  List<String>? _jobStatusIds;
+  bool _jobStatusLoading = false;
+
+  /// Bumped on every status load, so a slow load for a date the admin has
+  /// since moved away from cannot overwrite the current one.
+  int _jobStatusRequest = 0;
 
   /// The auto-computed km/waypoints values as of the last time we filled
   /// them into the fields (on load, or on a previous auto-refresh) — lets
@@ -195,11 +213,31 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
   Future<void> _loadForCurrentTarget() async {
     final distributorId = widget.tab.distributorId;
     if (distributorId == null) return;
-    setState(() => _loaded = false);
+    setState(() {
+      _loaded = false;
+      _scheduleNote = null;
+    });
+    // Independent of the payroll read — don't hold the form up on it.
+    _loadScheduleStatus();
 
     final service = ref.read(payrollServiceRiverpod);
     final weekStart = weekStartFor(_date);
     final weekId = weekIdFor(weekStart);
+
+    // Started alongside the payroll read: whether the dropsheet has this
+    // distributor driving a vehicle that day decides the sets/code default.
+    final distributor = ref
+        .read(scheduleRiverpod)
+        .distributors
+        .where((d) => d.id == distributorId)
+        .firstOrNull;
+    final drivingFuture = distributor == null
+        ? Future.value(false)
+        : ref
+            .read(dropsheetServiceRiverpod)
+            .getDay(_date)
+            .then((day) => drivesVehicleOn(day, distributor))
+            .catchError((_) => false);
 
     PayrollDailyEntry? existing;
     try {
@@ -218,8 +256,13 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
     // A "worked" entry means real stats are already recorded for this day.
     _hasExisting = existing != null && existing.worked;
 
-    _setsOrCode.text =
-        existing?.specialCode ?? existing?.flyerSets?.toString() ?? '1';
+    final driving = await drivingFuture;
+    if (!mounted) return;
+    _setsOrCode.text = existing?.specialCode ??
+        existing?.flyerSets?.toString() ??
+        defaultSetsOrCode(
+            drivingThatDay: driving,
+            knownCodes: ref.read(payrollRiverpod).settings.bonusCodes);
     _kmWalked.text = (existing?.kmWalked ?? _autoKmWalked).toStringAsFixed(2);
     _waypoints.text = (existing?.waypointsReached ?? _autoWaypoints).toString();
     _auditScore.text = existing?.auditScore?.toString() ?? '';
@@ -318,11 +361,48 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
       ref.read(teWageStatsRiverpod).setDirty(widget.tab, false);
       // Stats now exist for this day → the button becomes "Update to Payroll".
       if (mounted) setState(() => _hasExisting = true);
-      if (mounted) {
+
+      // Recorded stats mean the round was worked, so the distributor's
+      // schedule jobs for that day are done. Payroll is already saved at this
+      // point, so a failure here is reported on its own, not as a failed save.
+      String? statusNote;
+      var statusFailed = false;
+      try {
+        statusNote = await _markScheduleJobsDone(distributorId, _date);
+        if (mounted) {
+          setState(() {
+            _scheduleNote = 'Schedule: $statusNote';
+            _scheduleNoteFailed = false;
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _scheduleNote = 'Schedule not updated: $e';
+            _scheduleNoteFailed = true;
+          });
+        }
+        debugPrint('[TEWageStats] marking schedule jobs done failed: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Stats saved, but the schedule job status could '
+                  'not be set to done: $e'),
+              backgroundColor: Colors.orange.shade800,
+            ),
+          );
+        }
+        statusFailed = true;
+      }
+      // Show what the schedule says now, whichever way that went.
+      _loadScheduleStatus();
+
+      if (mounted && !statusFailed) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-                'Wage stats saved to payroll for ${_dateFormat.format(_date)}'),
+                'Wage stats saved to payroll for ${_dateFormat.format(_date)}'
+                '${statusNote == null ? '' : ' · $statusNote'}'),
             backgroundColor: Colors.green,
           ),
         );
@@ -336,6 +416,131 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
       }
     }
     if (mounted) setState(() => _saving = false);
+  }
+
+  /// Read the schedule status of the distributor's jobs on [_date].
+  Future<void> _loadScheduleStatus() async {
+    final distributorId = widget.tab.distributorId;
+    if (distributorId == null) return;
+    final request = ++_jobStatusRequest;
+    setState(() => _jobStatusLoading = true);
+    List<String>? ids;
+    try {
+      final statuses = ref.read(jobStatusRiverpod);
+      if (statuses.statuses.isEmpty) await statuses.loadStatuses();
+      final jobs = await ref
+          .read(scheduleRiverpod)
+          .fetchJobsForDistributorAndDate(distributorId, _date);
+      ids = [for (final job in jobs) job.statusId];
+    } catch (e) {
+      debugPrint('[TEWageStats] reading schedule status failed: $e');
+    }
+    if (!mounted || request != _jobStatusRequest) return;
+    setState(() {
+      _jobStatusIds = ids;
+      _jobStatusLoading = false;
+    });
+  }
+
+  /// The schedule status of this day's jobs, as the job card shows it. One
+  /// chip per distinct status, so a day with a done and a scheduled job says
+  /// so rather than picking one.
+  Widget _buildScheduleStatus() {
+    if (_jobStatusLoading && _jobStatusIds == null) {
+      return const SizedBox(
+          width: 12,
+          height: 12,
+          child: CircularProgressIndicator(strokeWidth: 2));
+    }
+    final ids = _jobStatusIds;
+    if (ids == null) {
+      return Text('Schedule status unavailable',
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600));
+    }
+    if (ids.isEmpty) {
+      return Text('No schedule job',
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600));
+    }
+    final statuses = ref.watch(jobStatusRiverpod);
+    final counts = <String, int>{};
+    for (final id in ids) {
+      counts[id] = (counts[id] ?? 0) + 1;
+    }
+    return Tooltip(
+      message: '${ids.length} schedule job${ids.length == 1 ? '' : 's'} on '
+          '${_dateFormat.format(_date)}',
+      child: Wrap(
+        spacing: 4,
+        runSpacing: 4,
+        alignment: WrapAlignment.end,
+        children: [
+          for (final entry in counts.entries)
+            Builder(builder: (_) {
+              final status = statuses.getStatusById(entry.key);
+              final color = status?.color ?? Colors.grey;
+              final label = status?.label ?? entry.key;
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.15),
+                  border: Border.all(color: color),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  counts.length == 1 && entry.value == 1
+                      ? label
+                      : '$label ×${entry.value}',
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Color.lerp(color, Colors.black, 0.35)),
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  /// Set every schedule job [distributorId] has on [date] to the "Done"
+  /// status. Returns a one-line outcome for the save message; throws when the
+  /// status cannot be set.
+  Future<String> _markScheduleJobsDone(
+      String distributorId, DateTime date) async {
+    // Resolve "Done" from the configured statuses rather than assuming its
+    // id, so a renamed or re-created status still matches.
+    final statuses = ref.read(jobStatusRiverpod);
+    if (statuses.statuses.isEmpty) await statuses.loadStatuses();
+    final done = statuses.getStatusById('done') ??
+        statuses.statuses
+            .where((st) => st.label.trim().toLowerCase() == 'done')
+            .firstOrNull;
+    if (done == null) {
+      throw Exception('no "Done" status is configured for schedule jobs');
+    }
+
+    final schedule = ref.read(scheduleRiverpod);
+    final jobs =
+        await schedule.fetchJobsForDistributorAndDate(distributorId, date);
+    debugPrint('[TEWageStats] ${jobs.length} schedule job(s) for '
+        '$distributorId on ${_dateFormat.format(date)}: '
+        '${jobs.map((j) => '${j.id}=${j.statusId}').join(', ')}');
+    if (jobs.isEmpty) {
+      return 'no schedule job found for this distributor on '
+          '${_dateFormat.format(date)}';
+    }
+
+    var marked = 0;
+    for (final job in jobs) {
+      if (job.statusId == done.id) continue;
+      await schedule.updateJob(job.copyWith(statusId: done.id));
+      marked++;
+    }
+    if (marked == 0) {
+      return 'schedule job${jobs.length == 1 ? ' was' : 's were'} '
+          'already ${done.label}';
+    }
+    return '$marked schedule job${marked == 1 ? '' : 's'} set to ${done.label}';
   }
 
   /// Blue while still loading; green once loaded and in sync with what's
@@ -426,7 +631,7 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
           const SizedBox(height: 8),
           Row(
             children: [
-              Expanded(child: _field('Sets / code', _setsOrCode)),
+              Expanded(child: _setsOrCodeField()),
               const SizedBox(width: 6),
               Expanded(child: _field('Km walked', _kmWalked, numeric: true)),
               const SizedBox(width: 6),
@@ -460,24 +665,74 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
           const SizedBox(height: 6),
           _field('Any other issue', _notes),
           const SizedBox(height: 8),
-          Align(
-            alignment: Alignment.centerRight,
-            child: FilledButton.icon(
-              onPressed: (_saving || !_loaded) ? null : _save,
-              icon: _saving
-                  ? const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    )
-                  : Icon(_hasExisting ? Icons.sync : Icons.save, size: 16),
-              label: Text(_hasExisting ? 'Update to Payroll' : 'Save to Payroll'),
-              style: FilledButton.styleFrom(
-                  textStyle: const TextStyle(fontSize: 12)),
-            ),
+          Row(
+            children: [
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: _buildScheduleStatus(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: (_saving || !_loaded) ? null : _save,
+                icon: _saving
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : Icon(_hasExisting ? Icons.sync : Icons.save, size: 16),
+                label: Text(
+                    _hasExisting ? 'Update to Payroll' : 'Save to Payroll'),
+                style: FilledButton.styleFrom(
+                    textStyle: const TextStyle(fontSize: 12)),
+              ),
+            ],
           ),
+          if (_scheduleNote != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Row(
+                children: [
+                  Icon(
+                      _scheduleNoteFailed
+                          ? Icons.error_outline
+                          : Icons.event_available,
+                      size: 14,
+                      color: _scheduleNoteFailed
+                          ? Colors.orange.shade800
+                          : Colors.green.shade700),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(_scheduleNote!,
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: _scheduleNoteFailed
+                                ? Colors.orange.shade800
+                                : Colors.green.shade800)),
+                  ),
+                ],
+              ),
+            ),
         ],
+      ),
+    );
+  }
+
+  Widget _setsOrCodeField() {
+    final settings = ref.watch(payrollRiverpod).settings;
+    return SetsOrCodeDropdown(
+      controller: _setsOrCode,
+      codes: settings.bonusCodes,
+      codeLabels: settings.bonusCodeLabels,
+      style: const TextStyle(fontSize: 12, color: Colors.black87),
+      decoration: const InputDecoration(
+        labelText: 'Sets / code',
+        isDense: true,
+        contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        border: OutlineInputBorder(),
       ),
     );
   }

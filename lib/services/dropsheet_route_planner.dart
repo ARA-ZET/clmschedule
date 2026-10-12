@@ -290,18 +290,32 @@ class DropsheetRoutePlanner {
       final hasNonPickUp = !hasSeparator &&
           remaining.any((s) => s.taskType != DropsheetTaskType.pickUp);
 
+      // A loaded truck drives straight to the offload: once a loading stop
+      // is visited, its offload is the only candidate. The ETA replay
+      // (DropsheetProvider) also assumes the two are back to back.
+      final last = ordered.isEmpty ? null : ordered.last;
+      final pendingOffload = last?.role == DropsheetTaskRole.loading
+          ? remaining
+              .where((s) =>
+                  s.taskId == last!.taskId &&
+                  s.role == DropsheetTaskRole.offload)
+              .firstOrNull
+          : null;
+
       // Filter to stops whose dependency (if any) has been satisfied,
       // and enforce the pickUp-last constraint.
-      final eligible = remaining.where((s) {
-        // Defer pickUp stops until all other stops are exhausted.
-        if (s.taskType == DropsheetTaskType.pickUp && hasNonPickUp) {
-          return false;
-        }
-        // Furniture-move offload requires its loading stop to come first.
-        if (s.role != DropsheetTaskRole.offload) return true;
-        return ordered.any(
-            (o) => o.taskId == s.taskId && o.role == DropsheetTaskRole.loading);
-      }).toList();
+      final eligible = pendingOffload != null
+          ? [pendingOffload]
+          : remaining.where((s) {
+              // Defer pickUp stops until all other stops are exhausted.
+              if (s.taskType == DropsheetTaskType.pickUp && hasNonPickUp) {
+                return false;
+              }
+              // Furniture-move offload requires its loading stop to come first.
+              if (s.role != DropsheetTaskRole.offload) return true;
+              return ordered.any((o) =>
+                  o.taskId == s.taskId && o.role == DropsheetTaskRole.loading);
+            }).toList();
       // Should never happen given how stops are constructed, but guard
       // against an infinite loop.
       if (eligible.isEmpty) break;
@@ -483,8 +497,7 @@ class DropsheetRoutePlanner {
       // Return leg: last afternoon stop → depot, so we know the provisional
       // depot arrival used to re-anchor the whole leg to the target time.
       if (afCurrentId != null) {
-        final lastAddr =
-            _addressFor(id: afCurrentId, lat: afLat, lng: afLng);
+        final lastAddr = _addressFor(id: afCurrentId, lat: afLat, lng: afLng);
         final returnSeg = await _matrix.getRouteSegment(lastAddr, depotAddr,
             departureTime: afClock);
         if (returnSeg != null) {
@@ -497,8 +510,8 @@ class DropsheetRoutePlanner {
           );
           legs.add(returnLeg);
           legBeforeStopMap['__depot'] = returnLeg;
-          afClock =
-              afClock.add(Duration(seconds: returnSeg.durationInTrafficSeconds));
+          afClock = afClock
+              .add(Duration(seconds: returnSeg.durationInTrafficSeconds));
           arrivalTimes['__depot'] = _fmtHHmm(afClock);
         }
       }
@@ -676,6 +689,7 @@ class DropsheetRoutePlanner {
     switch (task.type) {
       case DropsheetTaskType.dropOff:
       case DropsheetTaskType.pickUp:
+      case DropsheetTaskType.distribute:
         return _singleStopFromKeys(task,
             latKey: 'lat',
             lngKey: 'lng',
@@ -1085,8 +1099,8 @@ class DropsheetRoutePlanner {
   /// pick-up ETAs are anchored to this value and computed backwards.
   String _arriveTargetTime(DropsheetDriverSection section) {
     final arrive = section.tasks
-        .where((t) =>
-            t.type == DropsheetTaskType.arrive && t.startTime.isNotEmpty)
+        .where(
+            (t) => t.type == DropsheetTaskType.arrive && t.startTime.isNotEmpty)
         .firstOrNull;
     return arrive?.startTime ?? '17:30';
   }
@@ -1114,7 +1128,8 @@ class DropsheetRoutePlanner {
   }) {
     final computedDepot = arrivalTimes['__depot'];
     if (computedDepot != null) {
-      final delta = _minutesOfHHmm(targetArrive) - _minutesOfHHmm(computedDepot);
+      final delta =
+          _minutesOfHHmm(targetArrive) - _minutesOfHHmm(computedDepot);
       if (delta != 0) {
         for (final stop in afternoonStops) {
           final eta = arrivalTimes[stop.stopKey];

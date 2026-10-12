@@ -6,6 +6,13 @@ analyzer:
     missing_return: warning
     public_member_api_docs: ignore
     todo: ignore
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - windows/**
+    - macos/**
+    - linux/**
 
 linter:
   rules:

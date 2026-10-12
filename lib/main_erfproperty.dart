@@ -9,6 +9,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'config/flavor_config.dart';
 import 'firebase_options.dart';
 import 'erf_property/pages/erf_property_screen.dart';
+import 'widgets/auth_gate.dart';
+import 'shareable_maps/providers/map_gesture_provider.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -35,12 +37,16 @@ class ErfPropertyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: FlavorConfig.instance.appName,
+      navigatorObservers: [
+        riverpod.ProviderScope.containerOf(context)
+            .read(mapModalObserverRiverpod),
+      ],
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
         useMaterial3: true,
       ),
-      home: const ErfPropertyScreen(),
+      home: const AuthGate(child: ErfPropertyScreen()),
     );
   }
 }

@@ -295,6 +295,7 @@ class PayslipDetailView extends riverpod.ConsumerWidget {
                                                 payslip: payslip,
                                                 advances: advances,
                                                 repayments: repayments,
+                                                weekStart: payroll.weekStart,
                                                 editable: editable),
                                           ],
                                         ),
@@ -611,26 +612,39 @@ class _PayslipPaper extends StatelessWidget {
     );
   }
 
-  /// Every outstanding (or this-week-touched) advance/penalty as a single
-  /// wide table — one row per item, spanning the full paper width, so
-  /// several deductions never blow the payslip out to extra printed pages.
+  /// Every advance/penalty that [belongsOnPayslip] for this week as a single
+  /// wide summary table — one row per item, spanning the full paper width,
+  /// so several deductions never blow the payslip out to extra printed pages
+  /// — followed by each item's instalment strip (see [_ScheduleHistory]) for
+  /// the when-and-how-much detail the summary row can't carry.
   Widget _buildDeductionsTable() {
     final weekId = weekIdFor(weekStart);
-    final relevant = advances.where((a) {
-      final touchedThisWeek = repayments
-          .any((r) => r.advanceId == a.id && r.linkedWeekId == weekId);
-      return a.balance > 0.005 || touchedThisWeek;
-    }).toList()
+    final relevant = advances
+        .where((a) => belongsOnPayslip(
+              originDate: a.datePaid,
+              totalAmount: a.amount,
+              weekEnd: weekEnd,
+              weekId: weekId,
+              payments: [
+                for (final r in repayments)
+                  if (r.advanceId == a.id)
+                    (linkedWeekId: r.linkedWeekId, amount: r.amount),
+              ],
+            ))
+        .toList()
       ..sort((a, b) => a.datePaid.compareTo(b.datePaid));
     if (relevant.isEmpty) return const SizedBox.shrink();
 
     final counters = <DeductionType, int>{};
     final rows = <List<String>>[];
+    final histories = <({String title, List<ScheduleEntry> schedule})>[];
     for (final item in relevant) {
       final count = (counters[item.type] ?? 0) + 1;
       counters[item.type] = count;
       final itemPayments = repayments
-          .where((r) => r.advanceId == item.id)
+          .where((r) =>
+              r.advanceId == item.id &&
+              isOnOrBeforeWeek(r.linkedWeekId, weekId))
           .map((r) => (date: r.date, amount: r.amount))
           .toList();
       final schedule = buildRepaymentSchedule(
@@ -660,32 +674,46 @@ class _PayslipPaper extends StatelessWidget {
         schedule.isEmpty ? '—' : _shortDateFormat.format(schedule.last.date),
         _currencyFormat.format(thisWeekAmount),
       ]);
+      if (schedule.isNotEmpty) {
+        histories.add((
+          title: '$title  ·  ${_shortDateFormat.format(item.datePaid)}  ·  '
+              '${_currencyFormat.format(item.amount)}',
+          schedule: schedule,
+        ));
+      }
     }
 
     return Padding(
       padding: const EdgeInsets.only(top: 12),
-      child: _ItemsTable(
-        columnHeaders: const [
-          'Description',
-          'Date paid',
-          'Amount',
-          'Instalments',
-          'Instalment amt',
-          'Notes',
-          'Last instalment',
-          "This week's deduction",
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _ItemsTable(
+            columnHeaders: const [
+              'Description',
+              'Date paid',
+              'Amount',
+              'Instalments',
+              'Instalment amt',
+              'Notes',
+              'Last instalment',
+              "This week's deduction",
+            ],
+            columnWidths: const {
+              0: FlexColumnWidth(2.2),
+              1: FlexColumnWidth(1.2),
+              2: FlexColumnWidth(1.1),
+              3: FlexColumnWidth(0.9),
+              4: FlexColumnWidth(1.2),
+              5: FlexColumnWidth(1.6),
+              6: FlexColumnWidth(1.2),
+              7: FlexColumnWidth(1.4),
+            },
+            rows: rows,
+          ),
+          _ScheduleHistory(
+              heading: 'Deduction history', histories: histories),
         ],
-        columnWidths: const {
-          0: FlexColumnWidth(2.2),
-          1: FlexColumnWidth(1.2),
-          2: FlexColumnWidth(1.1),
-          3: FlexColumnWidth(0.9),
-          4: FlexColumnWidth(1.2),
-          5: FlexColumnWidth(1.6),
-          6: FlexColumnWidth(1.2),
-          7: FlexColumnWidth(1.4),
-        },
-        rows: rows,
       ),
     );
   }
@@ -693,20 +721,31 @@ class _PayslipPaper extends StatelessWidget {
   /// Mirrors [_buildDeductionsTable] for savings deposits/withdrawals.
   Widget _buildSavingsTable() {
     final weekId = weekIdFor(weekStart);
-    final relevant = deposits.where((d) {
-      final touchedThisWeek = withdrawals
-          .any((w) => w.depositId == d.id && w.linkedWeekId == weekId);
-      return d.balance > 0.005 || touchedThisWeek;
-    }).toList()
+    final relevant = deposits
+        .where((d) => belongsOnPayslip(
+              originDate: d.dateDeposited,
+              totalAmount: d.amount,
+              weekEnd: weekEnd,
+              weekId: weekId,
+              payments: [
+                for (final w in withdrawals)
+                  if (w.depositId == d.id)
+                    (linkedWeekId: w.linkedWeekId, amount: w.amount),
+              ],
+            ))
+        .toList()
       ..sort((a, b) => a.dateDeposited.compareTo(b.dateDeposited));
     if (relevant.isEmpty) return const SizedBox.shrink();
 
     var count = 0;
     final rows = <List<String>>[];
+    final histories = <({String title, List<ScheduleEntry> schedule})>[];
     for (final item in relevant) {
       count++;
       final itemWithdrawals = withdrawals
-          .where((w) => w.depositId == item.id)
+          .where((w) =>
+              w.depositId == item.id &&
+              isOnOrBeforeWeek(w.linkedWeekId, weekId))
           .map((w) => (date: w.date, amount: w.amount))
           .toList();
       final schedule = buildRepaymentSchedule(
@@ -733,30 +772,123 @@ class _PayslipPaper extends StatelessWidget {
         schedule.isEmpty ? '—' : _shortDateFormat.format(schedule.last.date),
         _currencyFormat.format(thisWeekAmount),
       ]);
+      if (schedule.isNotEmpty) {
+        histories.add((
+          title: '$title  ·  ${_shortDateFormat.format(item.dateDeposited)}'
+              '  ·  ${_currencyFormat.format(item.amount)}',
+          schedule: schedule,
+        ));
+      }
     }
 
     return Padding(
       padding: const EdgeInsets.only(top: 12),
-      child: _ItemsTable(
-        columnHeaders: const [
-          'Description',
-          'Date deposited',
-          'Amount',
-          'Instalments',
-          'Instalment amt',
-          'Last instalment',
-          "This week's withdrawal",
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _ItemsTable(
+            columnHeaders: const [
+              'Description',
+              'Date deposited',
+              'Amount',
+              'Instalments',
+              'Instalment amt',
+              'Last instalment',
+              "This week's withdrawal",
+            ],
+            columnWidths: const {
+              0: FlexColumnWidth(2.2),
+              1: FlexColumnWidth(1.3),
+              2: FlexColumnWidth(1.1),
+              3: FlexColumnWidth(0.9),
+              4: FlexColumnWidth(1.3),
+              5: FlexColumnWidth(1.3),
+              6: FlexColumnWidth(1.5),
+            },
+            rows: rows,
+          ),
+          _ScheduleHistory(
+              heading: 'Withdrawal history', histories: histories),
         ],
-        columnWidths: const {
-          0: FlexColumnWidth(2.2),
-          1: FlexColumnWidth(1.3),
-          2: FlexColumnWidth(1.1),
-          3: FlexColumnWidth(0.9),
-          4: FlexColumnWidth(1.3),
-          5: FlexColumnWidth(1.3),
-          6: FlexColumnWidth(1.5),
-        },
-        rows: rows,
+      ),
+    );
+  }
+}
+
+/// Each item's instalment schedule as a horizontal strip of small
+/// date/amount boxes — the same layout the admin Deductions card uses, and
+/// the one the original wage-slip spreadsheet used, so a distributor holding
+/// a printed slip can see exactly WHEN each deduction came off and HOW MUCH.
+/// The summary table above answers "how many instalments"; this answers
+/// "which ones, and when".
+///
+/// Instalments already paid are shaded and dated in black; ones still
+/// projected ahead at the item's instalment amount are outlined and greyed,
+/// so nobody mistakes a forecast for money already taken.
+class _ScheduleHistory extends StatelessWidget {
+  final String heading;
+  final List<({String title, List<ScheduleEntry> schedule})> histories;
+
+  const _ScheduleHistory({required this.heading, required this.histories});
+
+  @override
+  Widget build(BuildContext context) {
+    if (histories.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('$heading  (shaded = already deducted, grey = still to come)',
+              style: TextStyle(fontSize: 9, color: Colors.grey.shade700)),
+          for (final h in histories) ...[
+            const SizedBox(height: 6),
+            Text(h.title,
+                style:
+                    const TextStyle(fontSize: 9, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 3),
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [
+                for (final e in h.schedule)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: e.isActual ? Colors.grey.shade200 : null,
+                      border: Border.all(
+                          color: Colors.grey.shade400, width: 0.5),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Text(
+                          _shortDateFormat.format(e.date),
+                          style: TextStyle(
+                            fontSize: 8,
+                            color: e.isActual
+                                ? Colors.grey.shade800
+                                : Colors.grey.shade500,
+                          ),
+                        ),
+                        Text(
+                          _currencyFormat.format(e.amount),
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                            color: e.isActual
+                                ? Colors.black
+                                : Colors.grey.shade500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ],
       ),
     );
   }

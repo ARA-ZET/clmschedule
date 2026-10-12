@@ -16,12 +16,31 @@ import '../providers/job_list_preferences_provider.dart';
 import '../providers/job_list_status_provider.dart';
 import '../providers/invoice_status_provider.dart';
 import '../providers/scale_provider.dart';
+import '../models/company.dart';
+import '../models/custom_job_type.dart';
+import '../models/xero_invoice.dart';
+import '../models/zoho_invoice.dart';
+import '../providers/company_provider.dart';
 import '../providers/job_type_provider.dart';
 import '../providers/vat_settings_provider.dart';
+import '../services/xero_invoice_status_sync.dart';
+import '../services/job_list_service.dart';
+import '../shareable_maps/services/map_link_service.dart';
+import 'distribution_report_dialog.dart';
+import '../providers/zoho_sync_settings_provider.dart';
+import '../utils/job_lifecycle_rules.dart';
+import 'zoho/unlink_void_invoice.dart';
+import 'zoho/void_invoice_prompt.dart';
+import 'zoho/create_invoice_dialog.dart';
+import 'zoho/zoho_invoice_detail_screen.dart';
+import 'xero/create_xero_invoice_dialog.dart';
+import 'xero/xero_invoice_detail_screen.dart';
+import 'xero/xero_accounting_screen.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/day_off_provider.dart';
 import '../services/chat_service.dart';
 import '../services/schedule_reallocation_service.dart';
+import '../utils/zoho_org.dart';
 import 'add_edit_job_dialog.dart';
 import 'editable_table_cell.dart';
 import 'multi_select_status_filter.dart';
@@ -30,6 +49,7 @@ import 'month_navigation_widget.dart';
 import 'simple_date_filter.dart';
 import 'job_list_columns_dialog.dart';
 import 'job_list_column_config.dart';
+import 'job_invoices_sheet.dart';
 import 'reminder_dialog.dart' as reminder;
 import 'map_picker_dialog.dart';
 
@@ -368,6 +388,40 @@ class JobListFrozenHeaders extends StatelessWidget {
   }
 }
 
+/// Offer to void a job's invoice when an edit moves it into the nominated
+/// cancelled status.
+///
+/// Mirrors `AddEditJobDialog._maybeVoidOnCancel`, for the status changes that
+/// never go through that dialog — the Job List's inline status dropdown, which
+/// is how a job is cancelled in practice.
+///
+/// Only fires on the **transition** into cancelled: re-saving an already
+/// cancelled job must not nag on every edit. Never throws — the status change
+/// is already written by the time this runs, so an unreachable accounting
+/// system must not present as the status change having failed.
+Future<void> _maybeVoidOnInlineCancel({
+  required BuildContext context,
+  required riverpod.WidgetRef ref,
+  required JobListItem before,
+  required JobListItem after,
+}) async {
+  final settings = ref.read(zohoSyncSettingsRiverpod);
+  if (!shouldOfferVoidOnCancel(
+    before: before,
+    after: after,
+    cancelledStatusId: settings.cancelledJobStatusId,
+  )) {
+    return;
+  }
+
+  await maybeVoidInvoiceForJob(
+    context: context,
+    ref: ref,
+    job: after,
+    reason: 'has been marked cancelled',
+  );
+}
+
 // Stateless widget for building data cells
 class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
   final JobListItem item;
@@ -379,6 +433,9 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
   final Function(BuildContext, JobListItem) onShowEditDialog;
   final Function(BuildContext, JobListItem) onShowCopyDialog;
   final Function(BuildContext, JobListItem) onShowDeleteConfirmation;
+  /// Called after an inline job-status change has been written, so the grid —
+  /// whose context outlives this cell's — can offer to void the invoice.
+  final void Function(JobListItem before, JobListItem after) onJobStatusChanged;
   final String? Function(int, String) getVehicleTrailerComboFromQuantity;
 
   const JobListDataCellsBuilder({
@@ -392,6 +449,7 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
     required this.onShowEditDialog,
     required this.onShowCopyDialog,
     required this.onShowDeleteConfirmation,
+    required this.onJobStatusChanged,
     required this.getVehicleTrailerComboFromQuantity,
   });
 
@@ -479,21 +537,28 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                         ref.read(jobListStatusRiverpod);
                     final invoiceStatusProvider =
                         ref.read(invoiceStatusRiverpod);
-                    Future.microtask(
-                        () => jobListProvider.updateJobListItemWithTracking(
-                              item,
-                              updatedItem,
-                              resolveJobStatusLabel: (statusId) =>
-                                  jobListStatusProvider
-                                      .getStatusById(statusId)
-                                      ?.label,
-                              resolveInvoiceStatusLabel: (statusId) =>
-                                  invoiceStatusProvider
-                                      .getStatusById(statusId)
-                                      ?.label,
-                              resolveQuantityLabel:
-                                  getVehicleTrailerComboFromQuantity,
-                            ));
+                    Future.microtask(() async {
+                      await jobListProvider.updateJobListItemWithTracking(
+                        item,
+                        updatedItem,
+                        resolveJobStatusLabel: (statusId) =>
+                            jobListStatusProvider.getStatusById(statusId)?.label,
+                        resolveInvoiceStatusLabel: (statusId) =>
+                            invoiceStatusProvider.getStatusById(statusId)?.label,
+                        resolveQuantityLabel:
+                            getVehicleTrailerComboFromQuantity,
+                      );
+                      // Cancelling from this dropdown must offer the void just
+                      // as cancelling from the edit dialog does — otherwise the
+                      // quickest way to cancel a job is also the one that
+                      // leaves its invoice live with nothing attached.
+                      //
+                      // Handed to the grid rather than prompting from here: the
+                      // write above rebuilds the table, which can dispose this
+                      // cell's element, and a dialog opened on a dead context
+                      // is a dialog the user never sees.
+                      onJobStatusChanged(item, updatedItem);
+                    });
                   }
                 },
               ),
@@ -557,6 +622,29 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                   );
                 }).toList(),
                 onChanged: (newStatusId) {
+                  if (newStatusId != null &&
+                      !isManualInvoiceStatusAllowed(
+                        job: item,
+                        newStatusId: newStatusId,
+                        statusMap: ref
+                            .read(zohoSyncSettingsRiverpod)
+                            .invoiceStatusMap,
+                      )) {
+                    // An invoiced job follows its books; only Paid (cash,
+                    // direct EFT the books may never see) is set by hand.
+                    final books = item.resolvedInvoiceProviderId ==
+                            AccountingProvider.xero.name
+                        ? 'Xero'
+                        : 'Zoho Books';
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(
+                          'Invoice ${item.resolvedInvoiceNumber} is linked to '
+                          '$books, so its status follows the books. Only '
+                          'Paid can be set by hand.'),
+                      backgroundColor: Colors.orange.shade800,
+                    ));
+                    return;
+                  }
                   if (newStatusId != null) {
                     // Check if the new status is "paid" - auto-complete active reminders
                     List<JobReminder> updatedReminders = item.reminders;
@@ -855,66 +943,29 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
     // Invoice
     if (prefsProvider.isColumnVisible('invoice')) {
       cells.add(DataCell(
-        EditableTableCell(
-          value: item.invoice,
-          onSave: (value) => onUpdateField(item, 'invoice', value),
-          width: JobListColumnConfig.getWidth('invoice'),
-        ),
+        // A split job lists every invoice number, each opening its invoice.
+        item.hasSplitInvoices
+            ? JobInvoiceNumbersCell(
+                job: item,
+                width: JobListColumnConfig.getWidth('invoice'),
+              )
+            : EditableTableCell(
+                value: item.invoice,
+                onSave: (value) => onUpdateField(item, 'invoice', value),
+                width: JobListColumnConfig.getWidth('invoice'),
+              ),
       ));
     }
 
     // Amount
     if (prefsProvider.isColumnVisible('amount')) {
-      final vatProvider = ref.watch(vatSettingsRiverpod);
-      final vatPct = vatProvider.vatPercentage;
-      final typeChargesVat =
-          JobTypeProvider.instance?.chargesVat(item.jobTypeId) ?? false;
-      final isIncl = item.priceIsInclVat;
-      final displayAmount =
-          isIncl ? item.computedInclVat(vatPct) : item.computedExclVat(vatPct);
-
-      Widget? amountDisplay;
-      if (typeChargesVat) {
-        final badgeColor =
-            isIncl ? Colors.green.shade700 : Colors.orange.shade800;
-        final amountLabel = isIncl ? 'Incl' : 'Excl';
-        amountDisplay = Row(
-          mainAxisSize: MainAxisSize.min,
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'R ${displayAmount.toStringAsFixed(2)}',
-              style: const TextStyle(
-                color: Colors.black,
-                fontWeight: FontWeight.bold,
-                fontSize: 13,
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-              decoration: BoxDecoration(
-                color: badgeColor.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(
-                    color: badgeColor.withValues(alpha: 0.45), width: 0.8),
-              ),
-              child: Text(
-                amountLabel,
-                style: TextStyle(
-                  fontSize: 10,
-                  color: badgeColor,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-          ],
-        );
-      }
+      // Amounts are always excl VAT, so the cell shows that figure plainly.
+      final vatPct = ref.watch(vatSettingsRiverpod).vatPercentage;
+      final displayAmount = item.computedExclVat(vatPct);
 
       cells.add(DataCell(
         EditableTableCell(
           value: 'R ${displayAmount.toStringAsFixed(2)}',
-          displayWidget: amountDisplay,
           onSave: (value) {
             final cleanValue = value.replaceAll(RegExp(r'[^0-9.]'), '');
             final newAmount = double.tryParse(cleanValue) ?? item.amount;
@@ -1034,21 +1085,26 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(
-              icon: Icon(Icons.edit, size: scaleProvider.smallIconSize),
-              onPressed: () => onShowEditDialog(context, item),
+            _actionSlot(
+              icon: Icons.edit,
               tooltip: 'Edit',
+              scaleProvider: scaleProvider,
+              onPressed: () => onShowEditDialog(context, item),
             ),
-            IconButton(
-              icon: Icon(Icons.copy, size: scaleProvider.smallIconSize),
-              onPressed: () => onShowCopyDialog(context, item),
+            _actionSlot(
+              icon: Icons.copy,
               tooltip: 'Copy',
+              scaleProvider: scaleProvider,
+              onPressed: () => onShowCopyDialog(context, item),
             ),
-            IconButton(
-              icon: Icon(Icons.delete,
-                  size: scaleProvider.smallIconSize, color: Colors.red),
-              onPressed: () => onShowDeleteConfirmation(context, item),
+            _invoiceAction(context, ref, item, scaleProvider),
+            _reportAction(context, item, scaleProvider),
+            _actionSlot(
+              icon: Icons.delete,
               tooltip: 'Delete',
+              scaleProvider: scaleProvider,
+              color: Colors.red,
+              onPressed: () => onShowDeleteConfirmation(context, item),
             ),
           ],
         ),
@@ -1056,6 +1112,290 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
     }
 
     return cells;
+  }
+
+  /// View this job's invoice, or raise one if it has none.
+  ///
+  /// Works for both accounting providers, routed by the job type's company:
+  /// Community Life Media through Xero, Junk & Stuff and Happy Sun through
+  /// their own Zoho Books organisations. The
+  /// routing is the whole point — an invoice must never be raised against the
+  /// wrong company's books, so this never guesses and never offers a choice.
+  ///
+  /// Job types marked as not invoiced, or belonging to a company with no
+  /// provider (handled manually), show nothing at all.
+  Widget _invoiceAction(
+    BuildContext context,
+    riverpod.WidgetRef ref,
+    JobListItem item,
+    ScaleProvider scaleProvider,
+  ) {
+    final jobType = JobTypeProvider.instance?.getJobTypeById(item.jobTypeId);
+    if (jobType == null) return const SizedBox.shrink();
+
+    final provider = ref.read(companyRiverpod).providerForJobType(jobType);
+    if (provider != AccountingProvider.xero &&
+        provider != AccountingProvider.zoho) {
+      // A manually billed company, or a job type marked as not invoiced. A struck-through
+      // icon rather than a blank cell: an empty space reads as "the button
+      // hasn't loaded yet", where this says "there is deliberately nothing to
+      // do here" — and the tooltip explains which of the two reasons applies.
+      return _notInvoiced(
+        scaleProvider,
+        jobType.createsInvoices
+            ? 'Not invoiced in the app — '
+                '${ref.read(companyRiverpod).forJobType(jobType)?.name ?? 'this company'} '
+                'is billed manually'
+            : 'This job type does not raise invoices',
+      );
+    }
+
+    // Which provider to *create* with comes from the company. Which provider to
+    // *open* with comes from the invoice itself — a job type reassigned between
+    // companies after being invoiced would otherwise open the wrong provider's
+    // screen with an id that means nothing to it.
+    final isXero = provider == AccountingProvider.xero;
+
+    // A bill split between clients has several invoices; list them all rather
+    // than opening just the primary.
+    if (item.hasSplitInvoices) {
+      final count = item.allInvoices.length;
+      return _actionSlot(
+        icon: Icons.receipt_long,
+        scaleProvider: scaleProvider,
+        color: const Color(0xFF2B7DE9),
+        tooltip: '$count invoices — ${item.allInvoiceNumbers.join(', ')}',
+        onPressed: () => showJobInvoicesSheet(
+          context,
+          item,
+          onAddInvoice: () => onShowEditDialog(context, item),
+        ),
+      );
+    }
+
+    // Read through the neutral getters: a job invoiced through Zoho before the
+    // provider-neutral fields existed carries only the legacy `zoho*` ones, and
+    // reading those directly would make this blind to its own history.
+    if (item.hasAccountingInvoice) {
+      final invoicedWithXero = item.resolvedInvoiceProviderId ==
+          AccountingProvider.xero.name;
+      final colour = invoicedWithXero
+          ? XeroInvoiceStatus.parse(item.resolvedInvoiceStatus).color
+          : ZohoInvoiceStatus.parse(
+              item.resolvedInvoiceStatus.isEmpty
+                  ? null
+                  : item.resolvedInvoiceStatus,
+            ).color;
+      final label = invoicedWithXero
+          ? XeroInvoiceStatus.parse(item.resolvedInvoiceStatus).label
+          : ZohoInvoiceStatus.parse(
+              item.resolvedInvoiceStatus.isEmpty
+                  ? null
+                  : item.resolvedInvoiceStatus,
+            ).label;
+
+      void openInvoice() => Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => invoicedWithXero
+                  ? XeroInvoiceDetailScreen(invoiceId: item.resolvedInvoiceId)
+                  : ZohoInvoiceDetailScreen(
+                      orgId: ZohoOrg.forJob(item),
+                      invoiceId: item.resolvedInvoiceId),
+            ),
+          );
+
+      // A void invoice is a dead end on its own: the job still points at it,
+      // so it cannot be invoiced again. Offer the unlink alongside the view.
+      if (jobInvoiceLooksVoid(item)) {
+        return _actionSlot(
+          icon: Icons.receipt_long,
+          scaleProvider: scaleProvider,
+          color: colour,
+          tooltip: 'Invoice ${item.resolvedInvoiceNumber} is void — tap to '
+              'view it or unlink it and invoice again',
+          onPressed: () => _showVoidInvoiceActions(
+              context, ref, item, jobType, openInvoice),
+        );
+      }
+
+      return _actionSlot(
+        icon: Icons.receipt_long,
+        scaleProvider: scaleProvider,
+        color: colour,
+        tooltip: 'View invoice ${item.resolvedInvoiceNumber} · $label '
+            '(${invoicedWithXero ? 'Xero' : 'Zoho'})',
+        onPressed: openInvoice,
+      );
+    }
+
+    if (!jobType.createsInvoices) {
+      return _notInvoiced(
+          scaleProvider, 'This job type does not raise invoices');
+    }
+
+    return _actionSlot(
+      icon: Icons.request_quote_outlined,
+      scaleProvider: scaleProvider,
+      color: const Color(0xFF2B7DE9),
+      tooltip: 'Create invoice in ${isXero ? 'Xero' : 'Zoho Books'}',
+      onPressed: () {
+        if (isXero) {
+          showCreateXeroInvoiceDialog(context, item);
+        } else {
+          showDialog<void>(
+            context: context,
+            // Invoicing from the Job List, so the dialog takes the item
+            // directly rather than a Collection Schedule projection.
+            builder: (_) => CreateInvoiceDialog(item: item),
+          );
+        }
+      },
+    );
+  }
+
+  /// Choices for a job whose linked invoice is void: look at it, or unlink it
+  /// and go straight on to raising the replacement.
+  Future<void> _showVoidInvoiceActions(
+      BuildContext context,
+      riverpod.WidgetRef ref,
+      JobListItem item,
+      CustomJobType jobType,
+      VoidCallback openInvoice) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.receipt_long),
+              title: Text('View void invoice ${item.resolvedInvoiceNumber}'),
+              onTap: () => Navigator.of(sheetContext).pop('view'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.link_off),
+              title: const Text('Unlink & create new invoice'),
+              subtitle: const Text(
+                  'The void invoice stays in the books; this job gets a new one'),
+              onTap: () => Navigator.of(sheetContext).pop('unlink'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!context.mounted) return;
+    if (choice == 'view') {
+      openInvoice();
+      return;
+    }
+    if (choice != 'unlink') return;
+
+    final unlinked =
+        await unlinkVoidedInvoice(context: context, ref: ref, job: item);
+    if (!unlinked || !context.mounted) return;
+
+    // The row's stream has not caught up yet, so hand the dialogs the job as
+    // it now stands rather than the stale copy still pointing at the void one.
+    final fresh = item.withoutInvoiceLink();
+    final provider = ref.read(companyRiverpod).providerForJobType(jobType);
+    if (provider == AccountingProvider.xero) {
+      await showCreateXeroInvoiceDialog(context, fresh);
+    } else if (provider == AccountingProvider.zoho) {
+      await showDialog<void>(
+        context: context,
+        builder: (_) => CreateInvoiceDialog(item: fresh),
+      );
+    }
+  }
+
+  /// One icon in the Actions column.
+  ///
+  /// Every action goes through here so the row's icons line up regardless of
+  /// which are available. Left to themselves, an enabled `IconButton` pads out
+  /// to the 48px tap target while a struck-through placeholder does not, so
+  /// the delete icon landed in a different place on every row depending on
+  /// whether that job happened to be invoiced or mapped.
+  ///
+  /// [struckThrough] renders the icon greyed with a cross through it — for an
+  /// action that is deliberately unavailable, where a blank space would read
+  /// as "not loaded yet" rather than "nothing to do here". The tooltip still
+  /// shows, which is the whole point of drawing it rather than omitting it.
+  Widget _actionSlot({
+    required IconData icon,
+    required String tooltip,
+    required ScaleProvider scaleProvider,
+    VoidCallback? onPressed,
+    Color? color,
+    bool struckThrough = false,
+  }) {
+    final size = scaleProvider.smallIconSize;
+    return SizedBox(
+      width: JobListColumnConfig.actionSlotWidth,
+      child: IconButton(
+        icon: struckThrough
+            ? Stack(
+                alignment: Alignment.center,
+                children: [
+                  Icon(icon, size: size, color: Colors.grey.shade400),
+                  Icon(Icons.close,
+                      size: size * 0.72, color: Colors.grey.shade600),
+                ],
+              )
+            : Icon(icon, size: size, color: color),
+        tooltip: tooltip,
+        onPressed: struckThrough ? null : onPressed,
+        padding: EdgeInsets.zero,
+        // Size is stated here rather than through `constraints`, which
+        // Material 3's IconButton ignores outright — under M3 the size comes
+        // from the style's minimum/maximum, and `shrinkWrap` stops the button
+        // padding itself back out to a 48px tap target and overflowing the
+        // slot.
+        style: IconButton.styleFrom(
+          fixedSize: const Size.square(JobListColumnConfig.actionSlotWidth),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+      ),
+    );
+  }
+
+  /// Compile the client-facing distribution report for this job.
+  ///
+  /// Deliberately **not** gated on job status. The report is compiled from the
+  /// linked map and its GPS folders, so what decides whether it can be written
+  /// is whether those exist — not what someone last set the status dropdown to.
+  Widget _reportAction(
+    BuildContext context,
+    JobListItem item,
+    ScaleProvider scaleProvider,
+  ) {
+    // A report is built around the map link and the tracks behind it; with no
+    // map there is nothing to report. Shown struck through rather than hidden,
+    // so the reason is visible instead of the button just being absent.
+    final hasMap = item.shareableMapId.isNotEmpty ||
+        MapLinkService.extractShareCodeFromText(item.area) != null;
+
+    return _actionSlot(
+      icon: Icons.summarize,
+      scaleProvider: scaleProvider,
+      struckThrough: !hasMap,
+      color: Colors.teal.shade700,
+      tooltip: hasMap
+          ? 'Compile distribution report'
+          : 'No map linked — link one in the Area column to report on this job',
+      onPressed: () => showDistributionReportDialog(context, item),
+    );
+  }
+
+  /// Greyed-out invoice icon with a cross, for jobs that are never invoiced
+  /// from the app.
+  Widget _notInvoiced(ScaleProvider scaleProvider, String reason) {
+    return _actionSlot(
+      icon: Icons.receipt_long,
+      tooltip: reason,
+      scaleProvider: scaleProvider,
+      struckThrough: true,
+    );
   }
 
   void _showMapLinkOptions(
@@ -1075,7 +1415,6 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
       mapId: result.mapId,
       monthKey: result.monthKey,
       mapName: result.mapName,
-      storageFolderPath: result.storageFolderPath,
     );
 
     if (context.mounted) {
@@ -1171,6 +1510,83 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     _frozenVerticalScrollController.addListener(_syncFrozenVerticalScroll);
   }
 
+  /// True between scheduling a Xero status refresh and it running, so a burst
+  /// of rebuilds queues one callback rather than one each.
+  bool _xeroRefreshScheduled = false;
+
+  /// Bring the Xero invoice statuses on screen up to date, in one API call.
+  ///
+  /// Safe to call from `build`: [XeroInvoiceStatusSync] throttles in memory and
+  /// refuses to overlap runs, so however often this grid rebuilds it costs at
+  /// most one request per staleness window. Rows invoiced through Zoho, and
+  /// rows with a fresh status, are filtered out inside the service.
+  ///
+  /// Deferred to a post-frame callback because the refresh writes to Firestore,
+  /// and mutating provider state during a build would throw. Its result is not
+  /// awaited or acted on — a changed status arrives back through the Job List's
+  /// own stream, and a failure must leave the grid rendering a stale status
+  /// rather than an error.
+  void _scheduleXeroStatusRefresh(List<JobListItem> items) {
+    if (_xeroRefreshScheduled || items.isEmpty) return;
+    _xeroRefreshScheduled = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _xeroRefreshScheduled = false;
+      if (!mounted) return;
+      ref.read(xeroInvoiceStatusSyncRiverpod).refresh(items);
+    });
+  }
+
+  /// Writes already sent by [_scheduleInvoiceStatusReconcile], job id →
+  /// status id, so a rebuild before the stream catches up does not resend.
+  final Map<String, String> _reconcileSent = {};
+
+  /// Bring the Invoice Status column of invoiced rows into line with their
+  /// books, from the cached book statuses — no Zoho or Xero call.
+  ///
+  /// The live refreshes only touch a row when its book status *changes*, so a
+  /// status picked by hand, or one set before the mapping existed, would
+  /// otherwise contradict the invoice indefinitely. A job marked Paid by hand
+  /// keeps it (see [desiredInvoiceStatusId]). Writes only the rows that differ,
+  /// so once the stream echoes them back this settles to a no-op.
+  void _scheduleInvoiceStatusReconcile(List<JobListItem> items) {
+    final settings = ref.read(zohoSyncSettingsRiverpod);
+    final statusMap = settings.invoiceStatusMap;
+    if (items.isEmpty || settings.isLoading || statusMap.isEmpty) return;
+
+    final updates = <({String jobId, DateTime date, String invoiceStatusId})>[];
+    for (final job in items) {
+      final desired = desiredInvoiceStatusId(
+        currentStatusId: job.invoiceStatusId,
+        bookKeys: cachedBookStatusKeys(job),
+        statusMap: statusMap,
+      );
+      if (desired == null) {
+        _reconcileSent.remove(job.id);
+        continue;
+      }
+      if (_reconcileSent[job.id] == desired) continue;
+      _reconcileSent[job.id] = desired;
+      updates.add((jobId: job.id, date: job.date, invoiceStatusId: desired));
+    }
+    if (updates.isEmpty) return;
+
+    // Post-frame: this writes to Firestore, which must not happen mid-build.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref
+          .read(jobListServiceRiverpod)
+          .updateInvoiceStatusIds(updates)
+          .catchError((Object e) {
+        // Let the next build retry rather than suppressing it forever.
+        for (final u in updates) {
+          _reconcileSent.remove(u.jobId);
+        }
+        debugPrint('[invoice-status] reconcile failed: $e');
+      });
+    });
+  }
+
   bool _isSyncingHorizontal = false;
   bool _isSyncingVertical = false;
 
@@ -1236,6 +1652,9 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         final jobListItems = jobListProvider.jobListItems;
         final hasError = jobListProvider.error != null;
         final isLoading = jobListProvider.isLoading;
+
+        _scheduleXeroStatusRefresh(jobListItems);
+        _scheduleInvoiceStatusReconcile(jobListItems);
 
         // Error state
         if (hasError && jobListItems.isEmpty) {
@@ -1303,6 +1722,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
                         onMonthSelected: jobListProvider.goToMonth,
                         availableMonths: jobListProvider.getAvailableMonths(),
                         mode: Mode.joblist,
+                        trailingActions: [_accountingButton(context)],
                       ),
                     ),
                     // Subtle loading indicator when data is loading but items exist (refreshing)
@@ -1928,6 +2348,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           onShowEditDialog: _showEditJobDialog,
           onShowCopyDialog: _showCopyJobDialog,
           onShowDeleteConfirmation: _showDeleteConfirmation,
+          onJobStatusChanged: _handleInlineJobStatusChanged,
           getVehicleTrailerComboFromQuantity:
               _getVehicleTrailerComboFromQuantity,
         ).buildCells(context, ref);
@@ -2001,15 +2422,13 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           break;
         case 'amount':
           final newAmt = value as double;
+          // Amounts are always entered excluding VAT.
           final vatPct = ref.read(vatSettingsRiverpod).vatPercentage;
-          final newExcl =
-              item.priceIsInclVat ? newAmt / (1 + vatPct / 100) : newAmt;
-          final newIncl =
-              item.priceIsInclVat ? newAmt : newAmt * (1 + vatPct / 100);
           updatedItem = item.copyWith(
             amount: newAmt,
-            amountExclVat: newExcl,
-            amountInclVat: newIncl,
+            amountExclVat: newAmt,
+            amountInclVat: newAmt * (1 + vatPct / 100),
+            priceIsInclVat: false,
           );
           break;
         case 'client':
@@ -2152,11 +2571,13 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       if (result != null && context.mounted) {
         JobListItem job;
         bool skipAllocation = false;
+        bool invoiced = false;
 
         // Handle different return types from dialog
         if (result is Map<String, dynamic>) {
           job = result['job'] as JobListItem;
           skipAllocation = result['skipAllocation'] == true;
+          invoiced = result['invoiced'] == true;
         } else if (result is JobListItem) {
           job = result;
           skipAllocation = false;
@@ -2172,9 +2593,10 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             _broadcastJobCreated(job, action: 'add');
             if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                      'Collection job added successfully without schedule allocation!'),
+                SnackBar(
+                  content: Text(invoiced
+                      ? 'Job and invoice saved successfully!'
+                      : 'Collection job added successfully without schedule allocation!'),
                   backgroundColor: Colors.green,
                 ),
               );
@@ -2212,17 +2634,35 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
   }
 
   void _showEditJobDialog(BuildContext context, JobListItem item) async {
-    final result = await showDialog<JobListItem>(
+    // `dynamic` because the invoicing path returns
+    // {'job': ..., 'skipAllocation': true} to say it already wrote the job —
+    // writing again here would clobber the Zoho link it just stamped on.
+    final dynamic rawResult = await showDialog<dynamic>(
       context: context,
       builder: (context) => AddEditJobDialog(jobToEdit: item),
     );
+
+    if (rawResult is Map<String, dynamic>) {
+      if (context.mounted) {
+        _broadcastJobCreated(rawResult['job'] as JobListItem, action: 'update');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Job and invoice saved successfully!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+      return;
+    }
+
+    final result = rawResult is JobListItem ? rawResult : null;
 
     if (result != null && context.mounted) {
       try {
         _ClientRenamePromptChoice renameChoice =
             _ClientRenamePromptChoice.updateJobListOnly;
-        final clientChanged =
-            result.client.trim().toLowerCase() != item.client.trim().toLowerCase();
+        final clientChanged = result.client.trim().toLowerCase() !=
+            item.client.trim().toLowerCase();
         if (clientChanged) {
           final choice = await _showClientRenamePrompt(
             context,
@@ -2254,7 +2694,8 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           updatedItem: result,
         );
 
-        if (renameChoice == _ClientRenamePromptChoice.updateJobListAndSchedule) {
+        if (renameChoice ==
+            _ClientRenamePromptChoice.updateJobListAndSchedule) {
           await _syncClientRenameOnSchedule(
             context,
             originalItem: item,
@@ -2303,8 +2744,8 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
 
     final today = scheduleNow();
     final todayOnly = DateTime(today.year, today.month, today.day);
-    final sourceDate =
-        DateTime(originalItem.date.year, originalItem.date.month, originalItem.date.day);
+    final sourceDate = DateTime(
+        originalItem.date.year, originalItem.date.month, originalItem.date.day);
     if (sourceDate.isBefore(todayOnly)) {
       debugPrint('[job-date-shift] skip: source date is in the past');
       return;
@@ -2316,11 +2757,13 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     );
 
     if (!service.hasEligibleAllocations(originalItem)) {
-      debugPrint('[job-date-shift] skip: no eligible schedule allocations found');
+      debugPrint(
+          '[job-date-shift] skip: no eligible schedule allocations found');
       return;
     }
 
-    final hasGroupedConflict = service.hasGroupedAllocationConflict(originalItem);
+    final hasGroupedConflict =
+        service.hasGroupedAllocationConflict(originalItem);
     final choice = await _showDateShiftPrompt(
       context,
       originalItem: originalItem,
@@ -2334,7 +2777,8 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Job date updated. Existing schedule allocation was kept.'),
+            content: Text(
+                'Job date updated. Existing schedule allocation was kept.'),
           ),
         );
       }
@@ -2369,7 +2813,8 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('No eligible schedule jobs were shifted for this change.'),
+            content:
+                Text('No eligible schedule jobs were shifted for this change.'),
           ),
         );
       }
@@ -2399,7 +2844,9 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       originalItem: originalItem,
       updatedItem: updatedItem,
     );
-    if (!mounted || choice == null || choice == _ClientRenamePromptChoice.cancel) {
+    if (!mounted ||
+        choice == null ||
+        choice == _ClientRenamePromptChoice.cancel) {
       return;
     }
 
@@ -2457,14 +2904,16 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       if (updatedCount > 0) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Updated client name on $updatedCount scheduled job(s).'),
+            content:
+                Text('Updated client name on $updatedCount scheduled job(s).'),
             backgroundColor: Colors.green,
           ),
         );
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Client name changed in Job List. No linked schedule jobs were updated.'),
+            content: Text(
+                'Client name changed in Job List. No linked schedule jobs were updated.'),
           ),
         );
       }
@@ -2472,7 +2921,8 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Client name changed in Job List, but schedule sync failed: $e'),
+          content: Text(
+              'Client name changed in Job List, but schedule sync failed: $e'),
           backgroundColor: Colors.red,
         ),
       );
@@ -2571,6 +3021,17 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     return a.year == b.year && a.month == b.month && a.day == b.day;
   }
 
+  String _copyJobStatusId(String sourceStatusId) => resolveCopyJobStatusId(
+        statuses: ref.read(jobListStatusRiverpod).statuses,
+        sourceStatusId: sourceStatusId,
+      );
+
+  String _copyInvoiceStatusId(String sourceStatusId) =>
+      resolveCopyInvoiceStatusId(
+        statuses: ref.read(invoiceStatusRiverpod).statuses,
+        sourceStatusId: sourceStatusId,
+      );
+
   void _showCopyJobDialog(BuildContext context, JobListItem item) async {
     // Capture the source job's coordinates *before* opening the dialog so
     // that we can clone its linked map after the duplicate has been saved.
@@ -2583,6 +3044,16 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         '📋 [CopyJob] source item id=$sourceJobItemId month=$sourceJobMonthId '
         'client="${item.client}" shareableMapId="$sourceShareableMapId"');
 
+    // A copy is a brand-new order, whatever state the source job had reached,
+    // so it starts the lifecycle again rather than inheriting the source's
+    // "Report Sent"/"Paid" end-state. Both are resolved from the live status
+    // collections so a relabelled or re-seeded status doc cannot leave copies
+    // pointing at an id that no longer exists.
+    final newJobStatusId = _copyJobStatusId(item.jobStatusId);
+    final newInvoiceStatusId = _copyInvoiceStatusId(item.invoiceStatusId);
+    debugPrint('📋 [CopyJob] status "${item.jobStatusId}" → "$newJobStatusId"; '
+        'invoice status "${item.invoiceStatusId}" → "$newInvoiceStatusId"');
+
     // Build the pre-populated job for the dialog.
     // id='' signals the dialog that this is a new job (not an edit).
     // area is cleared when the source has a linked map — the clone URL will
@@ -2590,12 +3061,25 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     final copiedJob = item.copyWith(
       id: '',
       invoice: '',
-      invoiceStatusId: 'INV_NOT CREATED',
+      jobStatusId: newJobStatusId,
+      invoiceStatusId: newInvoiceStatusId,
       area: sourceShareableMapId.isNotEmpty ? '' : null,
       collectionJobId: '',
       shareableMapId: '',
       storageFolderPath: '',
       updates: const [],
+      // The Zoho link must NOT carry over: the duplicate raises its own
+      // invoice. Leaving these set would point two jobs at one invoice and
+      // would also hide the invoicing panel (hasZohoInvoice would be true).
+      // The source id is passed separately, purely to pre-fill the lines.
+      zohoContactId: '',
+      zohoInvoiceId: '',
+      zohoInvoiceNumber: '',
+      zohoInvoiceStatus: '',
+      // The source's void-invoice history is not the copy's.
+      voidedInvoiceIds: const [],
+      // Nor are its split invoices — the copy raises its own.
+      splitInvoices: const [],
     );
 
     final result = await showDialog<dynamic>(
@@ -2603,6 +3087,8 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       builder: (context) => AddEditJobDialog(
         jobToEdit: copiedJob,
         mapWillBeCopied: sourceShareableMapId.isNotEmpty,
+        sourceZohoInvoiceId:
+            item.zohoInvoiceId.isEmpty ? null : item.zohoInvoiceId,
       ),
     );
 
@@ -2732,7 +3218,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       // After the map is cloned, generate a fresh share link and write the
       // new URL into the duplicated job's `area` field. The cloud function
       // already created the storage folder and set `storageFolderPath` on
-      // both the new map and new job, so we forward that path here too.
+      // both the new map and new job; the path is only logged here.
       final data = result.data;
       if (data is Map) {
         final newMapId = data['newMapId'] as String?;
@@ -2745,7 +3231,6 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
                 mapId: newMapId,
                 monthKey: newMapMonthKey,
                 mapName: newMapName,
-                storageFolderPath: newFolderPath,
                 fallbackJob: newJob,
               );
           debugPrint(
@@ -2765,43 +3250,66 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     }
   }
 
-  void _showDeleteConfirmation(BuildContext context, JobListItem item) {
-    showDialog(
+  /// The Job List's inline status dropdown has just written a status change.
+  ///
+  /// Runs on the grid's own context, which survives the table rebuild that the
+  /// write triggers — see the call site in [JobListDataCellsBuilder].
+  void _handleInlineJobStatusChanged(JobListItem before, JobListItem after) {
+    if (!mounted) return;
+    unawaited(_maybeVoidOnInlineCancel(
       context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('Delete Job'),
-          content: Text(
-              'Are you sure you want to delete the job for ${item.client}?'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () async {
-                Navigator.of(context).pop();
-                try {
-                  await ref.read(jobListRiverpod).deleteJobListItem(item.id);
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Job deleted successfully')),
-                    );
-                  }
-                } catch (e) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Error deleting job: $e')),
-                    );
-                  }
-                }
-              },
-              child: const Text('Delete', style: TextStyle(color: Colors.red)),
-            ),
-          ],
-        );
-      },
+      ref: ref,
+      before: before,
+      after: after,
+    ));
+  }
+
+  /// Delete a job, offering to void its Zoho invoice in the same warning.
+  ///
+  /// One dialog rather than two: the invoice decision belongs with the delete
+  /// decision, and stacking prompts invites clicking through without reading.
+  Future<void> _showDeleteConfirmation(
+      BuildContext context, JobListItem item) async {
+    final decision = await confirmDeleteJobAndInvoice(
+      context: context,
+      ref: ref,
+      job: item,
     );
+    if (!decision.confirmed) return;
+
+    try {
+      // Void first, while the job still carries its Zoho link — once the
+      // record is gone there is nothing left to read the invoice id from.
+      if (decision.voidInvoice && context.mounted) {
+        await voidInvoiceForJob(context: context, ref: ref, job: item);
+      }
+
+      await ref.read(jobListRiverpod).deleteJobListItem(item.id);
+
+      // Drop the reverse index too, or the Invoices screen keeps offering a
+      // route back to a job that no longer exists. Which index depends on the
+      // provider: Zoho's rows predate the neutral one and still use their own.
+      final service = ref.read(jobListServiceRiverpod);
+      if (item.hasZohoInvoice) {
+        await service.removeZohoInvoiceLink(item.zohoInvoiceId);
+      }
+      if (item.resolvedInvoiceProviderId == AccountingProvider.xero.name &&
+          item.resolvedInvoiceId.isNotEmpty) {
+        await service.removeAccountingInvoiceLink(item.resolvedInvoiceId);
+      }
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Job deleted successfully')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error deleting job: $e')),
+        );
+      }
+    }
   }
 
   void _showUpdateHistory(BuildContext context, JobListItem item) {
@@ -3024,6 +3532,24 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     } else {
       return 'Just now ($timeWithMs)';
     }
+  }
+
+  /// Opens Community Life Media's Xero books — invoices and customers as tabs
+  /// on one screen.
+  ///
+  /// Deliberately not Zoho's. Each business has its own books and its own home
+  /// screen: Junk & Stuff invoices through Zoho and is reached from the
+  /// Collection Schedule, CLM invoices through Xero and is reached from here.
+  /// Offering both in both places would make it easy to raise an invoice
+  /// against the wrong company's books.
+  Widget _accountingButton(BuildContext context) {
+    return IconButton(
+      icon: const Icon(Icons.receipt_long, size: 26),
+      tooltip: 'Xero — invoices and customers',
+      onPressed: () => Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const XeroAccountingScreen()),
+      ),
+    );
   }
 
   // Helper method to get vehicle/trailer combination label from quantity (for tracked changes display)

@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../config/flavor_config.dart';
 import '../providers/map_instruction_provider.dart';
 import '../models/job.dart';
+import '../models/dropsheet_task.dart' show DropsheetTask;
 import '../models/work_area.dart';
 import '../models/custom_polygon.dart';
 import '../providers/job_status_provider.dart';
+import '../models/job_linked_map.dart';
 import 'job_map_link.dart';
 import 'print_map_view.dart';
 import '../providers/schedule_provider.dart';
@@ -38,7 +40,16 @@ class JobCard extends riverpod.ConsumerWidget {
   final Job job;
   final bool isFullscreen;
 
-  const JobCard({super.key, required this.job, required this.isFullscreen});
+  /// Outline drawn on the card's own shape — the schedule cell passes its
+  /// Job List lag colour here. Null keeps the plain card.
+  final Color? borderColor;
+
+  const JobCard({
+    super.key,
+    required this.job,
+    required this.isFullscreen,
+    this.borderColor,
+  });
 
   Color _getStatusColor(riverpod.WidgetRef ref) {
     final statusProvider = ref.watch(jobStatusRiverpod);
@@ -69,13 +80,19 @@ class JobCard extends riverpod.ConsumerWidget {
     }
 
     try {
-      showDialog(
-        context: context,
-        useSafeArea: true,
-        builder: (BuildContext context) => Dialog.fullscreen(
-          child: PrintMapView(
-            job: job,
-            distributorName: distributorName,
+      // A page route, not showDialog: MapModalGestureObserver holds every
+      // map while a PopupRoute is open, which would disable this map's own
+      // pan/zoom on web.
+      Navigator.of(context, rootNavigator: true).push(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (BuildContext context) => Scaffold(
+            body: SafeArea(
+              child: PrintMapView(
+                job: job,
+                distributorName: distributorName,
+              ),
+            ),
           ),
         ),
       );
@@ -92,6 +109,16 @@ class JobCard extends riverpod.ConsumerWidget {
     }
   }
 
+  /// The shape the Card would use anyway, outlined in [borderColor].
+  ShapeBorder _borderedShape(BuildContext context) {
+    final theme = Theme.of(context);
+    final base = theme.cardTheme.shape as OutlinedBorder? ??
+        RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(theme.useMaterial3 ? 12 : 4),
+        );
+    return base.copyWith(side: BorderSide(color: borderColor!, width: 2.5));
+  }
+
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     // isFullscreen is passed from the parent grid (single TogglerProvider subscription
@@ -101,6 +128,7 @@ class JobCard extends riverpod.ConsumerWidget {
     return Card(
       margin: const EdgeInsets.all(1),
       color: statusColor,
+      shape: borderColor == null ? null : _borderedShape(context),
       child: Padding(
         padding: const EdgeInsets.all(3),
         child: Column(
@@ -151,6 +179,10 @@ class _JobClientSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Captured now, not looked up on save: the client dialog outlives this
+    // element if the card is rebuilt while it is open, and an ancestor lookup
+    // on a deactivated context throws — which silently lost the save.
+    final container = riverpod.ProviderScope.containerOf(context);
     return Flexible(
       flex: 3,
       child: Row(
@@ -162,12 +194,10 @@ class _JobClientSection extends StatelessWidget {
               onClientsChanged: (List<String> updatedClients,
                   List<String> updatedInstructions) {
                 // Get fresh job data from provider to avoid stale state
-                final scheduleProvider =
-                    riverpod.ProviderScope.containerOf(context)
-                        .read(scheduleRiverpod);
+                final scheduleProvider = container.read(scheduleRiverpod);
                 final freshJob = _freshJobOrNull(scheduleProvider, job.id);
                 if (freshJob == null) {
-                  _showJobDeletedSnackBar(context);
+                  if (context.mounted) _showJobDeletedSnackBar(context);
                   return;
                 }
                 final originalJob = freshJob;
@@ -218,10 +248,8 @@ class _JobWorkAreaSection extends StatelessWidget {
                 final updatedWorkingAreas =
                     updatedWorkMaps.map((polygon) => polygon.name).toList();
                 final originalJob = freshJob;
-                final modifiedJob = freshJob.copyWith(
-                  workingAreas: updatedWorkingAreas,
-                  workMaps: updatedWorkMaps,
-                );
+                final modifiedJob = freshJob.withEditedWorkMaps(
+                    updatedWorkMaps, updatedWorkingAreas);
                 scheduleProvider.updateJobWithUndo(
                   originalJob,
                   modifiedJob,
@@ -251,36 +279,9 @@ class _JobActionsSection extends riverpod.ConsumerWidget {
   Future<void> _handleLinkMapTap(
       BuildContext context, riverpod.WidgetRef ref) async {
     final scheduleProvider = ref.read(scheduleRiverpod);
-    if (job.linkedMapId.isNotEmpty) {
-      final action = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Map Linked'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop('unlink'),
-              child: const Text('Unlink'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop('relink'),
-              child: const Text('Re-link'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Close'),
-            ),
-          ],
-        ),
-      );
-      if (action == 'unlink') {
-        await unlinkMapFromScheduleJob(scheduleProvider, job);
-      } else if (action == 'relink') {
-        if (!context.mounted) return;
-        await linkExistingMapToScheduleJob(context, scheduleProvider, job);
-      }
-      return;
-    }
-    await linkExistingMapToScheduleJob(context, scheduleProvider, job);
+    // One dialog for every case: no maps linked yet goes straight to the
+    // picker, otherwise it lists what's linked with add/unlink per map.
+    await showLinkedMapsDialog(context, scheduleProvider, job);
   }
 
   void _showMapInstructionsDialog(BuildContext context) {
@@ -393,15 +394,14 @@ class _JobActionsSection extends riverpod.ConsumerWidget {
           ),
           // Link map button
           Tooltip(
-            message: job.linkedMapId.isNotEmpty
-                ? 'Map linked — tap to unlink or relink'
+            message: job.hasLinkedMaps
+                ? 'Maps linked — tap to add polygons, unlink or link another'
                 : 'Link an existing map',
             child: IconButton(
               icon: Icon(
-                job.linkedMapId.isNotEmpty ? Icons.link : Icons.link_off,
-                color: job.linkedMapId.isNotEmpty
-                    ? Colors.lightBlueAccent
-                    : Colors.white54,
+                job.hasLinkedMaps ? Icons.link : Icons.link_off,
+                color:
+                    job.hasLinkedMaps ? Colors.lightBlueAccent : Colors.white54,
                 size: scaleProvider.smallIconSize,
               ),
               constraints: const BoxConstraints(),
@@ -563,10 +563,14 @@ class _ClientListEditorState extends State<_ClientListEditor> {
         clientInstructions: widget.job.clientInstructions,
         jobId: widget.job.id,
         onClientsChanged: (updatedClients, updatedInstructions) {
-          setState(() {
-            _localClients = updatedClients;
-            _controller.text = updatedClients.join(', ');
-          });
+          // The card can be rebuilt while the dialog is open (a live schedule
+          // update); the save must still go through when it was.
+          if (mounted) {
+            setState(() {
+              _localClients = updatedClients;
+              _controller.text = updatedClients.join(', ');
+            });
+          }
           widget.onClientsChanged(updatedClients, updatedInstructions);
         },
       ),
@@ -697,11 +701,13 @@ class _ClientListDialogState extends State<_ClientListDialog> {
       );
     }).where((p) => p.client.isNotEmpty).toList();
 
+    // Close first: if the save callback throws, the dialog must still close
+    // rather than leave a Save button that appears to do nothing.
+    Navigator.of(context).pop();
     widget.onClientsChanged(
       validPairs.map((p) => p.client).toList(),
       validPairs.map((p) => p.instruction).toList(),
     );
-    Navigator.of(context).pop();
   }
 
   void _showDeleteJobConfirmation(BuildContext context) {
@@ -1062,6 +1068,23 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
     // Exclude point-type entries (dropoff, pickup, etc.) from the label.
     final polygonMaps = _localWorkMaps.where((w) => !w.isPoint).toList();
     if (polygonMaps.isEmpty) {
+      // A job placed as a single point is named after the nearest street
+      // intersection (ScheduleProvider fills `workingAreas` with it).
+      final named = widget.job.workingAreas
+          .map((a) => a.trim())
+          .where((a) => a.isNotEmpty && !DropsheetTask.isPlaceholderArea(a))
+          .toList();
+      if (named.isNotEmpty) return named.join(', ');
+      // Name still being looked up: say what the point is meanwhile.
+      final point = _localWorkMaps
+          .where((w) => w.isPoint && w.points.isNotEmpty)
+          .firstOrNull;
+      if (point != null) {
+        final label = point.name.trim();
+        return label.isEmpty || RegExp(r'^Point \d+$').hasMatch(label)
+            ? 'Drop-off point'
+            : label;
+      }
       return 'add work area';
     }
     final names = polygonMaps.map((w) => w.name).where((n) => n.isNotEmpty);
@@ -1164,17 +1187,27 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                         freshJob.date,
                       );
                     },
-                    onLinkExistingMap: (mapId, monthKey) async {
+                    onLinkExistingMap: (mapId, monthKey, mapName) async {
+                      final client =
+                          await clientForLinkedMap(monthKey, mapId, widget.job);
                       final freshJob =
                           _freshJobOrNull(scheduleProvider, widget.job.id);
                       if (freshJob == null) {
                         if (context.mounted) _showJobDeletedSnackBar(context);
                         return;
                       }
-                      final modifiedJob = freshJob.copyWith(
-                        linkedMapId: mapId,
-                        linkedMapMonthKey: monthKey,
-                      );
+                      // The editor's own save only writes work maps/areas, so
+                      // the map's client can go straight onto the job here.
+                      final modifiedJob =
+                          withLinkedMapClient(freshJob, client).withLinkedMaps([
+                        ...freshJob.effectiveLinkedMaps
+                            .where((m) => m.mapId != mapId),
+                        JobLinkedMap(
+                          mapId: mapId,
+                          monthKey: monthKey,
+                          name: mapName,
+                        ),
+                      ]);
                       await scheduleProvider.updateJobWithUndo(
                         freshJob,
                         modifiedJob,
@@ -1635,8 +1668,7 @@ class _SnippetPickerDialog extends riverpod.ConsumerWidget {
                         child: ListView.separated(
                           shrinkWrap: true,
                           itemCount: instructions.length,
-                          separatorBuilder: (_, __) =>
-                              const Divider(height: 1),
+                          separatorBuilder: (_, __) => const Divider(height: 1),
                           itemBuilder: (context, idx) {
                             final instr = instructions[idx];
                             return InkWell(

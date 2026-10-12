@@ -23,8 +23,7 @@ final sectionPickUpViewProvider =
 
 /// Whether map markers should show their label badges. Toggled from the
 /// 'Plan drivers' header and watched by the day-planner map page.
-final markerLabelsProvider =
-    riverpod.StateProvider<bool>((ref) => true);
+final markerLabelsProvider = riverpod.StateProvider<bool>((ref) => true);
 
 /// Compact dropsheet panel used inside the day planner split screen.
 ///
@@ -68,11 +67,44 @@ class _DayPlannerPanelState extends riverpod.ConsumerState<DayPlannerPanel> {
             date: widget.date,
             onAddDriver: () => _showAddDriverDialog(context),
             onSyncFromSchedule: () async {
-              await dropsheet.syncFromSchedule();
+              // Past days are archived records — re-syncing one can push
+              // allocated stops back to "Unassigned", so confirm first.
+              if (dropsheet.isHistoricalDate) {
+                final proceed = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Sync an archived dropsheet?'),
+                    content: const Text(
+                      'This day has already been run. Syncing re-matches it '
+                      'against the schedule as it stands today, so stops '
+                      'whose jobs have since changed will drop off their '
+                      'drivers and reappear under "Unassigned stops".',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: const Text('CANCEL'),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        style: TextButton.styleFrom(
+                            foregroundColor: Colors.orange[700]),
+                        child: const Text('SYNC ANYWAY'),
+                      ),
+                    ],
+                  ),
+                );
+                if (proceed != true) return;
+              }
+              final synced = await dropsheet.syncFromSchedule(
+                  force: dropsheet.isHistoricalDate);
               if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                    content: Text('Synced new stops from schedule.')),
+                SnackBar(
+                  content: Text(synced
+                      ? 'Synced new stops from schedule.'
+                      : 'This dropsheet is archived — nothing was changed.'),
+                ),
               );
             },
           ),
@@ -215,13 +247,11 @@ class _PanelHeader extends riverpod.ConsumerWidget {
           Tooltip(
             message: showLabels ? 'Hide labels' : 'Show labels',
             child: GestureDetector(
-              onTap: () => ref
-                  .read(markerLabelsProvider.notifier)
-                  .state = !showLabels,
+              onTap: () =>
+                  ref.read(markerLabelsProvider.notifier).state = !showLabels,
               child: Container(
                 margin: const EdgeInsets.symmetric(horizontal: 4),
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 9, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
                 decoration: BoxDecoration(
                   color: showLabels
                       ? const Color(0xFF00897B)
@@ -333,8 +363,7 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
         .update((m) => {...m, widget.section.id: v});
   }
 
-  bool _isDistributorStop(DropsheetTask t) =>
-      t.type == DropsheetTaskType.dropOff || t.type == DropsheetTaskType.pickUp;
+  bool _isDistributorStop(DropsheetTask t) => t.isDistributorTask;
 
   /// Tasks that should appear in the planner panel.
   /// Mandatory in-depot tasks (Inspect / Pack / Leave) stay hidden —
@@ -353,10 +382,10 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
   /// the global depot startTime.
   String _leaveTime(DepotConfig depot) {
     try {
-      final leave = widget.section.tasks.firstWhere(
-          (t) => t.type == DropsheetTaskType.leave &&
-              t.typeData['isPickupDivider'] != true &&
-              t.startTime.isNotEmpty);
+      final leave = widget.section.tasks.firstWhere((t) =>
+          t.type == DropsheetTaskType.leave &&
+          t.typeData['isPickupDivider'] != true &&
+          t.startTime.isNotEmpty);
       return leave.startTime;
     } catch (_) {
       return depot.startTime;
@@ -369,11 +398,33 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
     final dropsheet = ref.read(dropsheetRiverpod);
     final messenger = ScaffoldMessenger.of(context);
 
-    if (config.depot.lat == null || config.depot.lng == null) {
+    // Resolve the office coordinates on demand — geocoded once per address
+    // and reused from then on, so there is nothing for the user to do first.
+    if (config.depot.needsGeocoding) {
+      setState(() {
+        if (optimise) {
+          _optimising = true;
+        } else {
+          _calculating = true;
+        }
+      });
+      await config.ensureDepotGeocoded(retryFailed: true);
+      if (!mounted) return;
+      setState(() {
+        if (optimise) {
+          _optimising = false;
+        } else {
+          _calculating = false;
+        }
+      });
+    }
+    if (!config.depot.hasCoordinates) {
       messenger.showSnackBar(
-        const SnackBar(
-          content: Text(
-              'Office is not yet geocoded. Open Task manager and save the office address first.'),
+        SnackBar(
+          content: Text(config.depot.address.trim().isEmpty
+              ? 'No office address set. Add one in Task manager.'
+              : 'Could not locate the office address '
+                  '"${config.depot.address}". Check it in Task manager.'),
         ),
       );
       return;
@@ -1104,6 +1155,7 @@ class _StopRow extends riverpod.ConsumerWidget {
     switch (t.type) {
       case DropsheetTaskType.dropOff:
       case DropsheetTaskType.pickUp:
+      case DropsheetTaskType.distribute:
         final name = (t.typeData['distributorName'] as String?) ?? t.contact;
         return name.isNotEmpty ? name : t.job;
       case DropsheetTaskType.collection:
@@ -1170,6 +1222,8 @@ class _TypeChip extends StatelessWidget {
         return (bg: const Color(0xFFE3F2FD), fg: const Color(0xFF1565C0));
       case DropsheetTaskType.pickUp:
         return (bg: const Color(0xFFE8F5E9), fg: const Color(0xFF2E7D32));
+      case DropsheetTaskType.distribute:
+        return (bg: const Color(0xFFFFF3E0), fg: const Color(0xFFE65100));
       case DropsheetTaskType.collection:
         return (bg: const Color(0xFFFFF8E1), fg: const Color(0xFFEF6C00));
       case DropsheetTaskType.jobReturn:

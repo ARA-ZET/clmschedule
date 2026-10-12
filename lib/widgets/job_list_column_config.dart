@@ -1,6 +1,17 @@
 /// Column configuration for JobListGrid
 /// Maps column keys to their widths and properties
 class JobListColumnConfig {
+  /// Width of one icon slot in the Actions column.
+  ///
+  /// Every action renders in a box exactly this wide. Left to size themselves,
+  /// an `IconButton` and a struck-through placeholder come out different
+  /// widths, which made the delete icon sit in a different place on every row
+  /// depending on which actions happened to be available.
+  static const double actionSlotWidth = 40;
+
+  /// Edit, copy, invoice, report, delete.
+  static const int actionSlotCount = 5;
+
   static const Map<String, double> columnWidths = {
     'date': 80,
     'client': 252,
@@ -21,7 +32,10 @@ class JobListColumnConfig {
     'reportAddresses': 150,
     'whoToInvoice': 120,
     'refresh': 60,
-    'actions': 120,
+    // Derived from the slots themselves, plus a little breathing room, so
+    // adding a sixth action cannot silently clip it out of sight the way a
+    // fourth once was at a hardcoded 120.
+    'actions': actionSlotWidth * actionSlotCount + 12,
   };
 
   static double getWidth(String columnKey) {

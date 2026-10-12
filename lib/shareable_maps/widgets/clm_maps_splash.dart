@@ -137,51 +137,51 @@ class _ClmMapsSplashState extends State<ClmMapsSplash>
                           child: Stack(
                             fit: StackFit.expand,
                             children: [
-                          Image.asset(
-                            'assets/map.jpg',
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => Container(
-                              color: const Color(0xFF0A2E6E),
-                              child: const Icon(Icons.map,
-                                  size: 48, color: Colors.white70),
-                            ),
-                          ),
-                          // Subtle overlay so the LOADING chip is readable
-                          Container(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                                colors: [
-                                  Colors.black.withValues(alpha: 0.15),
-                                  Colors.transparent,
-                                ],
-                              ),
-                            ),
-                          ),
-                          // LOADING chip
-                          Positioned(
-                            top: 10,
-                            left: 10,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 5),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: const Text(
-                                'LOADING',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w700,
-                                  color: Color(0xFF2C4A6E),
-                                  letterSpacing: 1.2,
+                              Image.asset(
+                                'assets/map.jpg',
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => Container(
+                                  color: const Color(0xFF0A2E6E),
+                                  child: const Icon(Icons.map,
+                                      size: 48, color: Colors.white70),
                                 ),
                               ),
-                            ),
-                          ),
-                        ],
+                              // Subtle overlay so the LOADING chip is readable
+                              Container(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      Colors.black.withValues(alpha: 0.15),
+                                      Colors.transparent,
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              // LOADING chip
+                              Positioned(
+                                top: 10,
+                                left: 10,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 12, vertical: 5),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: const Text(
+                                    'LOADING',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF2C4A6E),
+                                      letterSpacing: 1.2,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
@@ -253,8 +253,7 @@ class _ClmMapsSplashState extends State<ClmMapsSplash>
                               borderRadius: BorderRadius.circular(2),
                               child: LinearProgressIndicator(
                                 backgroundColor: Colors.grey.shade200,
-                                valueColor:
-                                    const AlwaysStoppedAnimation<Color>(
+                                valueColor: const AlwaysStoppedAnimation<Color>(
                                   Color(0xFF2C4A6E),
                                 ),
                                 minHeight: 3,

@@ -138,6 +138,7 @@ enum MarkerLabelField {
   switch (type) {
     case DropsheetTaskType.dropOff:
     case DropsheetTaskType.pickUp:
+    case DropsheetTaskType.distribute:
       return (
         primary: MarkerLabelField.distributorName,
         secondary: MarkerLabelField.workArea,
@@ -171,20 +172,39 @@ class DepotConfig {
   final double? lng;
   final String startTime; // "HH:mm"
 
+  /// The address string [lat]/[lng] were resolved from. Coordinates are only
+  /// trusted while this still matches [address], so the office is geocoded
+  /// once per address and reused forever after.
+  final String geocodedAddress;
+
   const DepotConfig({
     this.address = '27 7th Ave, Kensington, Cape Town',
     this.lat,
     this.lng,
     this.startTime = '07:30',
+    this.geocodedAddress = '',
   });
 
   bool get hasCoordinates => lat != null && lng != null;
+
+  static String normaliseAddress(String value) =>
+      value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  /// True when the stored coordinates were resolved from the current address.
+  bool get isGeocoded =>
+      hasCoordinates &&
+      normaliseAddress(geocodedAddress) == normaliseAddress(address);
+
+  /// True when we should call the geocoder: there is an address to resolve
+  /// and its coordinates are missing or stale.
+  bool get needsGeocoding => address.trim().isNotEmpty && !isGeocoded;
 
   DepotConfig copyWith({
     String? address,
     double? lat,
     double? lng,
     String? startTime,
+    String? geocodedAddress,
     bool clearCoordinates = false,
   }) =>
       DepotConfig(
@@ -192,6 +212,9 @@ class DepotConfig {
         lat: clearCoordinates ? null : (lat ?? this.lat),
         lng: clearCoordinates ? null : (lng ?? this.lng),
         startTime: startTime ?? this.startTime,
+        geocodedAddress: clearCoordinates
+            ? ''
+            : (geocodedAddress ?? this.geocodedAddress),
       );
 
   Map<String, dynamic> toMap() => {
@@ -199,15 +222,39 @@ class DepotConfig {
         if (lat != null) 'lat': lat,
         if (lng != null) 'lng': lng,
         'startTime': startTime,
+        'geocodedAddress': geocodedAddress,
       };
 
-  factory DepotConfig.fromMap(Map<String, dynamic> data) => DepotConfig(
-        address:
-            (data['address'] as String?) ?? '27 7th Ave, Kensington, Cape Town',
-        lat: (data['lat'] as num?)?.toDouble(),
-        lng: (data['lng'] as num?)?.toDouble(),
-        startTime: (data['startTime'] as String?) ?? '07:30',
-      );
+  @override
+  bool operator ==(Object other) =>
+      other is DepotConfig &&
+      other.address == address &&
+      other.lat == lat &&
+      other.lng == lng &&
+      other.startTime == startTime &&
+      other.geocodedAddress == geocodedAddress;
+
+  @override
+  int get hashCode =>
+      Object.hash(address, lat, lng, startTime, geocodedAddress);
+
+  factory DepotConfig.fromMap(Map<String, dynamic> data) {
+    final address =
+        (data['address'] as String?) ?? '27 7th Ave, Kensington, Cape Town';
+    final lat = (data['lat'] as num?)?.toDouble();
+    final lng = (data['lng'] as num?)?.toDouble();
+    // Configs written before `geocodedAddress` existed already hold coordinates
+    // for their saved address — adopt them instead of re-geocoding.
+    final geocoded = (data['geocodedAddress'] as String?) ??
+        ((lat != null && lng != null) ? address : '');
+    return DepotConfig(
+      address: address,
+      lat: lat,
+      lng: lng,
+      startTime: (data['startTime'] as String?) ?? '07:30',
+      geocodedAddress: geocoded,
+    );
+  }
 }
 
 /// A user-defined task type created in the Task Manager.

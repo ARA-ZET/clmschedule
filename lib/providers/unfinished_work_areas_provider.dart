@@ -160,7 +160,9 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
     return addItem(
       clients: job.clients,
       workingAreas: job.workingAreas,
-      workMaps: job.workMaps,
+      // Linked client-map areas go in as copies: the pool keeps a snapshot
+      // of the ground that was left, not a live link.
+      workMaps: job.detachedWorkMaps,
       statusId: job.statusId,
       dropOffPoint: job.dropOffPoint,
     );

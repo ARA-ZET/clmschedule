@@ -3,9 +3,20 @@
 // Controls per-mode, per-tab map layer visibility (waypoints and polygons).
 // The TEMap reads from this provider so the toggle in the left panel
 // immediately shows/hides markers without reloading data.
+import 'dart:collection';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:gpx/gpx.dart';
 import 'te_mode_provider.dart';
+
+/// Waypoints are tracked by object identity, never by value: a GPX file can
+/// easily hold hundreds of waypoints with identical names/coordinates, and
+/// `Wpt` uses value equality. Identity also survives index shifts caused by
+/// deleting or undoing other waypoints.
+Set<Wpt> _identitySet([Iterable<Wpt> initial = const []]) =>
+    LinkedHashSet<Wpt>(equals: identical, hashCode: identityHashCode)
+      ..addAll(initial);
 
 final teMapLayerRiverpod = riverpod.ChangeNotifierProvider<TEMapLayerProvider>(
     (ref) => TEMapLayerProvider());
@@ -18,12 +29,16 @@ class _ModeLayerState {
   final Map<int, int?> selectedWaypoint = {};
   final Map<int, Set<int>> multiSelectedWaypoints = {};
 
+  /// Waypoints the user flagged as "keep" — protected from bulk deletes.
+  final Map<int, Set<Wpt>> keptWaypoints = {};
+
   void clear() {
     waypointsVisible.clear();
     polygonsVisible.clear();
     waypointFilter.clear();
     selectedWaypoint.clear();
     multiSelectedWaypoints.clear();
+    keptWaypoints.clear();
   }
 
   void removeTab(int tabIndex) {
@@ -32,11 +47,13 @@ class _ModeLayerState {
     polygonsVisible.remove(tabIndex);
     selectedWaypoint.remove(tabIndex);
     multiSelectedWaypoints.remove(tabIndex);
+    keptWaypoints.remove(tabIndex);
     _shiftDown(waypointsVisible, tabIndex);
     _shiftDown(waypointFilter, tabIndex);
     _shiftDown(polygonsVisible, tabIndex);
     _shiftDown(selectedWaypoint, tabIndex);
     _shiftDown(multiSelectedWaypoints, tabIndex);
+    _shiftDown(keptWaypoints, tabIndex);
   }
 }
 
@@ -60,6 +77,7 @@ class TEMapLayerProvider extends ChangeNotifier {
     TEMode.trim: _ModeLayerState(),
     TEMode.processing: _ModeLayerState(),
     TEMode.update: _ModeLayerState(),
+    TEMode.report: _ModeLayerState(),
   };
   TEMode _activeMode = TEMode.processing;
   _ModeLayerState get _s => _stateByMode[_activeMode]!;
@@ -87,6 +105,45 @@ class TEMapLayerProvider extends ChangeNotifier {
 
   void clearMultiSelection(int tabIndex) {
     _s.multiSelectedWaypoints.remove(tabIndex);
+    notifyListeners();
+  }
+
+  // ── Keep list ─────────────────────────────────────────────────────────────
+  //
+  // Workflow: a file can arrive with thousands of waypoints where only a
+  // handful matter. The user clicks the handful they want to keep, then
+  // deletes everything else — either with "Delete others" or by rubber-band
+  // selecting the rest (kept waypoints are never selected, so they cannot be
+  // deleted in bulk by accident).
+
+  /// The kept waypoints of [tabIndex] that are still present in [waypoints].
+  /// A kept waypoint can be deleted on its own (row delete, Delete key), which
+  /// would otherwise leave a dangling entry and an inflated "kept" count.
+  /// Pure filter — it never mutates provider state, so it is safe from build().
+  Set<Wpt> liveKeptWaypoints(int tabIndex, List<Wpt> waypoints) {
+    final kept = _s.keptWaypoints[tabIndex];
+    if (kept == null || kept.isEmpty) return _identitySet();
+    return _identitySet(waypoints.where(kept.contains));
+  }
+
+  bool isWaypointKept(int tabIndex, Wpt waypoint) =>
+      _s.keptWaypoints[tabIndex]?.contains(waypoint) ?? false;
+
+  void toggleKeptWaypoint(int tabIndex, Wpt waypoint) {
+    final set = _s.keptWaypoints.putIfAbsent(tabIndex, _identitySet);
+    if (!set.remove(waypoint)) set.add(waypoint);
+    if (set.isEmpty) _s.keptWaypoints.remove(tabIndex);
+    notifyListeners();
+  }
+
+  void addKeptWaypoints(int tabIndex, Iterable<Wpt> waypoints) {
+    if (waypoints.isEmpty) return;
+    _s.keptWaypoints.putIfAbsent(tabIndex, _identitySet).addAll(waypoints);
+    notifyListeners();
+  }
+
+  void clearKeptWaypoints(int tabIndex) {
+    if (_s.keptWaypoints.remove(tabIndex) == null) return;
     notifyListeners();
   }
 

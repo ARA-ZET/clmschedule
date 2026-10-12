@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'package:cloud_firestore/cloud_firestore.dart' show FirebaseException;
 import 'package:flutter/foundation.dart';
+import 'package:intl/intl.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/schedule.dart';
@@ -10,9 +13,12 @@ import '../models/work_suburb.dart';
 import '../models/custom_polygon.dart';
 import '../models/schedule_confirmation_status.dart';
 import '../services/firestore_service.dart';
+import '../services/schedule_batch_move.dart';
 import '../services/schedule_mutation_types.dart';
 import 'auth_provider.dart';
 import 'dropsheet_provider.dart';
+import '../track_editor/services/te_place_names.dart' as place_names;
+import '../utils/unsaved_changes_guard.dart';
 
 final scheduleRiverpod = riverpod.ChangeNotifierProvider<ScheduleProvider>(
   (ref) => ScheduleProvider(ref: ref),
@@ -26,6 +32,20 @@ class ScheduleProvider extends ChangeNotifier {
   List<Distributor> _distributors = [];
   List<Job> _currentMonthJobs = [];
   List<Job> _nextMonthJobs = [];
+
+  // What the Firestore streams last delivered. [_currentMonthJobs] /
+  // [_nextMonthJobs] are these with every pending write laid on top (see
+  // [_rebuildFromServer]).
+  List<Job> _serverCurrentMonthJobs = [];
+  List<Job> _serverNextMonthJobs = [];
+
+  // Extra months streamed on request (see [ensureMonthsLoadedForRange]) for
+  // views like payroll whose date range crosses into a month outside the
+  // current/next window. Feeds the per-day lookups only — never [jobs] —
+  // so the schedule grid and month-wide operations are unaffected.
+  final Map<String, List<Job>> _extraMonthJobs = {};
+  final Map<String, StreamSubscription<List<Job>>> _extraMonthSubscriptions =
+      {};
   List<WorkArea> _workAreas = [];
   List<WorkSuburb> _workSuburbs = [];
   DateTime _currentMonth = scheduleNow();
@@ -116,67 +136,229 @@ class ScheduleProvider extends ChangeNotifier {
         (a.longitude - b.longitude).abs() < eps;
   }
 
+  // --- Optimistic writes -------------------------------------------------
+  //
+  // Every schedule mutation shows on screen at once and is saved in the
+  // background, one at a time, in the order the user made them:
+  //
+  // * The writes run through [_writeChain], so a second drag never starts its
+  //   transaction before the first has committed. Run in parallel, a later
+  //   drag read the day docs before the earlier one landed, missed its job
+  //   and failed, rolling the grid back.
+  // * Each write's optimistic change is kept as a [_PendingWrite] and laid
+  //   over every stream emission until the stream shows it. Transactions
+  //   are not applied to Firestore's local cache, so a snapshot arriving
+  //   mid-save (another day's edit, the previous drag landing) used to
+  //   replace the lists and flash the job back to where it came from.
+  // * Network and contention failures are retried until they go through.
+  //   Only a write that cannot apply (its job was deleted or moved by
+  //   someone else) is dropped — and only its own change is undone.
+
+  final List<_PendingWrite> _pendingWrites = [];
+  _PendingWrite? _recordingWrite;
+  Future<void> _writeChain = Future<void>.value();
+
+  /// Schedule writes not yet saved. Non-zero while a save is in flight or
+  /// retrying (e.g. offline) — the page warns before closing meanwhile.
+  final ValueNotifier<int> pendingWriteCount = ValueNotifier<int>(0);
+
+  /// Upper bound on how long a saved write keeps masking the stream when
+  /// the stream never shows exactly what was written (the service tidied
+  /// it, or someone else edited the job straight after).
+  static const Duration _confirmTimeout = Duration(seconds: 8);
+
   /// Replace a job in the local lists by id, then notify listeners instantly.
   void _optimisticUpdateJob(Job newJob) {
-    for (int i = 0; i < _currentMonthJobs.length; i++) {
-      if (_currentMonthJobs[i].id == newJob.id) {
-        _currentMonthJobs = List.of(_currentMonthJobs)..[i] = newJob;
-        _invalidateCaches();
-        notifyListeners();
-        return;
-      }
+    final recording = _recordingWrite;
+    if (recording != null) {
+      recording.upserts[newJob.id] = newJob;
+      recording.removes.remove(newJob.id);
     }
-    for (int i = 0; i < _nextMonthJobs.length; i++) {
-      if (_nextMonthJobs[i].id == newJob.id) {
-        _nextMonthJobs = List.of(_nextMonthJobs)..[i] = newJob;
-        _invalidateCaches();
-        notifyListeners();
-        return;
-      }
+    if (_upsertLocal(newJob)) {
+      _invalidateCaches();
+      notifyListeners();
     }
   }
 
   /// Remove a job from local lists by id, then notify listeners instantly.
   void _optimisticRemoveJob(String jobId) {
+    final recording = _recordingWrite;
+    if (recording != null) {
+      recording.removes.add(jobId);
+      recording.upserts.remove(jobId);
+    }
+    _removeLocal(jobId);
+    _invalidateCaches();
+    notifyListeners();
+  }
+
+  /// Puts [job] in the local lists in place of its old copy, in the list for
+  /// its month (a job moved across the month boundary changes list). A job
+  /// the lists have never held is only added when one of the loaded months
+  /// owns its date. Returns whether anything changed.
+  bool _upsertLocal(Job job) {
+    final ci = _currentMonthJobs.indexWhere((j) => j.id == job.id);
+    final ni = ci >= 0 ? -1 : _nextMonthJobs.indexWhere((j) => j.id == job.id);
+    final next = DateTime(_currentMonth.year, _currentMonth.month + 1);
+    final inCurrent = job.date.year == _currentMonth.year &&
+        job.date.month == _currentMonth.month;
+    final inNext = job.date.year == next.year && job.date.month == next.month;
+    if (ci < 0 && ni < 0 && !inCurrent && !inNext) return false;
+
+    final toCurrent = inCurrent || (!inNext && ci >= 0);
+    final current = List.of(_currentMonthJobs);
+    final nextJobs = List.of(_nextMonthJobs);
+    if (ci >= 0) current.removeAt(ci);
+    if (ni >= 0) nextJobs.removeAt(ni);
+    if (toCurrent) {
+      current.insert(ci >= 0 ? ci : current.length, job);
+    } else {
+      nextJobs.insert(ni >= 0 ? ni : nextJobs.length, job);
+    }
+    _currentMonthJobs = current;
+    _nextMonthJobs = nextJobs;
+    return true;
+  }
+
+  void _removeLocal(String jobId) {
     final beforeCurrent = _currentMonthJobs.length;
     _currentMonthJobs = _currentMonthJobs.where((j) => j.id != jobId).toList();
     if (_currentMonthJobs.length == beforeCurrent) {
       _nextMonthJobs = _nextMonthJobs.where((j) => j.id != jobId).toList();
     }
-    _invalidateCaches();
-    notifyListeners();
   }
 
-  /// Snapshot of the local job lists. The optimistic helpers replace the
-  /// lists copy-on-write (never mutate in place), so holding the current
-  /// references is an exact snapshot.
-  ({List<Job> current, List<Job> next}) _captureLocalState() =>
-      (current: _currentMonthJobs, next: _nextMonthJobs);
-
-  void _restoreLocalState(({List<Job> current, List<Job> next}) snapshot) {
-    _currentMonthJobs = snapshot.current;
-    _nextMonthJobs = snapshot.next;
+  /// Rebuilds the local lists from the last stream data plus every pending
+  /// write, oldest first. Saved writes the stream now shows are retired.
+  void _rebuildFromServer() {
+    _pendingWrites.removeWhere((w) => w.committed && _serverShows(w));
+    _currentMonthJobs = List.of(_serverCurrentMonthJobs);
+    _nextMonthJobs = List.of(_serverNextMonthJobs);
+    for (final w in _pendingWrites) {
+      w.removes.forEach(_removeLocal);
+      w.upserts.values.forEach(_upsertLocal);
+    }
     _invalidateCaches();
-    notifyListeners();
   }
 
-  /// Uniform pattern for every schedule mutation: capture local state,
-  /// apply the optimistic update, persist via the transactional service,
-  /// and on any failure restore the exact pre-mutation local state before
-  /// rethrowing so the UI can surface the error. The Firestore stream
-  /// remains the source of truth and reconciles on its next emission.
-  Future<T> _guardedMutation<T>({
+  /// Whether the stream data already reflects [write].
+  bool _serverShows(_PendingWrite write) {
+    final server = <String, Job>{
+      for (final j in _serverCurrentMonthJobs) j.id: j,
+      for (final j in _serverNextMonthJobs) j.id: j,
+    };
+    if (write.removes.any(server.containsKey)) return false;
+    for (final e in write.upserts.entries) {
+      final s = server[e.key];
+      if (s == null || _fingerprint(s) != _fingerprint(e.value)) return false;
+    }
+    return true;
+  }
+
+  /// What a job saves as — resolved link areas excluded, the way [Job.toMap]
+  /// writes it — so the stream's copy and the optimistic one compare equal.
+  static String _fingerprint(Job job) => job.toMap().toString();
+
+  /// Uniform pattern for every schedule mutation: apply the optimistic
+  /// update now, then persist it through the write queue (see above). The
+  /// returned future completes once the write is saved, or fails if it
+  /// cannot be applied — after its optimistic change has been undone.
+  ///
+  /// [persist] must not call [_guardedMutation] itself: it would wait in the
+  /// queue behind its own write.
+  Future<void> _guardedMutation<T>({
     void Function()? applyOptimistic,
     required Future<T> Function() persist,
-  }) async {
-    final snapshot = _captureLocalState();
-    applyOptimistic?.call();
+  }) {
+    final write = _PendingWrite();
+    _recordingWrite = write;
     try {
-      return await persist();
-    } catch (e) {
-      _restoreLocalState(snapshot);
-      rethrow;
+      applyOptimistic?.call();
+    } finally {
+      _recordingWrite = null;
     }
+    _pendingWrites.add(write);
+    _setPendingWriteCount(pendingWriteCount.value + 1);
+
+    final done = Completer<void>();
+    _writeChain = _writeChain.then((_) async {
+      try {
+        await _persistWithRetry(persist);
+        write.committed = true;
+        // The stream normally confirms within a moment; if it never shows
+        // exactly this, stop masking it after [_confirmTimeout].
+        Timer(_confirmTimeout, () {
+          if (_pendingWrites.remove(write)) {
+            _rebuildFromServer();
+            notifyListeners();
+          }
+        });
+        if (_serverShows(write)) {
+          _pendingWrites.remove(write);
+        }
+        done.complete();
+      } catch (e, st) {
+        _pendingWrites.remove(write);
+        _rebuildFromServer();
+        notifyListeners();
+        done.completeError(e, st);
+      } finally {
+        _setPendingWriteCount(pendingWriteCount.value - 1);
+      }
+    });
+    return done.future;
+  }
+
+  void _setPendingWriteCount(int count) {
+    pendingWriteCount.value = count;
+    setUnsavedChangesGuard(count > 0);
+  }
+
+  /// Runs [persist] until it succeeds. Transient failures (offline, timeouts,
+  /// transaction contention) are retried with backoff, indefinitely;
+  /// anything else is thrown.
+  Future<void> _persistWithRetry<T>(Future<T> Function() persist) async {
+    var attempt = 0;
+    var lastWasAmbiguous = false;
+    while (true) {
+      attempt++;
+      try {
+        await persist().timeout(const Duration(seconds: 30));
+        return;
+      } catch (e) {
+        // A retry after a timeout / dropped connection can find its job
+        // already moved: the earlier attempt did commit, only the reply was
+        // lost. The stream then shows the result.
+        if (e is JobNotFoundException && lastWasAmbiguous) {
+          debugPrint('ScheduleProvider: write already applied on attempt '
+              '${attempt - 1} ($e)');
+          return;
+        }
+        if (!_isTransientWriteError(e)) rethrow;
+        lastWasAmbiguous = true;
+        final delayMs =
+            (500 * (1 << (attempt - 1).clamp(0, 5))).clamp(500, 15000);
+        debugPrint('ScheduleProvider: schedule write attempt $attempt failed '
+            '($e); retrying in ${delayMs}ms');
+        await Future<void>.delayed(Duration(milliseconds: delayMs));
+      }
+    }
+  }
+
+  static bool _isTransientWriteError(Object e) {
+    if (e is TimeoutException) return true;
+    if (e is FirebaseException) {
+      return const {
+        'unavailable',
+        'aborted',
+        'deadline-exceeded',
+        'resource-exhausted',
+        'internal',
+        'unknown',
+        'failed-precondition',
+      }.contains(e.code);
+    }
+    return false;
   }
 
   /// Attaches the next-month job stream before a write that targets a date
@@ -237,13 +419,12 @@ class ScheduleProvider extends ChangeNotifier {
   /// distributors who have at least one schedule job whose date falls
   /// within `[start, end]` (inclusive) — same rule as [gridDistributors],
   /// but scoped to an arbitrary date range (a payroll week) instead of the
-  /// rolling current/next-month cache. Note [jobs] only spans the current
-  /// and next calendar month, so a payroll week further in the past may not
-  /// find matching jobs here — inactive distributors for such a week simply
-  /// won't show, which is the same trade-off [gridDistributors] makes.
+  /// rolling current/next-month cache. Also sees any extra months requested
+  /// via [ensureMonthsLoadedForRange], which payroll does for each week it
+  /// opens, so weeks crossing a month boundary find their jobs too.
   List<Distributor> distributorsWithJobsInRange(DateTime start, DateTime end) {
     final distributorIdsWithJobs = <String>{};
-    for (final job in jobs) {
+    for (final job in _jobsWithExtraMonths) {
       // Compare by date only — job.date may carry a time-of-day component
       // (e.g. time-slotted job types), which would wrongly exclude a job
       // later on the range's end day if compared against midnight directly.
@@ -258,11 +439,67 @@ class ScheduleProvider extends ChangeNotifier {
     }).toList();
   }
 
+  /// [jobs] plus any extra months requested via [ensureMonthsLoadedForRange]
+  /// that the current/next streams don't already cover.
+  List<Job> get _jobsWithExtraMonths {
+    if (_extraMonthJobs.isEmpty) return jobs;
+    final covered = {
+      _firestoreService.getMonthlyDocumentId(_currentMonth),
+      if (_nextMonthSubscribedFor != null)
+        _firestoreService.getMonthlyDocumentId(_nextMonthSubscribedFor!),
+    };
+    return [
+      ...jobs,
+      for (final e in _extraMonthJobs.entries)
+        if (!covered.contains(e.key)) ...e.value,
+    ];
+  }
+
+  /// Streams every month touched by `[start, end]` that isn't already
+  /// loaded, so [getJobsForDistributorAndDate] and
+  /// [distributorsWithJobsInRange] see jobs across a month boundary (e.g. a
+  /// payroll week of 25 Sep – 1 Oct viewed in October). Replaces any
+  /// previously requested extra months — one caller-defined range at a time.
+  void ensureMonthsLoadedForRange(DateTime start, DateTime end) {
+    final wanted = <String, DateTime>{};
+    for (var m = DateTime(start.year, start.month);
+        !m.isAfter(DateTime(end.year, end.month));
+        m = DateTime(m.year, m.month + 1)) {
+      wanted[_firestoreService.getMonthlyDocumentId(m)] = m;
+    }
+    wanted.remove(_firestoreService.getMonthlyDocumentId(_currentMonth));
+    final nextId = _firestoreService.getMonthlyDocumentId(
+        DateTime(_currentMonth.year, _currentMonth.month + 1));
+    if (_nextMonthSubscribedFor != null) wanted.remove(nextId);
+
+    for (final id in _extraMonthSubscriptions.keys.toList()) {
+      if (wanted.containsKey(id)) continue;
+      _extraMonthSubscriptions.remove(id)?.cancel();
+      _extraMonthJobs.remove(id);
+      _invalidateCaches();
+    }
+    for (final e in wanted.entries) {
+      if (_extraMonthSubscriptions.containsKey(e.key)) continue;
+      _extraMonthSubscriptions[e.key] =
+          _firestoreService.streamJobs(e.value).listen(
+        (jobs) {
+          _extraMonthJobs[e.key] = jobs;
+          _invalidateCaches();
+          notifyListeners();
+        },
+        onError: (error) {
+          debugPrint(
+              'ScheduleProvider: Extra month ${e.key} jobs stream error: $error');
+        },
+      );
+    }
+  }
+
   /// Build (or return cached) lookup map for O(1) cell queries.
   Map<String, List<Job>> get _lookupMap {
     if (_jobLookupMap != null) return _jobLookupMap!;
     final map = <String, List<Job>>{};
-    for (final job in jobs) {
+    for (final job in _jobsWithExtraMonths) {
       final key =
           '${job.distributorId}:${job.date.year}-${job.date.month.toString().padLeft(2, '0')}-${job.date.day.toString().padLeft(2, '0')}';
       (map[key] ??= []).add(job);
@@ -290,9 +527,8 @@ class ScheduleProvider extends ChangeNotifier {
         return ScheduleLogUser(
           uid: auth.user?.uid,
           email: auth.user?.email,
-          name: auth.appUser?.name ??
-              auth.user?.displayName ??
-              auth.user?.email,
+          name:
+              auth.appUser?.name ?? auth.user?.displayName ?? auth.user?.email,
         );
       };
     }
@@ -437,6 +673,10 @@ class ScheduleProvider extends ChangeNotifier {
   // Null when no next-month listener is active.
   DateTime? _nextMonthSubscribedFor;
 
+  /// Completes on the next-month stream's first delivery, so code that needs
+  /// that month's occupancy (batch moves) can wait for it.
+  Completer<void> _nextMonthLoaded = Completer<void>();
+
   // Load job streams for a specific month (and next month when it has data)
   // Only tears down and recreates the two job subscriptions.
   void _loadJobStreamsForMonth(DateTime month) {
@@ -444,11 +684,14 @@ class ScheduleProvider extends ChangeNotifier {
     _currentMonthJobsSubscription?.cancel();
     _nextMonthJobsSubscription?.cancel();
     _nextMonthSubscribedFor = null;
+    _nextMonthLoaded = Completer<void>();
 
     // Clear stale data from previous month so the lookup map
     // doesn't contain old-month entries while new streams start.
     _currentMonthJobs = [];
     _nextMonthJobs = [];
+    _serverCurrentMonthJobs = [];
+    _serverNextMonthJobs = [];
 
     // Invalidate all derived caches
     _invalidateCaches();
@@ -459,8 +702,9 @@ class ScheduleProvider extends ChangeNotifier {
     // Listen to jobs stream for the current month — set up synchronously
     _currentMonthJobsSubscription = _firestoreService.streamJobs(month).listen(
       (jobs) {
-        _currentMonthJobs = jobs;
-        _invalidateCaches();
+        _serverCurrentMonthJobs = jobs;
+        _rebuildFromServer();
+        _schedulePointNameBackfill();
         debugPrint(
             'ScheduleProvider: Received ${jobs.length} jobs for current month ${_firestoreService.getMonthlyDocumentId(month)}');
         notifyListeners();
@@ -508,8 +752,10 @@ class ScheduleProvider extends ChangeNotifier {
     _nextMonthSubscribedFor = nextMonth;
     _nextMonthJobsSubscription = _firestoreService.streamJobs(nextMonth).listen(
       (jobs) {
-        _nextMonthJobs = jobs;
-        _invalidateCaches();
+        _serverNextMonthJobs = jobs;
+        if (!_nextMonthLoaded.isCompleted) _nextMonthLoaded.complete();
+        _rebuildFromServer();
+        _schedulePointNameBackfill();
         debugPrint(
             'ScheduleProvider: Received ${jobs.length} jobs for next month ${_firestoreService.getMonthlyDocumentId(nextMonth)}');
         notifyListeners();
@@ -528,8 +774,10 @@ class ScheduleProvider extends ChangeNotifier {
     _nextMonthSubscribedFor = nextMonth;
     _nextMonthJobsSubscription = _firestoreService.streamJobs(nextMonth).listen(
       (jobs) {
-        _nextMonthJobs = jobs;
-        _invalidateCaches();
+        _serverNextMonthJobs = jobs;
+        if (!_nextMonthLoaded.isCompleted) _nextMonthLoaded.complete();
+        _rebuildFromServer();
+        _schedulePointNameBackfill();
         notifyListeners();
       },
       onError: (error) {
@@ -728,17 +976,184 @@ class ScheduleProvider extends ChangeNotifier {
 
   Future<void> addJob(Job job) async {
     try {
-      final normalized = _normalizeDropOffPoint(job, preferExisting: false);
-      await _firestoreService.addJob(normalized, normalized.date);
+      final normalized = await _nameBarePoint(
+          _normalizeDropOffPoint(job, preferExisting: false));
+      final id = await _firestoreService.addJob(normalized, normalized.date);
       debugPrint('Successfully added job for ${job.date}');
+      _nameBarePointLater(id, normalized);
     } catch (e) {
       debugPrint('Error adding job: $e');
       rethrow;
     }
   }
 
+  // ── Naming point-only jobs ───────────────────────────────────────────────
+  //
+  // A job placed as a single point (tapped or found by address search) has
+  // no work-area polygon to take a name from, so it used to read "To be
+  // assigned" on the schedule and the dropsheet. Such jobs are named after
+  // the nearest street intersection ("Voortrekker Rd & Durban Rd") from
+  // OpenStreetMap. Only an empty / placeholder working area is ever filled;
+  // a name someone typed is never replaced.
+
+  static bool _isUnnamedArea(String area) {
+    final t = area.trim().toLowerCase();
+    return t.isEmpty || t == 'to be assigned';
+  }
+
+  /// The point to name when [job] is "just a point" and still unnamed, else
+  /// null. Jobs with work-area polygons (own or linked) are never renamed.
+  @visibleForTesting
+  static LatLng? barePointToNameForTest(Job job) => _barePointToName(job);
+
+  static LatLng? _barePointToName(Job job) {
+    if (job.areaLinks.isNotEmpty) return null;
+    if (job.workMaps.any((w) => w.isPolygon)) return null;
+    if (!job.workingAreas.every(_isUnnamedArea)) return null;
+    if (job.dropOffPoint != null) return job.dropOffPoint;
+    for (final w in job.workMaps) {
+      if (w.isPoint && w.points.isNotEmpty) return w.points.first;
+    }
+    return null;
+  }
+
+  /// Street intersection at [point], or null if none / not answered in time.
+  static Future<String?> _intersectionAt(LatLng point,
+      {Duration? timeout}) async {
+    final key = place_names.tePlaceKey(point.latitude, point.longitude);
+    var lookup =
+        place_names.resolveIntersections([(point.latitude, point.longitude)]);
+    if (timeout != null) {
+      lookup = lookup.timeout(timeout, onTimeout: () => const {});
+    }
+    try {
+      final name = (await lookup)[key]?.trim();
+      return (name == null || name.isEmpty) ? null : name;
+    } catch (e) {
+      debugPrint('ScheduleProvider: intersection lookup failed: $e');
+      return null;
+    }
+  }
+
+  /// [job] with its working area set to the intersection name when it is an
+  /// unnamed point and the name is known quickly (usually from memory — the
+  /// jobs split off one Job List item share a point). Never delays a save by
+  /// more than a few seconds; [_nameBarePointLater] covers the slow case.
+  Future<Job> _nameBarePoint(Job job) async {
+    final point = _barePointToName(job);
+    if (point == null) return job;
+    final name =
+        await _intersectionAt(point, timeout: const Duration(seconds: 3));
+    return name == null ? job : job.copyWith(workingAreas: [name]);
+  }
+
+  /// [job] named from an intersection already in memory — no network call.
+  Job _nameBarePointFromCache(Job job) {
+    final point = _barePointToName(job);
+    if (point == null) return job;
+    final (known, name) =
+        place_names.cachedIntersection(point.latitude, point.longitude);
+    final n = name?.trim();
+    return known && n != null && n.isNotEmpty
+        ? job.copyWith(workingAreas: [n])
+        : job;
+  }
+
+  /// `jobId@lat,lng` naming follow-ups in flight, so repeated edits of the
+  /// same unnamed job don't each start another lookup.
+  final Set<String> _pointNamesInFlight = {};
+
+  /// Names a saved point-only job once the lookup finishes, re-reading the
+  /// job first so a name added meanwhile (or a new polygon) is respected.
+  void _nameBarePointLater(String jobId, Job saved) {
+    final point = _barePointToName(saved);
+    if (point == null || jobId.isEmpty) return;
+    final flightKey =
+        '$jobId@${place_names.tePlaceKey(point.latitude, point.longitude)}';
+    if (!_pointNamesInFlight.add(flightKey)) return;
+    unawaited(() async {
+      final name = await _intersectionAt(point)
+          .whenComplete(() => _pointNamesInFlight.remove(flightKey));
+      if (name == null) return;
+      try {
+        final current = (await _firestoreService.fetchJobsForDate(saved.date))
+            .where((j) => j.id == jobId)
+            .firstOrNull;
+        if (current == null) return;
+        final stillBare = _barePointToName(current);
+        if (stillBare == null || !_sameLatLng(stillBare, point)) return;
+        await updateJob(current.copyWith(workingAreas: [name]));
+      } catch (e) {
+        debugPrint('ScheduleProvider: naming point job $jobId failed: $e');
+      }
+    }());
+  }
+
+  /// `jobId@lat,lng` pairs already sent for naming this session, so a job
+  /// is looked up once per point (moving its point makes it eligible again).
+  final Set<String> _pointNameAttempts = {};
+  Timer? _pointNameDebounce;
+
+  void _schedulePointNameBackfill() {
+    _pointNameDebounce?.cancel();
+    _pointNameDebounce = Timer(
+        const Duration(seconds: 2), () => unawaited(_backfillPointNames()));
+  }
+
+  /// Names point-only jobs that were created before naming existed (or whose
+  /// lookup failed then), for today onwards — past days are left as run. All
+  /// points go to Overpass in one batched lookup, then each job still
+  /// unnamed at the same point gets its intersection as the working area.
+  Future<void> _backfillPointNames() async {
+    final today = scheduleToday();
+    final todo = <(Job, LatLng, String)>[];
+    for (final j in jobs) {
+      if (j.id.isEmpty) continue;
+      if (DateTime(j.date.year, j.date.month, j.date.day).isBefore(today)) {
+        continue;
+      }
+      final p = _barePointToName(j);
+      if (p == null) continue;
+      final key = place_names.tePlaceKey(p.latitude, p.longitude);
+      if (!_pointNameAttempts.add('${j.id}@$key')) continue;
+      todo.add((j, p, key));
+    }
+    if (todo.isEmpty) return;
+
+    Map<String, String?> names;
+    try {
+      names = await place_names.resolveIntersections(
+          [for (final t in todo) (t.$2.latitude, t.$2.longitude)]);
+    } catch (e) {
+      debugPrint('ScheduleProvider: point-name backfill failed: $e');
+      names = const {};
+    }
+
+    for (final (job, point, key) in todo) {
+      if (!names.containsKey(key)) {
+        // Map servers didn't answer — allow a retry on a later update.
+        _pointNameAttempts.remove('${job.id}@$key');
+        continue;
+      }
+      final name = names[key]?.trim();
+      if (name == null || name.isEmpty) continue;
+      final current = jobs.where((j) => j.id == job.id).firstOrNull;
+      if (current == null) continue;
+      final stillBare = _barePointToName(current);
+      if (stillBare == null || !_sameLatLng(stillBare, point)) continue;
+      try {
+        await updateJob(current.copyWith(workingAreas: [name]));
+        debugPrint('ScheduleProvider: named point job ${job.id} "$name"');
+      } catch (e) {
+        debugPrint('ScheduleProvider: naming point job ${job.id} failed: $e');
+      }
+    }
+  }
+
   Future<void> updateJob(Job job) async {
-    final normalized = _normalizeDropOffPoint(job);
+    // Edits never wait on the map server: only an already-known name is
+    // applied here; [_nameBarePointLater] fills it in otherwise.
+    final normalized = _nameBarePointFromCache(_normalizeDropOffPoint(job));
     // Optimistic UI: surface the change locally before the Firestore
     // round-trip so the calling screen (work-areas map, print map, day
     // planner, etc.) reflects the new state instantly; rolled back
@@ -750,6 +1165,7 @@ class ScheduleProvider extends ChangeNotifier {
       persist: () => _firestoreService.updateJob(normalized, normalized.date),
     );
     _notifyDropsheetOfCoordChanges(previous, normalized);
+    _nameBarePointLater(normalized.id, normalized);
   }
 
   Future<void> deleteJob(String jobId, [DateTime? targetDate]) async {
@@ -772,17 +1188,22 @@ class ScheduleProvider extends ChangeNotifier {
     ));
   }
 
-  Future<void> moveJobBetweenDates(Job originalJob, Job movedJob) async {
+  Future<void> moveJobBetweenDates(Job originalJob, Job movedJob) =>
+      _guardedMutation<void>(
+        persist: () => _persistMoveBetweenDates(originalJob, movedJob),
+      );
+
+  /// The write behind [moveJobBetweenDates], for callers already inside a
+  /// [_guardedMutation].
+  Future<void> _persistMoveBetweenDates(Job originalJob, Job movedJob) async {
     // Attach the destination month's stream first so the moved job stays
     // visible in the local cache after the current-month stream drops it.
     await _ensureMonthStreamsCover(movedJob.date);
-    await _guardedMutation<void>(
-      persist: () => _firestoreService.moveJobBetweenDates(
-        originalJob,
-        movedJob,
-        originalJob.date,
-        movedJob.date,
-      ),
+    await _firestoreService.moveJobBetweenDates(
+      originalJob,
+      movedJob,
+      originalJob.date,
+      movedJob.date,
     );
     // Sync the dropsheets for BOTH the source and destination dates so
     // the dropoff task moves with the job — even when neither date is
@@ -847,7 +1268,7 @@ class ScheduleProvider extends ChangeNotifier {
     if (!_isSameDay(originalJob.date, normalized.date)) {
       await _guardedMutation<void>(
         applyOptimistic: () => _optimisticUpdateJob(normalized),
-        persist: () => moveJobBetweenDates(originalJob, normalized),
+        persist: () => _persistMoveBetweenDates(originalJob, normalized),
       );
       _notifyDropsheetOfCoordChanges(originalJob, normalized);
     } else {
@@ -861,8 +1282,91 @@ class ScheduleProvider extends ChangeNotifier {
       DateTime originalDate, DateTime newDate) async {
     await _guardedMutation<void>(
       applyOptimistic: () => _optimisticUpdateJob(movedJob),
-      persist: () => moveJobBetweenDates(originalJob, movedJob),
+      persist: () => _persistMoveBetweenDates(originalJob, movedJob),
     );
+  }
+
+  /// Moves [jobs] onto [startDate] and the days after it, each to the
+  /// first free distributor (see [planBatchMove]); a full day spills to the
+  /// next. Shown at once and saved as one atomic write. Throws a
+  /// [BatchMoveException] — before changing anything — when the loaded
+  /// schedule has no room for every job.
+  Future<BatchMovePlan> moveJobsFromDate(
+    List<Job> jobs,
+    DateTime startDate, {
+    bool Function(String distributorId, DateTime date)? isDayOff,
+  }) async {
+    // Next month's jobs decide which of its slots are free.
+    var lastDate = DateTime(_currentMonth.year, _currentMonth.month + 2, 0);
+    await ensureNextMonthLoaded();
+    try {
+      await _nextMonthLoaded.future.timeout(const Duration(seconds: 5));
+    } on TimeoutException {
+      lastDate = DateTime(_currentMonth.year, _currentMonth.month + 1, 0);
+    }
+
+    // Plan from the live copies: the selection may be a few edits old.
+    final byId = {for (final j in this.jobs) j.id: j};
+    final fresh = [
+      for (final j in jobs)
+        if (byId[j.id] != null) byId[j.id]!,
+    ];
+    if (fresh.isEmpty) throw BatchMoveException('The selected jobs are gone.');
+
+    final plan = planBatchMove(
+      jobs: fresh,
+      distributors: _distributors,
+      startDate: startDate,
+      lastDate: lastDate,
+      occupiedOn: (d) => {for (final j in getJobsForDate(d)) j.distributorId},
+      isDayOff: isDayOff ?? (_, __) => false,
+    );
+    if (plan.unplaced.isNotEmpty) {
+      throw BatchMoveException(
+        'Only ${plan.moved.length} of ${fresh.length} jobs fit between '
+        '${DateFormat('d MMM').format(startDate)} and '
+        '${DateFormat('d MMM').format(lastDate)} — nothing was moved.',
+      );
+    }
+
+    final moves = <(Job, Job)>[
+      for (final j in fresh)
+        if (plan.moved[j.id]!.distributorId != j.distributorId ||
+            !_isSameDay(plan.moved[j.id]!.date, j.date))
+          (j, plan.moved[j.id]!),
+    ];
+    if (moves.isEmpty) return plan;
+
+    await _guardedMutation<void>(
+      applyOptimistic: () {
+        final recording = _recordingWrite;
+        for (final (_, moved) in moves) {
+          recording?.upserts[moved.id] = moved;
+          recording?.removes.remove(moved.id);
+          _upsertLocal(moved);
+        }
+        _invalidateCaches();
+        notifyListeners();
+      },
+      persist: () async {
+        await _firestoreService.moveJobsAtomically(moves);
+        final dists = _distributors.isNotEmpty ? _distributors : null;
+        final dates = <String, DateTime>{
+          for (final (original, moved) in moves) ...{
+            DateFormat('yyyy-MM-dd').format(original.date): original.date,
+            DateFormat('yyyy-MM-dd').format(moved.date): moved.date,
+          },
+        };
+        for (final date in dates.values) {
+          unawaited(DropsheetProvider.syncDateOneShot(
+            date,
+            firestoreService: _firestoreService,
+            distributors: dists,
+          ));
+        }
+      },
+    );
+    return plan;
   }
 
   Future<void> deleteJobWithUndo(Job job, DateTime targetDate) async {
@@ -1089,6 +1593,17 @@ class ScheduleProvider extends ChangeNotifier {
     return jobs.where((j) => j.distributorId == distributorId).toList();
   }
 
+  /// Live version of [fetchJobsForDistributorAndDate]. Works for any day,
+  /// not just the months this provider keeps streaming.
+  Stream<List<Job>> watchJobsForDistributorAndDate(
+    String distributorId,
+    DateTime date,
+  ) {
+    final localDate = DateTime(date.year, date.month, date.day);
+    return _firestoreService.watchJobsForDate(localDate).map(
+        (jobs) => jobs.where((j) => j.distributorId == distributorId).toList());
+  }
+
   Future<bool> undo() async {
     return false;
   }
@@ -1099,13 +1614,33 @@ class ScheduleProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _pointNameDebounce?.cancel();
+    pendingWriteCount.dispose();
     _isInitialized = false;
     _workAreaStreamsInitialized = false;
     _distributorsSubscription?.cancel();
     _currentMonthJobsSubscription?.cancel();
     _nextMonthJobsSubscription?.cancel();
+    for (final sub in _extraMonthSubscriptions.values) {
+      sub.cancel();
+    }
     _workAreasSubscription?.cancel();
     _workSuburbsSubscription?.cancel();
     super.dispose();
   }
+}
+
+/// One schedule write's optimistic change, kept until the stream shows it.
+class _PendingWrite {
+  final Map<String, Job> upserts = {};
+  final Set<String> removes = {};
+  bool committed = false;
+}
+
+/// A batch move that could not be planned; nothing was changed.
+class BatchMoveException implements Exception {
+  final String message;
+  BatchMoveException(this.message);
+  @override
+  String toString() => message;
 }

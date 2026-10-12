@@ -105,7 +105,11 @@ List<TETargetPolygon> groupWaypointsByPolygon(
       if (wpt.lat == null || wpt.lon == null) return false;
       return isPointInPolygon(LatLng(wpt.lat!, wpt.lon!), polygon.points);
     }).toList();
-    results.add(TETargetPolygon(name: polygon.name, waypoints: contained));
+    results.add(TETargetPolygon(
+      name: polygon.name,
+      waypoints: contained,
+      points: polygon.points,
+    ));
   }
   return results;
 }

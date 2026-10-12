@@ -16,6 +16,9 @@ class MonthNavigationWidget extends riverpod.ConsumerWidget {
   // Optional refresh callback
   final List<Widget>? extraActions; // Rendered after the Current button
 
+  /// Rendered on the right, immediately before the month picker.
+  final List<Widget>? trailingActions;
+
   const MonthNavigationWidget({
     super.key,
     required this.currentMonthDisplay,
@@ -27,6 +30,7 @@ class MonthNavigationWidget extends riverpod.ConsumerWidget {
     this.onRefresh,
     required this.mode,
     this.extraActions,
+    this.trailingActions,
     // Optional parameter
   });
 
@@ -198,21 +202,25 @@ class MonthNavigationWidget extends riverpod.ConsumerWidget {
           // Available Months Dropdown
           Row(
             children: [
-              IconButton(
-                  onPressed: () {
-                    ref.read(togglerRiverpod).toggleFullview(mode);
-                  },
-                  tooltip:
-                      isFullview ? "Exit Fullscreen" : "Change to fullscreen",
-                  icon: isFullview
-                      ? const Icon(
-                          Icons.fullscreen_exit,
-                          size: 32,
-                        )
-                      : const Icon(
-                          Icons.fullscreen,
-                          size: 32,
-                        )),
+              // Fullscreen is a grid affordance: the Schedule and Collection
+              // Schedule gain real estate from it. The Job List is a plain
+              // table that does not, so it is not offered there.
+              if (mode != Mode.joblist)
+                IconButton(
+                    onPressed: () {
+                      ref.read(togglerRiverpod).toggleFullview(mode);
+                    },
+                    tooltip:
+                        isFullview ? "Exit Fullscreen" : "Change to fullscreen",
+                    icon: isFullview
+                        ? const Icon(
+                            Icons.fullscreen_exit,
+                            size: 32,
+                          )
+                        : const Icon(
+                            Icons.fullscreen,
+                            size: 32,
+                          )),
               // Unfinished Work Areas panel toggle (schedule only)
               if (mode == Mode.schedule) ...[
                 const SizedBox(width: 4),
@@ -225,6 +233,10 @@ class MonthNavigationWidget extends riverpod.ConsumerWidget {
                       ? const Icon(Icons.view_sidebar, size: 28)
                       : const Icon(Icons.view_sidebar_outlined, size: 28),
                 ),
+              ],
+              if (trailingActions != null) ...[
+                ...trailingActions!,
+                const SizedBox(width: 4),
               ],
               const SizedBox(width: 8),
               FutureBuilder<List<String>>(

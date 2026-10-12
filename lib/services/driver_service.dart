@@ -17,9 +17,12 @@ class DriverService {
         );
   }
 
+  /// Stored under [Driver.id] — the distributor's id, so a dropsheet
+  /// section's `driverId` is that distributor's id everywhere else too
+  /// (payroll's driving-code default, the schedule).
   Future<String> addDriver(Driver driver) async {
-    final ref = await _col.add(driver.toMap());
-    return ref.id;
+    await _col.doc(driver.id).set(driver.toMap());
+    return driver.id;
   }
 
   Future<void> updateDriver(Driver driver) async {

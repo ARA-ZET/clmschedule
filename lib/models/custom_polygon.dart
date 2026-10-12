@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
@@ -35,6 +36,74 @@ enum PointCategory {
   }
 }
 
+/// Houses-versus-apartments split behind [CustomPolygon.letterBoxEstimate].
+///
+/// Computed once — when a polygon finishes drawing or editing, or when it is
+/// imported from a work area or suburb — and stored with the polygon, so
+/// showing it later (the info window, the estimates table) costs nothing.
+///
+/// Deliberately defined here rather than reusing the letterbox module's own
+/// breakdown type: this model is used across the whole app, and it must not
+/// take a dependency on that module. The provider translates between the two.
+///
+/// A null split on a polygon means *never computed*, which is not the same as
+/// a computed result that happens to be all zeros.
+class LetterBoxSplit {
+  /// Letterboxes standing on their own — a house with its own box at the gate.
+  final int houses;
+
+  /// Letterboxes in a cluster: the bank of boxes at a block's entrance. A
+  /// count of BOXES, not of blocks.
+  final int apartmentBoxes;
+
+  /// How many distinct blocks those boxes form.
+  final int apartmentBlocks;
+
+  const LetterBoxSplit({
+    required this.houses,
+    required this.apartmentBoxes,
+    required this.apartmentBlocks,
+  });
+
+  static const empty =
+      LetterBoxSplit(houses: 0, apartmentBoxes: 0, apartmentBlocks: 0);
+
+  /// Total letterboxes across both kinds.
+  int get total => houses + apartmentBoxes;
+
+  /// True when there is nothing worth showing.
+  bool get isEmpty => houses == 0 && apartmentBoxes == 0;
+
+  factory LetterBoxSplit.fromMap(Map<String, dynamic> data) {
+    return LetterBoxSplit(
+      houses: (data['houses'] as num?)?.toInt() ?? 0,
+      apartmentBoxes: (data['apartmentBoxes'] as num?)?.toInt() ?? 0,
+      apartmentBlocks: (data['apartmentBlocks'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Map<String, dynamic> toMap() => {
+        'houses': houses,
+        'apartmentBoxes': apartmentBoxes,
+        'apartmentBlocks': apartmentBlocks,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LetterBoxSplit &&
+          other.houses == houses &&
+          other.apartmentBoxes == apartmentBoxes &&
+          other.apartmentBlocks == apartmentBlocks;
+
+  @override
+  int get hashCode => Object.hash(houses, apartmentBoxes, apartmentBlocks);
+
+  @override
+  String toString() => 'LetterBoxSplit(houses: $houses, '
+      'apartmentBoxes: $apartmentBoxes, apartmentBlocks: $apartmentBlocks)';
+}
+
 class CustomPolygon {
   /// Stable domain identifier for data sets that need one, such as work suburbs.
   /// Regular shareable map polygons can leave this null.
@@ -63,6 +132,43 @@ class CustomPolygon {
   /// Estimated number of letter boxes in this polygon/work area.
   final int letterBoxEstimate;
 
+  /// Houses-versus-apartments split behind [letterBoxEstimate]. Null when it
+  /// has never been computed for this polygon — polygons drawn before the
+  /// split existed, or ones whose estimate was typed in by hand.
+  final LetterBoxSplit? letterBoxSplit;
+
+  /// The estimate this polygon arrived with, kept when a curated count later
+  /// replaces [letterBoxEstimate].
+  ///
+  /// A polygon imported from another map's "Target Areas" layer carries the
+  /// number the client was quoted on. The auto-count then overwrites
+  /// [letterBoxEstimate] with what the letterbox index says for the same
+  /// ground — which is the right number to work from, but the quoted one is
+  /// what the client agreed to, and losing it makes the two impossible to
+  /// reconcile. The first recount over a non-zero estimate stashes it here
+  /// and nothing overwrites it afterwards.
+  ///
+  /// Null when the polygon was drawn here, or when no count has replaced its
+  /// original number yet — in which case [letterBoxEstimate] IS that number.
+  final int? importedLetterBoxEstimate;
+
+  /// Letterbox-index suburbs that contributed to [letterBoxEstimate] when it
+  /// was last counted. Stored as ids, not as a trusted/untrusted flag, so the
+  /// editor can check each suburb's CURRENT curation status: the warning on
+  /// an area clears the moment an admin verifies its suburb, without a
+  /// recount. Null when the estimate did not come from the index (typed by
+  /// hand) or was counted before this was recorded.
+  final List<String>? letterboxSuburbIds;
+
+  /// A person set [letterBoxEstimate] by hand and it must stay as typed: no
+  /// recount (vertex edit, boundary stitch, cleanup, recheck) overwrites it,
+  /// and it is no longer flagged as resting on unverified suburbs — someone
+  /// has looked at it and taken responsibility for the number.
+  final bool letterBoxLocked;
+
+  /// Who locked it (an email), for the "set by" note. Null when unlocked.
+  final String? letterBoxLockedBy;
+
   const CustomPolygon({
     this.id,
     required this.name,
@@ -75,6 +181,11 @@ class CustomPolygon {
     this.type = MapElementType.polygon,
     this.pointCategory = PointCategory.generic,
     this.letterBoxEstimate = 0,
+    this.letterBoxSplit,
+    this.importedLetterBoxEstimate,
+    this.letterboxSuburbIds,
+    this.letterBoxLocked = false,
+    this.letterBoxLockedBy,
   });
 
   /// Whether this element is a single-point marker / point.
@@ -122,6 +233,18 @@ class CustomPolygon {
       type: type,
       pointCategory: PointCategory.fromId(data['pointCategory'] as String?),
       letterBoxEstimate: (data['letterBoxEstimate'] as num?)?.toInt() ?? 0,
+      letterBoxSplit: data['letterBoxSplit'] is Map
+          ? LetterBoxSplit.fromMap(
+              Map<String, dynamic>.from(data['letterBoxSplit'] as Map))
+          : null,
+      importedLetterBoxEstimate:
+          (data['importedLetterBoxEstimate'] as num?)?.toInt(),
+      letterboxSuburbIds: data['letterboxSuburbIds'] is List
+          ? List<String>.unmodifiable(
+              (data['letterboxSuburbIds'] as List).map((e) => e.toString()))
+          : null,
+      letterBoxLocked: data['letterBoxLocked'] as bool? ?? false,
+      letterBoxLockedBy: data['letterBoxLockedBy'] as String?,
     );
   }
 
@@ -159,6 +282,13 @@ class CustomPolygon {
       if (isPoint && pointCategory != PointCategory.generic)
         'pointCategory': pointCategory.id,
       if (letterBoxEstimate > 0) 'letterBoxEstimate': letterBoxEstimate,
+      if (letterBoxSplit != null) 'letterBoxSplit': letterBoxSplit!.toMap(),
+      if (importedLetterBoxEstimate != null)
+        'importedLetterBoxEstimate': importedLetterBoxEstimate,
+      if (letterboxSuburbIds != null) 'letterboxSuburbIds': letterboxSuburbIds,
+      if (letterBoxLocked) 'letterBoxLocked': true,
+      if (letterBoxLocked && letterBoxLockedBy != null)
+        'letterBoxLockedBy': letterBoxLockedBy,
     };
     return map;
   }
@@ -188,7 +318,24 @@ class CustomPolygon {
     MapElementType? type,
     PointCategory? pointCategory,
     int? letterBoxEstimate,
+    LetterBoxSplit? letterBoxSplit,
+    /// Drop the stored split rather than carrying it forward — for when the
+    /// total is being overridden by hand, which leaves any previously
+    /// computed breakdown describing a different number.
+    bool clearLetterBoxSplit = false,
+    int? importedLetterBoxEstimate,
+
+    /// Forget the number this polygon was imported with — for when the
+    /// polygon is no longer the imported one it was.
+    bool clearImportedLetterBoxEstimate = false,
+
+    /// Also cleared by [clearLetterBoxSplit]: a hand-typed total has no
+    /// index provenance.
+    List<String>? letterboxSuburbIds,
+    bool? letterBoxLocked,
+    String? letterBoxLockedBy,
   }) {
+    final locked = letterBoxLocked ?? this.letterBoxLocked;
     return CustomPolygon(
       id: id ?? this.id,
       name: name ?? this.name,
@@ -203,6 +350,18 @@ class CustomPolygon {
       type: type ?? this.type,
       pointCategory: pointCategory ?? this.pointCategory,
       letterBoxEstimate: letterBoxEstimate ?? this.letterBoxEstimate,
+      letterBoxSplit: clearLetterBoxSplit
+          ? null
+          : (letterBoxSplit ?? this.letterBoxSplit),
+      importedLetterBoxEstimate: clearImportedLetterBoxEstimate
+          ? null
+          : (importedLetterBoxEstimate ?? this.importedLetterBoxEstimate),
+      letterboxSuburbIds: clearLetterBoxSplit
+          ? null
+          : (letterboxSuburbIds ?? this.letterboxSuburbIds),
+      letterBoxLocked: locked,
+      letterBoxLockedBy:
+          locked ? (letterBoxLockedBy ?? this.letterBoxLockedBy) : null,
     );
   }
 
@@ -222,8 +381,9 @@ class CustomPolygon {
       fillColor = Colors.red.withValues(alpha: 0.1);
       sw = 5;
     } else if (isSelected) {
-      strokeColor = color;
-      sw = 6;
+      // Emphasise relative to the polygon's own width so the style panel's
+      // border slider still shows a change while the polygon is selected.
+      sw = strokeWidth + 3;
     }
 
     return Polygon(
@@ -343,7 +503,12 @@ class CustomPolygon {
         other.isDashed == isDashed &&
         other.type == type &&
         other.pointCategory == pointCategory &&
-        other.letterBoxEstimate == letterBoxEstimate;
+        other.letterBoxEstimate == letterBoxEstimate &&
+        other.letterBoxSplit == letterBoxSplit &&
+        other.importedLetterBoxEstimate == importedLetterBoxEstimate &&
+        listEquals(other.letterboxSuburbIds, letterboxSuburbIds) &&
+        other.letterBoxLocked == letterBoxLocked &&
+        other.letterBoxLockedBy == letterBoxLockedBy;
   }
 
   @override
@@ -360,6 +525,11 @@ class CustomPolygon {
       type,
       pointCategory,
       letterBoxEstimate,
+      letterBoxSplit,
+      importedLetterBoxEstimate,
+      letterboxSuburbIds == null ? null : Object.hashAll(letterboxSuburbIds!),
+      letterBoxLocked,
+      letterBoxLockedBy,
     );
   }
 

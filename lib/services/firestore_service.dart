@@ -3,6 +3,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import '../models/distributor.dart';
+import 'area_link_resolver.dart';
+import '../models/job_area_link.dart';
 import '../models/job.dart';
 import '../models/work_area.dart';
 import '../models/work_suburb.dart';
@@ -339,7 +341,25 @@ class FirestoreService {
 
   /// One-shot fetch of distributors (cache-first). Use when a consumer
   /// only needs a snapshot rather than a live subscription.
-  Future<List<Distributor>> fetchDistributorsOnce() async {
+  /// [fromServer] skips the local cache — for callers that act on fields
+  /// which may have just changed (e.g. the dropsheet sync reading `role`).
+  Future<List<Distributor>> fetchDistributorsOnce(
+      {bool fromServer = false}) async {
+    if (fromServer) {
+      try {
+        final snapshot = await _distributors
+            .orderBy('index')
+            .get(const GetOptions(source: Source.server));
+        return snapshot.docs
+            .map((doc) => Distributor.fromMap(
+                doc.id, Map<String, dynamic>.from(doc.data() as Map)))
+            .toList();
+      } catch (e) {
+        // Offline: the cached copy is better than failing the caller.
+        debugPrint(
+            'fetchDistributorsOnce: server read failed, using cache: $e');
+      }
+    }
     QuerySnapshot snapshot;
     try {
       snapshot = await _distributors
@@ -643,8 +663,7 @@ class FirestoreService {
         if (plan.containsKey(doc.id)) {
           final parsed = DateTime.tryParse(doc.id);
           if (parsed != null) {
-            planDates[doc.id] =
-                DateTime(parsed.year, parsed.month, parsed.day);
+            planDates[doc.id] = DateTime(parsed.year, parsed.month, parsed.day);
           }
         }
       }
@@ -684,6 +703,12 @@ class FirestoreService {
       mapInstructions: job.mapInstructions,
       dropOffPoint: job.dropOffPoint,
       pickUpPoint: job.pickUpPoint,
+      linkedMapId: job.linkedMapId,
+      linkedMapMonthKey: job.linkedMapMonthKey,
+      linkedMaps: List.from(job.linkedMaps),
+      areaLinks: List.from(job.areaLinks),
+      resolvedAreaNames: job.resolvedAreaNames,
+      missingAreaLinkKeys: job.missingAreaLinkKeys,
     );
   }
 
@@ -691,8 +716,14 @@ class FirestoreService {
   Stream<List<Job>> streamJobsForDate(DateTime date) {
     // Ensure daily document exists when streaming
     _dailyService.ensureScheduleDailyDocExists(date);
+    return watchJobsForDate(date);
+  }
 
-    return _dailyService.getScheduleDailyDoc(date).snapshots().map((snapshot) {
+  /// Live jobs for one day, read-only: unlike [streamJobsForDate] it never
+  /// creates the day document, so watching a day can't write to the schedule.
+  Stream<List<Job>> watchJobsForDate(DateTime date) {
+    return AreaLinkResolver.instance.hydrateStream(
+        _dailyService.getScheduleDailyDoc(date).snapshots().map((snapshot) {
       if (!snapshot.exists || snapshot.data() == null) {
         return <Job>[];
       }
@@ -708,7 +739,7 @@ class FirestoreService {
         final jobMap = Map<String, dynamic>.from(jobData as Map);
         return Job.fromArrayElement(jobMap);
       }).toList();
-    });
+    }));
   }
 
   // Stream jobs for a date range (will combine multiple daily documents)
@@ -759,10 +790,14 @@ class FirestoreService {
   // Stream all jobs for an entire month using a SINGLE collection listener.
   // This replaces 28-31 individual document listeners with 1 query listener.
   // Fires whenever ANY day document in the month changes.
-  Stream<List<Job>> streamJobsForMonth(DateTime month) {
+  //
+  // [resolveAreaLinks] false skips filling linked client-map areas in — for
+  // readers that only need clients/dates and should not fetch client maps.
+  Stream<List<Job>> streamJobsForMonth(DateTime month,
+      {bool resolveAreaLinks = true}) {
     final monthlyId = _dailyService.getMonthlyDocumentId(month);
 
-    return _firestore
+    final raw = _firestore
         .collection('schedules')
         .doc(monthlyId)
         .collection('days')
@@ -781,6 +816,9 @@ class FirestoreService {
       }
       return allJobs;
     });
+    return resolveAreaLinks
+        ? AreaLinkResolver.instance.hydrateStream(raw)
+        : raw;
   }
 
   // Stream of all jobs for current month (optimized for monthly view)
@@ -850,10 +888,11 @@ class FirestoreService {
         return <Job>[];
       }
 
-      return jobsArray.map((jobData) {
+      final jobs = jobsArray.map((jobData) {
         final jobMap = Map<String, dynamic>.from(jobData as Map);
         return Job.fromArrayElement(jobMap);
       }).toList();
+      return await AreaLinkResolver.instance.hydrateAllLoaded(jobs);
     } catch (e) {
       print('Error fetching jobs for date ${date.toIso8601String()}: $e');
       return <Job>[];
@@ -920,6 +959,43 @@ class FirestoreService {
     );
   }
 
+  /// Adds and removes client-map area links on several schedule jobs in ONE
+  /// transaction, so a move between distributors can never leave an area
+  /// on both jobs or on neither. Only each job's `areaLinks` field is
+  /// rewritten; everything else on the job is left exactly as stored, so a
+  /// concurrent edit to the job's other fields is never overwritten.
+  /// Throws [JobNotFoundException] when a job is no longer on its day.
+  Future<void> applyAreaLinkChanges(
+    List<AreaLinkChange> changes, {
+    String action = 'allocateAreas',
+  }) async {
+    if (changes.isEmpty) return;
+    await _runScheduleMutation<void>(
+      action: action,
+      dates: [for (final c in changes) c.date],
+      affectedJobIds: [for (final c in changes) c.jobId],
+      mutate: (ctx) {
+        for (final change in changes) {
+          final key = ctx.dateKeyFor(change.date);
+          final jobs = ctx.jobsByDateKey[key]!;
+          final idx = jobs.indexWhere((j) => j['id'] == change.jobId);
+          if (idx == -1) throw JobNotFoundException(change.jobId, key);
+          final raw = jobs[idx];
+          final current = (raw['areaLinks'] as List? ?? const [])
+              .map((e) =>
+                  JobAreaLink.fromMap(Map<String, dynamic>.from(e as Map)))
+              .toList();
+          final next = change.applyTo(current);
+          if (next.isEmpty) {
+            raw.remove('areaLinks');
+          } else {
+            raw['areaLinks'] = next.map((l) => l.toMap()).toList();
+          }
+        }
+      },
+    );
+  }
+
   /// Sets (or clears) the admin confirmation status for a schedule day.
   /// Confirmed stamps confirmedAt/confirmedBy; other statuses clear them so
   /// stale confirmation info doesn't linger once a day is reopened for edits.
@@ -944,14 +1020,18 @@ class FirestoreService {
   }
 
   /// Streams the confirmation status for a schedule day.
+  ///
+  /// Metadata changes are included so the UI learns the moment a locally
+  /// cached/pending value is acknowledged by the server — otherwise a client
+  /// that wrote while offline keeps rendering its own optimistic value with no
+  /// way to tell it apart from what everyone else sees.
   Stream<ScheduleDayConfirmation> streamScheduleDayConfirmation(
     DateTime date,
   ) {
-    return _dailyService.getScheduleDailyDoc(date).snapshots().map(
-          (snap) => ScheduleDayConfirmation.fromMap(
-            snap.data() as Map<String, dynamic>?,
-          ),
-        );
+    return _dailyService
+        .getScheduleDailyDoc(date)
+        .snapshots(includeMetadataChanges: true)
+        .map(ScheduleDayConfirmation.fromSnapshot);
   }
 
   // Move a job between different dates (handles cross-day/cross-month moves)
@@ -981,6 +1061,34 @@ class FirestoreService {
           throw JobNotFoundException(originalJob.id, sourceKey);
         }
         ctx.jobsByDateKey[ctx.dateKeyFor(newDate)]!.add(updatedJob.toMap());
+      },
+    );
+  }
+
+  /// Moves several jobs at once, atomically: each job in [moves] (original →
+  /// moved) leaves its original day and lands on its new one. If any job is
+  /// no longer where it was read, nothing is written.
+  Future<void> moveJobsAtomically(List<(Job, Job)> moves) async {
+    if (moves.isEmpty) return;
+    await _runScheduleMutation<void>(
+      action: 'moveJobs',
+      dates: [
+        for (final (original, moved) in moves) ...[original.date, moved.date],
+      ],
+      affectedJobIds: [for (final (original, _) in moves) original.id],
+      mutate: (ctx) {
+        for (final (original, _) in moves) {
+          final key = ctx.dateKeyFor(original.date);
+          final dayJobs = ctx.jobsByDateKey[key]!;
+          final before = dayJobs.length;
+          dayJobs.removeWhere((j) => j['id'] == original.id);
+          if (dayJobs.length == before) {
+            throw JobNotFoundException(original.id, key);
+          }
+        }
+        for (final (_, moved) in moves) {
+          ctx.jobsByDateKey[ctx.dateKeyFor(moved.date)]!.add(moved.toMap());
+        }
       },
     );
   }

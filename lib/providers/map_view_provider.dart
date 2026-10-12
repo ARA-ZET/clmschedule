@@ -117,6 +117,17 @@ class MapViewProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Remove the vertex at [index]. Returns false (and changes nothing) when
+  /// the polygon is already down to the 3 points an area needs.
+  bool removeEditingPoint(int index) {
+    if (_editingPoints.length <= 3) return false;
+    if (index < 0 || index >= _editingPoints.length) return false;
+    _editingPoints.removeAt(index);
+    _hasUnsavedChanges = true;
+    notifyListeners();
+    return true;
+  }
+
   void cancelEditing() {
     _isEditing = false;
     _editingPoints.clear();

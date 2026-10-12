@@ -5,7 +5,6 @@ import '../../models/dropsheet_task.dart';
 import '../../models/dropsheet_task_type_config.dart';
 import '../../providers/dropsheet_task_config_provider.dart';
 import '../../providers/job_type_provider.dart';
-import '../../services/geocoding_service.dart';
 
 /// Dialog that lets the user configure each dropsheet task type:
 ///   - Custom label (overrides the default display name)
@@ -27,6 +26,9 @@ class _TaskManagerDialogState
   late List<_DynamicWorking> _dynamicTypes;
   // Working copy for global depot/start-of-day settings.
   late _DepotWorking _depot;
+  // Set once the user edits the office fields, so a late-arriving provider
+  // update can't overwrite what they typed.
+  bool _depotEdited = false;
   // Collapsed section keys: 'depot', 'mandatory', 'distributor', 'additional', 'custom'
   final Set<String> _collapsed = {};
 
@@ -44,22 +46,8 @@ class _TaskManagerDialogState
   }
 
   Future<void> _save() async {
-    // Best-effort geocode of the depot address if it changed and we don't
-    // already have coordinates.
-    final depotAddr = _depot.address.trim();
-    if (depotAddr.isNotEmpty && (_depot.lat == null || _depot.lng == null)) {
-      final query = depotAddr.toLowerCase().contains('south africa')
-          ? depotAddr
-          : '$depotAddr, Western Cape, South Africa';
-      debugPrint('[TaskManager] geocoding depot="$query"');
-      final res = await GeocodingService().geocodeAddress(query);
-      if (res != null) {
-        _depot = _depot.copyWith(lat: res['lat'], lng: res['lng']);
-      } else {
-        debugPrint('[TaskManager] depot geocode FAILED');
-      }
-    }
-
+    // The office address is geocoded by the provider on save — once per
+    // address, then reused from the stored coordinates.
     final updatedConfigs = <DropsheetTaskType, DropsheetTaskTypeConfig>{};
     for (final entry in _working.entries) {
       updatedConfigs[entry.key] = entry.value.toConfig(entry.key);
@@ -114,6 +102,16 @@ class _TaskManagerDialogState
   Widget build(BuildContext context) {
     final jobTypeProvider = ref.watch(jobTypeRiverpod);
     final allJobTypes = jobTypeProvider.jobTypes;
+
+    // The provider's Firestore load and its auto-geocode can both land after
+    // this dialog opened. Without re-syncing, the working copy captured in
+    // initState keeps showing the pre-load defaults ("not geocoded yet") even
+    // though the real config has coordinates — and saving would then write
+    // those stale defaults back over them.
+    final config = ref.watch(dropsheetTaskConfigRiverpod);
+    if (!_depotEdited && config.depot != _depot.toConfig()) {
+      _depot = _DepotWorking.from(config.depot);
+    }
 
     return Dialog(
       insetPadding: const EdgeInsets.all(24),
@@ -172,7 +170,10 @@ class _TaskManagerDialogState
                   if (!_collapsed.contains('depot'))
                     _DepotRow(
                       working: _depot,
-                      onChanged: (updated) => setState(() => _depot = updated),
+                      onChanged: (updated) => setState(() {
+                        _depot = updated;
+                        _depotEdited = true;
+                      }),
                     ),
                   const Divider(height: 24),
                   // ── Mandatory tasks ───────────────────────────
@@ -223,6 +224,7 @@ class _TaskManagerDialogState
                     for (final type in [
                       DropsheetTaskType.dropOff,
                       DropsheetTaskType.pickUp,
+                      DropsheetTaskType.distribute,
                     ])
                       _TaskTypeRow(
                         type: type,
@@ -511,6 +513,7 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
   bool get _showsDefaultFields => !const {
         DropsheetTaskType.dropOff,
         DropsheetTaskType.pickUp,
+        DropsheetTaskType.distribute,
       }.contains(widget.type);
   bool get _showsJobList => !const {
         DropsheetTaskType.inspect,
@@ -519,6 +522,7 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
         DropsheetTaskType.arrive,
         DropsheetTaskType.dropOff,
         DropsheetTaskType.pickUp,
+        DropsheetTaskType.distribute,
       }.contains(widget.type);
 
   List<Widget> _leaveInfo() => [
@@ -590,6 +594,8 @@ class _TaskTypeRowState extends State<_TaskTypeRow> {
         return Icons.local_shipping_outlined;
       case DropsheetTaskType.pickUp:
         return Icons.upload_outlined;
+      case DropsheetTaskType.distribute:
+        return Icons.directions_walk;
       case DropsheetTaskType.collection:
         return Icons.inventory_2_outlined;
       case DropsheetTaskType.jobReturn:
@@ -1223,12 +1229,14 @@ class _DepotWorking {
   final double? lat;
   final double? lng;
   final String startTime;
+  final String geocodedAddress;
 
   const _DepotWorking({
     required this.address,
     required this.lat,
     required this.lng,
     required this.startTime,
+    this.geocodedAddress = '',
   });
 
   factory _DepotWorking.from(DepotConfig d) => _DepotWorking(
@@ -1236,6 +1244,7 @@ class _DepotWorking {
         lat: d.lat,
         lng: d.lng,
         startTime: d.startTime,
+        geocodedAddress: d.geocodedAddress,
       );
 
   _DepotWorking copyWith({
@@ -1243,13 +1252,14 @@ class _DepotWorking {
     double? lat,
     double? lng,
     String? startTime,
-    bool clearCoords = false,
+    String? geocodedAddress,
   }) =>
       _DepotWorking(
         address: address ?? this.address,
-        lat: clearCoords ? null : (lat ?? this.lat),
-        lng: clearCoords ? null : (lng ?? this.lng),
+        lat: lat ?? this.lat,
+        lng: lng ?? this.lng,
         startTime: startTime ?? this.startTime,
+        geocodedAddress: geocodedAddress ?? this.geocodedAddress,
       );
 
   DepotConfig toConfig() => DepotConfig(
@@ -1257,7 +1267,11 @@ class _DepotWorking {
         lat: lat,
         lng: lng,
         startTime: startTime,
+        geocodedAddress: geocodedAddress,
       );
+
+  /// Mirrors [DepotConfig.isGeocoded] for the in-progress edit.
+  bool get isGeocoded => toConfig().isGeocoded;
 }
 
 class _DepotRow extends StatefulWidget {
@@ -1278,6 +1292,19 @@ class _DepotRowState extends State<_DepotRow> {
     super.initState();
     _addr = TextEditingController(text: widget.working.address);
     _start = TextEditingController(text: widget.working.startTime);
+  }
+
+  @override
+  void didUpdateWidget(_DepotRow old) {
+    super.didUpdateWidget(old);
+    // Follow a re-sync from the provider (the dialog only pushes one while the
+    // user hasn't edited these fields, so this can't clobber typing).
+    if (widget.working.address != _addr.text) {
+      _addr.text = widget.working.address;
+    }
+    if (widget.working.startTime != _start.text) {
+      _start.text = widget.working.startTime;
+    }
   }
 
   @override
@@ -1303,7 +1330,7 @@ class _DepotRowState extends State<_DepotRow> {
 
   @override
   Widget build(BuildContext context) {
-    final hasCoords = widget.working.lat != null && widget.working.lng != null;
+    final hasCoords = widget.working.isGeocoded;
     return ExpansionTile(
       tilePadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 2),
       childrenPadding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
@@ -1338,8 +1365,11 @@ class _DepotRowState extends State<_DepotRow> {
             isDense: true,
             border: OutlineInputBorder(),
           ),
-          onChanged: (v) => widget.onChanged(
-              widget.working.copyWith(address: v, clearCoords: true)),
+          // Coordinates are kept as-is; they stop counting as current once the
+          // address no longer matches `geocodedAddress`, and are refreshed on
+          // save.
+          onChanged: (v) =>
+              widget.onChanged(widget.working.copyWith(address: v)),
         ),
         const SizedBox(height: 12),
         Row(

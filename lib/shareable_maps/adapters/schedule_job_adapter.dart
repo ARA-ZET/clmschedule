@@ -4,12 +4,16 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../models/custom_polygon.dart';
 import '../../models/job.dart';
+import '../../models/job_area_link.dart';
+import '../../models/job_linked_map.dart';
 import '../../providers/unfinished_work_areas_provider.dart';
 import '../../services/job_cloud_map_data_service.dart';
 import '../models/map_layer.dart';
 import '../models/map_point.dart';
 import '../models/map_polyline.dart';
 import '../models/shareable_map.dart';
+import '../services/shareable_maps_firestore_service.dart';
+import '../utils/linked_map_polygons.dart';
 import 'map_data_adapter.dart';
 
 /// Callback signature for saving updated polygons and working area names
@@ -26,12 +30,32 @@ typedef ScheduleJobSaveCallback = Future<void> Function(
 typedef ScheduleJobLinkMapCallback = Future<void> Function(
   String mapId,
   String monthKey,
+  String mapName,
 );
 
 /// Fixed layer id for polygons injected from matching unfinished work areas.
 /// Polygons in this layer sync back to [UnfinishedWorkAreasProvider] on save
 /// instead of being persisted on the job itself.
 const String kUnfinishedAreasLayerId = 'unfinished_work_areas_layer';
+
+/// Fixed layer id for the recorded GPS tracks of the linked client maps —
+/// the same overlay the print map offers, behind a show/hide toggle.
+const String kLinkedClientMapTracksLayerId = 'linked_client_map_tracks_layer';
+
+/// Fixed layer id for the polygons of the client maps linked to this job.
+/// Shown for reference so the user can see the client's ground and copy the
+/// parts this distributor is being sent to; never saved onto the job itself
+/// (see [MapDataAdapter.referenceLayerId]). Copying happens through the
+/// editor's "Client map" action, which moves polygons into the job layer.
+const String kLinkedClientMapLayerId = 'linked_client_map_layer';
+
+/// Fixed layer id for the client-map areas allocated to this job by link
+/// (`Job.areaLinks`). Their outlines belong to the client map, so this layer
+/// is never saved onto the job — edit them on the client map instead.
+const String kAllocatedAreasLayerId = 'allocated_client_areas_layer';
+
+/// The job's own layer — everything in it is saved to `Job.workMaps`.
+const String kJobMapsLayerId = 'job_maps_layer';
 
 /// Adapter that bridges the ShareableMapEditor to a single schedule [Job]'s
 /// `workMaps` field.
@@ -57,6 +81,11 @@ class ScheduleJobAdapter extends MapDataAdapter {
   /// so we can route edits back to the right Firestore doc on [save].
   final Map<String, String> _polygonNameToUnfinishedId = {};
 
+  /// The client maps this adapter is currently showing. Starts from the job
+  /// snapshot and grows with [onLinkExistingMap], so linking inside the
+  /// editor can refresh the reference layer without reloading the map.
+  final List<JobLinkedMap> _links;
+
   ScheduleJobAdapter({
     required Job job,
     required ScheduleJobSaveCallback onSave,
@@ -64,6 +93,7 @@ class ScheduleJobAdapter extends MapDataAdapter {
     this.distributorName,
     UnfinishedWorkAreasProvider? unfinishedProvider,
   })  : _job = job,
+        _links = List<JobLinkedMap>.from(job.effectiveLinkedMaps),
         _onSave = onSave,
         _onLinkExistingMap = onLinkExistingMap,
         _unfinishedProvider = unfinishedProvider;
@@ -75,7 +105,106 @@ class ScheduleJobAdapter extends MapDataAdapter {
     required String mapName,
     String? storageFolderPath,
   }) async {
-    await _onLinkExistingMap?.call(mapId, monthKey);
+    if (!_links.any((l) => l.mapId == mapId)) {
+      _links.add(JobLinkedMap(mapId: mapId, monthKey: monthKey, name: mapName));
+    }
+    await _onLinkExistingMap?.call(mapId, monthKey, mapName);
+  }
+
+  /// True once at least one client map is linked, so the editor can offer
+  /// its polygons and tracks.
+  bool get hasLinkedMap => _links.isNotEmpty;
+
+  @override
+  String? get referenceLayerId => kLinkedClientMapLayerId;
+
+  @override
+  String? get referenceTracksLayerId => kLinkedClientMapTracksLayerId;
+
+  @override
+  bool get hasReferenceTracks => _links.isNotEmpty;
+
+  Future<List<ShareableMap>> _loadLinkedMaps() async {
+    final maps = <ShareableMap>[];
+    for (final link in _links) {
+      try {
+        final map = await ShareableMapsFirestoreService()
+            .getMap(link.monthKey, link.mapId);
+        if (map != null) maps.add(map);
+      } catch (e) {
+        debugPrint('[ScheduleJobAdapter] linked map ${link.mapId}: $e');
+      }
+    }
+    return maps;
+  }
+
+  @override
+  Future<MapLayer?> loadReferenceLayer() async {
+    if (_links.isEmpty) return null;
+    final maps = await _loadLinkedMaps();
+    if (maps.isEmpty) return null;
+
+    // Polygons the job already holds are drawn from the job layer, so
+    // showing them here as well would just be a second outline on top.
+    final seen = _job.workMaps.map(polygonGeometryKey).toSet();
+    final polygons = [
+      for (final map in maps)
+        for (final group in linkedMapPolygonGroups(map))
+          for (final p in group.polygons)
+            if (seen.add(polygonGeometryKey(p))) p,
+    ];
+    if (polygons.isEmpty) return null;
+
+    final now = DateTime.now();
+    return MapLayer(
+      id: kLinkedClientMapLayerId,
+      name: maps.length == 1
+          ? 'Client map · ${maps.first.name}'
+          : 'Client maps · ${maps.map((m) => m.name).join(', ')}',
+      description: 'Polygons from the linked client maps — not saved on the '
+          'job until you add them',
+      order: 2,
+      defaultColor: Colors.deepPurple,
+      polygons: polygons,
+      polylines: const [],
+      points: const [],
+      createdAt: now,
+      updatedAt: now,
+    );
+  }
+
+  @override
+  Future<MapLayer?> loadReferenceTracksLayer() async {
+    if (_links.isEmpty) return null;
+    final maps = await _loadLinkedMaps();
+    final tracks = <MapPolyline>[];
+    for (final map in maps) {
+      final folderPath = map.cloudFolderPaths.isNotEmpty
+          ? map.cloudFolderPaths.first
+          : map.storageFolderPath;
+      if (folderPath == null || folderPath.isEmpty) continue;
+      try {
+        tracks.addAll(
+            await JobCloudMapDataService().fetchCompiledTracks(folderPath));
+      } catch (e) {
+        debugPrint('[ScheduleJobAdapter] tracks for ${map.name}: $e');
+      }
+    }
+    if (tracks.isEmpty) return null;
+
+    final now = DateTime.now();
+    return MapLayer(
+      id: kLinkedClientMapTracksLayerId,
+      name: 'Recorded tracks',
+      description: 'Walked tracks from the linked client maps',
+      order: 3,
+      defaultColor: Colors.blueGrey,
+      polygons: const [],
+      polylines: tracks,
+      points: const [],
+      createdAt: now,
+      updatedAt: now,
+    );
   }
 
   @override
@@ -128,11 +257,15 @@ class ScheduleJobAdapter extends MapDataAdapter {
   @override
   Future<ShareableMap> load() async {
     final now = DateTime.now();
+    final linkedLayer = await loadReferenceLayer();
 
-    // Split workMaps by element type
-    final polygonWorkMaps = _job.workMaps.where((p) => p.isPolygon).toList();
-    final polylineWorkMaps = _job.workMaps.where((p) => p.isPolyline).toList();
-    final pointWorkMaps = _job.workMaps.where((p) => p.isPoint).toList();
+    // Split workMaps by element type. Areas resolved from client-map links
+    // get a layer of their own, which is not saved back onto the job.
+    final ownWorkMaps = _job.ownWorkMaps;
+    final allocatedAreas = _job.workMaps.where(JobAreaLink.isResolved).toList();
+    final polygonWorkMaps = ownWorkMaps.where((p) => p.isPolygon).toList();
+    final polylineWorkMaps = ownWorkMaps.where((p) => p.isPolyline).toList();
+    final pointWorkMaps = ownWorkMaps.where((p) => p.isPoint).toList();
     final hasDropoffPoint = pointWorkMaps.any(
         (p) => p.pointCategory == PointCategory.dropoff && p.points.isNotEmpty);
     final inferredDropOff = _job.dropOffPoint ??
@@ -140,7 +273,7 @@ class ScheduleJobAdapter extends MapDataAdapter {
 
     // Convert existing workMaps to a single layer
     final layer = MapLayer(
-      id: 'job_maps_layer',
+      id: kJobMapsLayerId,
       name: 'Job Maps',
       description: 'Work maps for ${_job.clientsDisplay}',
       order: 0,
@@ -218,7 +351,23 @@ class ScheduleJobAdapter extends MapDataAdapter {
       id: 'job_${_job.id}',
       name: displayName,
       description: 'Work areas: ${_job.workingAreasDisplay}',
-      layers: [layer, ..._buildUnfinishedLayers(now)],
+      layers: [
+        layer,
+        if (allocatedAreas.isNotEmpty)
+          MapLayer(
+            id: kAllocatedAreasLayerId,
+            name: 'Allocated from client maps',
+            description: 'Linked to the client map — changes made here are '
+                'not saved; edit the client map instead',
+            order: 1,
+            defaultColor: Colors.teal,
+            polygons: allocatedAreas,
+            createdAt: now,
+            updatedAt: now,
+          ),
+        ..._buildUnfinishedLayers(now),
+        ...?(linkedLayer == null ? null : [linkedLayer]),
+      ],
       defaultCenter: center,
       defaultZoom: 13.0,
       createdAt: now,
@@ -265,8 +414,13 @@ class ScheduleJobAdapter extends MapDataAdapter {
   Future<void> save(ShareableMap map) async {
     // Separate layers: unfinished-areas layer syncs back to the unfinished
     // provider; all other layers are persisted on the job itself.
-    final jobLayers =
-        map.layers.where((l) => l.id != kUnfinishedAreasLayerId).toList();
+    final jobLayers = map.layers
+        .where((l) =>
+            l.id != kUnfinishedAreasLayerId &&
+            l.id != kAllocatedAreasLayerId &&
+            l.id != kLinkedClientMapLayerId &&
+            l.id != kLinkedClientMapTracksLayerId)
+        .toList();
     final unfinishedLayers =
         map.layers.where((l) => l.id == kUnfinishedAreasLayerId).toList();
 

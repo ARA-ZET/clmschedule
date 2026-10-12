@@ -2,10 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../../models/collection_job.dart';
+import '../../models/distributor.dart';
 import '../../models/driver.dart';
 import '../../providers/driver_provider.dart';
+import '../../providers/schedule_provider.dart';
 
-/// Full CRUD UI for the `/drivers` collection.
+/// Full CRUD UI for the `/drivers` collection. Drivers are picked from the
+/// distributors list and stored under the distributor's id, so the
+/// dropsheet, schedule and payroll all refer to the same person by the
+/// same id — except management, who are entered by name (see
+/// [Driver.management]).
 class DriverManagementDialog extends riverpod.ConsumerWidget {
   const DriverManagementDialog({super.key});
 
@@ -13,6 +19,8 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final provider = ref.watch(driverRiverpod);
     final drivers = provider.drivers;
+    final distributors = ref.watch(scheduleRiverpod).distributors;
+    final distributorIds = {for (final d in distributors) d.id};
 
     return Dialog(
       child: ConstrainedBox(
@@ -78,6 +86,11 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
                                     d.defaultTrailer != TrailerType.noTrailer)
                                   d.defaultTrailer!.displayName,
                                 if (!d.active) 'inactive',
+                                if (d.management) 'management',
+                                if (!d.management &&
+                                    distributors.isNotEmpty &&
+                                    !distributorIds.contains(d.id))
+                                  'not linked to a distributor',
                               ].join(' • ')),
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -85,7 +98,7 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
                                   IconButton(
                                     icon: const Icon(Icons.edit, size: 20),
                                     onPressed: () => _editDriver(
-                                        context, provider,
+                                        context, provider, distributors,
                                         driver: d),
                                   ),
                                   IconButton(
@@ -106,7 +119,7 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
               child: Align(
                 alignment: Alignment.centerRight,
                 child: FilledButton.icon(
-                  onPressed: () => _editDriver(context, provider),
+                  onPressed: () => _editDriver(context, provider, distributors),
                   icon: const Icon(Icons.add),
                   label: const Text('Add driver'),
                 ),
@@ -120,16 +133,32 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
 
   Future<void> _editDriver(
     BuildContext context,
-    DriverProvider provider, {
+    DriverProvider provider,
+    List<Distributor> distributors, {
     Driver? driver,
   }) async {
+    final takenIds = {
+      for (final d in provider.drivers)
+        if (d.id != driver?.id) d.id,
+    };
     final result = await showDialog<Driver>(
       context: context,
-      builder: (_) => _DriverFormDialog(initial: driver),
+      builder: (_) => _DriverFormDialog(
+        initial: driver,
+        distributors: [
+          for (final d in distributors)
+            if (!takenIds.contains(d.id)) d,
+        ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase())),
+      ),
     );
     if (result == null) return;
     if (driver == null) {
       await provider.add(result);
+    } else if (result.id != driver.id) {
+      // An old driver being linked to a distributor: re-keyed under the
+      // distributor's id. Past dropsheets keep the old id on their sections.
+      await provider.add(result);
+      await provider.delete(driver.id);
     } else {
       await provider.update(result);
     }
@@ -163,15 +192,21 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
 
 class _DriverFormDialog extends StatefulWidget {
   final Driver? initial;
-  const _DriverFormDialog({this.initial});
+
+  /// Distributors that can be picked — those not already a driver.
+  final List<Distributor> distributors;
+
+  const _DriverFormDialog({this.initial, required this.distributors});
 
   @override
   State<_DriverFormDialog> createState() => _DriverFormDialogState();
 }
 
 class _DriverFormDialogState extends State<_DriverFormDialog> {
-  late final TextEditingController _name;
   late final TextEditingController _phone;
+  late final TextEditingController _name;
+  Distributor? _distributor;
+  bool _management = false;
   VehicleType? _vehicle;
   TrailerType? _trailer;
   bool _active = true;
@@ -179,6 +214,10 @@ class _DriverFormDialogState extends State<_DriverFormDialog> {
   @override
   void initState() {
     super.initState();
+    _distributor = widget.distributors
+        .where((d) => d.id == widget.initial?.id)
+        .firstOrNull;
+    _management = widget.initial?.management ?? false;
     _name = TextEditingController(text: widget.initial?.name ?? '');
     _phone = TextEditingController(text: widget.initial?.phone ?? '');
     _vehicle = widget.initial?.defaultVehicle;
@@ -203,11 +242,42 @@ class _DriverFormDialogState extends State<_DriverFormDialog> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
-              controller: _name,
-              autofocus: true,
-              decoration: const InputDecoration(labelText: 'Name'),
+            SwitchListTile(
+              value: _management,
+              onChanged: (v) => setState(() => _management = v),
+              title: const Text('Management'),
+              subtitle:
+                  const Text('Not a distributor — paid on the monthly payroll'),
+              contentPadding: EdgeInsets.zero,
             ),
+            if (_management)
+              TextField(
+                controller: _name,
+                autofocus: isNew,
+                decoration: const InputDecoration(labelText: 'Name'),
+              )
+            else
+              DropdownButtonFormField<Distributor>(
+                initialValue: _distributor,
+                isExpanded: true,
+                decoration: InputDecoration(
+                  labelText: 'Distributor',
+                  helperText: !isNew && _distributor == null
+                      ? '${widget.initial!.name} isn\'t linked to a distributor yet'
+                      : null,
+                ),
+                items: [
+                  for (final d in widget.distributors)
+                    DropdownMenuItem(value: d, child: Text(d.name)),
+                ],
+                onChanged: (d) => setState(() {
+                  _distributor = d;
+                  final phone = d?.phone1?.trim() ?? '';
+                  if (_phone.text.trim().isEmpty && phone.isNotEmpty) {
+                    _phone.text = phone;
+                  }
+                }),
+              ),
             const SizedBox(height: 8),
             TextField(
               controller: _phone,
@@ -259,15 +329,27 @@ class _DriverFormDialogState extends State<_DriverFormDialog> {
         ),
         FilledButton(
           onPressed: () {
-            final name = _name.text.trim();
-            if (name.isEmpty) return;
-            final id = widget.initial?.id ??
-                'd_${DateTime.now().microsecondsSinceEpoch}';
+            final String id;
+            final String name;
+            if (_management) {
+              name = _name.text.trim();
+              if (name.isEmpty) return;
+              id = widget.initial?.id ??
+                  'm_${DateTime.now().microsecondsSinceEpoch}';
+            } else {
+              final distributor = _distributor;
+              // New drivers must be a distributor; an old unlinked driver
+              // can still be saved as-is.
+              if (distributor == null && isNew) return;
+              id = distributor?.id ?? widget.initial!.id;
+              name = distributor?.name ?? widget.initial!.name;
+            }
             Navigator.pop(
               context,
               Driver(
                 id: id,
                 name: name,
+                management: _management,
                 phone: _phone.text.trim(),
                 defaultVehicle: _vehicle,
                 defaultTrailer: _trailer,

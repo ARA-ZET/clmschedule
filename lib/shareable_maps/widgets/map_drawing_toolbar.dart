@@ -77,10 +77,62 @@ class _MapDrawingToolbarState
                   mode: DrawingMode.point,
                   tooltip: 'Add point',
                 ),
+              if (caps.canDrawPolygons) ...[
+                const Divider(height: 1),
+                _SnapToolButton(
+                  isActive: provider.snapToNeighbours,
+                  onTap: () =>
+                      provider.setSnapToNeighbours(!provider.snapToNeighbours),
+                ),
+              ],
             ],
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Snap toggle — makes a click land on a neighbour's corner or edge instead
+/// of near it, so adjacent polygons hold the same coordinates and no sliver
+/// can open up between them. On by default; switch it off to place a vertex
+/// freely right next to an existing boundary.
+class _SnapToolButton extends StatelessWidget {
+  final bool isActive;
+  final VoidCallback onTap;
+
+  const _SnapToolButton({required this.isActive, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = isActive ? Colors.blue : Colors.grey.shade700;
+    return Tooltip(
+      message: isActive
+          ? 'Snapping on — new points share the neighbour\'s corners'
+          : 'Snapping off — points land exactly where you click',
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          color: isActive ? Colors.blue.shade100 : null,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(isActive ? Icons.hub : Icons.hub_outlined,
+                  color: color, size: 28),
+              const SizedBox(height: 4),
+              Text(
+                'Snap',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: color,
+                  fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

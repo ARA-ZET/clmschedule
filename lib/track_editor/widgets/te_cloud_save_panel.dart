@@ -16,12 +16,17 @@ import '../../providers/job_list_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../services/gpx_storage_service.dart';
 import '../../utils/payroll_week.dart';
+import '../../models/custom_job_type.dart';
+import '../../models/job.dart';
+import '../../providers/job_type_provider.dart';
+import '../services/te_track_clients.dart';
+import 'te_distributor_picker_dialog.dart';
 import '../models/styled_polygon.dart';
 import '../models/tab_item.dart';
 import '../providers/te_cloud_save_state_provider.dart';
 import '../providers/te_processing_provider.dart';
+import '../providers/te_schedule_sync_provider.dart';
 import '../providers/te_tabs_provider.dart';
-import '../../shareable_maps/providers/map_gesture_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
 import 'te_wage_stats_box.dart';
@@ -53,8 +58,9 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     tabsProvider.replaceTabMeta(currentIndex, distributorId: distributorId);
     final updatedTab = tabsProvider.tabs[currentIndex];
     if (updatedTab.trackDate != null) {
-      await ref.read(teProcessingRiverpod).refreshTab(
-          currentIndex, tabsProvider, ref.read(scheduleRiverpod));
+      await ref
+          .read(teProcessingRiverpod)
+          .refreshTab(currentIndex, tabsProvider, ref.read(scheduleRiverpod));
     }
     ref.read(teCloudSaveRiverpod).clearTab(tab);
     if (mounted) _resolveClients(tabsProvider.tabs[currentIndex]);
@@ -74,21 +80,14 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
       }
       return;
     }
-    final sorted = [...distributors]
-      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    final picked = await showDialog<String>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('Match distributor'),
-        children: [
-          for (final d in sorted)
-            SimpleDialogOption(
-              onPressed: () => Navigator.of(ctx).pop(d.id),
-              child: Text(d.name),
-            ),
-        ],
-      ),
+    final tab = _tab;
+    final picked = await showTEDistributorPicker(
+      context,
+      distributors: distributors,
+      fileName: tab.matchKey?.isNotEmpty == true ? tab.matchKey! : tab.title,
+      currentId: tab.distributorId,
     );
+    if (picked == tab.distributorId) return;
     if (picked != null) await _applyDistributor(picked);
   }
 
@@ -136,25 +135,19 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
               const Spacer(),
-              PopupMenuButton<String>(
+              IconButton(
                 tooltip: 'Match distributor',
                 padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
                 icon: Icon(
                   Icons.person,
                   size: 20,
                   color:
                       tab.distributorId != null ? Colors.green : Colors.black87,
                 ),
-                onSelected: (distributorId) => _applyDistributor(distributorId),
-                itemBuilder: (context) => ref
-                    .read(scheduleRiverpod)
-                    .distributors
-                    .map((d) => PopupMenuItem<String>(
-                          value: d.id,
-                          child: Text(d.name),
-                        ))
-                    .toList(),
+                onPressed: _showDistributorPicker,
               ),
+              const SizedBox(width: 8),
               IconButton(
                 icon: const Icon(Icons.refresh, size: 18),
                 tooltip: 'Refresh clients',
@@ -248,7 +241,10 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     );
   }
 
-  /// Open the folder picker to add a client manually.
+  /// Add a client picked from the cloud folders: put it on the tab's
+  /// schedule job, so it resolves with that job's work areas as its trim
+  /// polygons and stays on the schedule for next time. With no job for the
+  /// day, it is added for saving only.
   Future<void> _addClient(TETabItem tab) async {
     final date = _extractDate() ?? scheduleNow();
     final year = date.year.toString();
@@ -260,44 +256,130 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
       builder: (ctx) => _FolderPickerDialog(
         initialPath: monthPath,
         clientSuggestions: _joblistClientSuggestions(),
-        mapGestureProvider: ref.read(mapGestureRiverpod),
       ),
     );
     if (picked == null || !mounted) return;
 
     final segments = picked.split('/').where((s) => s.isNotEmpty).toList();
     final clientName = segments.length >= 4 ? segments[3] : segments.last;
+    final messenger = ScaffoldMessenger.of(context);
 
     final saveState = ref.read(teCloudSaveRiverpod);
     final existing = saveState.clientsFor(tab);
-    if (existing
-        .any((c) => c.clientName == clientName && c.folderPath == picked)) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('$clientName already in list'),
-            backgroundColor: Colors.orange,
-          ),
-        );
+    final listed =
+        existing.where((c) => c.clientName == clientName).firstOrNull;
+    if (listed != null) {
+      // Already here — the pick just points it at a different folder.
+      if (listed.folderPath != picked) {
+        saveState.setFolder(listed, picked, exists: true);
       }
+      messenger.showSnackBar(SnackBar(
+        content: Text('$clientName already in list'),
+        backgroundColor: Colors.orange,
+      ));
       return;
     }
 
+    final schedule = ref.read(scheduleRiverpod);
+    final distributorId = tab.distributorId;
+    final trackDate = tab.trackDate;
+    var jobs = const <Job>[];
+    if (distributorId != null &&
+        distributorId.isNotEmpty &&
+        trackDate != null) {
+      try {
+        jobs = await schedule.fetchJobsForDistributorAndDate(
+            distributorId, trackDate);
+      } catch (e) {
+        debugPrint('[TECloudSave] add client: job lookup failed: $e');
+      }
+    }
+    if (!mounted) return;
+
     final distributorName = existing.isNotEmpty
         ? existing.first.distributorName
-        : _matchDistributor(ref.read(scheduleRiverpod))?.name ?? '';
+        : _matchDistributor(schedule)?.name ?? '';
+    // Shown straight away, and carries the picked folder through the
+    // re-resolve below. Marked manual so it survives even if the schedule
+    // never lists it (no job, or a client type that records no waypoints).
+    final entry = TECloudSaveClientEntry(
+      clientName: clientName,
+      distributorName: distributorName,
+      date: date,
+      polygons: const [],
+      folderPath: picked,
+      folderExists: true,
+      manual: true,
+    );
 
-    saveState.addClient(
-      tab,
-      TECloudSaveClientEntry(
-        clientName: clientName,
-        distributorName: distributorName,
-        date: date,
-        polygons: const [],
-        folderPath: picked,
-        folderExists: true,
+    if (jobs.isEmpty) {
+      saveState.addClient(tab, entry);
+      messenger.showSnackBar(const SnackBar(
+        content: Text('No schedule job for this distributor on this day — '
+            'client added for saving only, with no trim areas.'),
+        duration: Duration(seconds: 4),
+      ));
+      return;
+    }
+
+    final target = jobs.length == 1
+        ? jobs.first
+        : await _pickJobForClient(jobs, clientName);
+    if (target == null || !mounted) return;
+
+    // Before the write: if the live sync lands mid-write it carries this
+    // tab's state (entry included) over to the refreshed tab.
+    saveState.addClient(tab, entry);
+    var updatedJobs = jobs;
+    if (!target.clients.contains(clientName)) {
+      final updated = target.copyWith(clients: [...target.clients, clientName]);
+      try {
+        await schedule.updateJob(updated);
+      } catch (e) {
+        debugPrint('[TECloudSave] add client: schedule update failed: $e');
+        messenger.showSnackBar(SnackBar(
+          content: Text('Could not add $clientName to the schedule: $e'),
+          backgroundColor: Colors.red,
+        ));
+        return;
+      }
+      updatedJobs = [
+        for (final j in jobs) j.id == target.id ? updated : j,
+      ];
+    }
+    if (!mounted) return;
+    await _resolveClients(tab, freshJobs: updatedJobs);
+    messenger.showSnackBar(SnackBar(
+      content: Text('Added $clientName to the schedule'),
+      duration: const Duration(seconds: 2),
+    ));
+  }
+
+  /// Which of the day's jobs [clientName] belongs to, when there are several.
+  Future<Job?> _pickJobForClient(List<Job> jobs, String clientName) async {
+    final picked = await showDialog<Job>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('Add $clientName to which job?'),
+        children: [
+          for (final job in jobs)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, job),
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(job.clients.isEmpty
+                    ? '(no clients yet)'
+                    : job.clients.join(', ')),
+                subtitle: job.workingAreas.isEmpty
+                    ? null
+                    : Text(job.workingAreas.join(', '),
+                        maxLines: 2, overflow: TextOverflow.ellipsis),
+              ),
+            ),
+        ],
       ),
     );
+    return picked;
   }
 
   /// Extract the linked schedule date, falling back to the first timestamped
@@ -381,7 +463,18 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     return (id: bestId, name: bestName);
   }
 
-  Future<void> _resolveClients(TETabItem tab) async {
+  /// Job types, waiting for the first load if it has not finished yet.
+  Future<List<CustomJobType>> _loadedJobTypes() async {
+    final types = ref.read(jobTypeRiverpod);
+    for (var i = 0; types.isLoading && i < 50; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return types.jobTypes;
+  }
+
+  /// [freshJobs], when given, are the tab's jobs as just written — used
+  /// instead of any cached copy that may not have caught up yet.
+  Future<void> _resolveClients(TETabItem tab, {List<Job>? freshJobs}) async {
     final saveState = ref.read(teCloudSaveRiverpod);
     saveState.beginResolve(tab);
 
@@ -400,64 +493,103 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
         return;
       }
 
-      final jobs =
-          await schedule.fetchJobsForDistributorAndDate(match.id, date);
+      // Prefer the live copy the schedule sync keeps for this tab's day;
+      // then the main app's in-memory months; fetch only when neither has
+      // it (e.g. the standalone editor).
+      final streamed = tab.distributorId == match.id
+          ? ref.read(teScheduleSyncRiverpod).latestJobsFor(tab)
+          : null;
+      final inMemory = schedule.getJobsForDistributorAndDate(match.id, date);
+      final jobs = freshJobs ??
+          streamed ??
+          (inMemory.isNotEmpty
+              ? inMemory
+              : await schedule.fetchJobsForDistributorAndDate(match.id, date));
       if (jobs.isEmpty) {
         saveState.finishResolveError(
             tab, 'No jobs found for this date & distributor');
         return;
       }
 
+      // Collection, window cleaning and similar work records no waypoints,
+      // so there is nothing to file for those clients — leave them out.
+      // Matched against the Job List already in memory — no extra reads.
+      // Best effort: if it cannot be read, show every client rather than none.
+      var hidden = const <String>{};
+      try {
+        hidden = findClientsWithoutTracks(
+          clients: jobs.expand((j) => j.clients),
+          jobListItems: await loadedJobListItems(ref.read(jobListRiverpod)),
+          jobTypes: await _loadedJobTypes(),
+        );
+      } catch (e) {
+        debugPrint('[TECloudSave] job-type lookup failed, showing all: $e');
+      }
+
       final gpxStorage = GpxStorageService();
-      final seen = <String>{};
+      final seen = <String>{...hidden};
       final entries = <TECloudSaveClientEntry>[];
 
       final year = date.year.toString();
       final monthLabel = DateFormat('MMM yyyy').format(date);
       final monthPath = 'Distribution/$year/$monthLabel';
 
-      for (final job in jobs) {
-        for (final client in job.clients) {
-          if (client.isEmpty || !seen.add(client)) continue;
+      final clients = [
+        for (final job in jobs)
+          for (final client in job.clients)
+            if (client.isNotEmpty && seen.add(client)) client,
+      ];
+      // One Storage listing per month answers every client, and the checks
+      // run together rather than one round trip after another.
+      final folderExists = await Future.wait(
+          clients.map((c) => gpxStorage.clientFolderExists(date, c)));
 
-          final clientFolderExists =
-              await gpxStorage.clientFolderExists(date, client);
-          final folderPath = clientFolderExists
-              ? gpxStorage.clientFolderPath(date, client)
-              : monthPath;
+      for (var ci = 0; ci < clients.length; ci++) {
+        final client = clients[ci];
+        final clientFolderExists = folderExists[ci];
+        final folderPath = clientFolderExists
+            ? gpxStorage.clientFolderPath(date, client)
+            : monthPath;
 
-          final polys = <TEStyledPolygon>[];
-          for (final j in jobs) {
-            if (j.clients.contains(client)) {
-              for (final wm in j.workMaps) {
-                polys.add(TEStyledPolygon(
-                  id: 'wm_${wm.name.hashCode}_${wm.points.hashCode}',
-                  name: wm.name,
-                  points: wm.points,
-                  style: TEKmlStyle(
-                    strokeColor: wm.color,
-                    strokeWidth: wm.strokeWidth.toDouble(),
-                    fillColor:
-                        wm.color.withAlpha((wm.fillOpacity * 255).round()),
-                    fill: true,
-                    outline: true,
-                  ),
-                ));
-              }
+        final polys = <TEStyledPolygon>[];
+        for (final j in jobs) {
+          if (j.clients.contains(client)) {
+            // Areas only: point names would otherwise end up in the
+            // saved file name.
+            for (final wm in j.workMaps.where((wm) => wm.isPolygon)) {
+              polys.add(TEStyledPolygon(
+                id: 'wm_${wm.name.hashCode}_${wm.points.hashCode}',
+                name: wm.name,
+                points: wm.points,
+                style: TEKmlStyle(
+                  strokeColor: wm.color,
+                  strokeWidth: wm.strokeWidth.toDouble(),
+                  fillColor: wm.color.withAlpha((wm.fillOpacity * 255).round()),
+                  fill: true,
+                  outline: true,
+                ),
+              ));
             }
           }
-
-          entries.add(TECloudSaveClientEntry(
-            clientName: client,
-            distributorName: match.name,
-            date: date,
-            polygons: polys,
-            folderPath: folderPath,
-            folderExists: clientFolderExists,
-          ));
         }
+
+        entries.add(TECloudSaveClientEntry(
+          clientName: client,
+          distributorName: match.name,
+          date: date,
+          polygons: polys,
+          folderPath: folderPath,
+          folderExists: clientFolderExists,
+        ));
       }
 
+      if (entries.isEmpty) {
+        saveState.finishResolveError(
+            tab,
+            'No distribution clients for this date & distributor — '
+            'only work that records no waypoints (${hidden.join(', ')})');
+        return;
+      }
       saveState.finishResolveSuccess(tab, entries);
     } catch (e) {
       saveState.finishResolveError(tab, 'Error: $e');
@@ -770,7 +902,6 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
         initialPath: _folderPath,
         clientName: widget.entry.clientName,
         clientSuggestions: widget.clientSuggestionsBuilder?.call() ?? const [],
-        mapGestureProvider: ref.read(mapGestureRiverpod),
       ),
     );
     if (picked != null && picked != _folderPath && mounted) {
@@ -1146,12 +1277,10 @@ class _FolderPickerDialog extends StatefulWidget {
   final String initialPath;
   final String? clientName;
   final List<String> clientSuggestions;
-  final MapGestureProvider? mapGestureProvider;
   const _FolderPickerDialog({
     required this.initialPath,
     this.clientName,
     this.clientSuggestions = const [],
-    this.mapGestureProvider,
   });
 
   @override
@@ -1220,10 +1349,7 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
                       .where((s) => s.toLowerCase().contains(query))
                       .toList();
 
-          return MouseRegion(
-            onEnter: (_) => widget.mapGestureProvider?.disableMapGestures(),
-            onExit: (_) => widget.mapGestureProvider?.enableMapGestures(),
-            child: AlertDialog(
+          return AlertDialog(
               title: Text('New $levelLabel Folder',
                   style: const TextStyle(fontSize: 15)),
               content: ConstrainedBox(
@@ -1287,8 +1413,7 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
                   child: const Text('Create'),
                 ),
               ],
-            ),
-          );
+            );
         },
       ),
     );
@@ -1329,8 +1454,6 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
       insetPadding: const EdgeInsets.all(24),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
-        onEnter: (_) => widget.mapGestureProvider?.disableMapGestures(),
-        onExit: (_) => widget.mapGestureProvider?.enableMapGestures(),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 420, maxHeight: 520),
           child: Column(

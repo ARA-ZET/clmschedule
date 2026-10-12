@@ -58,11 +58,21 @@ class _DriverSectionWidgetState
     final dropsheet = ref.read(dropsheetRiverpod);
     final messenger = ScaffoldMessenger.of(context);
 
-    if (config.depot.lat == null || config.depot.lng == null) {
+    // Resolve the office coordinates on demand — geocoded once per address
+    // and reused from then on, so there is nothing for the user to do first.
+    if (config.depot.needsGeocoding) {
+      setState(() => _calculating = true);
+      await config.ensureDepotGeocoded(retryFailed: true);
+      if (!mounted) return;
+      setState(() => _calculating = false);
+    }
+    if (!config.depot.hasCoordinates) {
       messenger.showSnackBar(
-        const SnackBar(
-          content: Text(
-              'Office is not yet geocoded. Open Task manager and save the office address first.'),
+        SnackBar(
+          content: Text(config.depot.address.trim().isEmpty
+              ? 'No office address set. Add one in Task manager.'
+              : 'Could not locate the office address '
+                  '"${config.depot.address}". Check it in Task manager.'),
         ),
       );
       return;
@@ -509,8 +519,10 @@ class _Header extends riverpod.ConsumerWidget {
       ),
     );
     if (ok == true) {
+      // withVehicleTrailer also refreshes the mandatory Inspect row so a
+      // driver taking a trailer is told to inspect the trailer too.
       await ref.read(dropsheetRiverpod).updateDriverSection(
-            section.copyWith(vehicle: vehicle, trailer: trailer),
+            section.withVehicleTrailer(vehicle, trailer),
           );
     }
   }

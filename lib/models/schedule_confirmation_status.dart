@@ -51,19 +51,41 @@ enum ScheduleConfirmationStatus {
 }
 
 /// Confirmation status for a schedule day plus who confirmed it and when.
+///
+/// [isFromCache] / [hasPendingWrites] come from the snapshot metadata so the
+/// UI can tell a value the server has acknowledged from one that is still only
+/// local. Without that distinction an offline client happily shows "Confirmed"
+/// from its own cache while every other user still sees the old status.
 class ScheduleDayConfirmation {
   final ScheduleConfirmationStatus status;
   final DateTime? confirmedAt;
   final String? confirmedBy;
+  final bool isFromCache;
+  final bool hasPendingWrites;
 
   const ScheduleDayConfirmation({
     this.status = ScheduleConfirmationStatus.notConfirmed,
     this.confirmedAt,
     this.confirmedBy,
+    this.isFromCache = false,
+    this.hasPendingWrites = false,
   });
 
-  factory ScheduleDayConfirmation.fromMap(Map<String, dynamic>? data) {
-    if (data == null) return const ScheduleDayConfirmation();
+  /// True when this value has not yet been round-tripped through the server,
+  /// i.e. what it shows may differ from what other users see.
+  bool get isUnsynced => isFromCache || hasPendingWrites;
+
+  factory ScheduleDayConfirmation.fromMap(
+    Map<String, dynamic>? data, {
+    bool isFromCache = false,
+    bool hasPendingWrites = false,
+  }) {
+    if (data == null) {
+      return ScheduleDayConfirmation(
+        isFromCache: isFromCache,
+        hasPendingWrites: hasPendingWrites,
+      );
+    }
     final ts = data['confirmedAt'];
     return ScheduleDayConfirmation(
       status: ScheduleConfirmationStatus.fromString(
@@ -71,6 +93,17 @@ class ScheduleDayConfirmation {
       ),
       confirmedAt: ts is Timestamp ? ts.toDate() : null,
       confirmedBy: data['confirmedBy'] as String?,
+      isFromCache: isFromCache,
+      hasPendingWrites: hasPendingWrites,
+    );
+  }
+
+  /// Reads the day doc together with its sync metadata.
+  factory ScheduleDayConfirmation.fromSnapshot(DocumentSnapshot snap) {
+    return ScheduleDayConfirmation.fromMap(
+      snap.data() as Map<String, dynamic>?,
+      isFromCache: snap.metadata.isFromCache,
+      hasPendingWrites: snap.metadata.hasPendingWrites,
     );
   }
 }

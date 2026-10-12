@@ -1,6 +1,7 @@
 // track_editor/models/te_gpx_file_entry.dart
 import 'package:flutter/foundation.dart';
 import 'package:gpx/gpx.dart';
+import '../../utils/text_encoding.dart';
 
 /// Whether a GPX file contains a track or waypoints.
 enum TEGpxFileType { track, waypoints, unknown }
@@ -60,7 +61,7 @@ class TEGpxFileEntry {
     List<Trk> tracks = [];
     List<Wpt> wpts = [];
     try {
-      final xml = String.fromCharCodes(bytes);
+      final xml = decodeTextBytes(bytes);
       final gpx = GpxReader().fromString(xml);
       tracks = gpx.trks;
       wpts = gpx.wpts;

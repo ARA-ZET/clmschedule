@@ -434,6 +434,19 @@ class _CloudFileManagerScreenState extends State<CloudFileManagerScreen> {
       return;
     }
 
+    if (result.linksError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Renamed "${folder.name}" → "${newName.trim()}", but '
+              'the jobs and maps using it still point at the old name: '
+              '${result.linksError}'),
+          backgroundColor: Colors.orange,
+          duration: const Duration(seconds: 10),
+        ),
+      );
+      return;
+    }
+
     final refParts = <String>[];
     if (result.mapsUpdated > 0) {
       refParts.add(

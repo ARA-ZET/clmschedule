@@ -3,16 +3,20 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../models/address.dart';
 import '../services/address_service_v2.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import '../shareable_maps/providers/map_gesture_provider.dart';
+import '../shareable_maps/widgets/map_overlay.dart';
 
 /// Master map viewer showing all addresses from all suburbs
-class MasterMapViewer extends StatefulWidget {
+class MasterMapViewer extends riverpod.ConsumerStatefulWidget {
   const MasterMapViewer({super.key});
 
   @override
-  State<MasterMapViewer> createState() => _MasterMapViewerState();
+  riverpod.ConsumerState<MasterMapViewer> createState() =>
+      _MasterMapViewerState();
 }
 
-class _MasterMapViewerState extends State<MasterMapViewer> {
+class _MasterMapViewerState extends riverpod.ConsumerState<MasterMapViewer> {
   final AddressServiceV2 _addressService =
       AddressServiceV2(FirebaseFirestore.instance);
 
@@ -100,6 +104,8 @@ class _MasterMapViewerState extends State<MasterMapViewer> {
           snippet: address.suburb.toUpperCase(),
         ),
         onTap: () {
+          // The click that landed on a panel over the map.
+          if (ref.read(mapGestureRiverpod).isHeld) return;
           setState(() => _selectedAddress = address);
         },
         icon: _suburbColors[address.suburb.toLowerCase()] ??
@@ -236,6 +242,7 @@ class _MasterMapViewerState extends State<MasterMapViewer> {
       body: Stack(
         children: [
           GoogleMap(
+            webGestureHandling: ref.watch(mapGestureRiverpod).gestureHandling,
             initialCameraPosition: CameraPosition(
               target: _getCenter(),
               zoom: 12,
@@ -263,47 +270,49 @@ class _MasterMapViewerState extends State<MasterMapViewer> {
       bottom: 16,
       left: 16,
       right: 16,
-      child: Card(
-        elevation: 8,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _selectedAddress!.streetAddress.isNotEmpty
-                              ? _selectedAddress!.streetAddress
-                              : _selectedAddress!.suburb,
-                          style: const TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                        Text(
-                          _selectedAddress!.suburb.toUpperCase(),
-                          style: TextStyle(
-                              fontSize: 14, color: Colors.blue.shade700),
-                        ),
-                      ],
+      child: MapOverlay(
+        child: Card(
+          elevation: 8,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _selectedAddress!.streetAddress.isNotEmpty
+                                ? _selectedAddress!.streetAddress
+                                : _selectedAddress!.suburb,
+                            style: const TextStyle(
+                                fontSize: 18, fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            _selectedAddress!.suburb.toUpperCase(),
+                            style: TextStyle(
+                                fontSize: 14, color: Colors.blue.shade700),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () {
-                      setState(() => _selectedAddress = null);
-                    },
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(_selectedAddress!.fullAddress,
-                  style: const TextStyle(fontSize: 12)),
-            ],
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () {
+                        setState(() => _selectedAddress = null);
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(_selectedAddress!.fullAddress,
+                    style: const TextStyle(fontSize: 12)),
+              ],
+            ),
           ),
         ),
       ),
@@ -316,77 +325,79 @@ class _MasterMapViewerState extends State<MasterMapViewer> {
       left: 16,
       right: 16,
       bottom: 16,
-      child: Card(
-        elevation: 8,
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.blue.shade50,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(12)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.analytics, color: Colors.blue),
-                  const SizedBox(width: 8),
-                  const Text('Statistics',
-                      style:
-                          TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const Spacer(),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () {
-                      setState(() => _showStats = false);
-                    },
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: ListView(
+      child: MapOverlay(
+        child: Card(
+          elevation: 8,
+          child: Column(
+            children: [
+              Container(
                 padding: const EdgeInsets.all(16),
-                children: [
-                  _buildStatRow('Total Addresses',
-                      _allAddresses.length.toString(), Colors.blue),
-                  _buildStatRow('Suburbs', _addressesBySuburb.length.toString(),
-                      Colors.purple),
-                  const Divider(height: 32),
-                  const Text('By Suburb:',
-                      style:
-                          TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  const SizedBox(height: 12),
-                  ..._addressesBySuburb.entries.map((entry) {
-                    return Card(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      child: ListTile(
-                        leading: Icon(Icons.location_city,
-                            color: _suburbColors[entry.key] != null
-                                ? Colors.blue
-                                : Colors.grey),
-                        title: Text(entry.key.toUpperCase(),
-                            style:
-                                const TextStyle(fontWeight: FontWeight.w500)),
-                        trailing: Text('${entry.value.length}',
-                            style:
-                                const TextStyle(fontWeight: FontWeight.bold)),
-                        onTap: () {
-                          setState(() {
-                            _filterSuburb = entry.key;
-                            _showStats = false;
-                          });
-                          _createMarkers();
-                          Future.delayed(
-                              const Duration(milliseconds: 100), _fitBounds);
-                        },
-                      ),
-                    );
-                  }),
-                ],
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(12)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.analytics, color: Colors.blue),
+                    const SizedBox(width: 8),
+                    const Text('Statistics',
+                        style: TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () {
+                        setState(() => _showStats = false);
+                      },
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    _buildStatRow('Total Addresses',
+                        _allAddresses.length.toString(), Colors.blue),
+                    _buildStatRow('Suburbs',
+                        _addressesBySuburb.length.toString(), Colors.purple),
+                    const Divider(height: 32),
+                    const Text('By Suburb:',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16)),
+                    const SizedBox(height: 12),
+                    ..._addressesBySuburb.entries.map((entry) {
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        child: ListTile(
+                          leading: Icon(Icons.location_city,
+                              color: _suburbColors[entry.key] != null
+                                  ? Colors.blue
+                                  : Colors.grey),
+                          title: Text(entry.key.toUpperCase(),
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w500)),
+                          trailing: Text('${entry.value.length}',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.bold)),
+                          onTap: () {
+                            setState(() {
+                              _filterSuburb = entry.key;
+                              _showStats = false;
+                            });
+                            _createMarkers();
+                            Future.delayed(
+                                const Duration(milliseconds: 100), _fitBounds);
+                          },
+                        ),
+                      );
+                    }),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

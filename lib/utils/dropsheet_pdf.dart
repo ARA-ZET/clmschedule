@@ -5,7 +5,6 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
-import '../models/collection_job.dart';
 import '../models/dropsheet_day.dart';
 import '../providers/dropsheet_provider.dart' show kUnassignedSectionId;
 import 'dropsheet_maps.dart';
@@ -35,12 +34,7 @@ Future<Uint8List> generateDropsheetPdf(DropsheetDay day, DateTime date) async {
     if (section.id == kUnassignedSectionId) continue;
 
     // Pre-compute section-level metadata (needed by header + footer).
-    final vehicleParts = <String>[
-      if (section.vehicle != null) section.vehicle!.displayName,
-      if (section.trailer != null && section.trailer != TrailerType.noTrailer)
-        section.trailer!.displayName,
-    ];
-    final vehicleLabel = vehicleParts.join(' + ');
+    final vehicleLabel = section.vehicleTrailerLabel;
     final nonMandatory = section.tasks.where((t) => !t.isMandatory).length;
     String routeSummary = '';
     if (section.routeDistanceMeters > 0) {
@@ -249,9 +243,7 @@ List<pw.Widget> _buildSectionContent({
   final dataRows = <pw.TableRow>[];
   for (var i = 0; i < section.tasks.length; i++) {
     final task = section.tasks[i];
-    final jobLabel = task.job.isNotEmpty
-        ? task.job
-        : DropsheetMaps.defaultJobLabel(task.type);
+    final jobLabel = task.displayJob;
     final locationLabel = DropsheetMaps.locationLabel(task);
     final rowBg =
         i.isEven ? PdfColors.white : const PdfColor.fromInt(0xFFF8F8F8);
@@ -261,7 +253,7 @@ List<pw.Widget> _buildSectionContent({
         children: [
           cell('${i + 1}', style: boldStyle, softWrap: false),
           cell(jobLabel, style: task.isMandatory ? mutedStyle : boldStyle),
-          cell(task.details, style: baseStyle),
+          cell(task.detailsText, style: baseStyle),
           cell(task.startTime, style: baseStyle, softWrap: false),
           cell(locationLabel,
               style: locationLabel.isEmpty ? italicStyle : baseStyle),

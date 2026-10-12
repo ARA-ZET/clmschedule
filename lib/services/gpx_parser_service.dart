@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:xml/xml.dart';
 import '../models/gpx_track.dart';
+import '../utils/text_encoding.dart';
 
 /// Service for parsing GPX files and converting them to GpxTrack objects
 class GpxParserService {
@@ -28,7 +29,7 @@ class GpxParserService {
   ) async {
     try {
       // Convert bytes to string
-      final xmlString = String.fromCharCodes(fileBytes);
+      final xmlString = decodeTextBytes(fileBytes);
 
       // Parse XML
       final document = XmlDocument.parse(xmlString);

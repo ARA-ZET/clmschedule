@@ -10,6 +10,7 @@ import 'package:intl/intl.dart';
 import '../services/file_search_service.dart';
 import '../services/gpx_storage_service.dart';
 import '../shareable_maps/services/shareable_maps_firestore_service.dart';
+import '../utils/text_encoding.dart';
 
 /// Hierarchy depth constants for the folder structure:
 /// 0: Distribution (root)
@@ -319,7 +320,7 @@ class CloudFileManagerProvider with ChangeNotifier {
   /// Download a file as string content (for GPX/KML).
   Future<String?> downloadFileAsString(StorageFileItem file) async {
     final bytes = await _storage.downloadFileBytes(file.fullPath);
-    if (bytes != null) return String.fromCharCodes(bytes);
+    if (bytes != null) return decodeTextBytes(bytes);
     return null;
   }
 
@@ -505,21 +506,36 @@ class CloudFileManagerProvider with ChangeNotifier {
   /// document (shareable maps, job list items) that referenced the old path so
   /// links remain valid after the rename.
   ///
-  /// Returns `({newPath, mapsUpdated, jobsUpdated})`. `newPath` is `null` on
-  /// failure.
-  Future<({String? newPath, int mapsUpdated, int jobsUpdated})> renameFolder(
-      StorageFolderItem folder, String newName) async {
+  /// Returns `({newPath, mapsUpdated, jobsUpdated, linksError})`. `newPath`
+  /// is `null` on failure. `linksError` is set when the folder was renamed
+  /// but the jobs and maps pointing at it could not be re-pointed.
+  Future<
+      ({
+        String? newPath,
+        int mapsUpdated,
+        int jobsUpdated,
+        String? linksError,
+      })> renameFolder(StorageFolderItem folder, String newName) async {
     final sanitized = newName.trim();
     if (sanitized.isEmpty || sanitized == folder.name) {
-      return (newPath: null, mapsUpdated: 0, jobsUpdated: 0);
+      return (newPath: null, mapsUpdated: 0, jobsUpdated: 0, linksError: null);
     }
     try {
       final newPath = await _storage.renameFolder(folder.fullPath, sanitized);
 
       // Update Firestore references to point to the new folder path so
       // shareable maps and job list items keep loading their cloud data.
-      final refs = await ShareableMapsFirestoreService()
-          .updateFolderPathReference(folder.fullPath, newPath);
+      // The files have already moved by now, so a failure here is reported
+      // as what it is rather than as a failed rename.
+      var refs = (maps: 0, jobs: 0);
+      String? linksError;
+      try {
+        refs = await ShareableMapsFirestoreService()
+            .updateFolderPathReference(folder.fullPath, newPath);
+      } catch (e) {
+        linksError = '$e';
+        debugPrint('renameFolder: links not updated for $newPath: $e');
+      }
 
       // Rebuild compiled tracks/waypoints in the new folder.
       unawaited(_rebuildCompiledFor({newPath}));
@@ -529,12 +545,13 @@ class CloudFileManagerProvider with ChangeNotifier {
         newPath: newPath,
         mapsUpdated: refs.maps,
         jobsUpdated: refs.jobs,
+        linksError: linksError,
       );
     } catch (e) {
       _error = 'Failed to rename folder: $e';
       debugPrint(_error);
       notifyListeners();
-      return (newPath: null, mapsUpdated: 0, jobsUpdated: 0);
+      return (newPath: null, mapsUpdated: 0, jobsUpdated: 0, linksError: null);
     }
   }
 

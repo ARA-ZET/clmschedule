@@ -1,0 +1,279 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.4 2390de5a",
+  "osm3s": {
+    "timestamp_osm_base": "2026-09-14T10:34:21Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+
+{
+  "type": "way",
+  "id": 23201973,
+  "nodes": [
+    4472813557,
+    250949323,
+    250949322,
+    4472735690,
+    7479208604,
+    4472813556,
+    7479208603,
+    7479208602,
+    1973969259
+  ],
+  "tags": {
+    "highway": "residential",
+    "maxspeed": "60",
+    "name": "Vrede Street",
+    "oneway": "yes",
+    "source": "City of Cape Town",
+    "surface": "asphalt",
+    "width": "16.6"
+  }
+},
+{
+  "type": "way",
+  "id": 450362288,
+  "nodes": [
+    4472813557,
+    1244127044
+  ],
+  "tags": {
+    "highway": "residential",
+    "maxspeed": "60",
+    "name": "Teddington Road",
+    "source": "City of Cape Town",
+    "surface": "paving_stones",
+    "width": "6.8"
+  }
+},
+{
+  "type": "way",
+  "id": 450362289,
+  "nodes": [
+    4472813558,
+    13919420900,
+    7480201834,
+    4472734261,
+    4472813557
+  ],
+  "tags": {
+    "highway": "residential",
+    "maxspeed": "60",
+    "name": "Teddington Road",
+    "oneway": "yes",
+    "source": "City of Cape Town",
+    "surface": "asphalt",
+    "width": "8.699999999999999"
+  }
+},
+{
+  "type": "way",
+  "id": 737379384,
+  "nodes": [
+    6043866888,
+    4472735739,
+    6914003979,
+    60464071,
+    4497906441,
+    6903601958,
+    6903601956
+  ],
+  "tags": {
+    "highway": "primary",
+    "lanes": "2",
+    "name": "Voortrekker Road",
+    "name:etymology:wikidata": "Q510672",
+    "oneway": "yes",
+    "ref": "R102",
+    "surface": "asphalt"
+  }
+},
+{
+  "type": "way",
+  "id": 737384239,
+  "nodes": [
+    60464151,
+    6903601957,
+    4497906442,
+    60464152,
+    6903601959,
+    6903601960
+  ],
+  "tags": {
+    "highway": "primary",
+    "lanes": "2",
+    "maxspeed": "60",
+    "name": "Voortrekker Road",
+    "name:etymology:wikidata": "Q510672",
+    "oneway": "yes",
+    "ref": "R102",
+    "source": "City of Cape Town",
+    "surface": "asphalt"
+  }
+},
+{
+  "type": "node",
+  "id": 60464071,
+  "lat": -33.9011105,
+  "lon": 18.6285758
+},
+{
+  "type": "node",
+  "id": 60464151,
+  "lat": -33.9013660,
+  "lon": 18.6300568
+},
+{
+  "type": "node",
+  "id": 60464152,
+  "lat": -33.9012088,
+  "lon": 18.6285428
+},
+{
+  "type": "node",
+  "id": 250949322,
+  "lat": -33.9003041,
+  "lon": 18.6293088
+},
+{
+  "type": "node",
+  "id": 250949323,
+  "lat": -33.9002711,
+  "lon": 18.6290024
+},
+{
+  "type": "node",
+  "id": 1244127044,
+  "lat": -33.9008119,
+  "lon": 18.6286388
+},
+{
+  "type": "node",
+  "id": 1973969259,
+  "lat": -33.9004186,
+  "lon": 18.6308682
+},
+{
+  "type": "node",
+  "id": 4472734261,
+  "lat": -33.8997984,
+  "lon": 18.6290406
+},
+{
+  "type": "node",
+  "id": 4472735690,
+  "lat": -33.9003100,
+  "lon": 18.6293702
+},
+{
+  "type": "node",
+  "id": 4472735739,
+  "lat": -33.9010487,
+  "lon": 18.6275427
+},
+{
+  "type": "node",
+  "id": 4472813556,
+  "lat": -33.9004510,
+  "lon": 18.6307567
+},
+{
+  "type": "node",
+  "id": 4472813557,
+  "lat": -33.9002449,
+  "lon": 18.6288559
+},
+{
+  "type": "node",
+  "id": 4472813558,
+  "lat": -33.8994409,
+  "lon": 18.6291562
+},
+{
+  "type": "node",
+  "id": 4497906441,
+  "lat": -33.9011874,
+  "lon": 18.6292641
+},
+{
+  "type": "node",
+  "id": 4497906442,
+  "lat": -33.9012794,
+  "lon": 18.6292454
+},
+{
+  "type": "node",
+  "id": 6043866888,
+  "lat": -33.9010419,
+  "lon": 18.6274289
+},
+{
+  "type": "node",
+  "id": 6903601956,
+  "lat": -33.9012695,
+  "lon": 18.6300421
+},
+{
+  "type": "node",
+  "id": 6903601957,
+  "lat": -33.9013514,
+  "lon": 18.6299254
+},
+{
+  "type": "node",
+  "id": 6903601958,
+  "lat": -33.9012618,
+  "lon": 18.6299362
+},
+{
+  "type": "node",
+  "id": 6903601959,
+  "lat": -33.9011901,
+  "lon": 18.6283239
+},
+{
+  "type": "node",
+  "id": 6903601960,
+  "lat": -33.9011668,
+  "lon": 18.6280323
+},
+{
+  "type": "node",
+  "id": 6914003979,
+  "lat": -33.9010753,
+  "lon": 18.6281643
+},
+{
+  "type": "node",
+  "id": 7479208602,
+  "lat": -33.9004240,
+  "lon": 18.6308536
+},
+{
+  "type": "node",
+  "id": 7479208603,
+  "lat": -33.9004485,
+  "lon": 18.6307733
+},
+{
+  "type": "node",
+  "id": 7479208604,
+  "lat": -33.9004512,
+  "lon": 18.6307366
+},
+{
+  "type": "node",
+  "id": 7480201834,
+  "lat": -33.8996213,
+  "lon": 18.6290990
+},
+{
+  "type": "node",
+  "id": 13919420900,
+  "lat": -33.8995454,
+  "lon": 18.6291231
+}
+
+  ]
+}

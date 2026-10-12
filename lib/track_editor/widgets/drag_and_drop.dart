@@ -14,6 +14,7 @@ import '../providers/te_tracks_provider.dart';
 import '../providers/te_waypoints_provider.dart';
 import '../utils/html_file_reader.dart';
 import 'mymaps_link.dart';
+import '../../utils/text_encoding.dart';
 
 class TEDragAndDrop extends riverpod.ConsumerStatefulWidget {
   final void Function(List<({Uint8List bytes, String name})>) onFilesPicked;
@@ -96,7 +97,7 @@ class _TEDragAndDropState extends riverpod.ConsumerState<TEDragAndDrop> {
 
   void _readGpxFile(Uint8List bytes, String name) {
     try {
-      final xml = String.fromCharCodes(bytes);
+      final xml = decodeTextBytes(bytes);
       final gpx = GpxReader().fromString(xml);
       ref.read(teWaypointsRiverpod).addWaypoints(gpx.wpts);
       ref.read(teTracksRiverpod).addTracks(gpx.trks);

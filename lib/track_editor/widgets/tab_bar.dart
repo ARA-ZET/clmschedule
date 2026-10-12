@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/tab_item.dart';
+import '../pages/track_editor_screen.dart';
 import '../providers/te_cloud_save_state_provider.dart';
 import '../providers/te_files_provider.dart';
 import '../providers/te_map_layer_provider.dart';
@@ -11,8 +12,11 @@ import '../providers/te_tabs_provider.dart';
 import '../providers/te_tools_provider.dart';
 import '../providers/te_tracks_provider.dart';
 import '../providers/te_undo_provider.dart';
+import '../providers/te_view_provider.dart';
 import '../providers/te_wage_stats_provider.dart';
 import '../providers/te_waypoints_provider.dart';
+import '../providers/te_work_area_overlay_provider.dart';
+import '../../providers/schedule_provider.dart';
 
 class TETopTabBar extends riverpod.ConsumerWidget {
   const TETopTabBar({super.key});
@@ -201,32 +205,53 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                         ),
                       );
                     } else if (index == tabs.length) {
-                      // "+" new tab button
+                      // "+" new tab button. In Update mode a blank tab is
+                      // useless — there is nothing to update — so the button
+                      // opens the Cloud Files browser instead and the picked
+                      // file lands in its own new tab. A long-press still
+                      // gives an empty tab in every mode.
+                      final isUpdateMode =
+                          tabsProvider.activeMode == TEMode.update;
+                      void addEmptyTab() {
+                        final newTab = TETabItem(
+                          title: 'untitled ${index + 1}',
+                          polygons: [],
+                          tracks: [],
+                          waypoints: [],
+                          targetPolygons: [],
+                        );
+                        ref.read(teTabsRiverpod)
+                          ..addTab(newTab)
+                          ..selectTab(index);
+                      }
+
                       return SizedBox(
                         width: tabWidth,
-                        child: TextButton(
-                          onPressed: () {
-                            final newTab = TETabItem(
-                              title: 'untitled ${index + 1}',
-                              polygons: [],
-                              tracks: [],
-                              waypoints: [],
-                              targetPolygons: [],
-                            );
-                            ref.read(teTabsRiverpod)
-                              ..addTab(newTab)
-                              ..selectTab(index);
-                          },
-                          style: TextButton.styleFrom(
-                            backgroundColor: Colors.white,
-                            foregroundColor: Colors.blueGrey,
-                            shape: RoundedRectangleBorder(
-                              side: const BorderSide(
-                                  color: Colors.blueGrey, width: 2),
-                              borderRadius: BorderRadius.circular(8),
+                        child: Tooltip(
+                          message: isUpdateMode
+                              ? 'Open a cloud file in a new tab\n'
+                                  '(long-press for an empty tab)'
+                              : 'New empty tab',
+                          child: TextButton(
+                            onPressed: isUpdateMode
+                                ? () => openCloudFilesForTrackEditor(context)
+                                : addEmptyTab,
+                            onLongPress: isUpdateMode ? addEmptyTab : null,
+                            style: TextButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              foregroundColor: Colors.blueGrey,
+                              shape: RoundedRectangleBorder(
+                                side: const BorderSide(
+                                    color: Colors.blueGrey, width: 2),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
                             ),
+                            child: Icon(
+                                isUpdateMode
+                                    ? Icons.cloud_download
+                                    : Icons.create_new_folder,
+                                size: 20),
                           ),
-                          child: const Icon(Icons.create_new_folder, size: 20),
                         ),
                       );
                     } else {
@@ -304,8 +329,23 @@ class TETopTabBar extends riverpod.ConsumerWidget {
             padding: const EdgeInsets.only(left: toolGap, right: 8),
             child: Row(
               mainAxisSize: MainAxisSize.min,
+              // Stretch, so every control in this row — the labelled
+              // Map/Analysis switch included — is exactly as tall as the
+              // icon buttons beside it.
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               spacing: toolGap,
               children: [
+                // Map / Analysis switch for the right-hand pane. First in the
+                // row because it changes what everything to its right acts on:
+                // the editing tools only apply to the map.
+                Builder(builder: (_) {
+                  final viewP = ref.watch(teViewRiverpod);
+                  final isAnalysis = viewP.view == TEPaneView.analysis;
+                  return _ViewSwitch(
+                    isAnalysis: isAnalysis,
+                    onTap: () => ref.read(teViewRiverpod).toggleView(),
+                  );
+                }),
                 // Undo / Redo (per-tab) — placed just before the scissors
                 // tool so the user can quickly revert an accidental cut or
                 // drag without leaving the tab.
@@ -352,6 +392,28 @@ class TETopTabBar extends riverpod.ConsumerWidget {
                   isLocked: drawingMode != TEDrawingMode.none,
                   onTap: () => ref.read(teToolsRiverpod).toggleScissors(),
                 ),
+                // Work-areas overlay: draw every saved work area on the map
+                // so a round's areas can be picked by looking at the ground
+                // they cover rather than by remembering their names.
+                Builder(builder: (_) {
+                  final overlay = ref.watch(teWorkAreaOverlayRiverpod);
+                  return _LabelledToolButton(
+                    icon: Icons.layers_outlined,
+                    label: 'Work areas',
+                    tooltip: overlay.isLoading
+                        ? 'Loading work areas…'
+                        : overlay.isVisible
+                            ? 'Hide work areas'
+                            : 'Show work areas to add',
+                    isActive: overlay.isVisible,
+                    isBusy: overlay.isLoading,
+                    activeColor: Colors.teal,
+                    isLocked: scissorsMode || drawingMode != TEDrawingMode.none,
+                    onTap: () => ref
+                        .read(teWorkAreaOverlayRiverpod)
+                        .toggle(ref.read(scheduleRiverpod)),
+                  );
+                }),
                 // Draw polygon tool
                 _ToolButton(
                   icon: Icons.pentagon_outlined,
@@ -426,6 +488,151 @@ class _ToolButton extends StatelessWidget {
                         ? Colors.white
                         : Colors.blueGrey.shade700,
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Two-segment Map/Analysis switch for the right-hand pane. Labelled rather
+/// than icon-only: it changes what the whole pane is, not what a tool does.
+class _ViewSwitch extends StatelessWidget {
+  final bool isAnalysis;
+  final VoidCallback onTap;
+
+  const _ViewSwitch({required this.isAnalysis, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    Widget seg(IconData icon, String label, bool selected) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          color: selected ? Colors.blueGrey : Colors.transparent,
+          alignment: Alignment.center,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon,
+                  size: 14,
+                  color: selected ? Colors.white : Colors.blueGrey.shade400),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: selected ? Colors.white : Colors.blueGrey.shade400,
+                ),
+              ),
+            ],
+          ),
+        );
+
+    return Tooltip(
+      message: isAnalysis
+          ? 'Back to the map'
+          : 'Analyse this distributor\u2019s tracklog and handouts',
+      child: Material(
+        elevation: 1,
+        borderRadius: BorderRadius.circular(8),
+        color: Colors.white,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: onTap,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                seg(Icons.map_outlined, 'Map', !isAnalysis),
+                seg(Icons.insights, 'Analysis', isAnalysis),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A tool button that carries its name as well as its icon.
+///
+/// For tools whose icon cannot carry the meaning on its own — a stack of
+/// layers could be anything, while "Work areas" is the words the user already
+/// has for the thing. Same shape, colours and states as [_ToolButton], just
+/// wide enough for a label.
+class _LabelledToolButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String tooltip;
+  final bool isActive;
+  final Color activeColor;
+  final bool isLocked;
+
+  /// Work still in flight — fetching every saved work area takes a moment, and
+  /// the icon-only version of this button gave no sign it was doing anything.
+  final bool isBusy;
+
+  final VoidCallback onTap;
+
+  const _LabelledToolButton({
+    required this.icon,
+    required this.label,
+    required this.tooltip,
+    required this.isActive,
+    required this.activeColor,
+    required this.isLocked,
+    required this.onTap,
+    this.isBusy = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = isLocked
+        ? Colors.grey.shade400
+        : isActive
+            ? Colors.white
+            : Colors.blueGrey.shade700;
+
+    return Tooltip(
+      message: isLocked ? '' : tooltip,
+      child: Material(
+        elevation: isActive ? 4 : 1,
+        borderRadius: BorderRadius.circular(8),
+        color: isActive ? activeColor : Colors.white,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: isLocked ? null : onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: isBusy
+                      ? Padding(
+                          padding: const EdgeInsets.all(1),
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(fg),
+                          ),
+                        )
+                      : Icon(icon, size: 16, color: fg),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: fg,
+                  ),
+                ),
+              ],
             ),
           ),
         ),

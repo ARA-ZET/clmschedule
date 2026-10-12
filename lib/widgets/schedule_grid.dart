@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:clmschedule/utils/schedule_time.dart';
@@ -6,12 +8,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 
 import '../models/distributor.dart';
+import '../models/job.dart';
 import '../models/schedule_confirmation_status.dart';
 import '../providers/auth_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/scale_provider.dart';
+import '../providers/schedule_selection_provider.dart';
 import 'day_planner/day_planner_page.dart';
 import 'month_navigation_widget.dart';
+import 'schedule_batch_drop.dart';
 import 'schedule_job_cell.dart';
 
 /// Data class to optimize grid rebuilds with Selector pattern
@@ -265,14 +270,9 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
           availableMonths: scheduleProvider.getAvailableMonths(),
           mode: Mode.schedule,
           extraActions: [
-            _DayConfirmationButton(
-              label: 'Today',
-              date: scheduleNow(),
-            ),
-            _DayConfirmationButton(
-              label: 'Tomorrow',
-              date: scheduleNow().add(const Duration(days: 1)),
-            ),
+            const _DayConfirmationButton(label: 'Today', dayOffset: 0),
+            const _DayConfirmationButton(label: 'Tomorrow', dayOffset: 1),
+            const _SelectJobsButton(),
           ],
         ),
 
@@ -383,45 +383,12 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
                           date.day == today.day;
 
                       return TableViewCell(
-                        child: Card(
-                          color: isToday
-                              ? Theme.of(context).primaryColor.withValues(alpha: 0.2)
-                              : null,
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  '${DateFormat('EEE').format(date)} ${date.day} ${_getMonthAbbreviation(date.month)}',
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .titleSmall
-                                      ?.copyWith(
-                                        fontWeight:
-                                            isToday ? FontWeight.bold : null,
-                                        color: isToday
-                                            ? Theme.of(context).primaryColor
-                                            : null,
-                                      ),
-                                  textAlign: TextAlign.center,
-                                ),
-                                const SizedBox(width: 8),
-                                SizedBox(
-                                  height: scaleProvider.smallIconSize,
-                                  width: scaleProvider.smallIconSize,
-                                  child: IconButton(
-                                    padding: EdgeInsets.zero,
-                                    iconSize: scaleProvider.smallIconSize - 2,
-                                    icon: const Icon(Icons.map_outlined),
-                                    tooltip: 'View all areas for this day',
-                                    onPressed: () =>
-                                        _openDateMap(context, date),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+                        child: _DateHeaderCell(
+                          date: date,
+                          isToday: isToday,
+                          label:
+                              '${DateFormat('EEE').format(date)} ${date.day} ${_getMonthAbbreviation(date.month)}',
+                          onOpenMap: () => _openDateMap(context, date),
                         ),
                       );
                     }
@@ -486,16 +453,155 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
   }
 }
 
+/// A date column's header. Drop selected jobs (or one job) here to move
+/// them onto this date and the days after it, each to the first free
+/// distributor. While selecting, a click selects every job on the day.
+class _DateHeaderCell extends riverpod.ConsumerWidget {
+  final DateTime date;
+  final bool isToday;
+  final String label;
+  final VoidCallback onOpenMap;
+
+  const _DateHeaderCell({
+    required this.date,
+    required this.isToday,
+    required this.label,
+    required this.onOpenMap,
+  });
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final scaleProvider = ref.read(scaleRiverpod);
+    final selecting =
+        ref.watch(scheduleSelectionRiverpod.select((s) => s.isSelecting));
+    final theme = Theme.of(context);
+
+    return DragTarget<Object>(
+      onWillAcceptWithDetails: (d) =>
+          d.data is ScheduleJobsDrag || d.data is Job,
+      onAcceptWithDetails: (d) => dropJobsOnDate(context, ref, d.data, date),
+      builder: (context, candidates, _) {
+        final hovering = candidates.isNotEmpty;
+        return Tooltip(
+          message: selecting
+              ? 'Click to select every job on this day'
+              : 'Drop jobs here to move them to this day',
+          waitDuration: const Duration(milliseconds: 600),
+          child: Card(
+            color: hovering
+                ? Colors.blue.withValues(alpha: 0.25)
+                : isToday
+                    ? theme.primaryColor.withValues(alpha: 0.2)
+                    : null,
+            shape: hovering
+                ? RoundedRectangleBorder(
+                    side: BorderSide(color: Colors.blue.shade600, width: 2),
+                    borderRadius: BorderRadius.circular(8),
+                  )
+                : null,
+            child: InkWell(
+              onTap: selecting
+                  ? () => ref.read(scheduleSelectionRiverpod).toggleAll(ref
+                      .read(scheduleRiverpod)
+                      .getJobsForDate(date)
+                      .map((j) => j.id))
+                  : null,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      label,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: isToday ? FontWeight.bold : null,
+                        color: isToday ? theme.primaryColor : null,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      height: scaleProvider.smallIconSize,
+                      width: scaleProvider.smallIconSize,
+                      child: IconButton(
+                        padding: EdgeInsets.zero,
+                        iconSize: scaleProvider.smallIconSize - 2,
+                        icon: const Icon(Icons.map_outlined),
+                        tooltip: 'View all areas for this day',
+                        onPressed: onOpenMap,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Toolbar toggle for selecting several jobs to move together; shows the
+/// count and a clear button while any are selected.
+class _SelectJobsButton extends riverpod.ConsumerWidget {
+  const _SelectJobsButton();
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final selection = ref.watch(scheduleSelectionRiverpod);
+    final count = selection.count;
+    final on = selection.selectMode;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Tooltip(
+            message: on
+                ? 'Stop selecting (Esc)'
+                : 'Select several jobs to drag onto a date together '
+                    '(Ctrl / ⌘-click picks one job, Shift-click selects everything '
+                    'in between)',
+            child: FilterChip(
+              avatar:
+                  Icon(on ? Icons.checklist : Icons.checklist_rtl, size: 18),
+              label: Text(count > 0 ? '$count selected' : 'Select'),
+              selected: on || count > 0,
+              onSelected: (v) => selection.setSelectMode(v),
+            ),
+          ),
+          if (count > 0)
+            IconButton(
+              icon: const Icon(Icons.clear, size: 18),
+              tooltip: 'Clear selection',
+              visualDensity: VisualDensity.compact,
+              onPressed: selection.clear,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Quick-access badge/button for Today or Tomorrow, placed next to the
 /// month navigation's "Current" button. Tapping it jumps the grid to that
 /// date's month and opens a menu to set the admin confirmation status
 /// (Confirmed/Pending/Not Confirmed), which is surfaced to distributors on
 /// the public clmworking.web.app roster.
+///
+/// Takes a *day offset* rather than a date: the grid is routinely left open
+/// for days, and a date captured at build time silently goes stale. The state
+/// re-resolves "today" against the SAST clock and re-points its stream at the
+/// new day doc when the date rolls over, so the badge and the write it
+/// performs always refer to the same day everyone else is looking at.
 class _DayConfirmationButton extends riverpod.ConsumerStatefulWidget {
   final String label;
-  final DateTime date;
 
-  const _DayConfirmationButton({required this.label, required this.date});
+  /// Days from SAST today: 0 = today, 1 = tomorrow.
+  final int dayOffset;
+
+  const _DayConfirmationButton({required this.label, required this.dayOffset});
 
   @override
   riverpod.ConsumerState<_DayConfirmationButton> createState() =>
@@ -506,21 +612,53 @@ class _DayConfirmationButtonState
     extends riverpod.ConsumerState<_DayConfirmationButton> {
   final GlobalKey _key = GlobalKey();
   ScheduleDayConfirmation _lastKnown = const ScheduleDayConfirmation();
-  late final Stream<ScheduleDayConfirmation> _stream;
+  late DateTime _date;
+  late Stream<ScheduleDayConfirmation> _stream;
+  Timer? _rolloverTimer;
+  bool _saving = false;
+
+  DateTime get _targetDate =>
+      scheduleToday().add(Duration(days: widget.dayOffset));
 
   @override
   void initState() {
     super.initState();
-    _stream = ref.read(scheduleRiverpod).watchDayConfirmation(widget.date);
+    _date = _targetDate;
+    _stream = ref.read(scheduleRiverpod).watchDayConfirmation(_date);
+    // Cheap tick; the work only happens on the one minute a day the SAST
+    // calendar date actually changes.
+    _rolloverTimer =
+        Timer.periodic(const Duration(minutes: 1), (_) => _syncDate());
+  }
+
+  @override
+  void dispose() {
+    _rolloverTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Re-points the stream at the current target day if the date rolled over.
+  /// Returns the date the button now refers to.
+  DateTime _syncDate() {
+    final next = _targetDate;
+    if (next == _date) return _date;
+    setState(() {
+      _date = next;
+      _lastKnown = const ScheduleDayConfirmation();
+      _stream = ref.read(scheduleRiverpod).watchDayConfirmation(next);
+    });
+    return next;
   }
 
   Future<void> _openMenu() async {
+    // Resolve the day *before* reading or writing anything, so a session that
+    // has been open since yesterday cannot confirm the wrong day.
+    final date = _syncDate();
     final scheduleProvider = ref.read(scheduleRiverpod);
-    scheduleProvider.goToMonthContaining(widget.date);
+    scheduleProvider.goToMonthContaining(date);
 
     final renderBox = _key.currentContext!.findRenderObject() as RenderBox;
-    final overlay =
-        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final topLeft = renderBox.localToGlobal(Offset.zero, ancestor: overlay);
     final bottomRight = renderBox.localToGlobal(
       renderBox.size.bottomRight(Offset.zero),
@@ -560,11 +698,29 @@ class _DayConfirmationButtonState
         authProvider.user?.email ??
         'Unknown';
 
-    await scheduleProvider.setDayConfirmation(
-      widget.date,
-      selected,
-      confirmedBy: confirmedBy,
-    );
+    setState(() => _saving = true);
+    try {
+      await scheduleProvider.setDayConfirmation(
+        date,
+        selected,
+        confirmedBy: confirmedBy,
+      );
+    } catch (e) {
+      // A silently swallowed failure here is what makes the button look
+      // unresponsive — the write never landed but nothing said so.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: Colors.red,
+            content: Text(
+              'Could not set ${widget.label} to ${selected.displayName}: $e',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
@@ -575,37 +731,67 @@ class _DayConfirmationButtonState
         final confirmation = snapshot.data ?? const ScheduleDayConfirmation();
         _lastKnown = confirmation;
         final status = confirmation.status;
+        // Only a server-acknowledged value is what other users see; anything
+        // else is this client's own optimistic/cached copy.
+        final unsynced = snapshot.hasData && confirmation.isUnsynced;
+        final dateLabel = DateFormat('EEE d MMM').format(_date);
 
         return Padding(
           key: _key,
           padding: const EdgeInsets.only(left: 8),
           child: Material(
             color: Colors.transparent,
-            child: InkWell(
-              borderRadius: BorderRadius.circular(20),
-              onTap: _openMenu,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: status.color.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(20),
-                  border:
-                      Border.all(color: status.color.withValues(alpha: 0.5)),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(status.icon, size: 16, color: status.color),
-                    const SizedBox(width: 6),
-                    Text(
-                      widget.label,
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        color: status.color,
+            child: Tooltip(
+              message: unsynced
+                  ? '${widget.label} — $dateLabel\n'
+                      '${status.displayName} (not yet synced — other users '
+                      'may still see the previous status)'
+                  : '${widget.label} — $dateLabel\n${status.displayName}'
+                      '${confirmation.confirmedBy != null ? '\nby ${confirmation.confirmedBy}' : ''}',
+              child: InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: _saving ? null : _openMenu,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: status.color.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(20),
+                    border:
+                        Border.all(color: status.color.withValues(alpha: 0.5)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_saving)
+                        SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: status.color,
+                          ),
+                        )
+                      else
+                        Icon(status.icon, size: 16, color: status.color),
+                      const SizedBox(width: 6),
+                      Text(
+                        widget.label,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: status.color,
+                        ),
                       ),
-                    ),
-                  ],
+                      if (unsynced) ...[
+                        const SizedBox(width: 4),
+                        Icon(
+                          Icons.cloud_off,
+                          size: 12,
+                          color: status.color.withValues(alpha: 0.8),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
               ),
             ),

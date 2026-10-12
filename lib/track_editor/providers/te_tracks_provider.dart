@@ -15,6 +15,7 @@ class TETracksProvider with ChangeNotifier {
     TEMode.trim: [],
     TEMode.processing: [],
     TEMode.update: [],
+    TEMode.report: [],
   };
   TEMode _activeMode = TEMode.processing;
 

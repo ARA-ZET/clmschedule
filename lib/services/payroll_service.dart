@@ -85,6 +85,20 @@ class PayrollService {
     });
   }
 
+  /// [streamWeek] plus whether each snapshot is confirmed by the server
+  /// (not just the local cache) — for the schedule sync, which must not act
+  /// on a possibly-stale cached week.
+  Stream<({PayrollWeek week, bool fromServer})> streamWeekWithSource(
+      DateTime weekStart) {
+    final id = weekIdFor(weekStart);
+    return _weekDoc(weekStart).snapshots().map((snap) => (
+          week: snap.exists && snap.data() != null
+              ? PayrollWeek.fromMap(id, snap.data()!)
+              : PayrollWeek.empty(weekStart),
+          fromServer: !snap.metadata.isFromCache,
+        ));
+  }
+
   /// One-shot fetch, same empty-placeholder fallback as [streamWeek].
   Future<PayrollWeek> getWeek(DateTime anyDateInWeek) async {
     final weekStart = weekStartFor(anyDateInWeek);
@@ -563,11 +577,14 @@ class PayrollService {
   /// undone), if the week doc doesn't exist yet, or if the payslip already
   /// reflects the desired deduction (the common steady-state case — avoids
   /// needless ledger churn on every stats save). Otherwise the deduction is
-  /// the oldest outstanding advance's preferred instalment (or its remaining
-  /// balance, whichever is smaller), capped so the distributor is never left
-  /// with less than R500 net for the week; if this week's gross is ≤ R500 or
-  /// nothing is outstanding, any prior auto deduction for the week is
-  /// reversed. Idempotent (reverse-and-redo keyed by `linkedWeekId`).
+  /// the oldest outstanding advance's preferred instalment — or its whole
+  /// remaining balance when less than one instalment is still owed — applied
+  /// **all-or-nothing** against the R500 net floor: if the week can't afford
+  /// the full amount it deducts NOTHING and rolls over to a week that can,
+  /// rather than posting a clipped part-instalment. If nothing is
+  /// outstanding, or this week can't afford the instalment, any prior auto
+  /// deduction for the week is reversed. Idempotent (reverse-and-redo keyed
+  /// by `linkedWeekId`).
   Future<void> autoApplyDefaultAdvanceDeduction({
     required DateTime weekStart,
     required String distributorId,
@@ -592,16 +609,24 @@ class PayrollService {
       final totalOutstanding =
           outstanding.fold<double>(0, (t, a) => t + a.balance);
 
-      // Never leave the distributor with less than R500 net for the week.
+      // Never leave the distributor with less than R500 net for the week —
+      // and never break an agreed instalment up to squeeze under that floor.
+      // It's all-or-nothing: a week either affords the WHOLE instalment (or
+      // the whole remaining balance, when that's less than one instalment)
+      // or nothing is deducted and it rolls over to a week that can afford
+      // it. Clipping to the headroom instead — the old behaviour — silently
+      // turned a R100/week plan into odd amounts like R16 on a low week.
       final headroom = current.grossWage - 500;
       var amount = 0.0;
-      if (totalOutstanding > 0.005 && headroom > 0.005) {
+      if (totalOutstanding > 0.005) {
         final oldest = outstanding.first;
         final instalment = oldest.preferredInstallmentAmount > 0
             ? oldest.preferredInstallmentAmount
             : oldest.balance;
-        amount = instalment < headroom ? instalment : headroom;
-        if (amount > totalOutstanding) amount = totalOutstanding;
+        // One full instalment, or everything still owed if that's less.
+        final desired =
+            instalment > totalOutstanding ? totalOutstanding : instalment;
+        if (desired <= headroom) amount = desired;
       }
       final isDeducting = amount > 0.005;
 

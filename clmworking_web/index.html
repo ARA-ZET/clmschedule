@@ -232,6 +232,49 @@
     font-size: 0.85rem;
   }
   .refresh-btn:active { opacity: 0.6; }
+
+  /* Office-admin controls — only shown when unlocked with the admin passcode. */
+  .admin-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border);
+  }
+  .admin-label {
+    width: 100%;
+    color: var(--muted);
+    font-size: 0.75rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+  .admin-btn {
+    flex: 1 1 auto;
+    min-width: 96px;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 9px 14px;
+    font-size: 0.85rem;
+  }
+  .admin-btn:active { opacity: 0.6; }
+  .admin-btn[disabled] { opacity: 0.5; }
+  .admin-btn.is-current {
+    border-color: currentColor;
+    font-weight: 600;
+  }
+  .admin-btn.set-confirmed.is-current { color: #34d399; }
+  .admin-btn.set-pending.is-current { color: #fbbf24; }
+  .admin-btn.set-notConfirmed.is-current { color: #f87171; }
+  .admin-note {
+    width: 100%;
+    font-size: 0.75rem;
+    color: var(--muted);
+    min-height: 1em;
+  }
   .status {
     text-align: center;
     color: var(--muted);
@@ -286,6 +329,20 @@
     font-size: 1rem;
     font-weight: 600;
   }
+  #gate .remember {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 4px 0 12px;
+    color: var(--muted);
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  #gate .remember input {
+    width: auto;
+    margin: 0;
+  }
   #gate .error {
     color: #e0435c;
     font-size: 0.85rem;
@@ -298,12 +355,27 @@
 <body>
 
 <div id="gate">
-  <div class="box">
+  <!-- A real <form> with a password field is what makes browsers and password
+       managers offer to save the passcode. The previous markup used
+       type="tel" with autocomplete="off", which told them not to. -->
+  <form class="box" id="pinForm" autocomplete="on">
     <h1>Enter passcode</h1>
-    <input id="pinInput" type="tel" inputmode="numeric" autocomplete="off" placeholder="Passcode" />
-    <button id="pinSubmit">Unlock</button>
+    <!-- inputmode keeps the numeric keypad on phones and tablets; type=password
+         is what password managers look for. -->
+    <input
+      id="pinInput"
+      name="password"
+      type="password"
+      inputmode="numeric"
+      autocomplete="current-password"
+      placeholder="Passcode" />
+    <label class="remember">
+      <input type="checkbox" id="rememberMe" />
+      <span>Remember on this device</span>
+    </label>
+    <button id="pinSubmit" type="submit">Unlock</button>
     <div class="error" id="pinError"></div>
-  </div>
+  </form>
 </div>
 
 <header>
@@ -326,6 +398,7 @@
     </div>
     <hr class="divider" id="todayDivider" />
     <div class="badges" id="todayBadges"></div>
+    <div class="admin-row" id="todayAdmin" hidden></div>
   </section>
 
   <section class="card">
@@ -338,10 +411,13 @@
     </div>
     <hr class="divider" id="tomorrowDivider" />
     <div class="badges" id="tomorrowBadges"></div>
+    <div class="admin-row" id="tomorrowAdmin" hidden></div>
   </section>
 
   <div class="refresh-row">
     <button class="refresh-btn" id="refreshBtn">Refresh</button>
+    <!-- Needed on a shared device: without it, "remember" would be permanent. -->
+    <button class="refresh-btn" id="signOutBtn">Forget this device</button>
   </div>
   <div class="status" id="statusLine"></div>
 </main>
@@ -350,15 +426,58 @@
 (function () {
   "use strict";
 
-  // Only the SHA-256 hash of the passcode is stored here — not the passcode itself.
+  // Only the SHA-256 hash of each passcode is stored here — not the passcode
+  // itself. Note this gate is client-side and therefore soft: the hashes are
+  // served publicly and a 4-digit PIN is only 10,000 combinations. It keeps
+  // casual visitors out of the roster; it is NOT what protects writing a
+  // confirmation. setWorkingDayConfirmation re-checks the admin passcode
+  // server-side against a Firebase secret, so a direct POST gets nowhere.
   var PIN_HASH = "7931aa2a1bed855457d1ddf6bc06ab4406a9fba0579045a4d6ff78f9c07c440f";
+  var ADMIN_PIN_HASH = "cc3c3b754efdb129d02ab3c0c154a6725f30851ec1c54c018c62997ef2655437";
+
   var UNLOCK_KEY = "clmworking_unlocked";
+  var ROLE_KEY = "clmworking_role";
+  // Held for the session so the admin can keep confirming after a reload
+  // without re-entering it. Same browser, same person — no wider exposure.
+  var ADMIN_PIN_KEY = "clmworking_admin_pin";
+
   var ROSTER_URL = "https://us-central1-clmschedule.cloudfunctions.net/getWorkingRoster";
+  var CONFIRM_URL = "https://us-central1-clmschedule.cloudfunctions.net/setWorkingDayConfirmation";
+
+  var STATUS_LABELS = {
+    confirmed: "Confirmed",
+    pending: "Pending",
+    notConfirmed: "Not Confirmed",
+  };
+
+  // "Remember on this device" writes to localStorage, which survives closing
+  // the browser; otherwise sessionStorage, which does not. Reads check both so
+  // an existing session is honoured either way.
+  function readStored(key) {
+    return localStorage.getItem(key) || sessionStorage.getItem(key);
+  }
+
+  function writeStored(key, value, persist) {
+    (persist ? localStorage : sessionStorage).setItem(key, value);
+    // Clear the other store so the two can never disagree.
+    (persist ? sessionStorage : localStorage).removeItem(key);
+  }
+
+  function clearStored(key) {
+    localStorage.removeItem(key);
+    sessionStorage.removeItem(key);
+  }
+
+  function isAdmin() {
+    return readStored(ROLE_KEY) === "admin";
+  }
 
   var gate = document.getElementById("gate");
+  var pinForm = document.getElementById("pinForm");
   var pinInput = document.getElementById("pinInput");
   var pinSubmit = document.getElementById("pinSubmit");
   var pinError = document.getElementById("pinError");
+  var rememberMe = document.getElementById("rememberMe");
 
   async function sha256Hex(text) {
     var buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -371,8 +490,19 @@
     var value = pinInput.value.trim();
     if (!value) return;
     var hash = await sha256Hex(value);
-    if (hash === PIN_HASH) {
-      sessionStorage.setItem(UNLOCK_KEY, "1");
+
+    var persist = rememberMe.checked;
+
+    if (hash === ADMIN_PIN_HASH) {
+      writeStored(UNLOCK_KEY, "1", persist);
+      writeStored(ROLE_KEY, "admin", persist);
+      writeStored(ADMIN_PIN_KEY, value, persist);
+      gate.hidden = true;
+      loadRoster();
+    } else if (hash === PIN_HASH) {
+      writeStored(UNLOCK_KEY, "1", persist);
+      writeStored(ROLE_KEY, "viewer", persist);
+      clearStored(ADMIN_PIN_KEY);
       gate.hidden = true;
       loadRoster();
     } else {
@@ -382,9 +512,21 @@
     }
   }
 
-  pinSubmit.addEventListener("click", tryUnlock);
-  pinInput.addEventListener("keydown", function (e) {
-    if (e.key === "Enter") tryUnlock();
+  /// Forget this device — clears both stores and shows the gate again.
+  function signOut() {
+    clearStored(UNLOCK_KEY);
+    clearStored(ROLE_KEY);
+    clearStored(ADMIN_PIN_KEY);
+    gate.hidden = false;
+    pinInput.value = "";
+    pinInput.focus();
+  }
+
+  // Submitting the form (rather than clicking a bare button) is what prompts
+  // the browser to offer saving the passcode.
+  pinForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    tryUnlock();
   });
 
   var formatter = new Intl.DateTimeFormat(undefined, {
@@ -458,6 +600,75 @@
     }
   }
 
+  /// Buttons for the office admin to set a day's confirmation status.
+  ///
+  /// [offset] is 0 for today, 1 for tomorrow — the server accepts nothing else,
+  /// so this endpoint can only ever touch those two days.
+  function renderAdminControls(container, offset, currentStatus) {
+    container.hidden = !isAdmin();
+    container.innerHTML = "";
+    if (!isAdmin()) return;
+
+    var label = document.createElement("span");
+    label.className = "admin-label";
+    label.textContent = "Office admin — set status";
+    container.appendChild(label);
+
+    var note = document.createElement("span");
+    note.className = "admin-note";
+
+    ["confirmed", "pending", "notConfirmed"].forEach(function (status) {
+      var btn = document.createElement("button");
+      btn.className = "admin-btn set-" + status;
+      if (status === (currentStatus || "notConfirmed")) {
+        btn.classList.add("is-current");
+      }
+      btn.textContent = STATUS_LABELS[status];
+      btn.addEventListener("click", function () {
+        setConfirmation(offset, status, container, note);
+      });
+      container.appendChild(btn);
+    });
+
+    container.appendChild(note);
+  }
+
+  async function setConfirmation(offset, status, container, note) {
+    var passcode = sessionStorage.getItem(ADMIN_PIN_KEY);
+    if (!passcode) {
+      note.textContent = "Session expired — reload and re-enter the passcode.";
+      return;
+    }
+
+    var buttons = container.querySelectorAll(".admin-btn");
+    buttons.forEach(function (b) { b.disabled = true; });
+    note.textContent = "Saving…";
+
+    try {
+      var res = await fetch(CONFIRM_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passcode: passcode, offset: offset, status: status }),
+      });
+
+      if (res.status === 403) {
+        note.textContent = "Passcode rejected. Reload and re-enter it.";
+        sessionStorage.removeItem(ADMIN_PIN_KEY);
+        return;
+      }
+      if (!res.ok) throw new Error("bad status " + res.status);
+
+      note.textContent = "Saved.";
+      // Re-read rather than assume: the roster is the source of truth for what
+      // was actually stored, including the confirmed-at time.
+      await loadRoster();
+    } catch (err) {
+      note.textContent = "Couldn't save — check your connection and try again.";
+    } finally {
+      buttons.forEach(function (b) { b.disabled = false; });
+    }
+  }
+
   async function loadRoster() {
     statusLine.textContent = "Loading…";
     try {
@@ -472,16 +683,25 @@
       renderBadges(document.getElementById("todayBadges"), data.today.roster);
       renderBadges(document.getElementById("tomorrowBadges"), data.tomorrow.roster);
 
-      statusLine.textContent = "Updated " + new Date().toLocaleTimeString();
+      renderAdminControls(
+        document.getElementById("todayAdmin"), 0, data.today.confirmationStatus);
+      renderAdminControls(
+        document.getElementById("tomorrowAdmin"), 1, data.tomorrow.confirmationStatus);
+
+      statusLine.textContent = "Updated " + new Date().toLocaleTimeString() +
+        (isAdmin() ? " · office admin" : "");
     } catch (err) {
       statusLine.textContent = "Couldn't load roster — check your connection and refresh.";
     }
   }
 
   refreshBtn.addEventListener("click", loadRoster);
+  document.getElementById("signOutBtn").addEventListener("click", signOut);
 
-  if (sessionStorage.getItem(UNLOCK_KEY) === "1") {
+  if (readStored(UNLOCK_KEY) === "1") {
     gate.hidden = true;
+    // Leave the box ticked so re-unlocking later keeps the same choice.
+    rememberMe.checked = localStorage.getItem(UNLOCK_KEY) === "1";
     loadRoster();
   } else {
     pinInput.focus();
@@ -491,6 +711,17 @@
   setInterval(function () {
     if (gate.hidden) loadRoster();
   }, 5 * 60 * 1000);
+
+  // Phones freeze timers in background tabs, so a page left open for hours
+  // would show whatever status it loaded last. Re-read whenever it comes
+  // back to the foreground (pageshow also covers the bfcache restore that
+  // fires no visibilitychange).
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden && gate.hidden) loadRoster();
+  });
+  window.addEventListener("pageshow", function () {
+    if (gate.hidden) loadRoster();
+  });
 })();
 </script>
 </body>

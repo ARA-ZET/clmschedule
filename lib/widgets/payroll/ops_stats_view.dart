@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
@@ -8,10 +9,12 @@ import '../../models/distributor.dart';
 import '../../models/payroll_daily_entry.dart';
 import '../../models/payroll_payslip.dart';
 import '../../models/payroll_settings.dart';
+import '../../providers/day_off_provider.dart';
 import '../../providers/payroll_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../utils/payroll_calculator.dart' as calc;
 import '../../utils/payroll_week.dart';
+import 'sets_or_code_dropdown.dart';
 
 final _dayBlockFormat = DateFormat('d MMMM');
 
@@ -227,13 +230,31 @@ class _OpsStatsViewState extends riverpod.ConsumerState<OpsStatsView> {
 
   Future<void> _saveDay(DateTime day, PayrollSettings settings) async {
     final key = dayKeyFor(day);
-    setState(() => _savingDayKeys.add(key));
+    final payroll = ref.read(payrollRiverpod);
     final rows = _rowsByDayKey[key] ?? {};
-    final edits = <String, PayrollDailyEntry>{
-      for (final e in rows.entries) e.key: e.value.toEntry(settings.bonusCodes),
-    };
-    await ref.read(payrollRiverpod).updateDayForAllDistributors(day, edits);
-    if (mounted) setState(() => _savingDayKeys.remove(key));
+    // Only cells that differ from what the provider holds (saved, or
+    // already queued to save) — re-sending every distributor's cell would
+    // let one stale cell overwrite another column's newer value.
+    final edits = <String, PayrollDailyEntry>{};
+    for (final e in rows.entries) {
+      final entry = e.value.toEntry(settings.bonusCodes);
+      final saved = payroll.week.payslips[e.key]?.dailyEntries[key] ??
+          PayrollDailyEntry.empty(day);
+      if (!mapEquals(saved.toMap(), entry.toMap())) edits[e.key] = entry;
+    }
+    if (edits.isEmpty) return;
+    setState(() => _savingDayKeys.add(key));
+    try {
+      await payroll.updateDayForAllDistributors(day, edits);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
+            content: Text(
+                'Couldn\'t save ${_dayBlockFormat.format(day)} — please re-enter: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _savingDayKeys.remove(key));
+    }
   }
 
   /// Saves [day] a short delay after the admin moves on from a field
@@ -263,6 +284,7 @@ class _OpsStatsViewState extends riverpod.ConsumerState<OpsStatsView> {
   Widget build(BuildContext context) {
     final payroll = ref.watch(payrollRiverpod);
     final schedule = ref.watch(scheduleRiverpod);
+    final daysOff = ref.watch(dayOffRiverpod);
     final editable = isPayrollWeekEditable(payroll.weekStart);
     final distributors = schedule.distributorsWithJobsInRange(
         payroll.weekStart, payroll.weekEnd)
@@ -299,11 +321,14 @@ class _OpsStatsViewState extends riverpod.ConsumerState<OpsStatsView> {
             itemBuilder: (context, i) {
               final day = days[i];
               final key = dayKeyFor(day);
+              // Allocated on the schedule and not marked as a day off —
+              // the same rule the schedule sync applies to payroll.
               final workingDistributorIds = {
                 for (final d in distributors)
                   if (schedule
-                      .getJobsForDistributorAndDate(d.id, day)
-                      .isNotEmpty)
+                          .getJobsForDistributorAndDate(d.id, day)
+                          .isNotEmpty &&
+                      !daysOff.isDayOff(d.id, day))
                     d.id,
               };
               // A distributor with stats already saved for this day
@@ -314,8 +339,7 @@ class _OpsStatsViewState extends riverpod.ConsumerState<OpsStatsView> {
               final mismatchedDistributorIds = {
                 for (final d in distributors)
                   if (!workingDistributorIds.contains(d.id) &&
-                      (payroll.week.payslips[d.id]?.dailyEntries[key]
-                              ?.worked ??
+                      (payroll.week.payslips[d.id]?.dailyEntries[key]?.worked ??
                           false))
                     d.id,
               };
@@ -505,6 +529,15 @@ class _GridEntryState {
   /// having since been typed into by the admin (must not be clobbered).
   PayrollDailyEntry _lastLoadedEntry;
 
+  /// The value the schedule sync filled in automatically (a saved
+  /// [PayrollDailyEntry.autoDefault]) — shown grey/italic while the cell
+  /// still holds it. Null once the cell holds something the admin chose.
+  String? suggestedSetsOrCode;
+
+  /// Whether the cell still shows its automatic value untouched.
+  bool get holdsSuggestion =>
+      suggestedSetsOrCode != null && setsOrCode.text == suggestedSetsOrCode;
+
   /// Fires whenever anything about this distributor's day changes — lets
   /// just this one column's computed cells rebuild instead of the whole
   /// day block (see [_DistributorColumn]).
@@ -536,6 +569,8 @@ class _GridEntryState {
   _GridEntryState(PayrollDailyEntry entry)
       : date = entry.date,
         _lastLoadedEntry = entry,
+        suggestedSetsOrCode =
+            entry.autoDefault ? _formatSetsOrCode(entry) : null,
         estimateReachedNotifier = ValueNotifier(entry.estimateReached),
         setsOrCode = TextEditingController(
             text: entry.specialCode ?? entry.flyerSets?.toString() ?? ''),
@@ -581,8 +616,21 @@ class _GridEntryState {
   /// this same week) show up here without needing to leave and re-enter
   /// the Ops Stats tab.
   void refreshFromEntry(PayrollDailyEntry newEntry) {
-    _refreshField(setsOrCode, _formatSetsOrCode(_lastLoadedEntry),
-        _formatSetsOrCode(newEntry));
+    final wasSuggestion = holdsSuggestion;
+    if (wasSuggestion && newEntry.worked) {
+      // An untouched suggestion gives way to whatever was actually saved.
+      setsOrCode.text = _formatSetsOrCode(newEntry);
+    } else {
+      _refreshField(setsOrCode, _formatSetsOrCode(_lastLoadedEntry),
+          _formatSetsOrCode(newEntry));
+    }
+    if (newEntry.autoDefault) {
+      if (setsOrCode.text == _formatSetsOrCode(newEntry)) {
+        suggestedSetsOrCode = setsOrCode.text;
+      }
+    } else if (newEntry.worked || !wasSuggestion) {
+      suggestedSetsOrCode = null;
+    }
     _refreshField(kmWalked, _lastLoadedEntry.kmWalked?.toString() ?? '',
         newEntry.kmWalked?.toString() ?? '');
     _refreshField(
@@ -614,6 +662,7 @@ class _GridEntryState {
     return PayrollDailyEntry(
       date: date,
       worked: true,
+      autoDefault: holdsSuggestion,
       specialCode: matchedCode,
       flyerSets: matchedCode == null ? int.tryParse(raw) : null,
       kmWalked: double.tryParse(kmWalked.text.trim()),
@@ -797,8 +846,13 @@ class _DayBlock extends StatelessWidget {
   /// the week isn't locked AND they actually have a schedule job on this
   /// day — a day they didn't work shouldn't accept stats at all, matching
   /// the checkbox cell (which already only renders for working days).
+  ///
+  /// A mismatched cell stays editable too, so its stale stats can be
+  /// cleared to "didn't work".
   bool _isEditableFor(Distributor d) =>
-      editable && workingDistributorIds.contains(d.id);
+      editable &&
+      (workingDistributorIds.contains(d.id) ||
+          mismatchedDistributorIds.contains(d.id));
 
   /// Off cells get a border matching their grey fill, so the whole cell
   /// reads as one solid blocked-out box; working cells get a subtle light
@@ -861,12 +915,18 @@ class _DayBlock extends StatelessWidget {
           if (!collapsed) ...[
             _dataRow(
                 columnWidth,
-                (d, s) => TextField(
+                // No focus node: opening the menu would blur it and fire a
+                // save of the unchanged day; picking a value saves instead.
+                (d, s) => SetsOrCodeDropdown(
                       controller: s.setsOrCode,
-                      focusNode: s.setsOrCodeFocus,
                       enabled: _isEditableFor(d),
+                      codes: settings.bonusCodes,
+                      codeLabels: settings.bonusCodeLabels,
                       style: _kCellTextStyle,
                       decoration: _cellDecoration(d),
+                      suggestedValue: s.suggestedSetsOrCode,
+                      allowNotWorked: !workingDistributorIds.contains(d.id),
+                      onChanged: () => s.onFieldBlur?.call(),
                     )),
             _dataRow(
                 columnWidth,

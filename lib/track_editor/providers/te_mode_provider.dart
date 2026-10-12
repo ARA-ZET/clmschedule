@@ -13,6 +13,7 @@ enum TEMode {
   trim, // Trim waypoints to polygon boundaries & download results
   processing, // Match polygons against schedule jobs (future integration)
   update, // Opened from cloud: overwrite the original source file
+  report, // Bulk-scan a folder and build a client PDF report
 }
 
 final teModeRiverpod =

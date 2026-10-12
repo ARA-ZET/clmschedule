@@ -67,8 +67,8 @@ class _VatSettingsDialogState
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'Set the VAT percentage used to calculate incl/excl VAT amounts '
-            'on job prices.',
+            'Set the VAT percentage added on top of job amounts. Amounts '
+            'are always entered excluding VAT.',
             style: TextStyle(fontSize: 13, color: Colors.black54),
           ),
           const SizedBox(height: 16),
@@ -87,19 +87,6 @@ class _VatSettingsDialogState
             ],
             autofocus: true,
             onFieldSubmitted: (_) => _save(),
-          ),
-          const SizedBox(height: 12),
-          // Color legend
-          Row(
-            children: [
-              _LegendDot(color: Colors.green.shade600),
-              const SizedBox(width: 6),
-              const Text('Incl VAT', style: TextStyle(fontSize: 12)),
-              const SizedBox(width: 16),
-              _LegendDot(color: Colors.orange.shade700),
-              const SizedBox(width: 6),
-              const Text('Excl VAT', style: TextStyle(fontSize: 12)),
-            ],
           ),
         ],
       ),
@@ -124,20 +111,6 @@ class _VatSettingsDialogState
               : const Text('Save'),
         ),
       ],
-    );
-  }
-}
-
-class _LegendDot extends StatelessWidget {
-  final Color color;
-  const _LegendDot({required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 12,
-      height: 12,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
     );
   }
 }

@@ -51,6 +51,10 @@ class TECloudSaveClientEntry {
   /// Polygon indices currently ticked for the Trim & Save flow.
   final Set<int> selectedPolyIndices;
 
+  /// Added by hand with no schedule job behind it, so a re-resolve (which
+  /// only knows the schedule's clients) must keep it rather than drop it.
+  final bool manual;
+
   TECloudSaveClientEntry({
     required this.clientName,
     required this.distributorName,
@@ -61,12 +65,9 @@ class TECloudSaveClientEntry {
     this.savedAsIs = false,
     this.trimmedSaved = false,
     this.expanded = false,
+    this.manual = false,
     Set<int>? selectedPolyIndices,
   }) : selectedPolyIndices = selectedPolyIndices ?? <int>{};
-
-  /// Stable match key used to preserve user-visible flags across a manual
-  /// "Refresh" that re-resolves the client list.
-  String get matchKey => '$clientName|$folderPath';
 }
 
 /// Aggregate per-tab state (resolver status + clients list).
@@ -111,31 +112,51 @@ class TECloudSaveStateProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Replace the tab's client list, preserving per-client flags (saved
-  /// indicators, expansion, selections) for any entry that matches an
-  /// existing one via [TECloudSaveClientEntry.matchKey].
+  /// Replace the tab's client list with a fresh resolve. Re-resolves run
+  /// whenever the schedule changes, so each client keeps what the user set
+  /// on it: its folder, saved ticks, expansion, and ticked areas (matched by
+  /// name — the area list itself may have changed). Hand-added clients the
+  /// schedule doesn't know are kept.
   void finishResolveSuccess(
     TETabItem tab,
     List<TECloudSaveClientEntry> clients,
   ) {
     final state = _stateFor(tab);
-    final preserved = <String, TECloudSaveClientEntry>{
-      for (final c in state.clients) c.matchKey: c,
-    };
-    for (final c in clients) {
-      final prev = preserved[c.matchKey];
-      if (prev != null) {
-        c.savedAsIs = prev.savedAsIs;
-        c.trimmedSaved = prev.trimmedSaved;
-        c.expanded = prev.expanded;
-        c.selectedPolyIndices
-          ..clear()
-          ..addAll(prev.selectedPolyIndices);
-      }
+    final previous = <String, TECloudSaveClientEntry>{};
+    for (final c in state.clients) {
+      previous.putIfAbsent(c.clientName, () => c);
     }
+    for (final c in clients) {
+      final prev = previous.remove(c.clientName);
+      if (prev == null) continue;
+      // Keep the user's folder, unless it was missing and the client's
+      // own folder has since appeared.
+      if (prev.folderExists || !c.folderExists) {
+        c.folderPath = prev.folderPath;
+        c.folderExists = prev.folderExists;
+      }
+      c.savedAsIs = prev.savedAsIs;
+      c.trimmedSaved = prev.trimmedSaved;
+      c.expanded = prev.expanded;
+      final ticked = {
+        for (final i in prev.selectedPolyIndices)
+          if (i >= 0 && i < prev.polygons.length) prev.polygons[i].name,
+      };
+      c.selectedPolyIndices
+        ..clear()
+        ..addAll([
+          for (var i = 0; i < c.polygons.length; i++)
+            if (ticked.contains(c.polygons[i].name)) i,
+        ]);
+    }
+    final keptManual = [
+      for (final c in state.clients)
+        if (c.manual && !clients.any((n) => n.clientName == c.clientName)) c,
+    ];
     state
       ..clients.clear()
       ..clients.addAll(clients)
+      ..clients.addAll(keptManual)
       ..loading = false
       ..error = null
       ..resolved = true;
@@ -147,6 +168,17 @@ class TECloudSaveStateProvider extends ChangeNotifier {
     state.loading = false;
     state.error = error;
     state.resolved = false;
+    notifyListeners();
+  }
+
+  /// The schedule changed under [oldTab], which now lives on as [newTab].
+  /// Keeps its client list (and saved ticks) but marks it unresolved, so the
+  /// panel re-resolves it the next time it is shown.
+  void markStale(TETabItem oldTab, TETabItem newTab) {
+    final state = _byTab.remove(oldTab);
+    if (state == null) return;
+    state.resolved = false;
+    _byTab[newTab] = state;
     notifyListeners();
   }
 

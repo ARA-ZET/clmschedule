@@ -1,8 +1,14 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
-import '../providers/job_type_provider.dart';
+import '../models/company.dart';
 import '../models/custom_job_type.dart';
+import '../providers/company_provider.dart';
+import '../providers/job_type_provider.dart';
+import '../providers/zoho_items_provider.dart';
+import '../utils/zoho_org.dart';
+import 'xero/xero_item_picker.dart';
+import 'zoho/zoho_item_picker.dart';
 
 /// Settings dialog for managing custom job types. Exposes every behaviour
 /// flag on [CustomJobType] so that adding a new service or adjusting an
@@ -32,6 +38,16 @@ class _JobTypeManagementDialogState
   bool _autoAllocatesToSchedule = false;
   bool _hasTwoStops = false;
   bool _chargesVat = false;
+
+  /// Owning company. Empty means still inferred from the legacy flags.
+  String _companyId = '';
+  bool _createsInvoices = true;
+
+  /// Catalogue item this job type bills as; empty means free-text lines.
+  String _accountingItemCode = '';
+
+  /// Items this job type may bill as; empty means the whole catalogue.
+  List<String> _accountingItemCodes = const [];
   String? _iconName;
   int? _colorValue;
 
@@ -56,6 +72,10 @@ class _JobTypeManagementDialogState
       _autoAllocatesToSchedule = false;
       _hasTwoStops = false;
       _chargesVat = false;
+      _companyId = '';
+      _createsInvoices = true;
+      _accountingItemCode = '';
+      _accountingItemCodes = const [];
       _iconName = null;
       _colorValue = null;
     });
@@ -75,6 +95,10 @@ class _JobTypeManagementDialogState
       _autoAllocatesToSchedule = jobType.autoAllocatesToSchedule;
       _hasTwoStops = jobType.hasTwoStops;
       _chargesVat = jobType.chargesVat;
+      _companyId = jobType.companyId;
+      _createsInvoices = jobType.createsInvoices;
+      _accountingItemCode = jobType.accountingItemCode;
+      _accountingItemCodes = jobType.accountingItemCodes;
       _iconName = jobType.iconName;
       _colorValue = jobType.colorValue;
     });
@@ -87,6 +111,184 @@ class _JobTypeManagementDialogState
       _labelController.clear();
       _quantityLabelController.clear();
     });
+  }
+
+  /// Whether the job type being edited bills through Xero.
+  ///
+  /// Uses the same resolution the Add Job dialog does, including the legacy
+  /// fallback, so the item picker appears exactly when an item would be used.
+  AccountingProvider get _invoiceProvider {
+    final preview = CustomJobType(
+      id: '_preview',
+      label: '',
+      companyId: _companyId,
+      createsInvoices: _createsInvoices,
+      appearsOnCollectionSchedule: _appearsOnCollectionSchedule,
+      isHappySunService: _isHappySunService,
+    );
+    return AccountingProvider.forJobType(
+      fromCompany: ref.read(companyRiverpod).providerForJobType(preview),
+      createsInvoices: preview.createsInvoices,
+      appearsOnCollectionSchedule: preview.appearsOnCollectionSchedule,
+    );
+  }
+
+  /// The Zoho organisation this job type's company bills through — the item
+  /// catalogue differs between Junk & Stuff and Happy Sun.
+  String get _zohoOrgId {
+    final preview = CustomJobType(
+      id: '_preview',
+      label: '',
+      companyId: _companyId,
+      appearsOnCollectionSchedule: _appearsOnCollectionSchedule,
+      isHappySunService: _isHappySunService,
+    );
+    return ZohoOrg.forCompanyId(preview.resolvedCompanyId);
+  }
+
+  /// Which items the invoice picker should offer for this job type.
+  ///
+  /// A shortlist, not a lock: the picker still has a "show all items" escape,
+  /// because whoever is raising the invoice knows more about the particular job
+  /// than the job type does. Selecting none means no restriction.
+  Widget _buildAllowedItemsField() {
+    final provider = ref.watch(zohoItemsRiverpod(_zohoOrgId));
+
+    if (provider.isLoading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Row(children: [
+          SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2)),
+          SizedBox(width: 10),
+          Text('Loading items…', style: TextStyle(fontSize: 12)),
+        ]),
+      );
+    }
+
+    if (provider.items.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Offer these items on the invoice',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ),
+            if (_accountingItemCodes.isNotEmpty)
+              TextButton(
+                onPressed: () =>
+                    setState(() => _accountingItemCodes = const []),
+                child: const Text('Clear', style: TextStyle(fontSize: 12)),
+              ),
+          ],
+        ),
+        Text(
+          _accountingItemCodes.isEmpty
+              ? 'None selected — the picker offers the whole catalogue.'
+              : '${_accountingItemCodes.length} selected. Others stay reachable '
+                  'behind "show all items".',
+          style: const TextStyle(fontSize: 11, color: Colors.grey),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            for (final item in provider.items)
+              FilterChip(
+                label: Text(item.displayName,
+                    style: const TextStyle(fontSize: 12)),
+                selected: _accountingItemCodes.contains(item.itemId),
+                visualDensity: VisualDensity.compact,
+                onSelected: (on) => setState(() {
+                  final next = List<String>.of(_accountingItemCodes);
+                  if (on) {
+                    next.add(item.itemId);
+                  } else {
+                    next.remove(item.itemId);
+                  }
+                  _accountingItemCodes = next;
+                }),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// Company picker, with an explicit "work it out from the flags" option.
+  ///
+  /// That option matters: selecting a company writes `companyId` and pins it
+  /// forever. Leaving it inferred keeps the legacy derivation
+  /// (`appearsOnCollectionSchedule` → Junk & Stuff, `isHappySunService` →
+  /// Happy Sun, otherwise CLM), which is what lets this ship before every job
+  /// type has been assigned by hand.
+  Widget _buildCompanyField() {
+    final companyProvider = ref.watch(companyRiverpod);
+    final companies = companyProvider.companies;
+
+    // Offer inactive companies only when one is already selected, so an old
+    // assignment stays visible instead of silently resetting.
+    final selectable =
+        companies.where((c) => c.active || c.id == _companyId).toList();
+
+    // What the derivation would pick, so the inferred option can say so.
+    final inferred = CustomJobType(
+      id: '_preview',
+      label: '',
+      appearsOnCollectionSchedule: _appearsOnCollectionSchedule,
+      isHappySunService: _isHappySunService,
+    ).resolvedCompanyId;
+    final inferredName =
+        companyProvider.getById(inferred)?.displayLabel ?? inferred;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        DropdownButtonFormField<String>(
+          initialValue: _companyId,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            labelText: 'Belongs to',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: [
+            DropdownMenuItem<String>(
+              value: '',
+              child: Text('Work it out automatically  ·  $inferredName'),
+            ),
+            ...selectable.map((c) => DropdownMenuItem<String>(
+                  value: c.id,
+                  child: Text(
+                    c.active ? c.displayLabel : '${c.displayLabel} (inactive)',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                )),
+          ],
+          onChanged: (id) => setState(() => _companyId = id ?? ''),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(
+            _companyId.isEmpty
+                ? 'Inferred from the behaviour flags below. Pick a company to '
+                    'set it explicitly — needed if this type belongs to a '
+                    'company but does not appear on its usual grid.'
+                : 'Invoices through '
+                    '${companyProvider.getById(_companyId)?.accountingProvider.label ?? 'nothing'}.',
+            style: const TextStyle(fontSize: 11, color: Colors.grey),
+          ),
+        ),
+      ],
+    );
   }
 
   Future<void> _save() async {
@@ -118,6 +320,10 @@ class _JobTypeManagementDialogState
           autoAllocatesToSchedule: _autoAllocatesToSchedule,
           hasTwoStops: _hasTwoStops,
           chargesVat: _chargesVat,
+          companyId: _companyId,
+          createsInvoices: _createsInvoices,
+          accountingItemCode: _accountingItemCode,
+          accountingItemCodes: _accountingItemCodes,
           iconName: _iconName,
           colorValue: _colorValue,
           clearIcon: _iconName == null,
@@ -136,6 +342,10 @@ class _JobTypeManagementDialogState
           autoAllocatesToSchedule: _autoAllocatesToSchedule,
           hasTwoStops: _hasTwoStops,
           chargesVat: _chargesVat,
+          companyId: _companyId,
+          createsInvoices: _createsInvoices,
+          accountingItemCode: _accountingItemCode,
+          accountingItemCodes: _accountingItemCodes,
           iconName: _iconName,
           colorValue: _colorValue,
           clearIcon: _iconName == null,
@@ -379,6 +589,56 @@ class _JobTypeManagementDialogState
               autofocus: true,
             ),
             const SizedBox(height: 16),
+            Text('Company', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 4),
+            _buildCompanyField(),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Creates invoices'),
+              subtitle: const Text(
+                'Turn off for internal work that is never billed, e.g. '
+                'returning flyers',
+                style: TextStyle(fontSize: 11),
+              ),
+              value: _createsInvoices,
+              onChanged: (v) => setState(() => _createsInvoices = v),
+            ),
+            // Both businesses keep a price list in their own books, so the
+            // picker is per provider. `accountingItemCode` stores whichever
+            // identifier those books use — Xero's `Code`, Zoho's `item_id`.
+            if (_createsInvoices &&
+                _invoiceProvider == AccountingProvider.xero) ...[
+              const SizedBox(height: 10),
+              XeroItemPicker(
+                value: _accountingItemCode,
+                label: 'Bills as (Xero item)',
+                helperText:
+                    'Pre-fills the invoice line with this item\'s description, '
+                    'price, account and tax rate. Leave as free text to type '
+                    'the line each time.',
+                onChanged: (item) =>
+                    setState(() => _accountingItemCode = item?.code ?? ''),
+              ),
+            ],
+            if (_createsInvoices &&
+                _invoiceProvider == AccountingProvider.zoho) ...[
+              const SizedBox(height: 10),
+              ZohoItemPicker(
+                orgId: _zohoOrgId,
+                value: _accountingItemCode,
+                label: 'Bills as (Zoho item)',
+                helperText:
+                    'Pre-fills the invoice line with this item\'s name, '
+                    'description and rate. Leave as free text to type the line '
+                    'each time.',
+                onChanged: (item) =>
+                    setState(() => _accountingItemCode = item?.itemId ?? ''),
+              ),
+              const SizedBox(height: 12),
+              _buildAllowedItemsField(),
+            ],
+            const SizedBox(height: 16),
             Text('Behaviour', style: Theme.of(context).textTheme.labelLarge),
             const SizedBox(height: 4),
             SwitchListTile(
@@ -448,8 +708,7 @@ class _JobTypeManagementDialogState
                 style: TextStyle(fontSize: 11),
               ),
               value: _autoAllocatesToSchedule,
-              onChanged: (v) =>
-                  setState(() => _autoAllocatesToSchedule = v),
+              onChanged: (v) => setState(() => _autoAllocatesToSchedule = v),
             ),
             SwitchListTile(
               dense: true,
@@ -468,8 +727,8 @@ class _JobTypeManagementDialogState
               contentPadding: EdgeInsets.zero,
               title: const Text('Charges VAT'),
               subtitle: const Text(
-                'Shows the incl/excl VAT toggle in the job form and the '
-                'coloured VAT badge on the job list amount column',
+                'Adds VAT on top of the job amount (amounts are always '
+                'entered excl VAT) and on its invoices',
                 style: TextStyle(fontSize: 11),
               ),
               value: _chargesVat,

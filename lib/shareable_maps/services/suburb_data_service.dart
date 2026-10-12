@@ -12,13 +12,19 @@ import '../../models/work_suburb.dart';
 class SuburbDataService {
   static const String _mainPath = 'workSuburbs/main';
 
-  final FirebaseFirestore _firestore;
+  final FirebaseFirestore? _injectedFirestore;
+
+  /// Resolved lazily rather than in the initializer list so that subclasses
+  /// which override every method — test fakes, chiefly — never touch
+  /// `FirebaseFirestore.instance` and so do not require an initialised app.
+  FirebaseFirestore get _firestore =>
+      _injectedFirestore ?? FirebaseFirestore.instance;
 
   // Session-level in-memory cache — cleared by [invalidateCache].
   static List<WorkSuburb>? _cachedSuburbs;
 
   SuburbDataService({FirebaseFirestore? firestore})
-      : _firestore = firestore ?? FirebaseFirestore.instance;
+      : _injectedFirestore = firestore;
 
   // ── Public API ───────────────────────────────────────────────────────────
 

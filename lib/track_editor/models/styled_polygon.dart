@@ -54,8 +54,16 @@ class TETargetPolygon {
   final String name;
   final List<Wpt> waypoints;
 
+  /// The work-area boundary these waypoints were grouped into. Carried along
+  /// so the polygon can be counted against the curated letterbox index —
+  /// comparing what the distributor actually dropped here against how many
+  /// letterboxes are really inside this shape. Empty for grouping results
+  /// produced before the geometry was kept.
+  final List<LatLng> points;
+
   TETargetPolygon({
     required this.name,
     required this.waypoints,
+    this.points = const [],
   });
 }

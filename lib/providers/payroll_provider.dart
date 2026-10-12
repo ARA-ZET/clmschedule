@@ -13,6 +13,7 @@ import '../models/payroll_payslip.dart';
 import '../models/payroll_settings.dart';
 import '../models/payroll_week.dart';
 import '../services/firestore_service.dart';
+import '../services/payroll_schedule_sync.dart';
 import '../services/payroll_service.dart';
 import '../utils/payroll_week.dart';
 import '../utils/schedule_time.dart';
@@ -21,6 +22,21 @@ import 'schedule_provider.dart';
 
 final payrollServiceRiverpod =
     riverpod.Provider<PayrollService>((ref) => PayrollService());
+
+/// The live schedule → payroll sync ([PayrollScheduleSync]), running while
+/// a signed-in admin has the app open; null for everyone else.
+final payrollScheduleSyncRiverpod =
+    riverpod.Provider<PayrollScheduleSync?>((ref) {
+  final isAdmin = ref.watch(authRiverpod.select((a) => a.isAdmin));
+  if (!isAdmin) return null;
+  final sync = PayrollScheduleSync(ref.read(payrollServiceRiverpod), () {
+    final email = ref.read(authRiverpod).userEmail;
+    return email.isEmpty ? null : email;
+  })
+    ..start();
+  ref.onDispose(sync.stop);
+  return sync;
+});
 
 final payrollRiverpod = riverpod.ChangeNotifierProvider<PayrollProvider>(
   (ref) => PayrollProvider(ref.read(payrollServiceRiverpod), ref),
@@ -45,6 +61,20 @@ class PayrollProvider extends ChangeNotifier {
   Map<String, double> _outstandingByDistributor = const {};
   bool _isLoading = false;
   String? _error;
+
+  /// The week exactly as Firestore last reported it, before local edits
+  /// still on their way to the server are laid over it (see [_overlay]).
+  PayrollWeek? _serverWeek;
+
+  /// The payslip write currently running, and the ones queued behind it.
+  /// Writes go one at a time — concurrent transactions on the single week
+  /// doc contend and retry with backoff, which is what made quick
+  /// successive Ops Stats edits slow — and everything queued while one is
+  /// running is merged into the next single transaction.
+  _PayslipWrite? _inFlightWrite;
+  final List<_PayslipWrite> _writeQueue = [];
+
+  Timer? _autoDeductTimer;
 
   PayrollProvider(this._service, [this._ref]) {
     _listenSettings();
@@ -120,6 +150,12 @@ class PayrollProvider extends ChangeNotifier {
     _weekSub?.cancel();
     _isLoading = true;
     final activeWeekStart = _weekStart;
+    // A week can straddle a month boundary the schedule isn't streaming
+    // (e.g. 25 Sep – 1 Oct viewed in October); without those jobs Ops Stats
+    // flags every saved day in the other month as a schedule mismatch.
+    _ref
+        ?.read(scheduleRiverpod)
+        .ensureMonthsLoadedForRange(activeWeekStart, weekEnd);
 
     // Guards `ensureWeekInitialized` to run at most once per week open,
     // triggered by the stream's own first emission rather than a second,
@@ -131,7 +167,12 @@ class PayrollProvider extends ChangeNotifier {
     _weekSub = _service.streamWeek(activeWeekStart).listen(
       (week) async {
         if (activeWeekStart != _weekStart) return;
-        _week = week;
+        // A snapshot can land while later local edits are still being
+        // written (it only reflects writes committed so far); showing it raw
+        // would flash those cells back to their old values — and the Ops
+        // Stats grid would then save the reverted values for real.
+        _serverWeek = week;
+        _week = _overlay(week);
         _isLoading = false;
         _error = null;
         notifyListeners();
@@ -178,29 +219,114 @@ class PayrollProvider extends ChangeNotifier {
   Future<void> _mutatePayslips(
     Map<String, PayrollPayslip Function(PayrollPayslip)> mutations, {
     bool requireEditable = true,
-  }) async {
-    if (requireEditable && !isWeekEditable) return;
+  }) {
+    if (requireEditable && !isWeekEditable) return Future.value();
     final payslips = Map<String, PayrollPayslip>.from(_week.payslips);
+    final applied = <String, PayrollPayslip Function(PayrollPayslip)>{};
     final seeds = <String, PayrollPayslip>{};
-    var any = false;
     mutations.forEach((id, mutate) {
       final current = _week.payslips[id];
       if (current == null) return;
       seeds[id] = current; // pre-mutation snapshot; the txn applies mutate once
       payslips[id] = mutate(current);
-      any = true;
+      applied[id] = mutate;
     });
-    if (!any) return;
+    if (applied.isEmpty) return Future.value();
     _week = _service.recomputeWeek(_week.copyWith(payslips: payslips),
         settings: _settings);
     notifyListeners();
-    await _service.mutatePayslipsTxn(
-      _week.weekStart,
-      mutations: mutations,
-      seeds: seeds,
-      settings: _settings,
-      updatedBy: _currentUser,
-    );
+
+    // Merge into the newest queued (not yet running) write for this week,
+    // composing per-payslip so every mutation still applies in order.
+    final tail = _writeQueue.isEmpty ? null : _writeQueue.last;
+    final _PayslipWrite write;
+    if (tail != null && tail.weekStart == _weekStart) {
+      write = tail;
+    } else {
+      write = _PayslipWrite(_weekStart);
+      _writeQueue.add(write);
+    }
+    applied.forEach((id, mutate) {
+      final prior = write.mutations[id];
+      write.mutations[id] = prior == null ? mutate : (p) => mutate(prior(p));
+      write.seeds.putIfAbsent(id, () => seeds[id]!);
+    });
+    write.updatedBy = _currentUser;
+    unawaited(_drainWrites());
+    return write.done.future;
+  }
+
+  Future<void> _drainWrites() async {
+    if (_inFlightWrite != null) return;
+    while (_writeQueue.isNotEmpty) {
+      final write = _inFlightWrite = _writeQueue.removeAt(0);
+      try {
+        await _service.mutatePayslipsTxn(
+          write.weekStart,
+          mutations: write.mutations,
+          seeds: write.seeds,
+          settings: _settings,
+          updatedBy: write.updatedBy,
+        );
+        _inFlightWrite = null;
+        write.done.complete();
+      } catch (e, st) {
+        _inFlightWrite = null;
+        debugPrint('Payroll save failed: $e');
+        // Drop the failed edit from what's shown: back to the last server
+        // snapshot plus whatever is still queued.
+        final server = _serverWeek;
+        if (write.weekStart == _weekStart && server != null) {
+          _week = _overlay(server);
+          notifyListeners();
+        }
+        write.done.completeError(e, st);
+      }
+    }
+  }
+
+  /// [server] with every not-yet-confirmed local write for the viewed week
+  /// re-applied on top, oldest first.
+  PayrollWeek _overlay(PayrollWeek server) {
+    final writes = [
+      if (_inFlightWrite != null) _inFlightWrite!,
+      ..._writeQueue,
+    ].where((w) => w.weekStart == _weekStart);
+    if (writes.isEmpty) return server;
+    final payslips = Map<String, PayrollPayslip>.from(server.payslips);
+    for (final w in writes) {
+      w.mutations.forEach((id, mutate) {
+        final current = payslips[id] ?? w.seeds[id];
+        if (current != null) payslips[id] = mutate(current);
+      });
+    }
+    return _service.recomputeWeek(server.copyWith(payslips: payslips),
+        settings: _settings);
+  }
+
+  /// Completes once every queued payslip write has finished (or failed).
+  Future<void> _writesSettled() async {
+    while (_inFlightWrite != null || _writeQueue.isNotEmpty) {
+      final last = _writeQueue.isNotEmpty ? _writeQueue.last : _inFlightWrite!;
+      try {
+        await last.done.future;
+      } catch (_) {}
+    }
+  }
+
+  /// Runs [_autoApplyDefaultDeductions] once edits settle rather than after
+  /// every save — it's one transaction per candidate payslip on the same
+  /// week doc, so running it between rapid edits held each one up.
+  void _scheduleAutoDeductions() {
+    _autoDeductTimer?.cancel();
+    _autoDeductTimer = Timer(const Duration(milliseconds: 1500), () async {
+      await _writesSettled();
+      try {
+        await _autoApplyDefaultDeductions();
+      } catch (e) {
+        debugPrint('Auto advance deduction failed: $e');
+      }
+    });
   }
 
   /// Replaces one or more of a distributor's daily entries in one write.
@@ -218,7 +344,7 @@ class PayrollProvider extends ChangeNotifier {
         return p.copyWith(dailyEntries: entries);
       },
     });
-    await _autoApplyDefaultDeductions();
+    _scheduleAutoDeductions();
   }
 
   /// Replaces one day's entry for every distributor in [entriesByDistributorId]
@@ -242,7 +368,7 @@ class PayrollProvider extends ChangeNotifier {
           },
     };
     await _mutatePayslips(mutations);
-    await _autoApplyDefaultDeductions();
+    _scheduleAutoDeductions();
   }
 
   Future<void> updateAdvanceDeduction(
@@ -675,9 +801,22 @@ class PayrollProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _autoDeductTimer?.cancel();
     _weekSub?.cancel();
     _settingsSub?.cancel();
     _outstandingSub?.cancel();
     super.dispose();
   }
+}
+
+/// One queued payslip transaction for [weekStart] — see
+/// `PayrollProvider._writeQueue`.
+class _PayslipWrite {
+  final DateTime weekStart;
+  final Map<String, PayrollPayslip Function(PayrollPayslip)> mutations = {};
+  final Map<String, PayrollPayslip> seeds = {};
+  final Completer<void> done = Completer<void>();
+  String? updatedBy;
+
+  _PayslipWrite(this.weekStart);
 }

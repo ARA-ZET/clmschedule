@@ -18,6 +18,7 @@ import '../../shareable_maps/providers/map_gesture_provider.dart';
 import '../date_schedule_map_page.dart';
 import 'day_planner_palette.dart';
 import 'day_planner_panel.dart';
+import '../../shareable_maps/widgets/map_overlay.dart';
 
 /// Split-screen page launched from the schedule grid's date map button.
 ///
@@ -283,9 +284,12 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
               myLocationButtonEnabled: false,
               mapToolbarEnabled: false,
               zoomControlsEnabled: false,
-              webGestureHandling:
-                  ref.watch(mapGestureRiverpod).gestureHandling,
-              onTap: (_) => setState(() => _selectedMarker = null),
+              webGestureHandling: ref.watch(mapGestureRiverpod).gestureHandling,
+              onTap: (_) {
+                // The click that landed on a panel or dialog over the map.
+                if (ref.read(mapGestureRiverpod).isHeld) return;
+                setState(() => _selectedMarker = null);
+              },
               onCameraMove: (_) => _updateInfoWindowPosition(),
               onMapCreated: (controller) {
                 if (!_mapController.isCompleted) {
@@ -310,26 +314,21 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
                 right: 12,
                 bottom: 12,
                 child: PointerInterceptor(
-                  child: MouseRegion(
-                    onEnter: (_) =>
-                        ref.read(mapGestureRiverpod).disableMapGestures(),
-                    onExit: (_) =>
-                        ref.read(mapGestureRiverpod).enableMapGestures(),
+                  child: MapOverlay(
                     child: Card(
                       elevation: 3,
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(8)),
                       child: const Padding(
-                        padding: EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 7),
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 10, vertical: 7),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             SizedBox(
                               width: 13,
                               height: 13,
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2),
+                              child: CircularProgressIndicator(strokeWidth: 2),
                             ),
                             SizedBox(width: 8),
                             Text('Loading markers…',
@@ -364,9 +363,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       top: top,
       width: cardW,
       child: PointerInterceptor(
-        child: MouseRegion(
-          onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
-          onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+        child: MapOverlay(
           child: _MarkerInfoCard(
             spec: spec,
             day: day,
@@ -593,9 +590,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
         // Distributor-linked tasks: use the job's stored coordinate.
         final jobId = t.typeData['distributorJobId'] as String?;
         Job? job;
-        if ((t.type == DropsheetTaskType.dropOff ||
-                t.type == DropsheetTaskType.pickUp) &&
-            jobId != null) {
+        if (t.isDistributorTask && jobId != null) {
           job = jobById[jobId];
         }
         final stops = _stopPointsFor(t, job);
@@ -640,16 +635,37 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
         isPickUp: spec.isPickUp,
       ),
     ));
+    // Several distributors dropped at the same spot would draw their bitmaps
+    // exactly on top of each other, hiding all but one. Stack them instead:
+    // every marker keeps its true position (so drag, routing and ETAs are
+    // untouched), and the k-th one at a spot has its anchor pushed k bitmap
+    // heights below the image, which lifts it into a readable column above
+    // the first. Pixel-based, so it holds at every zoom level.
+    final stackIndex = <int>[];
+    final seenAtSpot = <String, int>{};
+    for (final spec in pending) {
+      final key = '${spec.position.latitude.toStringAsFixed(4)},'
+          '${spec.position.longitude.toStringAsFixed(4)}';
+      final k = seenAtSpot[key] ?? 0;
+      seenAtSpot[key] = k + 1;
+      stackIndex.add(k);
+    }
+
     for (var i = 0; i < pending.length; i++) {
       final spec = pending[i];
       final markerBitmap = bitmaps[i];
       final hasJob = spec.job != null;
+      final k = stackIndex[i];
       markers.add(
         Marker(
           markerId: MarkerId(spec.id),
           position: spec.position,
           icon: markerBitmap.icon,
-          anchor: markerBitmap.anchor,
+          anchor: k == 0
+              ? markerBitmap.anchor
+              : Offset(markerBitmap.anchor.dx,
+                  markerBitmap.anchor.dy + k * _stackStep),
+          zIndexInt: k,
           draggable: true,
           onTap: () => _onMarkerTap(spec),
           onDragEnd: (LatLng pos) {
@@ -697,6 +713,8 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
   }
 
   Future<void> _onMarkerTap(_MarkerSpec spec) async {
+    // Only marker taps call this; a held map means the click was for UI.
+    if (ref.read(mapGestureRiverpod).isHeld) return;
     final ctrl = await _mapController.future;
     final sc = await ctrl.getScreenCoordinate(spec.position);
     if (!mounted) return;
@@ -795,8 +813,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
   /// when the address was geocoded.
   List<_StopPoint> _stopPointsFor(DropsheetTask t, Job? job) {
     final out = <_StopPoint>[];
-    if (t.type == DropsheetTaskType.dropOff ||
-        t.type == DropsheetTaskType.pickUp) {
+    if (t.isDistributorTask) {
       // Per-area drop-offs (and pick-ups derived from them) pin their own
       // coordinate so they render as distinct pins. The default drop-off keeps
       // using the job's point so it tracks schedule-grid edits live.
@@ -917,9 +934,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
         if (t.isMandatory) continue;
         final jobId = t.typeData['distributorJobId'] as String?;
         Job? linkedJob;
-        if ((t.type == DropsheetTaskType.dropOff ||
-                t.type == DropsheetTaskType.pickUp) &&
-            jobId != null) {
+        if (t.isDistributorTask && jobId != null) {
           linkedJob = jobsById[jobId];
         }
         final stops = _stopPointsFor(t, linkedJob);
@@ -1049,6 +1064,9 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     return '${d.day} ${months[d.month - 1]}';
   }
 }
+
+/// Vertical spacing between stacked co-located markers, in bitmap heights.
+const double _stackStep = 1.05;
 
 class _MarkerSpec {
   final String id;
@@ -1471,6 +1489,8 @@ class _MarkerInfoCard extends riverpod.ConsumerWidget {
         return Icons.local_shipping_outlined;
       case DropsheetTaskType.pickUp:
         return Icons.upload_outlined;
+      case DropsheetTaskType.distribute:
+        return Icons.directions_walk;
       case DropsheetTaskType.collection:
         return Icons.inventory_2_outlined;
       case DropsheetTaskType.jobReturn:

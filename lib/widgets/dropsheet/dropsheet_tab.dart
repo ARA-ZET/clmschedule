@@ -47,8 +47,21 @@ class DropsheetTab extends riverpod.ConsumerWidget {
             builder: (_) => const TaskManagerDialog(),
           ),
           onPrint: () async {
-            final day = dropsheet.day;
             final date = dropsheet.date;
+            // Name the street corner at each drop-off point first so the
+            // printed Location is readable. Best-effort and capped: a slow
+            // map server must never stop the sheet from printing.
+            final messenger = ScaffoldMessenger.of(context);
+            messenger.showSnackBar(const SnackBar(
+              content: Text('Looking up street names for drop-off points…'),
+              duration: Duration(seconds: 30),
+            ));
+            final day = await dropsheet
+                .resolveIntersections()
+                .timeout(const Duration(seconds: 30),
+                    onTimeout: () => dropsheet.day)
+                .catchError((Object _) => dropsheet.day);
+            messenger.hideCurrentSnackBar();
             await Printing.layoutPdf(
               name: 'Dropsheet ${DateFormat('yyyy-MM-dd').format(date)}',
               onLayout: (_) => generateDropsheetPdf(day, date),
@@ -65,12 +78,24 @@ class DropsheetTab extends riverpod.ConsumerWidget {
               ),
             );
           },
+          isArchived: dropsheet.isHistoricalDate,
           onSyncFromSchedule: () async {
-            await dropsheet.syncFromSchedule();
+            // A past dropsheet is an audit record — syncing it re-runs the
+            // schedule match and can move allocated stops back to
+            // "Unassigned". Make the user opt in explicitly.
+            if (dropsheet.isHistoricalDate) {
+              final proceed = await _confirmArchivedSync(context);
+              if (proceed != true || !context.mounted) return;
+            }
+            final synced = await dropsheet.syncFromSchedule(
+                force: dropsheet.isHistoricalDate);
             if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                    content: Text('Synced new stops from schedule.')),
+                SnackBar(
+                  content: Text(synced
+                      ? 'Synced new stops from schedule.'
+                      : 'This dropsheet is archived — nothing was changed.'),
+                ),
               );
             }
           },
@@ -139,6 +164,35 @@ class DropsheetTab extends riverpod.ConsumerWidget {
                   : _DropsheetBody(day: day),
         ),
       ],
+    );
+  }
+
+  /// Confirms overwriting an archived (past) dropsheet before re-running the
+  /// schedule sync against it.
+  Future<bool?> _confirmArchivedSync(BuildContext context) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Sync an archived dropsheet?'),
+        content: const Text(
+          'This day has already been run. Syncing re-matches it against the '
+          'schedule as it stands today, so stops whose jobs have since been '
+          'deleted, moved or recreated will drop off their drivers and '
+          'reappear under "Unassigned stops".\n\n'
+          'The record of what was actually run that day cannot be recovered.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('CANCEL'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.orange[700]),
+            child: const Text('SYNC ANYWAY'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -248,6 +302,10 @@ class _TopBar extends StatelessWidget {
   final VoidCallback onSyncPickups;
   final bool driversAvailable;
 
+  /// True when [date] is before today — the sheet is a past-day record and
+  /// is no longer kept in step with the schedule automatically.
+  final bool isArchived;
+
   const _TopBar({
     required this.date,
     required this.onDateChanged,
@@ -259,6 +317,7 @@ class _TopBar extends StatelessWidget {
     required this.onSyncFromSchedule,
     required this.onSyncPickups,
     required this.driversAvailable,
+    required this.isArchived,
   });
 
   @override
@@ -311,6 +370,36 @@ class _TopBar extends StatelessWidget {
             tooltip: 'Pick date',
             onPressed: pickDate,
           ),
+          if (isArchived) ...[
+            const SizedBox(width: 8),
+            Tooltip(
+              message: 'Past day — kept as a record. The schedule and job '
+                  'list no longer sync into it automatically.',
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade700,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.lock_clock, size: 13, color: Colors.black87),
+                    SizedBox(width: 4),
+                    Text(
+                      'ARCHIVED',
+                      style: TextStyle(
+                        color: Colors.black87,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
           const Spacer(),
           OutlinedButton.icon(
             style: OutlinedButton.styleFrom(

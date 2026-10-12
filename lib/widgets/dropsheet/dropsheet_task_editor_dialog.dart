@@ -11,6 +11,7 @@ import '../../providers/dropsheet_task_config_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../services/firestore_service.dart';
 import '../../services/geocoding_service.dart';
+import '../../shareable_maps/services/map_link_service.dart';
 import '../../shareable_maps/services/places_autocomplete_service.dart';
 import '../../utils/dropsheet_maps.dart';
 
@@ -80,8 +81,8 @@ class _DropsheetTaskEditorDialogState
               : cfg.effectiveLabel),
     );
     _details = TextEditingController(
-      text: t.details.isNotEmpty
-          ? t.details
+      text: t.notes.isNotEmpty
+          ? t.notes
           : (dynDef?.defaultDetails.isNotEmpty == true
               ? dynDef!.defaultDetails
               : cfg.defaultDetails),
@@ -119,8 +120,7 @@ class _DropsheetTaskEditorDialogState
 
     // For an already-saved distributor task, load its backing job so the
     // work-area picker can offer the distributor's areas / polygon centroids.
-    if ((t.type == DropsheetTaskType.dropOff ||
-            t.type == DropsheetTaskType.pickUp) &&
+    if (t.isDistributorTask &&
         (_typeData['distributorJobId'] as String?)?.isNotEmpty == true) {
       _loadDistributorJob(_typeData['distributorJobId'] as String);
     }
@@ -270,6 +270,7 @@ class _DropsheetTaskEditorDialogState
         return _genericFields();
       case DropsheetTaskType.dropOff:
       case DropsheetTaskType.pickUp:
+      case DropsheetTaskType.distribute:
         return _distributorFields(type);
       case DropsheetTaskType.collection:
       case DropsheetTaskType.jobReturn:
@@ -345,8 +346,9 @@ class _DropsheetTaskEditorDialogState
   /// single area (its pin then lands in that area's polygon).
   Widget _workAreaPicker(String workArea) {
     final job = _distributorJob;
-    final areas = job?.workingAreas.where((a) => a.trim().isNotEmpty).toList() ??
-        const <String>[];
+    final areas =
+        job?.workingAreas.where((a) => a.trim().isNotEmpty).toList() ??
+            const <String>[];
     if (areas.length < 2) {
       return workArea.isEmpty
           ? const SizedBox.shrink()
@@ -652,6 +654,7 @@ class _DropsheetTaskEditorDialogState
         'distributorId': selected.distributorId,
         'distributorName': distName,
         'workArea': workArea,
+        DropsheetTask.kPointOnlyKey: DropsheetTask.isPointOnlyJob(selected),
         if (selected.dropOffPoint != null) ...{
           'lat': selected.dropOffPoint!.latitude,
           'lng': selected.dropOffPoint!.longitude,
@@ -665,10 +668,8 @@ class _DropsheetTaskEditorDialogState
             distName.isEmpty ? defaultLabel : '$defaultLabel: $distName';
       }
 
-      // details → work area  (matches sync)
-      if (_details.text.trim().isEmpty) {
-        _details.text = workArea;
-      }
+      // details stay the user's notes — the work area is already shown as
+      // the location and the name as the contact.
 
       // location → work area  (matches sync)
       _location.text = workArea;
@@ -744,8 +745,16 @@ class _DropsheetTaskEditorDialogState
       default:
         filtered = items;
     }
-    // Fall back to all items if the filter matched nothing.
-    return filtered.isEmpty ? items : filtered;
+    if (filtered.isNotEmpty) return filtered;
+    // Nothing matched the smart defaults. Rather than dropping straight to
+    // "every job on the day", prefer items whose job type actually appears on
+    // the dropsheet — those are the ones the sync can keep up to date. Only
+    // when there are none of those do we show everything, so the user can
+    // still link a one-off job by hand.
+    final onDropsheet = items
+        .where((it) => jtProvider.appearsOnDropsheet(it.jobTypeId))
+        .toList();
+    return onDropsheet.isNotEmpty ? onDropsheet : items;
   }
 
   Future<void> _pickJobListItem() async {
@@ -805,6 +814,17 @@ class _DropsheetTaskEditorDialogState
                           style: const TextStyle(
                               fontSize: 12, color: Colors.black54),
                         ),
+                        // The dropsheet sync only tracks job types flagged
+                        // "appears on dropsheet". Linking anything else is
+                        // allowed but stays a one-off snapshot, so say so
+                        // rather than letting the user expect live updates.
+                        if (!jobTypeProvider.appearsOnDropsheet(it.jobTypeId))
+                          const Text(
+                            "Won't update automatically — this job type "
+                            'is not on the dropsheet',
+                            style: TextStyle(
+                                fontSize: 10, color: Colors.deepOrange),
+                          ),
                       ],
                     ),
                   ),
@@ -852,7 +872,9 @@ class _DropsheetTaskEditorDialogState
           final dedicatedOffload = selected.offloadingAddress.trim();
           final offload = dedicatedOffload.isNotEmpty
               ? dedicatedOffload
-              : (area.isNotEmpty && !_isMapLinkOrUrl(area) && colAddr.isNotEmpty)
+              : (area.isNotEmpty &&
+                      !_isMapLinkOrUrl(area) &&
+                      colAddr.isNotEmpty)
                   ? colAddr
                   : si.isNotEmpty
                       ? si
@@ -935,7 +957,7 @@ class _DropsheetTaskEditorDialogState
     if (value.isEmpty) return false;
     return value.startsWith('http://') ||
         value.startsWith('https://') ||
-        value.contains('clm-maps.web.app/map/') ||
+        MapLinkService.containsShareUrl(value) ||
         value.contains('google.com/maps') ||
         value.contains('maps.app.goo.gl') ||
         value.contains('goo.gl/maps');
@@ -1024,6 +1046,7 @@ class _DropsheetTaskEditorDialogState
         break;
       case DropsheetTaskType.dropOff:
       case DropsheetTaskType.pickUp:
+      case DropsheetTaskType.distribute:
       case DropsheetTaskType.inspect:
       case DropsheetTaskType.pack:
       case DropsheetTaskType.leave:
@@ -1042,8 +1065,7 @@ class _DropsheetTaskEditorDialogState
             newTypeData.remove('lat');
             newTypeData.remove('lng');
           }
-        } else if (t.type != DropsheetTaskType.dropOff &&
-            t.type != DropsheetTaskType.pickUp) {
+        } else if (!t.isDistributorTask) {
           // Generic task — geocode the location field so the route planner
           // (custom type) and future consumers can use the coordinates.
           final loc = _location.text.trim();
@@ -1096,6 +1118,47 @@ class _DropsheetTaskEditorDialogState
     final parsedMinutes = int.tryParse(rawMinutes);
     final clearedMinutes = rawMinutes.isEmpty;
 
+    if (sourceJobListItemId != null) {
+      // A task that carries no sync fingerprint was built here, by hand. Mark
+      // it so the job-list sync keeps treating it as user-owned: it refreshes
+      // the linked item's data but never deletes the task or overrides the
+      // type the user chose. See [DropsheetTask.isUserCreatedJobListTask].
+      if (!t.typeData.containsKey(DropsheetTask.kJobListFingerprintKey)) {
+        newTypeData[DropsheetTask.kJobListManualKey] = true;
+      }
+      // Mark tasks the user has actually reworded, so the sync stops
+      // regenerating those fields from the source item and silently reverting
+      // the edit on its next pass. Only set it when something really changed —
+      // opening and closing the dialog must not detach a task from the sync.
+      String td(Map<String, dynamic> m, String key) =>
+          (m[key] as String?)?.trim() ?? '';
+      final touchedFields = _job.text.trim() != t.job ||
+          _details.text.trim() != t.details ||
+          location != t.location ||
+          _contact.text.trim() != t.contact ||
+          _tel.text.trim() != t.tel ||
+          // Address fields live in typeData, not on the task, but the sync
+          // regenerates them from the source item just the same.
+          td(newTypeData, 'address') != td(t.typeData, 'address') ||
+          td(newTypeData, 'loadingAddress') !=
+              td(t.typeData, 'loadingAddress') ||
+          td(newTypeData, 'offloadAddress') != td(t.typeData, 'offloadAddress');
+      if (touchedFields) {
+        newTypeData[DropsheetTask.kUserEditedKey] = true;
+      }
+    } else if (t.isDistributorTask &&
+        (newTypeData['distributorJobId'] as String?)?.isNotEmpty == true &&
+        // Same job as before — picking a (new) distributor is not a rewording.
+        newTypeData['distributorJobId'] == t.typeData['distributorJobId'] &&
+        (_job.text.trim() != t.job ||
+            location != t.location ||
+            _contact.text.trim() != t.contact ||
+            _tel.text.trim() != t.tel)) {
+      // The schedule sync regenerates these fields for distributor tasks;
+      // mark the task so it keeps the user's wording (see _computeSyncedDay).
+      newTypeData[DropsheetTask.kUserEditedKey] = true;
+    }
+
     final updated = t.copyWith(
       job: _job.text.trim(),
       details: _details.text.trim(),
@@ -1137,6 +1200,7 @@ class DropsheetTaskTypePicker extends riverpod.ConsumerWidget {
     const addable = [
       DropsheetTaskType.dropOff,
       DropsheetTaskType.pickUp,
+      DropsheetTaskType.distribute,
       DropsheetTaskType.collection,
       DropsheetTaskType.jobReturn,
       DropsheetTaskType.pickFlyers,
@@ -1197,6 +1261,8 @@ class DropsheetTaskTypePicker extends riverpod.ConsumerWidget {
         return Icons.local_shipping_outlined;
       case DropsheetTaskType.pickUp:
         return Icons.move_to_inbox_outlined;
+      case DropsheetTaskType.distribute:
+        return Icons.directions_walk;
       case DropsheetTaskType.collection:
         return Icons.inventory_2_outlined;
       case DropsheetTaskType.jobReturn:

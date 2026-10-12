@@ -1,15 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../models/job.dart';
-import '../models/custom_polygon.dart';
 import '../models/distributor.dart';
 import '../providers/day_off_provider.dart';
+import '../providers/distribution_lag_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/unfinished_work_areas_provider.dart';
 import '../providers/scale_provider.dart';
+import '../providers/schedule_selection_provider.dart';
+import '../utils/distribution_lag.dart';
+import '../utils/schedule_job_merge.dart';
 import 'job_card.dart';
+import 'schedule_batch_drop.dart';
 import 'job_drop_confirmation_dialog.dart';
 
 /// Isolated widget for a single schedule grid cell
@@ -71,9 +76,9 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
           return;
         }
 
-        final combinedJob = _mergeScheduleJobs(
-          targetJob: targetJob,
-          incomingJob: unfinishedItem,
+        final combinedJob = mergeScheduleJobs(
+          target: targetJob,
+          incoming: unfinishedItem,
         );
 
         await scheduleProvider.updateJobWithUndo(targetJob, combinedJob, date);
@@ -145,374 +150,302 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
     }
   }
 
-  /// Merge two lists of string tokens, deduplicating case-insensitively while
-  /// preserving the casing of the first occurrence. Empty / whitespace-only
-  /// entries are dropped.
-  static List<String> _mergeStringsPreserveCase(
-    List<String> a,
-    List<String> b,
-  ) {
-    final seen = <String>{};
-    final out = <String>[];
-    for (final v in [...a, ...b]) {
-      final trimmed = v.trim();
-      if (trimmed.isEmpty) continue;
-      final key = trimmed.toLowerCase();
-      if (seen.add(key)) out.add(trimmed);
-    }
-    return out;
-  }
-
-  /// Merge two schedule jobs without dropping instructions or access notes.
-  static Job _mergeScheduleJobs({
-    required Job targetJob,
-    required Job incomingJob,
-  }) {
-    final combinedClients = _mergeStringsPreserveCase(
-      targetJob.clients,
-      incomingJob.clients,
-    );
-    final combinedClientInstructions = _mergeStringsPreserveCase(
-      targetJob.clientInstructions,
-      incomingJob.clientInstructions,
-    );
-    final combinedWorkingAreas = _mergeStringsPreserveCase(
-      targetJob.workingAreas,
-      incomingJob.workingAreas,
-    );
-    final combinedWorkMaps = _mergeWorkMaps(
-      targetJob.workMaps,
-      incomingJob.workMaps,
-    );
-
-    return targetJob.copyWith(
-      clients: combinedClients,
-      clientInstructions: combinedClientInstructions,
-      workingAreas: combinedWorkingAreas,
-      workMaps: combinedWorkMaps,
-      mapInstructions: _mergeTextBlocks(
-        targetJob.mapInstructions,
-        incomingJob.mapInstructions,
-      ),
-      dropOffPoint: targetJob.dropOffPoint ?? incomingJob.dropOffPoint,
-      pickUpPoint: targetJob.pickUpPoint ?? incomingJob.pickUpPoint,
-    );
-  }
-
-  /// Combine two free-form instruction blocks without losing either side.
-  static String _mergeTextBlocks(String a, String b) {
-    final lines = <String>[];
-    for (final value in [a, b]) {
-      final trimmed = value.trim();
-      if (trimmed.isEmpty) continue;
-      if (!lines.contains(trimmed)) lines.add(trimmed);
-    }
-    return lines.join('\n');
-  }
-
-  /// Merge two polygon/work-map lists. The [target] list keeps priority.
-  ///
-  /// Incoming polygons whose `(type, name)` collides with an entry already
-  /// present get their name suffixed so no data is lost:
-  ///   * first collision  → `"<name> gap"`
-  ///   * further collisions → `"<name> gap1"`, `"<name> gap2"`, … (cumulative)
-  ///
-  /// Unnamed polygons are always appended as-is (no reliable way to
-  /// deduplicate geometry by name).
-  static List<CustomPolygon> _mergeWorkMaps(
-    List<CustomPolygon> target,
-    List<CustomPolygon> incoming,
-  ) {
-    String keyFor(String type, String name) => '$type::${name.trim()}';
-
-    // Seed the "used keys" set with everything already in the target.
-    final used = <String>{};
-    for (final p in target) {
-      final n = p.name.trim();
-      if (n.isNotEmpty) used.add(keyFor(p.type.toString(), n));
-    }
-
-    final merged = <CustomPolygon>[...target];
-    for (final p in incoming) {
-      final originalName = p.name.trim();
-      if (originalName.isEmpty) {
-        merged.add(p); // unnamed: keep, cannot dedupe safely
-        continue;
-      }
-
-      final typeStr = p.type.toString();
-      final originalKey = keyFor(typeStr, originalName);
-      if (used.add(originalKey)) {
-        merged.add(p);
-        continue;
-      }
-
-      // Collision — find next free "<name> gap" / "<name> gapN" suffix.
-      String candidate = '$originalName gap';
-      if (used.contains(keyFor(typeStr, candidate))) {
-        var n = 1;
-        while (used.contains(keyFor(typeStr, '$originalName gap$n'))) {
-          n++;
-        }
-        candidate = '$originalName gap$n';
-      }
-      used.add(keyFor(typeStr, candidate));
-      merged.add(p.copyWith(name: candidate));
-    }
-    return merged;
-  }
-
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final scaleProvider = ref.read(scaleRiverpod);
     final isDayOff = ref.watch(dayOffRiverpod).isDayOff(distributor.id, date);
+    // Worst lag behind the Job List date over every job in this cell; the
+    // select keeps cells from rebuilding unless their own lag changes.
+    final lag =
+        ref.watch(distributionLagRiverpod.select((p) => p.lagForJobs(jobs)));
 
-    return DragTarget<Job>(
-      onAcceptWithDetails: (jobDetails) async {
-        // Get the dragged job - fetch fresh data from provider
-        final draggedJobId = jobDetails.data.id;
+    // A multi-job selection dropped here moves from this date onwards,
+    // each job to the first free distributor.
+    return DragTarget<ScheduleJobsDrag>(
+      onAcceptWithDetails: (details) =>
+          dropJobsOnDate(context, ref, details.data, date),
+      builder: (context, candidates, _) => DecoratedBox(
+        position: DecorationPosition.foreground,
+        decoration: BoxDecoration(
+          border: candidates.isEmpty
+              ? null
+              : Border.all(color: Colors.blue.shade600, width: 2),
+        ),
+        child: DragTarget<Job>(
+          onAcceptWithDetails: (jobDetails) async {
+            // A drop ends selecting.
+            ref.read(scheduleSelectionRiverpod).setSelectMode(false);
+            // Get the dragged job - fetch fresh data from provider
+            final draggedJobId = jobDetails.data.id;
 
-        // Get fresh job data from provider to avoid stale state
-        final scheduleProvider = ref.read(scheduleRiverpod);
+            // Get fresh job data from provider to avoid stale state
+            final scheduleProvider = ref.read(scheduleRiverpod);
 
-        // Check if this is an unfinished work area item (no distributorId)
-        final isFromUnfinishedPanel = jobDetails.data.distributorId.isEmpty;
+            // Check if this is an unfinished work area item (no distributorId)
+            final isFromUnfinishedPanel = jobDetails.data.distributorId.isEmpty;
 
-        if (isFromUnfinishedPanel) {
-          await _handleUnfinishedDrop(
-            context,
-            ref,
-            jobDetails.data,
-            scheduleProvider,
-          );
-          return;
-        }
+            if (isFromUnfinishedPanel) {
+              await _handleUnfinishedDrop(
+                context,
+                ref,
+                jobDetails.data,
+                scheduleProvider,
+              );
+              return;
+            }
 
-        final draggedJob = scheduleProvider.jobs
-            .where((j) => j.id == draggedJobId)
-            .firstOrNull;
-        if (draggedJob == null) {
-          // The dragged job vanished mid-gesture (deleted/moved elsewhere).
-          _showJobGoneSnackBar(context);
-          return;
-        }
-
-        // Check if dropping on the same day and distributor (no changes)
-        final isSameDayAndDistributor =
-            draggedJob.distributorId == distributor.id &&
-                draggedJob.date.year == date.year &&
-                draggedJob.date.month == date.month &&
-                draggedJob.date.day == date.day;
-
-        if (isSameDayAndDistributor) {
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Row(
-                  children: [
-                    const Icon(Icons.info_outline, color: Colors.white),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Job is already on ${DateFormat('EEE, MMM d').format(date)} for ${distributor.name}',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                    ),
-                  ],
-                ),
-                backgroundColor: Colors.orange,
-                duration: const Duration(seconds: 2),
-                behavior: SnackBarBehavior.floating,
-              ),
-            );
-          }
-          return;
-        }
-
-        try {
-          // If there's already a job in the target cell
-          if (jobs.isNotEmpty) {
-            // Get fresh target job data from provider to avoid stale state
-            final staleTargetJob = scheduleProvider.jobs
-                .where((j) => j.id == jobs.first.id)
+            final draggedJob = scheduleProvider.jobs
+                .where((j) => j.id == draggedJobId)
                 .firstOrNull;
-            if (staleTargetJob == null) {
+            if (draggedJob == null) {
+              // The dragged job vanished mid-gesture (deleted/moved elsewhere).
               _showJobGoneSnackBar(context);
               return;
             }
 
-            // Show confirmation dialog
-            if (!context.mounted) return;
-            final action = await showDialog<DropAction>(
-              context: context,
-              builder: (context) => JobDropConfirmationDialog(
-                draggedJob: draggedJob,
-                targetJob: staleTargetJob,
-                distributorName: distributor.name,
-                targetDate: date,
-              ),
-            );
+            // Check if dropping on the same day and distributor (no changes)
+            final isSameDayAndDistributor =
+                draggedJob.distributorId == distributor.id &&
+                    draggedJob.date.year == date.year &&
+                    draggedJob.date.month == date.month &&
+                    draggedJob.date.day == date.day;
 
-            if (action == null) return; // User cancelled
-
-            // Re-validate after the dialog's async gap — the stream may have
-            // removed or changed either job while the dialog was open.
-            final freshDragged = scheduleProvider.jobs
-                .where((j) => j.id == draggedJob.id)
-                .firstOrNull;
-            final targetJob = scheduleProvider.jobs
-                .where((j) => j.id == staleTargetJob.id)
-                .firstOrNull;
-            if (freshDragged == null || targetJob == null) {
-              if (context.mounted) _showJobGoneSnackBar(context);
+            if (isSameDayAndDistributor) {
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Row(
+                      children: [
+                        const Icon(Icons.info_outline, color: Colors.white),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Job is already on ${DateFormat('EEE, MMM d').format(date)} for ${distributor.name}',
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                        ),
+                      ],
+                    ),
+                    backgroundColor: Colors.orange,
+                    duration: const Duration(seconds: 2),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
               return;
             }
-            final confirmedDraggedJob = freshDragged;
 
-            if (action == DropAction.swap) {
-              await scheduleProvider.swapJobsWithUndo(
-                confirmedDraggedJob,
-                targetJob,
-                date,
-              );
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: const Row(
-                      children: [
-                        Icon(Icons.swap_horiz, color: Colors.white),
-                        SizedBox(width: 8),
-                        Text('Jobs swapped'),
-                      ],
-                    ),
-                    backgroundColor: Colors.blue.shade700,
-                    duration: const Duration(milliseconds: 1500),
-                    behavior: SnackBarBehavior.floating,
+            try {
+              // If there's already a job in the target cell
+              if (jobs.isNotEmpty) {
+                // Get fresh target job data from provider to avoid stale state
+                final staleTargetJob = scheduleProvider.jobs
+                    .where((j) => j.id == jobs.first.id)
+                    .firstOrNull;
+                if (staleTargetJob == null) {
+                  _showJobGoneSnackBar(context);
+                  return;
+                }
+
+                // Show confirmation dialog
+                if (!context.mounted) return;
+                final action = await showDialog<DropAction>(
+                  context: context,
+                  builder: (context) => JobDropConfirmationDialog(
+                    draggedJob: draggedJob,
+                    targetJob: staleTargetJob,
+                    distributorName: distributor.name,
+                    targetDate: date,
                   ),
                 );
-              }
-            } else if (action == DropAction.addToExisting) {
-              final combinedJob = _mergeScheduleJobs(
-                targetJob: targetJob,
-                incomingJob: confirmedDraggedJob,
-              );
 
-              await scheduleProvider.combineJobsWithUndo(
-                confirmedDraggedJob,
-                targetJob,
-                combinedJob,
-                date,
-              );
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: const Row(
-                      children: [
-                        Icon(Icons.merge_type, color: Colors.white),
-                        SizedBox(width: 8),
-                        Text('Jobs combined'),
-                      ],
-                    ),
-                    backgroundColor: Colors.green.shade700,
-                    duration: const Duration(milliseconds: 1500),
-                    behavior: SnackBarBehavior.floating,
-                  ),
+                if (action == null) return; // User cancelled
+
+                // Re-validate after the dialog's async gap — the stream may have
+                // removed or changed either job while the dialog was open.
+                final freshDragged = scheduleProvider.jobs
+                    .where((j) => j.id == draggedJob.id)
+                    .firstOrNull;
+                final targetJob = scheduleProvider.jobs
+                    .where((j) => j.id == staleTargetJob.id)
+                    .firstOrNull;
+                if (freshDragged == null || targetJob == null) {
+                  if (context.mounted) _showJobGoneSnackBar(context);
+                  return;
+                }
+                final confirmedDraggedJob = freshDragged;
+
+                if (action == DropAction.swap) {
+                  await scheduleProvider.swapJobsWithUndo(
+                    confirmedDraggedJob,
+                    targetJob,
+                    date,
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: const Row(
+                          children: [
+                            Icon(Icons.swap_horiz, color: Colors.white),
+                            SizedBox(width: 8),
+                            Text('Jobs swapped'),
+                          ],
+                        ),
+                        backgroundColor: Colors.blue.shade700,
+                        duration: const Duration(milliseconds: 1500),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  }
+                } else if (action == DropAction.addToExisting) {
+                  final combinedJob = mergeScheduleJobs(
+                    target: targetJob,
+                    incoming: confirmedDraggedJob,
+                  );
+
+                  await scheduleProvider.combineJobsWithUndo(
+                    confirmedDraggedJob,
+                    targetJob,
+                    combinedJob,
+                    date,
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: const Row(
+                          children: [
+                            Icon(Icons.merge_type, color: Colors.white),
+                            SizedBox(width: 8),
+                            Text('Jobs combined'),
+                          ],
+                        ),
+                        backgroundColor: Colors.green.shade700,
+                        duration: const Duration(milliseconds: 1500),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  }
+                } else if (action == DropAction.copy) {
+                  final combinedJob = mergeScheduleJobs(
+                    target: targetJob,
+                    incoming: confirmedDraggedJob,
+                  );
+
+                  await scheduleProvider.copyAndCombineJobsWithUndo(
+                    targetJob,
+                    combinedJob,
+                    date,
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: const Row(
+                          children: [
+                            Icon(Icons.copy, color: Colors.white),
+                            SizedBox(width: 8),
+                            Text('Job copied & combined'),
+                          ],
+                        ),
+                        backgroundColor: Colors.purple.shade700,
+                        duration: const Duration(milliseconds: 1500),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  }
+                }
+              } else {
+                // If target cell is empty, just move the dragged job
+                final movedJob = draggedJob.copyWith(
+                  distributorId: distributor.id,
+                  date: date,
+                );
+
+                await scheduleProvider.updateJobWithUndo(
+                  draggedJob,
+                  movedJob,
+                  date,
                 );
               }
-            } else if (action == DropAction.copy) {
-              final combinedJob = _mergeScheduleJobs(
-                targetJob: targetJob,
-                incomingJob: confirmedDraggedJob,
-              );
-
-              await scheduleProvider.copyAndCombineJobsWithUndo(
-                targetJob,
-                combinedJob,
-                date,
-              );
+            } catch (e) {
+              debugPrint('Drag-drop operation failed: $e');
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
-                    content: const Row(
+                    content: Row(
                       children: [
-                        Icon(Icons.copy, color: Colors.white),
-                        SizedBox(width: 8),
-                        Text('Job copied & combined'),
+                        const Icon(Icons.error_outline, color: Colors.white),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text('Operation failed: $e'),
+                        ),
                       ],
                     ),
-                    backgroundColor: Colors.purple.shade700,
-                    duration: const Duration(milliseconds: 1500),
+                    backgroundColor: Colors.red,
+                    duration: const Duration(seconds: 3),
                     behavior: SnackBarBehavior.floating,
                   ),
                 );
               }
             }
-          } else {
-            // If target cell is empty, just move the dragged job
-            final movedJob = draggedJob.copyWith(
-              distributorId: distributor.id,
-              date: date,
+          },
+          onWillAcceptWithDetails: (job) => !isDayOff,
+          builder: (context, candidateData, rejectedData) {
+            if (isDayOff) {
+              return _DayOffCard(
+                distributor: distributor,
+                date: date,
+                isFullscreen: isFullscreen,
+              );
+            }
+            final card = Card(
+              color: candidateData.isNotEmpty
+                  ? Theme.of(context).primaryColor.withValues(alpha: 0.1)
+                  : null,
+              child: jobs.isEmpty
+                  ? _AddJobButton(
+                      distributor: distributor,
+                      date: date,
+                      scaleProvider: scaleProvider,
+                    )
+                  : _buildCellContent(lag == null ? null : _lagColor(lag.$1)),
             );
-
-            await scheduleProvider.updateJobWithUndo(
-              draggedJob,
-              movedJob,
-              date,
+            if (lag == null) return card;
+            // Manual trigger: hover still shows it on web, but a long press
+            // stays free for dragging the job.
+            return Tooltip(
+              message: _lagMessage(lag.$2),
+              triggerMode: TooltipTriggerMode.manual,
+              child: card,
             );
-          }
-        } catch (e) {
-          debugPrint('Drag-drop operation failed: $e');
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Row(
-                  children: [
-                    const Icon(Icons.error_outline, color: Colors.white),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text('Operation failed: $e'),
-                    ),
-                  ],
-                ),
-                backgroundColor: Colors.red,
-                duration: const Duration(seconds: 3),
-                behavior: SnackBarBehavior.floating,
-              ),
-            );
-          }
-        }
-      },
-      onWillAcceptWithDetails: (job) => !isDayOff,
-      builder: (context, candidateData, rejectedData) {
-        if (isDayOff) {
-          return _DayOffCard(
-            distributor: distributor,
-            date: date,
-            isFullscreen: isFullscreen,
-          );
-        }
-        return Card(
-          color: candidateData.isNotEmpty
-              ? Theme.of(context).primaryColor.withValues(alpha: 0.1)
-              : null,
-          child: jobs.isEmpty
-              ? _AddJobButton(
-                  distributor: distributor,
-                  date: date,
-                  scaleProvider: scaleProvider,
-                )
-              : _buildCellContent(),
-        );
-      },
+          },
+        ),
+      ),
     );
+  }
+
+  static Color _lagColor(DistributionLag lag) => switch (lag) {
+        DistributionLag.onTime => Colors.green.shade600,
+        DistributionLag.late => Colors.orange.shade700,
+        DistributionLag.overdue => Colors.red.shade700,
+      };
+
+  static String _lagMessage(JobLag lag) {
+    final days = lag.days;
+    final when = days == 0
+        ? 'on'
+        : '${days.abs()} ${days.abs() == 1 ? 'day' : 'days'} '
+            '${days > 0 ? 'after' : 'before'}';
+    return '${lag.client}: $when its Job List date '
+        '(${DateFormat('d MMM').format(lag.listDate)})';
   }
 
   /// Cell body. A single job fills the cell (unchanged behaviour); a cell
   /// holding more than one job splits vertically into one independently
   /// draggable card per job, so no job is hidden and each can be moved on its
   /// own. Each card is clipped to its slot to avoid overflow paint.
-  Widget _buildCellContent() {
-    if (jobs.length == 1) return _buildDraggableJob(jobs.first);
+  /// [borderColor] is the cell's worst lag, drawn on every card in it.
+  Widget _buildCellContent(Color? borderColor) {
+    if (jobs.length == 1) return _buildDraggableJob(jobs.first, borderColor);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -520,37 +453,163 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
           Expanded(
             child: Padding(
               padding: const EdgeInsets.only(bottom: 1),
-              child: ClipRect(child: _buildDraggableJob(job)),
+              child: ClipRect(child: _buildDraggableJob(job, borderColor)),
             ),
           ),
       ],
     );
   }
 
-  /// One job rendered as a long-press draggable card carrying that job as its
-  /// drag payload.
-  Widget _buildDraggableJob(Job job) {
-    return LongPressDraggable<Job>(
-      data: job,
-      delay: const Duration(milliseconds: 250),
-      hapticFeedbackOnStart: true,
-      feedback: Material(
-        elevation: 8.0,
-        color: Colors.transparent,
-        child: SizedBox(
-          width: cellWidth - 8,
-          height: rowHeight - 8,
-          child: Opacity(
-            opacity: 0.7,
-            child: JobCard(job: job, isFullscreen: isFullscreen),
+  /// One job rendered as a draggable card. Its drag carries the whole
+  /// selection when the job is part of a multi-job selection.
+  Widget _buildDraggableJob(Job job, Color? borderColor) => _SelectableJob(
+        job: job,
+        borderColor: borderColor,
+        cellWidth: cellWidth,
+        rowHeight: rowHeight,
+        isFullscreen: isFullscreen,
+      );
+}
+
+/// A schedule job card that can be selected for a multi-job move and dragged.
+///
+/// While selecting (the "Select" toggle, or Ctrl / ⌘ / Shift held) a click
+/// toggles the job instead of reaching the card's own controls, and a drag
+/// starts straight away; otherwise a long press starts the drag as before.
+class _SelectableJob extends riverpod.ConsumerWidget {
+  /// Shift-click selects the range from the last clicked job; any other
+  /// click (plain, Ctrl, ⌘) toggles just this job.
+  void _onSelectTap(riverpod.WidgetRef ref) {
+    final selection = ref.read(scheduleSelectionRiverpod);
+    if (!HardwareKeyboard.instance.isShiftPressed) {
+      selection.toggle(job.id,
+          distributorId: job.distributorId, date: job.date);
+      return;
+    }
+    final schedule = ref.read(scheduleRiverpod);
+    selection.selectRangeTo(
+      job.id,
+      distributorId: job.distributorId,
+      date: job.date,
+      rowOrder: [for (final d in schedule.gridDistributors) d.id],
+      jobsIn: (distributorId, date) => schedule
+          .getJobsForDistributorAndDate(distributorId, date)
+          .map((j) => j.id),
+    );
+  }
+
+  final Job job;
+  final Color? borderColor;
+  final double cellWidth;
+  final double rowHeight;
+  final bool isFullscreen;
+
+  const _SelectableJob({
+    required this.job,
+    required this.borderColor,
+    required this.cellWidth,
+    required this.rowHeight,
+    required this.isFullscreen,
+  });
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final selected =
+        ref.watch(scheduleSelectionRiverpod.select((s) => s.contains(job.id)));
+    // Rebuild a selected card on every selection change, so the payload
+    // below is the full current selection when a drag starts.
+    ref.watch(scheduleSelectionRiverpod
+        .select((s) => s.contains(job.id) ? s.version : -1));
+    final selecting =
+        ref.watch(scheduleSelectionRiverpod.select((s) => s.isSelecting));
+    final selection = ref.read(scheduleSelectionRiverpod);
+
+    // Dragging a selected job moves the whole selection.
+    final dragCount = selected ? selection.count : 1;
+    final Object data =
+        dragCount > 1 ? ScheduleJobsDrag(selection.ids.toList()) : job;
+
+    Widget card({double opacity = 1}) => Opacity(
+          opacity: opacity,
+          child: JobCard(
+            job: job,
+            isFullscreen: isFullscreen,
+            borderColor: borderColor,
           ),
+        );
+
+    final feedback = Material(
+      elevation: 8.0,
+      color: Colors.transparent,
+      child: SizedBox(
+        width: cellWidth - 8,
+        height: rowHeight - 8,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned.fill(child: card(opacity: 0.7)),
+            if (dragCount > 1)
+              Positioned(
+                top: -8,
+                right: -8,
+                child: CircleAvatar(
+                  radius: 12,
+                  backgroundColor: Colors.blue.shade700,
+                  child: Text(
+                    '$dragCount',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
-      childWhenDragging: Opacity(
-        opacity: 0.2,
-        child: JobCard(job: job, isFullscreen: isFullscreen),
-      ),
-      child: JobCard(job: job, isFullscreen: isFullscreen),
+    );
+
+    final child = Stack(
+      children: [
+        Positioned.fill(child: card()),
+        if (selected)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.blue.withValues(alpha: 0.18),
+                  border: Border.all(color: Colors.blue.shade700, width: 2.5),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+            ),
+          ),
+        if (selecting)
+          Positioned.fill(
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _onSelectTap(ref),
+              ),
+            ),
+          ),
+      ],
+    );
+    final whenDragging =
+        selected ? card(opacity: 0.2) : Opacity(opacity: 0.2, child: child);
+
+    // One widget type in both modes, with only the delay changing. Swapping
+    // between Draggable and LongPressDraggable remounted the JobCard whenever
+    // selection mode toggled, disposing the state an open card dialog (the
+    // client list) was about to save into — so its Save did nothing.
+    return LongPressDraggable<Object>(
+      data: data,
+      delay: selecting ? Duration.zero : const Duration(milliseconds: 250),
+      hapticFeedbackOnStart: !selecting,
+      feedback: feedback,
+      childWhenDragging: whenDragging,
+      child: child,
     );
   }
 }

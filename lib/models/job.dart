@@ -1,5 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+
+import 'job_area_link.dart';
+import 'job_linked_map.dart';
 import '../utils/schedule_time.dart';
 import 'custom_polygon.dart';
 
@@ -27,8 +30,15 @@ class Job {
   final LatLng? dropOffPoint;
   final LatLng? pickUpPoint;
 
-  /// Id of a linked `ShareableMap` document (picked via `MapPickerDialog`),
-  /// empty if none linked. Mirrors `JobListItem.shareableMapId`.
+  /// Every client map linked to this job. A job can go out with more than
+  /// one, so this is the list to read; [linkedMapId]/[linkedMapMonthKey]
+  /// mirror the first entry for older code paths. Keep the two in step by
+  /// going through [withLinkedMaps] rather than setting them separately.
+  final List<JobLinkedMap> linkedMaps;
+
+  /// Id of the first linked `ShareableMap` document (picked via
+  /// `MapPickerDialog`), empty if none linked. Mirrors
+  /// `JobListItem.shareableMapId`.
   final String linkedMapId;
 
   /// Month key (e.g. `'03-2026'`) of the linked map's Firestore path
@@ -37,6 +47,20 @@ class Job {
   /// cloud folder path) — deliberately not cached, so the print map always
   /// reflects the linked map's live state rather than a stale snapshot.
   final String linkedMapMonthKey;
+
+  /// Client-map polygons allocated to this job by reference (see
+  /// [JobAreaLink]). Their outlines are NOT stored here: `AreaLinkResolver`
+  /// fills them into [workMaps] (and their names into [workingAreas]) when
+  /// the job is read, and [toMap] leaves them out again.
+  final List<JobAreaLink> areaLinks;
+
+  /// Names [workingAreas] gained from resolving [areaLinks]. In memory only —
+  /// lets [toMap] drop them, so a renamed or unlinked area never lingers.
+  final Set<String> resolvedAreaNames;
+
+  /// [JobAreaLink.key]s whose polygon could not be found on its client map
+  /// (map or polygon deleted). In memory only, for warnings.
+  final Set<String> missingAreaLinkKeys;
 
   Job({
     required this.id,
@@ -52,7 +76,111 @@ class Job {
     this.pickUpPoint,
     this.linkedMapId = '',
     this.linkedMapMonthKey = '',
+    this.linkedMaps = const [],
+    this.areaLinks = const [],
+    this.resolvedAreaNames = const {},
+    this.missingAreaLinkKeys = const {},
   });
+
+  /// The areas that are this job's own (drawn on it or copied onto it), i.e.
+  /// [workMaps] without the ones resolved from [areaLinks].
+  List<CustomPolygon> get ownWorkMaps =>
+      workMaps.where((p) => !JobAreaLink.isResolved(p)).toList();
+
+  /// [workingAreas] without the names added by resolving [areaLinks].
+  List<String> get ownWorkingAreas => resolvedAreaNames.isEmpty
+      ? workingAreas
+      : workingAreas.where((a) => !resolvedAreaNames.contains(a)).toList();
+
+  /// The links whose polygon is missing from its client map.
+  List<JobAreaLink> get missingAreaLinks => missingAreaLinkKeys.isEmpty
+      ? const []
+      : areaLinks.where((l) => missingAreaLinkKeys.contains(l.key)).toList();
+
+  /// [workMaps] with the areas resolved from [areaLinks] turned into plain
+  /// copies (keeping the client map's polygon id). For places that store a
+  /// snapshot of the ground on purpose, like the unfinished-areas pool —
+  /// anything written with a resolved id would be stripped on save.
+  List<CustomPolygon> get detachedWorkMaps => [
+        for (final p in workMaps)
+          if (JobAreaLink.isResolved(p))
+            p.copyWith(id: p.id!.split('/').last)
+          else
+            p,
+      ];
+
+  /// This job after a user edited its full [workMaps] list (the job card's
+  /// work-area list): a linked area the user removed is unlinked. Only links
+  /// that were resolved into [workMaps] can be removed this way — one whose
+  /// map had not loaded yet was never on screen, so its absence means
+  /// nothing.
+  Job withEditedWorkMaps(List<CustomPolygon> edited, List<String> areas) {
+    final kept = edited.map((p) => p.id).whereType<String>().toSet();
+    final shown =
+        workMaps.where(JobAreaLink.isResolved).map((p) => p.id!).toSet();
+    return copyWith(
+      workMaps: edited,
+      workingAreas: areas,
+      areaLinks: areaLinks
+          .where((l) =>
+              !shown.contains(l.resolvedId) || kept.contains(l.resolvedId))
+          .toList(),
+    );
+  }
+
+  /// This job with [resolved] (polygons resolved from [areaLinks], already
+  /// carrying [JobAreaLink.resolvedId]s) in place of any it held before.
+  /// Idempotent: resolving an already-resolved job replaces, never stacks.
+  Job withResolvedAreas(
+    List<CustomPolygon> resolved, {
+    Set<String> missingKeys = const {},
+  }) {
+    final own = ownWorkingAreas;
+    final ownKeys = own.map((a) => a.trim().toLowerCase()).toSet();
+    final addedNames = <String>{};
+    for (final p in resolved) {
+      final n = p.name.trim();
+      if (n.isNotEmpty && ownKeys.add(n.toLowerCase())) addedNames.add(n);
+    }
+    return Job(
+      id: id,
+      clients: clients,
+      clientInstructions: clientInstructions,
+      workingAreas: [...own, ...addedNames],
+      workMaps: [...ownWorkMaps, ...resolved],
+      distributorId: distributorId,
+      date: date,
+      statusId: statusId,
+      mapInstructions: mapInstructions,
+      dropOffPoint: dropOffPoint,
+      pickUpPoint: pickUpPoint,
+      linkedMapId: linkedMapId,
+      linkedMapMonthKey: linkedMapMonthKey,
+      linkedMaps: linkedMaps,
+      areaLinks: areaLinks,
+      resolvedAreaNames: addedNames,
+      missingAreaLinkKeys: missingKeys,
+    );
+  }
+
+  /// True when at least one client map is linked.
+  bool get hasLinkedMaps => linkedMaps.isNotEmpty || linkedMapId.isNotEmpty;
+
+  /// The linked maps, filled in from the legacy single-link fields for jobs
+  /// stored before [linkedMaps] existed.
+  List<JobLinkedMap> get effectiveLinkedMaps => linkedMaps.isNotEmpty
+      ? linkedMaps
+      : (linkedMapId.isEmpty
+          ? const []
+          : [JobLinkedMap(mapId: linkedMapId, monthKey: linkedMapMonthKey)]);
+
+  /// This job with [maps] as its linked maps, keeping the legacy single-link
+  /// fields pointing at the first one.
+  Job withLinkedMaps(List<JobLinkedMap> maps) => copyWith(
+        linkedMaps: maps,
+        linkedMapId: maps.isEmpty ? '' : maps.first.mapId,
+        linkedMapMonthKey: maps.isEmpty ? '' : maps.first.monthKey,
+      );
 
   // Create from Firestore
   factory Job.fromMap(String id, Map<String, dynamic> data) {
@@ -121,27 +249,45 @@ class Job {
       pickUpPoint: pickUpPoint,
       linkedMapId: data['linkedMapId'] as String? ?? '',
       linkedMapMonthKey: data['linkedMapMonthKey'] as String? ?? '',
+      linkedMaps: (data['linkedMaps'] as List<dynamic>?)
+              ?.map((e) =>
+                  JobLinkedMap.fromMap(Map<String, dynamic>.from(e as Map)))
+              .where((m) => m.mapId.isNotEmpty)
+              .toList() ??
+          const [],
+      areaLinks: (data['areaLinks'] as List<dynamic>?)
+              ?.map((e) =>
+                  JobAreaLink.fromMap(Map<String, dynamic>.from(e as Map)))
+              .where((l) => l.mapId.isNotEmpty && l.polygonId.isNotEmpty)
+              .toList() ??
+          const [],
     );
   }
 
   // Convert to Firestore
   Map<String, dynamic> toMap() {
+    // Areas resolved from [areaLinks] live on their client map — never
+    // write a copy of them back onto the job.
+    final ownAreas = ownWorkingAreas;
     final map = {
       'id': id, // Include ID for array storage
       'clients': clients,
       'clientInstructions': clientInstructions,
       'mapInstructions': mapInstructions,
-      'workingAreas': workingAreas,
-      'workMaps': workMaps.map((workMap) => workMap.toMap()).toList(),
+      'workingAreas': ownAreas,
+      'workMaps': ownWorkMaps.map((workMap) => workMap.toMap()).toList(),
+      if (areaLinks.isNotEmpty)
+        'areaLinks': areaLinks.map((l) => l.toMap()).toList(),
       'linkedMapId': linkedMapId,
       'linkedMapMonthKey': linkedMapMonthKey,
+      'linkedMaps': linkedMaps.map((m) => m.toMap()).toList(),
       'distributorId': distributorId,
       'date': Timestamp.fromDate(scheduleCivilToInstant(date)),
       'statusId': statusId,
       // Keep backwards compatibility
       'status': statusId, // Also store as status for backwards compatibility
       'client': clients.isNotEmpty ? clients.first : '',
-      'workingArea': workingAreas.isNotEmpty ? workingAreas.first : '',
+      'workingArea': ownAreas.isNotEmpty ? ownAreas.first : '',
       if (dropOffPoint != null)
         'dropOffPoint': {
           'latitude': dropOffPoint!.latitude,
@@ -178,6 +324,10 @@ class Job {
     Object? pickUpPoint = _pickUpPointUnchanged,
     String? linkedMapId,
     String? linkedMapMonthKey,
+    List<JobLinkedMap>? linkedMaps,
+    List<JobAreaLink>? areaLinks,
+    Set<String>? resolvedAreaNames,
+    Set<String>? missingAreaLinkKeys,
   }) {
     List<CustomPolygon> cloneWorkMaps(List<CustomPolygon> maps) {
       return maps
@@ -209,6 +359,14 @@ class Job {
           : pickUpPoint as LatLng?,
       linkedMapId: linkedMapId ?? this.linkedMapId,
       linkedMapMonthKey: linkedMapMonthKey ?? this.linkedMapMonthKey,
+      linkedMaps: linkedMaps != null
+          ? List<JobLinkedMap>.from(linkedMaps)
+          : List<JobLinkedMap>.from(this.linkedMaps),
+      areaLinks: areaLinks != null
+          ? List<JobAreaLink>.from(areaLinks)
+          : List<JobAreaLink>.from(this.areaLinks),
+      resolvedAreaNames: resolvedAreaNames ?? this.resolvedAreaNames,
+      missingAreaLinkKeys: missingAreaLinkKeys ?? this.missingAreaLinkKeys,
     );
   }
 

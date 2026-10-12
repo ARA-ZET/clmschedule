@@ -20,6 +20,10 @@ class MapPolyline {
   final DateTime? endTime;
   final Duration? duration;
 
+  /// For a cloud track: the GPX file (within the layer's folder) it was
+  /// loaded from. Runtime-only — never written to Firestore.
+  final String? sourceFile;
+
   const MapPolyline({
     required this.id,
     required this.name,
@@ -34,6 +38,7 @@ class MapPolyline {
     this.startTime,
     this.endTime,
     this.duration,
+    this.sourceFile,
   });
 
   /// Create a new polyline with generated ID
@@ -76,10 +81,12 @@ class MapPolyline {
       strokeWidth: (data['strokeWidth'] as num?)?.toDouble() ?? 3.0,
       isDashed: data['isDashed'] as bool? ?? false,
       createdAt: data['createdAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['createdAt'] as num).toInt())
           : DateTime.now(),
       updatedAt: data['updatedAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((data['updatedAt'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['updatedAt'] as num).toInt())
           : DateTime.now(),
     );
   }
@@ -116,6 +123,7 @@ class MapPolyline {
     DateTime? startTime,
     DateTime? endTime,
     Duration? duration,
+    String? sourceFile,
   }) {
     return MapPolyline(
       id: id,
@@ -131,6 +139,7 @@ class MapPolyline {
       startTime: startTime ?? this.startTime,
       endTime: endTime ?? this.endTime,
       duration: duration ?? this.duration,
+      sourceFile: sourceFile ?? this.sourceFile,
     );
   }
 

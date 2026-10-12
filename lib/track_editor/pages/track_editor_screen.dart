@@ -17,6 +17,7 @@ import '../providers/te_waypoints_provider.dart';
 import '../services/kml_parser.dart';
 import 'package:gpx/gpx.dart';
 import 'track_editor_page.dart';
+import '../../utils/text_encoding.dart';
 
 class TrackEditorScreen extends riverpod.ConsumerStatefulWidget {
   const TrackEditorScreen({super.key});
@@ -28,29 +29,6 @@ class TrackEditorScreen extends riverpod.ConsumerStatefulWidget {
 
 class _TrackEditorScreenState
     extends riverpod.ConsumerState<TrackEditorScreen> {
-  void _openCloudFiles(BuildContext context) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => CloudFileManagerScreen(
-          onOpenInTrackEditor: (fileName, bytes, sourcePath) {
-            Navigator.of(context).pop(); // Close file manager
-            _loadFileIntoEditor(fileName, bytes, sourcePath);
-          },
-        ),
-      ),
-    );
-  }
-
-  void _loadFileIntoEditor(
-      String fileName, Uint8List bytes, String? sourcePath) {
-    loadCloudFileIntoTrackEditor(
-      container: riverpod.ProviderScope.containerOf(context),
-      fileName: fileName,
-      bytes: bytes,
-      sourcePath: sourcePath,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final mode = ref.watch(teModeRiverpod).mode;
@@ -73,19 +51,14 @@ class _TrackEditorScreenState
             selected: mode == TEMode.processing,
             onTap: () => modeProvider.setMode(TEMode.processing),
           ),
-          // ── Import ───────────────────────────────────────────────
+          // ── Report ───────────────────────────────────────────────
+          // Import and Trim used to live here — dropped as unused; this is
+          // the client-facing PDF report over a whole folder of GPX files.
           _ModeButton(
-            icon: Icons.upload_file,
-            label: 'Import',
-            selected: mode == TEMode.import,
-            onTap: () => modeProvider.setMode(TEMode.import),
-          ),
-          // ── Trim ─────────────────────────────────────────────────
-          _ModeButton(
-            icon: Icons.content_cut,
-            label: 'Trim',
-            selected: mode == TEMode.trim,
-            onTap: () => modeProvider.setMode(TEMode.trim),
+            icon: Icons.picture_as_pdf,
+            label: 'Report',
+            selected: mode == TEMode.report,
+            onTap: () => modeProvider.setMode(TEMode.report),
           ),
           // ── Update ───────────────────────────────────────────────
           // Activated automatically when a file is opened from the cloud
@@ -102,7 +75,7 @@ class _TrackEditorScreenState
             icon: Icons.cloud,
             label: 'Cloud Files',
             selected: false,
-            onTap: () => _openCloudFiles(context),
+            onTap: () => openCloudFilesForTrackEditor(context),
           ),
           const SizedBox(width: 8),
         ],
@@ -110,6 +83,39 @@ class _TrackEditorScreenState
       body: const TrackEditorPage(),
     );
   }
+}
+
+/// Push the Cloud Files browser and load whatever the user picks into a new
+/// Track Editor tab. Because the file comes from cloud storage it carries its
+/// source path, so [loadCloudFileIntoTrackEditor] switches the editor to
+/// [TEMode.update] and the sidebar can write the edits back over the original.
+///
+/// Shared by the app-bar "Cloud Files" button and the tab bar's "+" button in
+/// Update mode. The navigator and provider container are captured up front so
+/// the callback never reaches for a [BuildContext] that may be gone by the
+/// time the user picks a file.
+Future<void> openCloudFilesForTrackEditor(
+  BuildContext context, {
+  String? initialPath,
+}) {
+  final navigator = Navigator.of(context);
+  final container = riverpod.ProviderScope.containerOf(context);
+  return navigator.push(
+    MaterialPageRoute(
+      builder: (_) => CloudFileManagerScreen(
+        initialPath: initialPath,
+        onOpenInTrackEditor: (fileName, bytes, sourcePath) {
+          navigator.pop(); // Close file manager
+          loadCloudFileIntoTrackEditor(
+            container: container,
+            fileName: fileName,
+            bytes: bytes,
+            sourcePath: sourcePath,
+          );
+        },
+      ),
+    ),
+  );
 }
 
 /// Top-level helper to load a file from Cloud Storage into the Track Editor
@@ -138,7 +144,7 @@ void loadCloudFileIntoTrackEditor({
   final ext = fileName.split('.').last.toLowerCase();
   try {
     if (ext == 'gpx') {
-      final xml = String.fromCharCodes(bytes);
+      final xml = decodeTextBytes(bytes);
       final gpx = GpxReader().fromString(xml);
       // Switch mode FIRST so per-mode providers (waypoints, tracks, files,
       // tabs) route data into the correct bucket. If we add data first the

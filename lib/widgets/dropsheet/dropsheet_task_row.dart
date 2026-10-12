@@ -42,9 +42,7 @@ class DropsheetTaskRow extends StatelessWidget {
 
     final mapLinks = DropsheetMaps.linksFor(task);
     final locationLabel = DropsheetMaps.locationLabel(task);
-    final jobLabel = task.job.isNotEmpty
-        ? task.job
-        : DropsheetMaps.defaultJobLabel(task.type);
+    final jobLabel = task.displayJob;
 
     final payload = TaskDragPayload(
       fromSectionId: sectionId,
@@ -278,7 +276,7 @@ class DropsheetTaskRow extends StatelessWidget {
         const SizedBox(width: 6),
         Expanded(flex: 2, child: _cell(jobLabel, bold: true)),
         const SizedBox(width: 6),
-        Expanded(flex: 3, child: _cell(task.details, bold: true)),
+        Expanded(flex: 3, child: _cell(task.detailsText, bold: true)),
         const SizedBox(width: 6),
         SizedBox(width: 70, child: _cell(task.startTime)),
         const SizedBox(width: 6),
@@ -329,10 +327,10 @@ class DropsheetTaskRow extends StatelessWidget {
             _buildMenuButton(context),
           ],
         ),
-        if (task.details.isNotEmpty)
+        if (task.detailsText.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(left: indent, top: 2),
-            child: _cellWrap(task.details),
+            child: _cellWrap(task.detailsText),
           ),
         Padding(
           padding: const EdgeInsets.only(left: indent, top: 2),

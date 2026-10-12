@@ -7,10 +7,11 @@ import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 import '../models/collection_job.dart';
 import '../providers/collection_schedule_provider.dart';
 import '../providers/scale_provider.dart';
+import '../models/company.dart';
+import '../utils/zoho_org.dart';
 import 'month_navigation_widget.dart';
 import 'zoho/job_invoice_actions.dart';
-import 'zoho/zoho_customers_screen.dart';
-import 'zoho/zoho_invoices_screen.dart';
+import 'zoho/zoho_books_screen.dart';
 
 extension VehicleTypeExtension on VehicleType {
   String get displayName {
@@ -278,27 +279,22 @@ class _CollectionScheduleGridState
               mode: Mode.collection, // Add mode parameter
             ),
 
-            // Zoho Books entry points
+            // One Zoho Books destination, not two. Invoices and customers are
+            // tabs of the same screen now, so a separate Customers button
+            // would just be a slower route to the same place.
             Padding(
               padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
               child: Row(
                 children: [
                   OutlinedButton.icon(
-                    icon: const Icon(Icons.receipt_long, size: 18),
-                    label: const Text('Invoices'),
+                    icon: const Icon(Icons.account_balance_outlined, size: 18),
+                    label: const Text('Zoho Books'),
                     onPressed: () => Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => const ZohoInvoicesScreen(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  OutlinedButton.icon(
-                    icon: const Icon(Icons.people_outline, size: 18),
-                    label: const Text('Customers'),
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => const ZohoCustomersScreen(),
+                        builder: (_) => ZohoBooksScreen(
+                          orgId: ZohoOrg.forCompanyId(Company.junkAndStuffId),
+                          companyName: 'Junk & Stuff',
+                        ),
                       ),
                     ),
                   ),

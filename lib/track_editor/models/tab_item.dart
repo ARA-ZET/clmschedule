@@ -1,7 +1,9 @@
 // track_editor/models/tab_item.dart
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:gpx/gpx.dart';
+import '../utils/te_track_gaps.dart';
 import 'styled_polygon.dart';
+import 'te_letterbox_tab_check.dart';
 
 /// A drop-off point shown on the processing map. Sourced from the
 /// schedule job's `dropOffPoint` so the user can see exactly where the
@@ -46,6 +48,22 @@ class TETabItem {
   /// closed tabs alongside it.
   final String? matchKey;
 
+  /// The tab's tracks exactly as they came out of the GPX file, before
+  /// [splitTracksAtGaps] cut them at their jumps. Kept so the gap distance
+  /// can be changed afterwards: splitting throws the jumps away, so a wider
+  /// distance can only be applied by starting from the file again. Empty for
+  /// tabs that were not opened through the processing flow.
+  final List<Trk> sourceTracks;
+
+  /// Distance, in metres, [tracks] was last split at. Only meaningful when
+  /// [sourceTracks] is non-empty.
+  final double gapSplitM;
+
+  /// This tab's delivery-vs-letterbox comparison, held in memory so coming
+  /// back to the tab shows it without recounting. Shared by [copyWith], so a
+  /// rename or schedule refresh keeps it.
+  final TELetterboxTabCheck letterboxCheck;
+
   TETabItem({
     required this.title,
     required this.polygons,
@@ -59,7 +77,10 @@ class TETabItem {
     this.distributorId,
     this.trackDate,
     this.jobIds = const [],
-  });
+    this.sourceTracks = const [],
+    this.gapSplitM = kTrackGapSplitM,
+    TELetterboxTabCheck? letterboxCheck,
+  }) : letterboxCheck = letterboxCheck ?? TELetterboxTabCheck();
 
   /// Return a new [TETabItem] with selected fields overridden but the
   /// underlying mutable lists shared with the original tab. The caller
@@ -77,6 +98,8 @@ class TETabItem {
     String? distributorId,
     DateTime? trackDate,
     List<String>? jobIds,
+    List<Trk>? sourceTracks,
+    double? gapSplitM,
   }) {
     return TETabItem(
       title: title ?? this.title,
@@ -91,6 +114,9 @@ class TETabItem {
       distributorId: distributorId ?? this.distributorId,
       trackDate: trackDate ?? this.trackDate,
       jobIds: jobIds ?? this.jobIds,
+      sourceTracks: sourceTracks ?? this.sourceTracks,
+      gapSplitM: gapSplitM ?? this.gapSplitM,
+      letterboxCheck: letterboxCheck,
     );
   }
 }

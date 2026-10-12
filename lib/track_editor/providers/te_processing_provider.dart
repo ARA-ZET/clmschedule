@@ -8,22 +8,34 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
-import 'package:gpx/gpx.dart';
 import '../models/styled_polygon.dart';
 import '../models/te_gpx_file_entry.dart';
 import '../models/tab_item.dart';
-import '../../models/distributor.dart';
 import '../../models/custom_polygon.dart';
 import '../../providers/schedule_provider.dart';
 import '../../services/gpx_storage_service.dart';
 import '../services/point_in_polygon.dart';
+import '../services/te_gpx_matching.dart';
+import '../services/te_track_clients.dart';
+import '../utils/te_track_gaps.dart';
+import '../../models/job_list_item.dart';
+import '../../providers/job_list_provider.dart';
+import '../../providers/job_type_provider.dart';
 import 'te_tabs_provider.dart';
 
 final teProcessingRiverpod =
     riverpod.ChangeNotifierProvider<TEProcessingProvider>(
-        (ref) => TEProcessingProvider());
+        (ref) => TEProcessingProvider(
+              jobListItems: () => loadedJobListItems(ref.read(jobListRiverpod)),
+            ));
 
 class TEProcessingProvider extends ChangeNotifier {
+  TEProcessingProvider({this.jobListItems});
+
+  /// The Job List held in memory, used to tell distribution clients from
+  /// collection / cleaning work. Null in tests: nothing is hidden then.
+  final Future<List<JobListItem>> Function()? jobListItems;
+
   // ── State ──────────────────────────────────────────────────────────────────
   final List<TEGpxFileEntry> _files = [];
   List<TEGpxFileEntry> get files => List.unmodifiable(_files);
@@ -57,6 +69,21 @@ class TEProcessingProvider extends ChangeNotifier {
 
   bool _openingTabs = false;
   bool get openingTabs => _openingTabs;
+
+  /// Distance, in metres, that newly opened tabs have their tracks split at.
+  /// The Tracks panel writes the tab's chosen distance back here, so once the
+  /// user has found the right number for a day's driving rounds the rest of
+  /// the batch opens the same way.
+  double _gapSplitM = kTrackGapSplitM;
+  double get gapSplitM => _gapSplitM;
+
+  void setDefaultGapSplit(double meters) {
+    final clamped =
+        meters.clamp(kTrackGapSplitMinM, kTrackGapSplitMaxM).toDouble();
+    if (clamped == _gapSplitM) return;
+    _gapSplitM = clamped;
+    _safeNotify();
+  }
 
   String _progressMessage = '';
   String get progressMessage => _progressMessage;
@@ -310,8 +337,7 @@ class TEProcessingProvider extends ChangeNotifier {
           newTabs.add(tab);
           opened.add(entry);
         } catch (e) {
-          debugPrint(
-              '⚠️ Failed to open combined file "${entry.filename}": $e');
+          debugPrint('⚠️ Failed to open combined file "${entry.filename}": $e');
         }
       }
 
@@ -421,8 +447,10 @@ class TEProcessingProvider extends ChangeNotifier {
       final newJobIds = <String>[];
       for (final job in jobs) {
         newJobIds.add(job.id);
-        for (final wm in job.workMaps) {
-          newPolys.add(_customPolygonToStyled(wm));
+        // Only real areas — a job's map points and lines aren't areas and
+        // would clutter the list and the saved file name.
+        for (final wm in job.workMaps.where((wm) => wm.isPolygon)) {
+          newPolys.add(customPolygonToStyled(wm));
         }
         if (job.dropOffPoint != null) {
           final clientLabel = job.clients.isNotEmpty ? job.clients.first : '';
@@ -455,11 +483,10 @@ class TEProcessingProvider extends ChangeNotifier {
     debugPrint('──────────────────────────────────────────');
     debugPrint('📂 Building tab for pair: "${pair.matchKey}"');
 
-    final trackDate = _extractTrackDate(pair.trackFile.tracks) ??
-        _extractDateFromText(pair.matchKey) ??
-        _extractDateFromText(pair.trackFile.filename);
+    final trackDate = resolveDate(
+        pair.trackFile.tracks, pair.matchKey, pair.trackFile.filename);
     final distributor =
-        _matchDistributor(pair.matchKey, scheduleProvider.distributors);
+        matchDistributor(pair.matchKey, scheduleProvider.distributors);
 
     final workMapPolygons = <TEStyledPolygon>[];
     final dropOffs = <TEDropOffPoint>[];
@@ -474,8 +501,10 @@ class TEProcessingProvider extends ChangeNotifier {
       );
       for (final job in jobs) {
         jobIds.add(job.id);
-        for (final wm in job.workMaps) {
-          workMapPolygons.add(_customPolygonToStyled(wm));
+        // Only real areas — a job's map points and lines aren't areas and
+        // would clutter the list and the saved file name.
+        for (final wm in job.workMaps.where((wm) => wm.isPolygon)) {
+          workMapPolygons.add(customPolygonToStyled(wm));
         }
         if (job.dropOffPoint != null) {
           final clientLabel = job.clients.isNotEmpty ? job.clients.first : '';
@@ -492,10 +521,25 @@ class TEProcessingProvider extends ChangeNotifier {
       // \u2014 we never auto-create Round N folders here. If the folder is
       // missing, leave `storageFolderPath` null and let the UI prompt the
       // user to pick or create one via the save panel.
-      if (jobs.isNotEmpty && jobs.first.clients.isNotEmpty) {
+      // The primary client is the first one whose work records waypoints —
+      // a collection or window-cleaning job has no track folder to point at.
+      var hidden = const <String>{};
+      try {
+        hidden = findClientsWithoutTracks(
+          clients: jobs.expand((j) => j.clients),
+          jobListItems: await jobListItems?.call() ?? const [],
+          jobTypes: JobTypeProvider.instance?.jobTypes ?? const [],
+        );
+      } catch (e) {
+        debugPrint('⚠️ Could not check client job types: $e');
+      }
+      final primaryClient = jobs
+          .expand((j) => j.clients)
+          .where((c) => c.isNotEmpty && !hidden.contains(c))
+          .firstOrNull;
+      if (primaryClient != null) {
         try {
           final gpxStorage = GpxStorageService();
-          final primaryClient = jobs.first.clients.first;
           final exists =
               await gpxStorage.clientFolderExists(trackDate, primaryClient);
           if (exists) {
@@ -513,10 +557,17 @@ class TEProcessingProvider extends ChangeNotifier {
     }
     debugPrint('🗺  Work-map polygons loaded: ${workMapPolygons.length}');
 
+    // GPS spikes and signal drops would otherwise draw as long straight
+    // lines across town. The unsplit tracks are kept on the tab so the user
+    // can re-cut them at a different distance — a driven round leaves wide
+    // steps between points that the default 50 m chops into scraps.
+    final sourceTracks = [...pair.trackFile.tracks];
     final tab = TETabItem(
       title: pair.tabTitle,
       polygons: workMapPolygons,
-      tracks: [...pair.trackFile.tracks],
+      tracks: splitTracksAtGapsDetached(sourceTracks, _gapSplitM),
+      sourceTracks: sourceTracks,
+      gapSplitM: _gapSplitM,
       waypoints: [...pair.waypointsFile.waypoints],
       targetPolygons: [],
       dropOffPoints: dropOffs,
@@ -533,109 +584,11 @@ class TEProcessingProvider extends ChangeNotifier {
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
-
-  /// Extract the local date from the first timestamped point in [tracks].
-  static DateTime? _extractTrackDate(List<Trk> tracks) {
-    for (final trk in tracks) {
-      for (final seg in trk.trksegs) {
-        for (final pt in seg.trkpts) {
-          if (pt.time != null) return pt.time!.toLocal();
-        }
-      }
-    }
-    return null;
-  }
-
-  /// Extract a date from route filenames such as
-  /// `Track 11 May 2026 Distributor ...` when the GPX track points do not
-  /// carry timestamps. This lets single, unmatched track files resolve the
-  /// same schedule data as normal matched Track/Waypoints pairs.
-  static DateTime? _extractDateFromText(String text) {
-    final iso =
-        RegExp(r'\b(\d{4})[-_ ](\d{1,2})[-_ ](\d{1,2})\b').firstMatch(text);
-    if (iso != null) {
-      return _checkedDate(
-        int.parse(iso.group(1)!),
-        int.parse(iso.group(2)!),
-        int.parse(iso.group(3)!),
-      );
-    }
-
-    final dmy = RegExp(
-      r'\b(\d{1,2})[\s_\-]+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[\s_\-]+(\d{4})\b',
-      caseSensitive: false,
-    ).firstMatch(text);
-    if (dmy == null) return null;
-    final month = _monthNumber(dmy.group(2)!);
-    if (month == null) return null;
-    return _checkedDate(
-      int.parse(dmy.group(3)!),
-      month,
-      int.parse(dmy.group(1)!),
-    );
-  }
-
-  static DateTime? _checkedDate(int year, int month, int day) {
-    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-    final date = DateTime(year, month, day);
-    if (date.year != year || date.month != month || date.day != day) {
-      return null;
-    }
-    return date;
-  }
-
-  static int? _monthNumber(String raw) {
-    final key = raw.toLowerCase();
-    if (key.startsWith('jan')) return 1;
-    if (key.startsWith('feb')) return 2;
-    if (key.startsWith('mar')) return 3;
-    if (key.startsWith('apr')) return 4;
-    if (key == 'may') return 5;
-    if (key.startsWith('jun')) return 6;
-    if (key.startsWith('jul')) return 7;
-    if (key.startsWith('aug')) return 8;
-    if (key.startsWith('sep')) return 9;
-    if (key.startsWith('oct')) return 10;
-    if (key.startsWith('nov')) return 11;
-    if (key.startsWith('dec')) return 12;
-    return null;
-  }
-
-  /// Find the distributor whose name best matches [matchKey] (case-insensitive
-  /// token overlap). Returns null if no distributor scores at least one token.
-  static Distributor? _matchDistributor(
-    String matchKey,
-    List<Distributor> distributors,
-  ) {
-    if (distributors.isEmpty) return null;
-    final keyTokens = matchKey
-        .toLowerCase()
-        .split(RegExp(r'[\s_\-]+'))
-        .where((t) => t.isNotEmpty)
-        .toSet();
-    debugPrint('🔍 Matching key tokens: $keyTokens');
-
-    Distributor? best;
-    int bestScore = 0;
-
-    for (final d in distributors) {
-      final nameTokens = d.name
-          .toLowerCase()
-          .split(RegExp(r'[\s_\-]+'))
-          .where((t) => t.isNotEmpty)
-          .toSet();
-      final score = keyTokens.intersection(nameTokens).length;
-      debugPrint('   "${d.name}" tokens=$nameTokens → score=$score');
-      if (score > bestScore) {
-        bestScore = score;
-        best = d;
-      }
-    }
-    return best;
-  }
+  // Date/distributor matching itself lives in te_gpx_matching.dart, shared
+  // with the client Report feature so a file matches the same way in both.
 
   /// Convert a [CustomPolygon] (from a job's workMaps) to a [TEStyledPolygon].
-  static TEStyledPolygon _customPolygonToStyled(CustomPolygon cp) {
+  static TEStyledPolygon customPolygonToStyled(CustomPolygon cp) {
     return TEStyledPolygon(
       id: 'workmap_${cp.name.hashCode}_${cp.points.hashCode}',
       name: cp.name,

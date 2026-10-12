@@ -106,8 +106,11 @@ class PlacesAutocompleteService {
       final predictions = json['predictions'] as List<dynamic>? ?? [];
 
       return predictions.take(5).map((p) {
-        final structured =
-            (p['structured_formatting'] == null ? null : Map<String, dynamic>.from(p['structured_formatting'] as Map)) ?? {};
+        final structured = (p['structured_formatting'] == null
+                ? null
+                : Map<String, dynamic>.from(
+                    p['structured_formatting'] as Map)) ??
+            {};
         return PlaceSuggestion(
           placeId: p['place_id'] as String? ?? '',
           description: p['description'] as String? ?? '',
@@ -136,7 +139,9 @@ class PlacesAutocompleteService {
       }
 
       final json = jsonDecode(response.body) as Map<String, dynamic>;
-      final result = (json['result'] == null ? null : Map<String, dynamic>.from(json['result'] as Map));
+      final result = (json['result'] == null
+          ? null
+          : Map<String, dynamic>.from(json['result'] as Map));
       final geometry = result?['geometry'] as Map<String, dynamic>?;
       final location = geometry?['location'] as Map<String, dynamic>?;
 

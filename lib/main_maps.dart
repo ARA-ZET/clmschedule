@@ -15,6 +15,7 @@ import 'shareable_maps/widgets/shareable_maps_gallery.dart';
 import 'providers/auth_provider.dart';
 import 'providers/schedule_provider.dart';
 import 'firebase_options.dart';
+import 'shareable_maps/providers/map_gesture_provider.dart';
 
 /// Standalone CLM Maps Entry Point
 ///
@@ -54,6 +55,10 @@ class CLMMapApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: FlavorConfig.instance.appName,
+      navigatorObservers: [
+        riverpod.ProviderScope.containerOf(context)
+            .read(mapModalObserverRiverpod),
+      ],
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -66,46 +71,54 @@ class CLMMapApp extends StatelessWidget {
           elevation: 0,
         ),
       ),
-      onGenerateRoute: (settings) {
-        final uri = Uri.parse(settings.name ?? '');
+      // One route per URL. Flutter's default splits '/admin/map?doc=..' into
+      // '/', '/admin' and '/admin/map?..' and stacks all three; the hidden
+      // '/admin' login page then sees the signed-in session and resets the
+      // navigator to '/', so a map opened in a new tab landed on the gallery.
+      onGenerateInitialRoutes: (initialRoute) =>
+          [_generateRoute(RouteSettings(name: initialRoute))],
+      onGenerateRoute: _generateRoute,
+    );
+  }
 
-        if (_isAdminLoginRoute(uri)) {
-          return MaterialPageRoute(
-            builder: (_) => const CLMMapsAdminLoginPage(),
-          );
-        }
+  static Route<dynamic> _generateRoute(RouteSettings settings) {
+    final uri = Uri.parse(settings.name ?? '');
 
-        // Admin "open in new tab" link: /admin/map?doc={docId}&month={monthKey}
-        // Loads a specific map directly by its Firestore id/month so several
-        // maps can be open in separate browser tabs at once. The persisted
-        // Firebase Auth session in the new tab unlocks the admin tools.
-        if (uri.path == '/admin/map') {
-          final docId = uri.queryParameters['doc'];
-          final monthKey = uri.queryParameters['month'];
-          if (docId != null &&
-              docId.isNotEmpty &&
-              monthKey != null &&
-              monthKey.isNotEmpty) {
-            return MaterialPageRoute(
-              builder: (_) => _AdminMapLoader(docId: docId, monthKey: monthKey),
-            );
-          }
-        }
+    if (_isAdminLoginRoute(uri)) {
+      return MaterialPageRoute(
+        builder: (_) => const CLMMapsAdminLoginPage(),
+      );
+    }
 
-        // Handle deep links: /map/{shareCode}
-        if (uri.pathSegments.length == 2 && uri.pathSegments[0] == 'map') {
-          final shareCode = uri.pathSegments[1];
-          return MaterialPageRoute(
-            builder: (_) => _DeepLinkMapLoader(shareCode: shareCode),
-          );
-        }
-
-        // Default route: authenticated admins go to the gallery; everyone
-        // else sees the CLM website advert as a clean home fallback.
+    // Admin "open in new tab" link: /admin/map?doc={docId}&month={monthKey}
+    // Loads a specific map directly by its Firestore id/month so several
+    // maps can be open in separate browser tabs at once. The persisted
+    // Firebase Auth session in the new tab unlocks the admin tools.
+    if (uri.path == '/admin/map') {
+      final docId = uri.queryParameters['doc'];
+      final monthKey = uri.queryParameters['month'];
+      if (docId != null &&
+          docId.isNotEmpty &&
+          monthKey != null &&
+          monthKey.isNotEmpty) {
         return MaterialPageRoute(
-          builder: (_) => const _MapsRootGate(),
+          builder: (_) => _AdminMapLoader(docId: docId, monthKey: monthKey),
         );
-      },
+      }
+    }
+
+    // Handle deep links: /map/{shareCode}
+    if (uri.pathSegments.length == 2 && uri.pathSegments[0] == 'map') {
+      final shareCode = uri.pathSegments[1];
+      return MaterialPageRoute(
+        builder: (_) => _DeepLinkMapLoader(shareCode: shareCode),
+      );
+    }
+
+    // Default route: authenticated admins go to the gallery; everyone
+    // else sees the CLM website advert as a clean home fallback.
+    return MaterialPageRoute(
+      builder: (_) => const _MapsRootGate(),
     );
   }
 }
@@ -213,8 +226,11 @@ class _AdminMapLoaderState extends State<_AdminMapLoader> {
         monthKey: widget.monthKey,
         service: service,
       );
-      final provider = riverpod.ProviderScope.containerOf(context)
-          .read(shareableMapRiverpod);
+      // listen: false — this runs synchronously inside initState, where a
+      // dependency lookup asserts in debug builds.
+      final provider =
+          riverpod.ProviderScope.containerOf(context, listen: false)
+              .read(shareableMapRiverpod);
       await provider.loadFromAdapter(adapter);
       if (mounted) {
         Navigator.pushReplacement(

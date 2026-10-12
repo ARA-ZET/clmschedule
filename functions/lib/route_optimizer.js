@@ -96,7 +96,14 @@ async function runOptimisation(input, apiKey) {
 
   while (remaining.length > 0) {
     // Eligible = single/loading immediately; offload only after its loading.
-    const eligible = remaining.filter((s) => {
+    // A loaded truck drives straight to the offload, so right after a loading
+    // stop its offload is the only candidate (the app's ETA replay assumes
+    // the two are back to back).
+    const last = ordered[ordered.length - 1];
+    const pendingOffload = last && last.role === "loading" ?
+      remaining.find((s) => s.taskId === last.taskId && s.role === "offload") :
+      undefined;
+    const eligible = pendingOffload ? [pendingOffload] : remaining.filter((s) => {
       if (s.role !== "offload") return true;
       return ordered.some((o) => o.taskId === s.taskId && o.role === "loading");
     });

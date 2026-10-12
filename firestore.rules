@@ -3,8 +3,11 @@ rules_version = '2';
 // CLM Schedule Firestore security rules.
 //
 // Principles:
-// - Everything requires a signed-in user, except the few collections the
+// - Everything requires a signed-in STAFF user, except the few collections the
 //   unauthenticated map share-link viewer (/map/{code}) needs to READ.
+// - signedIn() means a real account and excludes anonymous sign-ins; the
+//   clmgpx field app signs in anonymously and gets its own narrow, enumerated
+//   grants via fieldApp(). Never widen signedIn() to include anonymous.
 // - Schedule audit logs (schedules/{month}/logs) are append-only: any
 //   signed-in user can create/read them, nobody can edit or delete —
 //   that guarantee is why there is NO catch-all match block (Firestore
@@ -17,8 +20,59 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // "Staff" = a real account (Google / email+password / custom token).
+    //
+    // Anonymous sign-ins are EXCLUDED on purpose. Anonymous auth is enabled on
+    // this project and the public web API key ships in every client, so anyone
+    // can mint an anonymous token in one unauthenticated HTTP call. Counting
+    // those as signed in would make every staff-only collection below — payroll,
+    // users, invoices — world-readable. Same policy the Xero callable enforces
+    // in functions/src/xero_accounting.ts.
     function signedIn() {
-      return request.auth != null;
+      return request.auth != null
+          && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    // The clmgpx field app (Android, sideloaded to distributor phones) has no
+    // login screen — the distributor picks their name from a list — so it signs
+    // in anonymously just to satisfy `request.auth != null`. It is NOT staff.
+    //
+    // Its grants are enumerated one collection at a time below and never folded
+    // into signedIn(): read-only on `distributors`, `schedules/{month}/days` and
+    // `dropsheet`, plus the single dropsheet task-completion write. Treat the
+    // three read grants as public-ish — an anonymous token needs only the API
+    // key, not the APK — so do not add anything here that must stay private.
+    function fieldApp() {
+      return request.auth != null
+          && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+
+    // ── TEMPORARY ROLLOUT BRIDGE — added 2026-09-07 ─────────────────────────
+    // The phones in the field still run the pre-auth build of clmgpx, which
+    // sends no credentials at all, so fieldApp() above does not match them and
+    // every read fails. This keeps those installs working until the
+    // authenticated build is rolled out to every device.
+    //
+    // COST WHILE THIS IS LIVE: the four grants marked `legacyFieldApp()` are
+    // readable by anyone on the internet who knows the project id — no token
+    // needed. That includes each distributor's `idNumber` and phone numbers,
+    // because rules cannot mask individual fields.
+    //
+    // TO REVERT once every phone is on the new build: delete this function and
+    // the four `|| legacyFieldApp()` clauses below. Nothing else depends on it.
+    function legacyFieldApp() {
+      return request.auth == null;
+    }
+
+    // Shape check for the only write clmgpx makes. Keeps a compromised field
+    // client from writing arbitrary documents into task_completions.
+    function validTaskCompletion() {
+      return request.resource.data.keys().hasOnly(
+               ['done', 'doneAt', 'driverId', 'taskId'])
+          && request.resource.data.done is bool
+          && request.resource.data.doneAt is timestamp
+          && request.resource.data.driverId is string
+          && request.resource.data.taskId is string;
     }
 
     // ── Public read: unauthenticated map share links (/map/{code})
@@ -34,6 +88,19 @@ service cloud.firestore {
     match /maps/{document=**} {
       allow read: if true;
       allow write: if signedIn();
+    }
+    // Collection-group queries are matched only by a {path=**} rule — the
+    // per-path rules above and jobLists below never apply to them. These keep
+    // a job's folder, its job-list item and its map linked: the Cloud Files
+    // folder rename finds every reference by path, and the distribution
+    // report finds a job's map by `jobListItemId`. Read only; the writes that
+    // follow go through the per-path rules. The only `items` subcollections
+    // are jobLists/jobList, both already readable when signed in.
+    match /{path=**}/maps/{mapId} {
+      allow read: if signedIn();
+    }
+    match /{path=**}/items/{itemId} {
+      allow read: if signedIn();
     }
     match /workSuburbs/{document=**} {
       allow read: if true;
@@ -53,7 +120,11 @@ service cloud.firestore {
     // ── Schedules: staff only; audit logs append-only ──
     match /schedules/{month} {
       allow read, write: if signedIn();
-      match /days/{day} { allow read, write: if signedIn(); }
+      // clmgpx reads this day doc to build a distributor's job list.
+      match /days/{day} {
+        allow read: if signedIn() || fieldApp() || legacyFieldApp();
+        allow write: if signedIn();
+      }
       match /meta/{doc} { allow read, write: if signedIn(); }
       match /logs/{logId} {
         allow read, create: if signedIn();
@@ -63,9 +134,21 @@ service cloud.firestore {
 
     // ── Staff-only collections (recursive: covers subcollections such as
     //    days/meta/items/advances/repayments/deposits/withdrawals) ──
-    match /distributors/{document=**}          { allow read, write: if signedIn(); }
+    // clmgpx renders the roster and the digital ID card from this collection.
+    // Read-only for the field app — it never adds or edits a distributor.
+    match /distributors/{document=**} {
+      allow read: if signedIn() || fieldApp() || legacyFieldApp();
+      allow write: if signedIn();
+    }
     match /distributorDaysOff/{document=**}    { allow read, write: if signedIn(); }
     match /workAreas/{document=**}             { allow read, write: if signedIn(); }
+    // Client Maps: the same one-document-per-area shape as workAreas, for
+    // ground a client is quoted for rather than ground a distributor is sent
+    // to. Carries letterbox counts, so sign-in is required to read as well.
+    match /clientAreas/{document=**}           { allow read, write: if signedIn(); }
+    // Regular clients: reusable distributor-slot allocation plans pointing at
+    // a gallery map. Admin app only.
+    match /regularClients/{document=**}        { allow read, write: if signedIn(); }
     match /users/{document=**}                 { allow read, write: if signedIn(); }
     match /userPreferences/{document=**}       { allow read, write: if signedIn(); }
     match /user_status/{document=**}           { allow read, write: if signedIn(); }
@@ -73,7 +156,26 @@ service cloud.firestore {
     match /jobList/{document=**}               { allow read, write: if signedIn(); }
     match /jobs/{document=**}                  { allow read, write: if signedIn(); }
     match /collectionSchedules/{document=**}   { allow read, write: if signedIn(); }
-    match /dropsheet/{document=**}             { allow read, write: if signedIn(); }
+    // clmgpx shows the driver their dropsheet for the day.
+    match /dropsheet/{document=**} {
+      allow read: if signedIn() || fieldApp() || legacyFieldApp();
+      allow write: if signedIn();
+    }
+    // The one write the field app makes: ticking a task done. Firestore grants
+    // access when ANY matching rule allows it, so this narrower match adds the
+    // create/update grant that the recursive rule above withholds. Deletes stay
+    // staff-only — a driver can complete a task, not erase the record of one.
+    match /dropsheet/{year}/{month}/{day}/task_completions/{taskId} {
+      allow read: if signedIn() || fieldApp() || legacyFieldApp();
+      allow create, update: if signedIn()
+          || ((fieldApp() || legacyFieldApp()) && validTaskCompletion());
+      allow delete: if signedIn();
+    }
+    // Task-type config, custom task types and the office/depot location
+    // (including its cached geocoded coordinates). NOT covered by the
+    // /dropsheet rule above — that only matches the exact `dropsheet`
+    // collection, so without this line every read and write here was denied.
+    match /dropsheetSettings/{document=**}     { allow read, write: if signedIn(); }
     match /unfinishedWorkAreas/{document=**}   { allow read, write: if signedIn(); }
     match /chat_months/{document=**}           { allow read, write: if signedIn(); }
     match /inventoryTools/{document=**}        { allow read, write: if signedIn(); }
@@ -150,17 +252,59 @@ service cloud.firestore {
     match /monthSummaries/{document=**}        { allow read, write: if signedIn(); }
     match /appConfig/{document=**}             { allow read, write: if signedIn(); }
     match /aiConfig/{document=**}              { allow read, write: if signedIn(); }
+    // Cache-version counters for the reference collections below
+    // (ReferenceCacheService writes `meta/referenceVersions`). Distinct from
+    // the `meta` SUBcollections under schedules/{month} and jobLists/{month},
+    // which are covered by their own parents — a nested match does not grant
+    // anything at the root, so without this line every version bump was denied
+    // and clients never learned their cached reference data had gone stale.
+    // Holds nothing but integer counters keyed by collection name.
+    match /meta/{document=**}                  { allow read, write: if signedIn(); }
     match /customJobListStatuses/{document=**} { allow read, write: if signedIn(); }
     match /customJobTypes/{document=**}        { allow read, write: if signedIn(); }
     match /customJobStatuses/{document=**}     { allow read, write: if signedIn(); }
     match /customInvoiceStatuses/{document=**} { allow read, write: if signedIn(); }
+    match /invoiceMessageTemplates/{document=**} { allow read, write: if signedIn(); }
+    // Distribution report bodies. Like the templates above, unlisted here the
+    // fail-closed default would leave the picker silently empty and the app
+    // would quietly fall back to its built-in wording.
+    match /distributionReportTemplates/{document=**} { allow read, write: if signedIn(); }
+    // Per-item invoice line templates, keyed by Zoho's item_id. Unlisted here
+    // would mean the fail-closed default denies every read — the collection
+    // would look permanently empty rather than erroring visibly.
+    match /zohoItemAutofills/{document=**} { allow read, write: if signedIn(); }
+    match /zohoInvoiceLinks/{document=**}      { allow read, write: if signedIn(); }
+    match /accountingInvoiceLinks/{document=**} { allow read, write: if signedIn(); }
+    match /companies/{document=**}             { allow read, write: if signedIn(); }
     match /jobStatuses/{document=**}           { allow read, write: if signedIn(); }
     match /settings/{document=**}              { allow read, write: if signedIn(); }
     match /happySunProjects/{document=**}      { allow read, write: if signedIn(); }
     match /happy_sun_settings/{document=**}    { allow read, write: if signedIn(); }
     match /erfProperties/{document=**}         { allow read, write: if signedIn(); }
+    match /erfAreas/{document=**}              { allow read, write: if signedIn(); }
     match /projects/{document=**}              { allow read, write: if signedIn(); }
     match /routeCache/{document=**}            { allow read, write: if signedIn(); }
+
+    // Cloud Storage file-search index: one doc per Distribution folder listing
+    // its files. Read by the letterbox seed picker to find folders that hold
+    // GPX, which is far cheaper than walking Storage. Written by the
+    // indexFileOnUpload trigger via the Admin SDK.
+    match /fileFolders/{document=**}           { allow read, write: if signedIn(); }
+
+    // Letterbox index: per-suburb counts, curation status and bounds (no
+    // geometry — the positions live in Storage). Sign-in required both ways;
+    // these numbers price client work and are used to review distributor
+    // performance, so they are not public the way a shared map is.
+    match /letterboxSuburbs/{document=**}      { allow read, write: if signedIn(); }
+    match /letterboxConfig/{document=**}       { allow read, write: if signedIn(); }
+
+    // ── DO NOT ADD `secureTokens` HERE ──────────────────────────────────────
+    // secureTokens/xero holds Community Life Media's rotating Xero OAuth
+    // refresh token. It is unlisted ON PURPOSE so the fail-closed default below
+    // denies every client; Cloud Functions reach it via the Admin SDK, which
+    // bypasses these rules. Adding a match here — even `allow read: if false`,
+    // which does nothing, since Firestore grants access when ANY matching rule
+    // allows it — would either leak the credential or achieve nothing.
 
     // Everything not matched above is DENIED (fail-closed).
   }

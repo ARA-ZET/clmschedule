@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../models/custom_polygon.dart';
 import 'map_layer.dart';
+import '../utils/polygon_ids.dart' as polygon_ids;
 
 /// Represents a complete shareable map with all layers and settings
 class ShareableMap {
@@ -96,7 +97,7 @@ class ShareableMap {
   }) {
     final now = DateTime.now();
     final defaultLayer = MapLayer.create(
-      name: 'Layer 1',
+      name: MapLayer.targetAreasName,
       order: 0,
       defaultColor: Colors.blue,
     );
@@ -136,7 +137,9 @@ class ShareableMap {
         legacyFolder.trim().isNotEmpty) {
       folders.add(legacyFolder.trim());
     }
-    final trackColorsData = (data['cloudTrackColors'] == null ? null : Map<String, dynamic>.from(data['cloudTrackColors'] as Map));
+    final trackColorsData = (data['cloudTrackColors'] == null
+        ? null
+        : Map<String, dynamic>.from(data['cloudTrackColors'] as Map));
     final trackColors = <String, int>{};
     if (trackColorsData != null) {
       trackColorsData.forEach((key, value) {
@@ -147,7 +150,9 @@ class ShareableMap {
         }
       });
     }
-    final layerNamesData = (data['cloudLayerNames'] == null ? null : Map<String, dynamic>.from(data['cloudLayerNames'] as Map));
+    final layerNamesData = (data['cloudLayerNames'] == null
+        ? null
+        : Map<String, dynamic>.from(data['cloudLayerNames'] as Map));
     final layerNames = <String, String>{};
     if (layerNamesData != null) {
       layerNamesData.forEach((key, value) {
@@ -159,6 +164,7 @@ class ShareableMap {
       });
     }
 
+    // Stored maps always carry polygon ids — schedule jobs link to them.
     return ShareableMap(
       id: id,
       name: data['name'] as String? ?? '',
@@ -175,10 +181,12 @@ class ShareableMap {
       ),
       defaultZoom: (data['defaultZoom'] as num?)?.toDouble() ?? 12.0,
       createdAt: data['createdAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((data['createdAt'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['createdAt'] as num).toInt())
           : DateTime.now(),
       updatedAt: data['updatedAt'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((data['updatedAt'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['updatedAt'] as num).toInt())
           : DateTime.now(),
       thumbnailUrl: data['thumbnailUrl'] as String?,
       jobListItemId: data['jobListItemId'] as String?,
@@ -192,7 +200,17 @@ class ShareableMap {
       clipCloudDataToPolygons:
           data['clipCloudDataToPolygons'] as bool? ?? false,
       cloudWaypointCount: (data['cloudWaypointCount'] as num?)?.toInt(),
-    );
+    ).withStablePolygonIds();
+  }
+
+  /// This map with every polygon carrying a stable id, unique across the
+  /// map (see `utils/polygon_ids.dart`). Returns this map when every polygon
+  /// already has one. Only for maps stored in `shareableMaps` — library
+  /// adapters read a missing id as "new polygon".
+  ShareableMap withStablePolygonIds() {
+    final next = polygon_ids.withStablePolygonIds(layers);
+    if (identical(next, layers)) return this;
+    return copyWith(layers: next, updatedAt: updatedAt);
   }
 
   /// Convert to Map (for Firestore/JSON)

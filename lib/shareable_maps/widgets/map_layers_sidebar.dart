@@ -7,15 +7,19 @@ import 'package:intl/intl.dart';
 import '../../config/flavor_config.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/cloud_file_manager_provider.dart';
-import '../providers/map_gesture_provider.dart';
 import '../providers/shareable_map_provider.dart';
+import 'cloud_track_rename_dialog.dart';
+import '../utils/gpx_track_rename.dart';
 import '../adapters/firestore_adapter.dart';
 import '../services/map_link_service.dart';
 import '../models/map_layer.dart';
+import '../../letterbox/services/letterbox_count_service.dart';
 import '../../models/custom_polygon.dart';
 import '../models/map_point.dart';
 import '../models/map_polyline.dart';
 import 'map_import_dialog.dart';
+import 'unverified_letterbox_dialog.dart';
+import 'map_overlay.dart';
 
 /// Sidebar widget for managing map layers - Google My Maps style
 class MapLayersSidebar extends riverpod.ConsumerWidget {
@@ -32,9 +36,11 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
       children: [
         _buildHeader(context, provider, showAdminTools: showAdminTools),
         _buildActionButtons(context, provider),
+        _buildEmptyLayersBar(context, provider),
         const Divider(height: 1),
         Expanded(
-          child: _buildLayersList(context, provider),
+          child: _buildLayersList(context, provider,
+              showAdminTools: showAdminTools),
         ),
         _buildBaseMapSection(context, ref),
       ],
@@ -96,28 +102,6 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                 },
               ),
             ],
-          ),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              const Icon(Icons.visibility, size: 12, color: Color(0xFF5F6368)),
-              const SizedBox(width: 4),
-              Text(
-                '${_getViewCount()} views',
-                style: const TextStyle(
-                  fontSize: 11,
-                  color: Color(0xFF5F6368),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 2),
-          Text(
-            'Last edit was ${_getLastEditTime(map?.createdAt)}',
-            style: const TextStyle(
-              fontSize: 11,
-              color: Color(0xFF5F6368),
-            ),
           ),
         ],
       ),
@@ -207,16 +191,108 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
     );
   }
 
-  Widget _buildLayersList(
-      BuildContext context,
-      ShareableMapProvider provider) {
-    final layers = provider.layers;
+  /// One line under the action buttons whenever the map has empty layers:
+  /// how many, a show/hide toggle, and a one-click remove.
+  Widget _buildEmptyLayersBar(
+      BuildContext context, ShareableMapProvider provider) {
+    if (!provider.capabilities.canManageLayers) return const SizedBox.shrink();
+    final empty = provider.emptyLayers;
+    if (empty.isEmpty) return const SizedBox.shrink();
+
+    final hidden = provider.hiddenEmptyLayerCount;
+    String plural(int n) => '$n empty layer${n == 1 ? '' : 's'}';
+    final label =
+        hidden > 0 ? '${plural(hidden)} hidden' : plural(empty.length);
+    const small = TextStyle(fontSize: 12);
+    final compact = TextButton.styleFrom(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      minimumSize: const Size(0, 28),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 8, 4),
+      child: Row(
+        children: [
+          const Icon(Icons.layers_clear_outlined,
+              size: 14, color: Color(0xFF5F6368)),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(fontSize: 12, color: Color(0xFF5F6368)),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          TextButton(
+            style: compact,
+            onPressed: () =>
+                provider.setHideEmptyLayers(!provider.hideEmptyLayers),
+            child:
+                Text(provider.hideEmptyLayers ? 'Show' : 'Hide', style: small),
+          ),
+          TextButton(
+            style: compact.copyWith(
+              foregroundColor: const WidgetStatePropertyAll(Color(0xFFD93025)),
+            ),
+            onPressed: () => _confirmRemoveEmptyLayers(context, provider),
+            child: const Text('Remove', style: small),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmRemoveEmptyLayers(
+      BuildContext context, ShareableMapProvider provider) {
+    final empty = provider.emptyLayers;
+    if (empty.isEmpty) return;
+    const shown = 8;
+    final names = empty.take(shown).map((l) => '• ${l.name}').join('\n');
+    final more =
+        empty.length > shown ? '\n…and ${empty.length - shown} more' : '';
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Remove ${empty.length} empty '
+            'layer${empty.length == 1 ? '' : 's'}?'),
+        content: Text(
+          '$names$more\n\n'
+          'These layers have nothing in them. Cloud tracks and waypoints '
+          'layers are kept even when empty.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              final removed = provider.removeEmptyLayers();
+              Navigator.pop(dialogContext);
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text('Removed $removed empty '
+                    'layer${removed == 1 ? '' : 's'}'),
+              ));
+            },
+            child: const Text('Remove', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLayersList(BuildContext context, ShareableMapProvider provider,
+      {required bool showAdminTools}) {
+    final layers = provider.sidebarLayers;
 
     return CustomScrollView(
       slivers: [
         const SliverPadding(padding: EdgeInsets.only(top: 8)),
         for (final layer in layers)
-          ..._buildLayerSlivers(context, provider, layer),
+          ..._buildLayerSlivers(context, provider, layer,
+              showAdminTools: showAdminTools),
         const SliverPadding(padding: EdgeInsets.only(bottom: 8)),
       ],
     );
@@ -225,8 +301,9 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
   List<Widget> _buildLayerSlivers(
     BuildContext context,
     ShareableMapProvider provider,
-    MapLayer layer,
-  ) {
+    MapLayer layer, {
+    required bool showAdminTools,
+  }) {
     final isWaypointLayer = provider.isCloudWaypointsLayer(layer.id);
 
     final header = SliverToBoxAdapter(
@@ -384,92 +461,261 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
       ];
     }
 
+    Widget polylineRow(BuildContext context, MapPolyline polyline,
+        {String? title, String? subtitle, double indent = 56}) {
+      return _buildLayerItem(
+        context,
+        provider: provider,
+        layer: layer,
+        iconWidget: Icon(Icons.timeline, size: 18, color: polyline.color),
+        title: title ?? polyline.name,
+        subtitle: subtitle,
+        indent: indent,
+        elementId: polyline.id,
+        onTap: () => provider.focusOnPolyline(layer.id, polyline.id),
+        // A cloud track's name lives in its GPX file, not on the map,
+        // so it is renamed there — the plain edit dialog would change
+        // nothing that survives a reload.
+        onEdit: () => provider.isCloudTracksLayer(layer.id)
+            ? showCloudTrackRenameDialog(
+                context,
+                provider: provider,
+                layerId: layer.id,
+                polyline: polyline,
+              )
+            : _showEditPolylineDialog(context, provider, layer, polyline),
+        onDelete: () => _deletePolyline(context, provider, layer, polyline.id),
+        onMoveTo: (targetLayerId) =>
+            provider.movePolylineToLayer(layer, polyline.id, targetLayerId),
+      );
+    }
+
+    Widget itemAt(BuildContext context, int index) {
+      if (index < pointCount) {
+        final point = layer.points[index];
+        return _buildLayerItem(
+          context,
+          provider: provider,
+          layer: layer,
+          iconWidget: isWaypointLayer
+              ? Image.asset('assets/letterbox.png', width: 18, height: 18)
+              : Icon(Icons.place, size: 18, color: point.color),
+          title: point.name,
+          elementId: point.id,
+          onTap: () => provider.focusOnPoint(layer.id, point.id),
+          onEdit: () => _showEditPointDialog(context, provider, layer, point),
+          onDelete: () => _deletePoint(context, provider, layer, point.id),
+          onMoveTo: (targetLayerId) =>
+              provider.movePointToLayer(layer, point.id, targetLayerId),
+        );
+      } else if (index < pointCount + polygonCount) {
+        final polygonIndex = index - pointCount;
+        final polygon = layer.polygons[polygonIndex];
+        final elementId = '${layer.id}_polygon_$polygonIndex';
+        return _buildLayerItem(
+          context,
+          provider: provider,
+          layer: layer,
+          iconWidget: Icon(Icons.crop_square, size: 18, color: polygon.color),
+          title: polygon.name,
+          subtitle: 'Est. ${polygon.letterBoxEstimate} letter boxes',
+          warning: provider.unverifiedSuburbsFor(polygon).isEmpty
+              ? null
+              : 'Unverified letterbox data — needs admin review',
+          locked: polygon.letterBoxLocked,
+          elementId: elementId,
+          onTap: () {
+            // Focus the map on the polygon AND open its info window,
+            // using the same subtitle format as a direct map tap.
+            final areaKm2 = _polygonAreaKm2(polygon.points);
+            final perimeterKm = _pathLengthKm(polygon.points, closed: true);
+            final subtitle = '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}';
+            provider.focusOnPolygon(layer.id, polygonIndex);
+            provider.openInfoWindow(InfoWindowData(
+              elementId: elementId,
+              layerId: layer.id,
+              title: polygon.name.isNotEmpty ? polygon.name : 'Unnamed Polygon',
+              description: polygon.description,
+              subtitle: subtitle,
+              type: 'polygon',
+              anchor: _centroid(polygon.points),
+              letterBoxEstimate: polygon.letterBoxEstimate,
+              importedLetterBoxEstimate: polygon.importedLetterBoxEstimate,
+            ));
+          },
+          onEdit: () => _showEditPolygonDialog(
+              context, provider, layer, polygonIndex, polygon),
+          onDelete: () =>
+              _deletePolygon(context, provider, layer, polygonIndex),
+          onMoveTo: (targetLayerId) =>
+              provider.movePolygonToLayer(layer, polygonIndex, targetLayerId),
+        );
+      }
+      final polyline = layer.polylines[index - pointCount - polygonCount];
+      return polylineRow(context, polyline);
+    }
+
+    // A distributor's day arrives as several polylines — one per `<trk>`
+    // the track editor split it into ("… (5)", "… (6)"), per `<trkseg>`
+    // ("… (seg 2)"), and per piece left after clipping to the map's
+    // polygons. Their names differ, but they share one GPX file, so the
+    // file is the group. In a cloud tracks layer each group is one row:
+    // collapsible for admins, and a single whole-track row (no segments at
+    // all) for clients.
+    if (provider.isCloudTracksLayer(layer.id) && polylineCount > 0) {
+      final byFile = <String, List<MapPolyline>>{};
+      for (final p in layer.polylines) {
+        byFile
+            .putIfAbsent(p.sourceFile ?? baseTrackName(p.name), () => [])
+            .add(p);
+      }
+      // Two files can carry the same track name, so this stays a list.
+      final groups = [
+        for (final entry in byFile.entries)
+          (
+            key: entry.key,
+            name: baseTrackName(entry.value.first.name),
+            segments: entry.value,
+          ),
+      ];
+      final rows = <Widget Function(BuildContext)>[
+        for (int i = 0; i < pointCount + polygonCount; i++)
+          (context) => itemAt(context, i),
+      ];
+      for (final (key: fileKey, :name, :segments) in groups) {
+        if (segments.length == 1) {
+          rows.add((context) => polylineRow(context, segments.single));
+          continue;
+        }
+        final key = ShareableMapProvider.cloudTrackGroupKey(layer.id, fileKey);
+        rows.add((context) => _buildTrackGroupRow(
+              context,
+              provider: provider,
+              layer: layer,
+              name: name,
+              segments: segments,
+              groupKey: key,
+              collapsible: showAdminTools,
+            ));
+        if (showAdminTools && provider.isTrackGroupExpanded(key)) {
+          for (int i = 0; i < segments.length; i++) {
+            rows.add((context) => polylineRow(
+                  context,
+                  segments[i],
+                  title: 'Segment ${i + 1}',
+                  subtitle: _segmentSubtitle(segments[i]),
+                  indent: 84,
+                ));
+          }
+        }
+      }
+      return [
+        header,
+        SliverList.builder(
+          itemCount: rows.length,
+          itemBuilder: (context, index) => rows[index](context),
+        ),
+      ];
+    }
+
     return [
       header,
       SliverList.builder(
         itemCount: totalCount,
-        itemBuilder: (context, index) {
-          if (index < pointCount) {
-            final point = layer.points[index];
-            return _buildLayerItem(
-              context,
-              provider: provider,
-              layer: layer,
-              iconWidget: isWaypointLayer
-                  ? Image.asset('assets/letterbox.png', width: 18, height: 18)
-                  : Icon(Icons.place, size: 18, color: point.color),
-              title: point.name,
-              elementId: point.id,
-              onTap: () => provider.focusOnPoint(layer.id, point.id),
-              onEdit: () =>
-                  _showEditPointDialog(context, provider, layer, point),
-              onDelete: () => _deletePoint(context, provider, layer, point.id),
-              onMoveTo: (targetLayerId) =>
-                  provider.movePointToLayer(layer, point.id, targetLayerId),
-            );
-          } else if (index < pointCount + polygonCount) {
-            final polygonIndex = index - pointCount;
-            final polygon = layer.polygons[polygonIndex];
-            final elementId = '${layer.id}_polygon_$polygonIndex';
-            return _buildLayerItem(
-              context,
-              provider: provider,
-              layer: layer,
-              iconWidget:
-                  Icon(Icons.crop_square, size: 18, color: polygon.color),
-              title: polygon.name,
-              subtitle: 'Est. ${polygon.letterBoxEstimate} letter boxes',
-              elementId: elementId,
-              onTap: () {
-                // Focus the map on the polygon AND open its info window,
-                // using the same subtitle format as a direct map tap.
-                final areaKm2 = _polygonAreaKm2(polygon.points);
-                final perimeterKm = _pathLengthKm(polygon.points, closed: true);
-                final subtitle =
-                    '${_fmtKm2(areaKm2)}  ·  ${_fmtKm(perimeterKm)}';
-                provider.focusOnPolygon(layer.id, polygonIndex);
-                provider.openInfoWindow(InfoWindowData(
-                  elementId: elementId,
-                  layerId: layer.id,
-                  title: polygon.name.isNotEmpty
-                      ? polygon.name
-                      : 'Unnamed Polygon',
-                  description: polygon.description,
-                  subtitle: subtitle,
-                  type: 'polygon',
-                  anchor: _centroid(polygon.points),
-                  letterBoxEstimate: polygon.letterBoxEstimate,
-                ));
-              },
-              onEdit: () => _showEditPolygonDialog(
-                  context, provider, layer, polygonIndex, polygon),
-              onDelete: () =>
-                  _deletePolygon(context, provider, layer, polygonIndex),
-              onMoveTo: (targetLayerId) => provider.movePolygonToLayer(
-                  layer, polygonIndex, targetLayerId),
-            );
-          } else {
-            final polylineIndex = index - pointCount - polygonCount;
-            final polyline = layer.polylines[polylineIndex];
-            return _buildLayerItem(
-              context,
-              provider: provider,
-              layer: layer,
-              iconWidget: Icon(Icons.timeline, size: 18, color: polyline.color),
-              title: polyline.name,
-              elementId: polyline.id,
-              onTap: () => provider.focusOnPolyline(layer.id, polyline.id),
-              onEdit: () =>
-                  _showEditPolylineDialog(context, provider, layer, polyline),
-              onDelete: () =>
-                  _deletePolyline(context, provider, layer, polyline.id),
-              onMoveTo: (targetLayerId) => provider.movePolylineToLayer(
-                  layer, polyline.id, targetLayerId),
-            );
-          }
-        },
+        itemBuilder: itemAt,
       ),
     ];
+  }
+
+  /// Distance and time of one segment, for its row under an expanded track.
+  static String _segmentSubtitle(MapPolyline p) {
+    final parts = <String>[p.formattedDistance];
+    if (p.formattedTimeRange.isNotEmpty) parts.add(p.formattedTimeRange);
+    return parts.join(' · ');
+  }
+
+  /// One row standing for every segment of a cloud track. Tapping the row
+  /// focuses the whole track; when [collapsible], a chevron opens the
+  /// individual segments beneath it.
+  Widget _buildTrackGroupRow(
+    BuildContext context, {
+    required ShareableMapProvider provider,
+    required MapLayer layer,
+    required String name,
+    required List<MapPolyline> segments,
+    required String groupKey,
+    required bool collapsible,
+  }) {
+    final expanded = collapsible && provider.isTrackGroupExpanded(groupKey);
+    final selectedId = provider.selectedElementId;
+    final isSelected =
+        selectedId != null && segments.any((p) => p.id == selectedId);
+    return InkWell(
+      onTap: () => provider.focusOnPolylineGroup(
+        layer.id,
+        [for (final p in segments) p.id],
+        title: name,
+      ),
+      child: Container(
+        padding: EdgeInsets.only(
+            left: collapsible ? 32 : 56, right: 8, top: 4, bottom: 4),
+        color: isSelected ? const Color(0xFFE8F0FE) : null,
+        child: Row(
+          children: [
+            if (collapsible)
+              InkWell(
+                onTap: () => provider.toggleTrackGroupExpanded(groupKey),
+                borderRadius: BorderRadius.circular(12),
+                child: Icon(
+                  expanded ? Icons.expand_more : Icons.chevron_right,
+                  size: 20,
+                  color: const Color(0xFF5F6368),
+                ),
+              ),
+            if (collapsible) const SizedBox(width: 4),
+            Icon(Icons.timeline, size: 18, color: segments.first.color),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    name.isEmpty ? 'Untitled' : name,
+                    style:
+                        const TextStyle(fontSize: 13, color: Color(0xFF202124)),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (collapsible)
+                    Text(
+                      '${segments.length} segments',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: const Color(0xFF5F6368).withValues(alpha: 0.8),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (collapsible)
+              IconButton(
+                icon: const Icon(Icons.edit_outlined,
+                    size: 16, color: Color(0xFF5F6368)),
+                tooltip: 'Rename track',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: () => showCloudTrackRenameDialog(
+                  context,
+                  provider: provider,
+                  layerId: layer.id,
+                  polyline: segments.first,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildEmptyLayerWidget(
@@ -552,6 +798,16 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
     required Widget iconWidget,
     required String title,
     String? subtitle,
+
+    /// Set when the subtitle's number should not be trusted; shown as an
+    /// amber flag on the row.
+    String? warning,
+
+    /// The estimate was set by hand and will not be recounted.
+    bool locked = false,
+
+    /// Left inset — deeper for segments listed under their track.
+    double indent = 56,
     required String elementId,
     required VoidCallback onTap,
     required VoidCallback onEdit,
@@ -565,7 +821,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
     return InkWell(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.only(left: 56, right: 8, top: 4, bottom: 4),
+        padding: EdgeInsets.only(left: indent, right: 8, top: 4, bottom: 4),
         color: isSelected ? const Color(0xFFE8F0FE) : null,
         child: Row(
           children: [
@@ -588,14 +844,42 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                   if (subtitle != null && subtitle.isNotEmpty)
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: const Color(0xFF5F6368).withValues(alpha: 0.8),
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                    Row(
+                      children: [
+                        if (warning != null) ...[
+                          Tooltip(
+                            message: warning,
+                            child: const Icon(Icons.warning_amber_rounded,
+                                size: 15, color: kUnverifiedLetterboxColor),
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+                        if (locked) ...[
+                          const Tooltip(
+                            message: 'Set by hand — not recalculated',
+                            child: Icon(Icons.lock,
+                                size: 13, color: Color(0xFF1A73E8)),
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+                        Flexible(
+                          child: Text(
+                            subtitle,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: warning != null
+                                  ? kUnverifiedLetterboxColor
+                                  : const Color(0xFF5F6368)
+                                      .withValues(alpha: 0.8),
+                              fontWeight: warning != null
+                                  ? FontWeight.w600
+                                  : FontWeight.normal,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
                     ),
                 ],
               ),
@@ -786,31 +1070,6 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
   }
 
   // Helper methods
-  int _getViewCount() {
-    // Placeholder for analytics
-    return 0;
-  }
-
-  String _getLastEditTime(DateTime? createdAt) {
-    if (createdAt == null) return 'just now';
-
-    final now = DateTime.now();
-    final difference = now.difference(createdAt);
-
-    if (difference.inSeconds < 60) return 'seconds ago';
-    if (difference.inMinutes < 60) {
-      return '${difference.inMinutes} minute${difference.inMinutes > 1 ? 's' : ''} ago';
-    }
-    if (difference.inHours < 24) {
-      return '${difference.inHours} hour${difference.inHours > 1 ? 's' : ''} ago';
-    }
-    if (difference.inDays < 7) {
-      return '${difference.inDays} day${difference.inDays > 1 ? 's' : ''} ago';
-    }
-
-    return DateFormat('MMM d, y').format(createdAt);
-  }
-
   static LatLng _centroid(List<LatLng> points) {
     if (points.isEmpty) return const LatLng(0, 0);
     double lat = 0, lng = 0;
@@ -1042,18 +1301,13 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
     showDialog(
       context: context,
       builder: (dialogContext) {
-        final gestureProvider =
-            riverpod.ProviderScope.containerOf(dialogContext)
-                .read(mapGestureRiverpod);
         return StatefulBuilder(
           builder: (dialogContext, setState) {
             final folders = provider.linkedCloudFolders;
             return Dialog(
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12)),
-              child: MouseRegion(
-                onEnter: (_) => gestureProvider.disableMapGestures(),
-                onExit: (_) => gestureProvider.enableMapGestures(),
+              child: MapOverlay(
                 child: ConstrainedBox(
                   constraints:
                       const BoxConstraints(maxWidth: 560, maxHeight: 680),
@@ -1329,8 +1583,20 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
 
   // ── Polygon info helpers ──────────────────────────────────────────
 
+  /// A calculated count as the split stored on the polygon, so the number and
+  /// its breakdown are always written together and never drift apart.
+  static LetterBoxSplit _splitOf(LetterboxCount result) => LetterBoxSplit(
+        houses: result.breakdown.houses,
+        apartmentBoxes: result.breakdown.apartmentBoxes,
+        apartmentBlocks: result.breakdown.apartmentBlocks,
+      );
+
   void _showPolygonInfoDialog(
       BuildContext context, ShareableMapProvider provider) {
+    // Estimates are edited by signed-in users only; anyone else gets the
+    // table read-only.
+    final auth = riverpod.ProviderScope.containerOf(context).read(authRiverpod);
+    final canEdit = auth.isAuthenticated && !provider.capabilities.readOnly;
     // Build editable rows — capture layerId + polygon index for write-back.
     final rows = <({
       String layerId,
@@ -1354,7 +1620,19 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
       }
     }
 
-    void commitRow(int i, StateSetter setState) {
+    /// Persist a row's estimate. [split] is passed only when the number came
+    /// from a calculation. A hand-typed total goes through
+    /// [ShareableMapProvider.setManualLetterboxEstimate], which clears the
+    /// stale split and LOCKS the number so later edits never recount it; a
+    /// calculation never overwrites a locked row.
+    ///
+    /// A calculation also stashes whatever number the polygon already had, so
+    /// an estimate it was imported with survives being recounted — the same
+    /// rule [ShareableMapProvider] applies to every other recount. A
+    /// hand-typed total does not: typing over a number is the user choosing
+    /// their own, not a count displacing one.
+    void commitRow(int i, StateSetter setState,
+        {LetterBoxSplit? split, List<String>? suburbIds}) {
       final r = rows[i];
       final newEst = int.tryParse(r.ctrl.text.trim()) ?? 0;
       // Re-read layer from provider so we never overwrite sibling changes.
@@ -1363,30 +1641,135 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
       if (currentLayer == null || r.index >= currentLayer.polygons.length) {
         return;
       }
+      final current = currentLayer.polygons[r.index];
+      if (!canEdit) return;
+      if (split == null) {
+        // Typed by hand — lock it so later edits do not recount over it.
+        if (newEst != current.letterBoxEstimate) {
+          provider.setManualLetterboxEstimate(r.layerId, r.index, newEst,
+              setBy: auth.userEmail);
+        }
+        setState(() {});
+        return;
+      }
+      // A hand-set number is never replaced by a calculation.
+      if (current.letterBoxLocked) return;
       provider.updatePolygon(
         currentLayer,
         r.index,
-        currentLayer.polygons[r.index].copyWith(letterBoxEstimate: newEst),
+        current.copyWith(
+          letterBoxEstimate: newEst,
+          letterBoxSplit: split,
+          letterboxSuburbIds: suburbIds,
+          importedLetterBoxEstimate: current.importedLetterBoxEstimate ??
+              (current.letterBoxEstimate > 0
+                  ? current.letterBoxEstimate
+                  : null),
+        ),
       );
       setState(() {});
+    }
+
+    // ── Letterbox counting ──────────────────────────────────────────
+    // The field above has always been free-text — nothing ever computed it.
+    // This wires the same curated-letterbox index the standalone Letterbox
+    // Index tool uses (LetterboxCountService.countIn), so "Calculate" fills
+    // the field with a real number instead of a typed guess.
+    //
+    // One counter per dialog open: a fresh suburb-list fetch each time this
+    // is opened is a trivial cost next to correctness, and this dialog is
+    // not kept open across a session.
+    final counter = LetterboxCountService();
+    // Parallel to `rows` — the last computed result, so a low-confidence
+    // (uncurated-suburb) or gap-affected number can be flagged rather than
+    // presented as fact. Null until that row has been calculated at least
+    // once in this dialog session.
+    final results = List<LetterboxCount?>.filled(rows.length, null);
+    final calculatingRow = List<bool>.filled(rows.length, false);
+    var calculatingAll = false;
+
+    /// Re-reads the polygon fresh from the provider, matching [commitRow]'s
+    /// own re-read — a cached points list here could go stale if the polygon
+    /// was edited on the map after the dialog opened.
+    CustomPolygon? currentPolygonFor(int i) {
+      final r = rows[i];
+      final layer = provider.layers.where((l) => l.id == r.layerId).firstOrNull;
+      if (layer == null || r.index >= layer.polygons.length) return null;
+      return layer.polygons[r.index];
     }
 
     showDialog(
       context: context,
       builder: (ctx) {
-        final gestureProvider =
-            riverpod.ProviderScope.containerOf(ctx).read(mapGestureRiverpod);
         return StatefulBuilder(
           builder: (ctx, setState) {
             final total = rows.fold(
                 0, (s, r) => s + (int.tryParse(r.ctrl.text.trim()) ?? 0));
 
+            Future<void> calculateRow(int i) async {
+              final poly = currentPolygonFor(i);
+              if (poly == null || poly.points.length < 3) return;
+              if (poly.letterBoxLocked) return;
+              setState(() => calculatingRow[i] = true);
+              try {
+                final result = await counter.countIn(poly.points);
+                results[i] = result;
+                rows[i].ctrl.text = result.count.toString();
+                commitRow(i, setState,
+                    split: _splitOf(result), suburbIds: result.suburbIds);
+              } catch (e) {
+                // Left uncalculated rather than silently writing 0 — a failed
+                // lookup must not read as "this area has no letterboxes". A
+                // spinner that just stops looks like nothing happened, and
+                // this is a billing figure — the failure has to be visible,
+                // not only logged.
+                debugPrint('[LetterBoxEstimates] calculate row $i failed: $e');
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Could not calculate: $e')),
+                  );
+                }
+              } finally {
+                setState(() => calculatingRow[i] = false);
+              }
+            }
+
+            Future<void> calculateAll() async {
+              setState(() => calculatingAll = true);
+              try {
+                final polygons = [
+                  for (var i = 0; i < rows.length; i++)
+                    currentPolygonFor(i)?.points ?? const <LatLng>[],
+                ];
+                final counted = await counter.countInEach(polygons);
+                for (var i = 0; i < rows.length; i++) {
+                  final poly = currentPolygonFor(i);
+                  if (poly == null || poly.letterBoxLocked) continue;
+                  results[i] = counted[i];
+                  rows[i].ctrl.text = counted[i].count.toString();
+                  commitRow(i, setState,
+                      split: _splitOf(counted[i]),
+                      suburbIds: counted[i].suburbIds);
+                }
+              } catch (e) {
+                debugPrint('[LetterBoxEstimates] calculate all failed: $e');
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Could not calculate all: $e')),
+                  );
+                }
+              } finally {
+                setState(() => calculatingAll = false);
+              }
+            }
+
+            final untrustedCount =
+                results.where((r) => r != null && !r.isTrusted).length;
+
             return Dialog(
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12)),
-              child: MouseRegion(
-                onEnter: (_) => gestureProvider.disableMapGestures(),
-                onExit: (_) => gestureProvider.enableMapGestures(),
+              child: MapOverlay(
                 child: ConstrainedBox(
                   constraints:
                       const BoxConstraints(maxWidth: 400, maxHeight: 560),
@@ -1410,6 +1793,29 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                                     fontSize: 15, fontWeight: FontWeight.w600),
                               ),
                             ),
+                            if (rows.isNotEmpty)
+                              TextButton.icon(
+                                onPressed: calculatingAll || !canEdit
+                                    ? null
+                                    : calculateAll,
+                                icon: calculatingAll
+                                    ? const SizedBox(
+                                        width: 14,
+                                        height: 14,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2),
+                                      )
+                                    : const Icon(Icons.calculate_outlined,
+                                        size: 16),
+                                label: Text(calculatingAll
+                                    ? 'Calculating…'
+                                    : 'Calculate all'),
+                                style: TextButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                  padding:
+                                      const EdgeInsets.symmetric(horizontal: 8),
+                                ),
+                              ),
                             IconButton(
                               icon: const Icon(Icons.close, size: 18),
                               onPressed: () => Navigator.pop(ctx),
@@ -1465,11 +1871,37 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                                     const Divider(height: 1),
                                 itemBuilder: (_, i) {
                                   final r = rows[i];
+                                  final result = results[i];
+                                  final untrusted =
+                                      result != null && !result.isTrusted;
+                                  // Prefer this session's fresh result, but
+                                  // fall back to the split stored on the
+                                  // polygon so rows that were counted when
+                                  // they were drawn show their breakdown
+                                  // without being recalculated here.
+                                  final split = result != null
+                                      ? _splitOf(result)
+                                      : currentPolygonFor(i)?.letterBoxSplit;
                                   return Padding(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 16, vertical: 6),
                                     child: Row(
                                       children: [
+                                        if (untrusted)
+                                          Padding(
+                                            padding:
+                                                const EdgeInsets.only(right: 4),
+                                            child: Tooltip(
+                                              message:
+                                                  'Includes uncurated suburb(s) — '
+                                                  'not a final quote yet: '
+                                                  '${result.unverifiedSuburbs.join(', ')}',
+                                              child: const Icon(
+                                                  Icons.warning_amber_rounded,
+                                                  size: 14,
+                                                  color: Color(0xFFB45309)),
+                                            ),
+                                          ),
                                         Expanded(
                                           flex: 3,
                                           child: Text(r.name,
@@ -1477,10 +1909,72 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                                                   const TextStyle(fontSize: 13),
                                               overflow: TextOverflow.ellipsis),
                                         ),
+                                        if (split != null &&
+                                            split.apartmentBlocks > 0)
+                                          Tooltip(
+                                            message: '${split.houses} '
+                                                'house(s), '
+                                                '${split.apartmentBoxes} '
+                                                'box(es) across '
+                                                '${split.apartmentBlocks} '
+                                                'block(s)',
+                                            child: const Padding(
+                                              padding:
+                                                  EdgeInsets.only(right: 4),
+                                              child: Icon(
+                                                  Icons.apartment_rounded,
+                                                  size: 14,
+                                                  color: Color(0xFF7C3AED)),
+                                            ),
+                                          ),
+                                        SizedBox(
+                                          width: 26,
+                                          child: currentPolygonFor(i)
+                                                      ?.letterBoxLocked ==
+                                                  true
+                                              ? Tooltip(
+                                                  message: 'Set by hand — '
+                                                      'not recalculated. '
+                                                      'Unlock it from the '
+                                                      'area\'s info window.',
+                                                  child: const Icon(Icons.lock,
+                                                      size: 14,
+                                                      color: Color(0xFF1A73E8)),
+                                                )
+                                              : calculatingRow[i]
+                                                  ? const Padding(
+                                                      padding:
+                                                          EdgeInsets.all(4),
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                              strokeWidth: 2),
+                                                    )
+                                                  : IconButton(
+                                                      icon: const Icon(
+                                                          Icons
+                                                              .calculate_outlined,
+                                                          size: 15),
+                                                      tooltip:
+                                                          'Calculate from curated '
+                                                          'letterboxes',
+                                                      padding: EdgeInsets.zero,
+                                                      constraints:
+                                                          const BoxConstraints(),
+                                                      onPressed:
+                                                          calculatingAll ||
+                                                                  !canEdit
+                                                              ? null
+                                                              : () =>
+                                                                  calculateRow(
+                                                                      i),
+                                                    ),
+                                        ),
+                                        const SizedBox(width: 4),
                                         Expanded(
                                           flex: 2,
                                           child: TextField(
                                             controller: r.ctrl,
+                                            readOnly: !canEdit,
                                             keyboardType: TextInputType.number,
                                             textAlign: TextAlign.right,
                                             style:
@@ -1513,27 +2007,71 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                         color: const Color(0xFFF8F9FA),
                         padding: const EdgeInsets.symmetric(
                             horizontal: 16, vertical: 10),
-                        child: Row(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Expanded(
-                              flex: 3,
-                              child: Text(
-                                'Total  (${rows.length} area${rows.length == 1 ? '' : 's'})',
-                                style: const TextStyle(
-                                    fontSize: 13, fontWeight: FontWeight.w700),
-                              ),
+                            Row(
+                              children: [
+                                Expanded(
+                                  flex: 3,
+                                  child: Text(
+                                    'Total  (${rows.length} area${rows.length == 1 ? '' : 's'})',
+                                    style: const TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700),
+                                  ),
+                                ),
+                                Expanded(
+                                  flex: 2,
+                                  child: Text(
+                                    total > 0
+                                        ? NumberFormat('#,###').format(total)
+                                        : '—',
+                                    textAlign: TextAlign.right,
+                                    style: const TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700),
+                                  ),
+                                ),
+                              ],
                             ),
-                            Expanded(
-                              flex: 2,
-                              child: Text(
-                                total > 0
-                                    ? NumberFormat('#,###').format(total)
-                                    : '—',
-                                textAlign: TextAlign.right,
-                                style: const TextStyle(
-                                    fontSize: 13, fontWeight: FontWeight.w700),
+                            // Charging is per 1000 letterboxes reached in most
+                            // areas, so the billable-units read is shown right
+                            // next to the raw total.
+                            if (total > 0)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 2),
+                                child: Text(
+                                  '${(total / 1000).toStringAsFixed(2)} '
+                                  'thousand-unit(s)',
+                                  style: const TextStyle(
+                                      fontSize: 11, color: Color(0xFF5F6368)),
+                                ),
                               ),
-                            ),
+                            // Never let an uncurated number sit next to the
+                            // total looking like a settled figure — this is
+                            // what gets typed into a client quote.
+                            if (untrustedCount > 0)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.warning_amber_rounded,
+                                        size: 13, color: Color(0xFFB45309)),
+                                    const SizedBox(width: 4),
+                                    Expanded(
+                                      child: Text(
+                                        '$untrustedCount area(s) include '
+                                        'uncurated suburbs — not a final '
+                                        'quote yet.',
+                                        style: const TextStyle(
+                                            fontSize: 11,
+                                            color: Color(0xFFB45309)),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                           ],
                         ),
                       ),
@@ -1551,7 +2089,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
   void _showAddLayerDialog(
       BuildContext context, ShareableMapProvider provider) {
     final nameController = TextEditingController(
-      text: 'Layer ${provider.layers.length + 1}',
+      text: provider.nextTargetAreasLayerName(),
     );
     final descController = TextEditingController();
     Color selectedColor = Colors.blue;
@@ -2354,13 +2892,9 @@ class _CloudFolderPickerDialogState
 
   @override
   Widget build(BuildContext context) {
-    final gestureProvider = ref.read(mapGestureRiverpod);
-
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: MouseRegion(
-        onEnter: (_) => gestureProvider.disableMapGestures(),
-        onExit: (_) => gestureProvider.enableMapGestures(),
+      child: MapOverlay(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 560, maxHeight: 620),
           child: Column(

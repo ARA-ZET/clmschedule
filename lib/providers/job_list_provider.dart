@@ -804,13 +804,19 @@ class JobListProvider extends ChangeNotifier {
   }
 
   /// Links an existing shareable map to a job list item.
-  /// Updates the job's shareableMapId, storageFolderPath, and area (with share URL).
+  ///
+  /// Writes only `shareableMapId` and `area` (the share URL) on the job, and
+  /// the `jobListItemId` back-reference on the map. The job's folder is left
+  /// alone: the job owns its folder, and the `onJobListItemWritten` Cloud
+  /// Function points the map at it as soon as `shareableMapId` changes.
+  /// Copying the map's folder onto the job instead would hand this job
+  /// whatever folder the map happened to have — often another job's — and
+  /// the function would then move that folder in under this job's name.
   Future<void> linkExistingMapToJob({
     required String jobId,
     required String mapId,
     required String monthKey,
     required String mapName,
-    String? storageFolderPath,
 
     /// Optional in-memory fallback used when the Firestore stream hasn't yet
     /// delivered the newly-created job (e.g. right after a copy operation).
@@ -835,7 +841,8 @@ class JobListProvider extends ChangeNotifier {
         debugPrint('⚠️ Share link for existing map failed: $e');
       }
 
-      // Update the map's jobListItemId reference
+      // Update the map's jobListItemId reference. Written before the job so
+      // the Cloud Function finds the map by it when the job update lands.
       try {
         final mapService = ShareableMapsFirestoreService(
             firestore: FirebaseFirestore.instance);
@@ -848,48 +855,36 @@ class JobListProvider extends ChangeNotifier {
         debugPrint('⚠️ Failed to update map jobListItemId: $e');
       }
 
-      final updatedJob = JobListItem(
-        id: jobId,
-        invoice: job.invoice,
-        amount: job.amount,
-        client: job.client,
-        jobStatusId: job.jobStatusId,
-        invoiceStatusId: job.invoiceStatusId,
-        jobTypeId: job.jobTypeId,
-        area: areaLink,
-        quantity: job.quantity,
-        manDays: job.manDays,
-        date: job.date,
-        collectionAddress: job.collectionAddress,
-        collectionDate: job.collectionDate,
-        specialInstructions: job.specialInstructions,
-        quantityDistributed: job.quantityDistributed,
-        invoiceDetails: job.invoiceDetails,
-        reportAddresses: job.reportAddresses,
-        whoToInvoice: job.whoToInvoice,
-        collectionJobId: job.collectionJobId,
-        shareableMapId: mapId,
-        storageFolderPath: storageFolderPath ?? job.storageFolderPath,
-        customPolygons: job.customPolygons,
-      );
-      await _jobListService.updateJobListItem(updatedJob, updatedJob.date);
-      notifyListeners();
+      await _writeMapLink(job, {'shareableMapId': mapId, 'area': areaLink});
     } catch (e) {
       debugPrint('⚠️ Link existing map to job failed: $e');
     }
   }
 
+  /// Persist map-link [fields] on [job] without touching anything else.
+  ///
+  /// A queued debounced edit for the same job would otherwise land after
+  /// this write and put the old `area` back, so it is patched too.
+  Future<void> _writeMapLink(
+      JobListItem job, Map<String, String> fields) async {
+    await _jobListService.updateJobListItemFields(job.id, job.date, fields);
+    final pending = _pendingUpdates[job.id];
+    if (pending != null) {
+      _pendingUpdates[job.id] = pending.copyWith(
+        shareableMapId: fields['shareableMapId'],
+        area: fields['area'],
+      );
+    }
+    notifyListeners();
+  }
+
   /// Detects a CLM Maps share URL anywhere inside [text] and returns the
   /// share code (e.g. "x7Kp2m") or null if no valid link is present.
-  static final RegExp _clmMapShareUrlRegex = RegExp(
-    r'https?://clm-maps\.web\.app/map/([A-Za-z0-9_-]+)',
-    caseSensitive: false,
-  );
-  static String? _extractClmMapShareCode(String? text) {
-    if (text == null || text.isEmpty) return null;
-    final match = _clmMapShareUrlRegex.firstMatch(text);
-    return match?.group(1);
-  }
+  ///
+  /// Lives on [MapLinkService] so the distribution report resolves an `area`
+  /// value through exactly the same rule this does.
+  static String? _extractClmMapShareCode(String? text) =>
+      MapLinkService.extractShareCodeFromText(text);
 
   /// Auto-link a CLM Maps share URL embedded in the job's `area` field to
   /// the corresponding shareable map. No-op if:
@@ -948,51 +943,15 @@ class JobListProvider extends ChangeNotifier {
         debugPrint('🔗 [AutoLink] Failed to set jobListItemId on map: $e');
       }
 
-      // 2. Persist the link onto the job. We update via the Firestore
-      //    service directly (rather than through the debounced update
-      //    pipeline) to avoid races with the listener.
+      // 2. Persist the link onto the job — `shareableMapId` only. The job's
+      //    folder is the job's own; the Cloud Function points the map at it.
       if (job != null) {
-        final updatedJob = JobListItem(
-          id: job.id,
-          invoice: job.invoice,
-          amount: job.amount,
-          client: job.client,
-          jobStatusId: job.jobStatusId,
-          invoiceStatusId: job.invoiceStatusId,
-          jobTypeId: job.jobTypeId,
-          area: job.area,
-          quantity: job.quantity,
-          manDays: job.manDays,
-          date: job.date,
-          collectionAddress: job.collectionAddress,
-          collectionDate: job.collectionDate,
-          specialInstructions: job.specialInstructions,
-          quantityDistributed: job.quantityDistributed,
-          invoiceDetails: job.invoiceDetails,
-          reportAddresses: job.reportAddresses,
-          whoToInvoice: job.whoToInvoice,
-          collectionJobId: job.collectionJobId,
-          shareableMapId: resolved.mapId,
-          storageFolderPath: mapDoc.storageFolderPath ?? job.storageFolderPath,
-          customPolygons: job.customPolygons,
-          updates: job.updates,
-          reminders: job.reminders,
-          vehicleTrailerCombo: job.vehicleTrailerCombo,
-        );
-        await _jobListService.updateJobListItem(updatedJob, updatedJob.date);
+        await _writeMapLink(job, {'shareableMapId': resolved.mapId});
       } else {
-        // Job not yet in local cache — write minimal fields directly via the
-        // monthly collection. This handles the immediately-after-add case.
-        final monthDate = date;
-        final col = FirebaseFirestore.instance
-            .collection('jobLists')
-            .doc(_jobListService.getMonthlyDocumentId(monthDate))
-            .collection('items');
-        await col.doc(jobId).update({
-          'shareableMapId': resolved.mapId,
-          if (mapDoc.storageFolderPath != null)
-            'storageFolderPath': mapDoc.storageFolderPath,
-        });
+        // Job not yet in local cache — this handles the immediately-after-add
+        // case, where only the date passed in can locate its month.
+        await _jobListService.updateJobListItemFields(
+            jobId, date, {'shareableMapId': resolved.mapId});
       }
       debugPrint('✅ [AutoLink] Linked job $jobId → ${resolved.mapId}');
     } catch (e, st) {

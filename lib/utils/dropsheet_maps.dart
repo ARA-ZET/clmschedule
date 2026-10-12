@@ -29,6 +29,7 @@ class DropsheetMaps {
     switch (task.type) {
       case DropsheetTaskType.dropOff:
       case DropsheetTaskType.pickUp:
+      case DropsheetTaskType.distribute:
         final lat = (task.typeData['lat'] as num?)?.toDouble();
         final lng = (task.typeData['lng'] as num?)?.toDouble();
         final name =
@@ -96,9 +97,21 @@ class DropsheetMaps {
     switch (task.type) {
       case DropsheetTaskType.dropOff:
       case DropsheetTaskType.pickUp:
-        final wa = (task.typeData['workArea'] as String?)?.trim();
-        if (wa != null && wa.isNotEmpty) return wa;
-        return (task.typeData['distributorName'] as String?) ?? task.location;
+      case DropsheetTaskType.distribute:
+        var wa = (task.typeData['workArea'] as String?)?.trim() ?? '';
+        if (DropsheetTask.isPlaceholderArea(wa)) wa = '';
+        final corner = task.intersection;
+        // Lead with the street corner — readable on a printed sheet, where
+        // a work-area name alone doesn't say where to stop.
+        // A point-only job is usually already named after this corner.
+        if (corner.isNotEmpty) {
+          return wa.isEmpty || wa == corner ? corner : '$corner · $wa';
+        }
+        if (wa.isNotEmpty) return wa;
+        // Never the distributor's name — that is already the Contact. A hand
+        // entered location is the last resort.
+        final loc = task.location.trim();
+        return DropsheetTask.isPlaceholderArea(loc) ? '' : loc;
       case DropsheetTaskType.collection:
       case DropsheetTaskType.jobReturn:
       case DropsheetTaskType.pickFlyers:

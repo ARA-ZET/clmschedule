@@ -26,6 +26,8 @@ const ZOHO_REFRESH_TOKEN = defineSecret("ZOHO_REFRESH_TOKEN");
 // ── Organisation config ──────────────────────────────────────────────────────
 // Data centre suffix — books.zoho.com => "com".
 const ZOHO_DC = "com";
+// Junk & Stuff — the organisation used when a caller names none, which is
+// every call made before Happy Sun got its own books.
 const ZOHO_ORG_ID = "747658013";
 
 const API_BASE = `https://www.zohoapis.${ZOHO_DC}/books/v3`;
@@ -103,10 +105,11 @@ async function getAccessToken() {
  * Perform one Zoho Books call. Retries once on 401 with a fresh token, since a
  * cached token can be revoked server-side before its nominal expiry.
  */
-async function zohoRequest(method, path, { query = {}, body = null } = {}) {
+async function zohoRequest(method, path, { query = {}, body = null, orgId = ZOHO_ORG_ID } = {}) {
   const attempt = async (token) => {
     const url = new URL(`${API_BASE}${path}`);
-    url.searchParams.set("organization_id", ZOHO_ORG_ID);
+    // null = an org-less endpoint (/organizations itself).
+    if (orgId) url.searchParams.set("organization_id", orgId);
     for (const [k, v] of Object.entries(query)) {
       if (v !== undefined && v !== null && v !== "") {
         url.searchParams.set(k, String(v));
@@ -152,6 +155,90 @@ async function zohoRequest(method, path, { query = {}, body = null } = {}) {
   return json;
 }
 
+/**
+ * Fetch a Zoho-rendered PDF and return it base64-encoded.
+ *
+ * Same endpoint as the JSON read, with `accept=pdf` — Zoho renders it with the
+ * organisation's own invoice template, so the output matches what Zoho Books
+ * itself prints. Kept separate from zohoRequest() because that one parses the
+ * body as JSON and checks `code`; a PDF response has neither.
+ */
+async function zohoPdf(path, orgId = ZOHO_ORG_ID) {
+  const attempt = async (token) => {
+    const url = new URL(`${API_BASE}${path}`);
+    url.searchParams.set("organization_id", orgId);
+    url.searchParams.set("accept", "pdf");
+    return fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        Accept: "application/pdf",
+      },
+    });
+  };
+
+  let res = await attempt(await getAccessToken());
+  if (res.status === 401) {
+    _accessToken = null;
+    res = await attempt(await refreshAccessToken());
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+
+  // An error comes back as JSON even though we asked for a PDF.
+  if (!res.ok || contentType.includes("application/json")) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const json = JSON.parse(await res.text());
+      message = json.message || message;
+    } catch { /* keep the status-based message */ }
+    throw new HttpsError(
+      res.status === 404 ? "not-found" : "failed-precondition",
+      `Zoho Books: ${message}`,
+    );
+  }
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.subarray(0, 4).toString("latin1") !== "%PDF") {
+    throw new HttpsError("internal", "Zoho did not return a PDF.");
+  }
+
+  return { pdfBase64: buf.toString("base64"), byteLength: buf.length };
+}
+
+// ── Organisations ────────────────────────────────────────────────────────────
+// One Zoho login holds several organisations — Junk & Stuff and Happy Sun —
+// and the refresh token reaches all of them; only `organization_id` differs.
+// The caller names the org, but it is checked against the orgs this token can
+// actually see, so the proxy never forwards an arbitrary id. Cached per
+// instance: the org list changes about once a year.
+const ORG_CACHE_MS = 60 * 60 * 1000;
+let _orgIds = null;
+let _orgIdsAt = 0;
+
+async function listOrganizations() {
+  return zohoRequest("GET", "/organizations", { orgId: null });
+}
+
+async function resolveOrgId(requested) {
+  if (requested === undefined || requested === null || requested === "") return ZOHO_ORG_ID;
+  const id = String(requested).trim();
+  if (!/^\d+$/.test(id)) throw new HttpsError("invalid-argument", "organizationId must be numeric.");
+  if (id === ZOHO_ORG_ID) return id;
+
+  const known = () => _orgIds && _orgIds.has(id) && Date.now() - _orgIdsAt < ORG_CACHE_MS;
+  if (!known()) {
+    const json = await listOrganizations();
+    _orgIds = new Set((json.organizations || []).map((o) => String(o.organization_id)));
+    _orgIdsAt = Date.now();
+  }
+  if (!_orgIds.has(id)) {
+    throw new HttpsError("permission-denied",
+      `Zoho organisation ${id} is not reachable with this Zoho login.`);
+  }
+  return id;
+}
+
 // ── Operation allowlist ──────────────────────────────────────────────────────
 
 const str = (v) => typeof v === "string" && v.trim() !== "";
@@ -162,16 +249,22 @@ function requireArg(cond, name) {
 }
 
 const OPS = {
+  // The organisations this Zoho login can reach — used to look up an org id
+  // for a company's settings. Not org-scoped itself.
+  listOrganizations: () => listOrganizations(),
+
   // ── Customers ──
-  createCustomer: (d) => {
+  createCustomer: (d, orgId) => {
     requireArg(obj(d.contact), "contact");
     requireArg(str(d.contact.contact_name), "contact.contact_name");
     return zohoRequest("POST", "/contacts", {
+      orgId,
       body: { ...d.contact, contact_type: "customer" },
     });
   },
 
-  listCustomers: (d) => zohoRequest("GET", "/contacts", {
+  listCustomers: (d, orgId) => zohoRequest("GET", "/contacts", {
+    orgId,
     query: {
       contact_type: "customer",
       search_text: d.searchText,
@@ -180,16 +273,43 @@ const OPS = {
     },
   }),
 
-  updateCustomer: (d) => {
+  // Needed before an update: the list response omits `contact_persons`, and
+  // editing a contact's details requires the primary contact_person_id.
+  getCustomer: (d, orgId) => {
+    requireArg(str(d.contactId), "contactId");
+    return zohoRequest("GET", `/contacts/${encodeURIComponent(d.contactId)}`, { orgId });
+  },
+
+  updateCustomer: (d, orgId) => {
     requireArg(str(d.contactId), "contactId");
     requireArg(obj(d.contact), "contact");
     return zohoRequest("PUT", `/contacts/${encodeURIComponent(d.contactId)}`, {
+      orgId,
       body: d.contact,
     });
   },
 
+  // ── Items ──
+  /**
+   * The item catalogue — Junk & Stuff's standard services and their rates.
+   *
+   * `status: "active"` so archived items do not turn up in a picker. Paged,
+   * unlike Xero's /Items, because Zoho caps `per_page` at 200.
+   */
+  listItems: (d, orgId) => zohoRequest("GET", "/items", {
+    orgId,
+    query: {
+      // Zoho's List Items endpoint filters through `filter_by`, not a `status`
+      // parameter — `status` is a field ON an item, not a query for the list.
+      filter_by: "Status.Active",
+      search_text: d.searchText,
+      page: d.page,
+      per_page: d.perPage,
+    },
+  }),
+
   // ── Invoices ──
-  createInvoice: (d) => {
+  createInvoice: (d, orgId) => {
     requireArg(obj(d.invoice), "invoice");
     requireArg(str(d.invoice.customer_id), "invoice.customer_id");
     requireArg(Array.isArray(d.invoice.line_items) && d.invoice.line_items.length > 0,
@@ -197,29 +317,44 @@ const OPS = {
     // Only bypass Zoho's auto-numbering when we're actually supplying a number.
     const keepOwnNumber = str(d.invoice.invoice_number);
     return zohoRequest("POST", "/invoices", {
+      orgId,
       query: keepOwnNumber ? { ignore_auto_number_generation: "true" } : {},
       body: d.invoice,
     });
   },
 
-  updateInvoice: (d) => {
+  updateInvoice: (d, orgId) => {
     requireArg(str(d.invoiceId), "invoiceId");
     requireArg(obj(d.invoice), "invoice");
     return zohoRequest("PUT", `/invoices/${encodeURIComponent(d.invoiceId)}`, {
+      orgId,
       body: d.invoice,
     });
   },
 
-  getInvoice: (d) => {
+  getInvoice: (d, orgId) => {
     requireArg(str(d.invoiceId), "invoiceId");
-    return zohoRequest("GET", `/invoices/${encodeURIComponent(d.invoiceId)}`);
+    return zohoRequest("GET", `/invoices/${encodeURIComponent(d.invoiceId)}`, { orgId });
   },
 
-  listInvoices: (d) => zohoRequest("GET", "/invoices", {
+  // The invoice as Zoho Books itself renders and prints it.
+  getInvoicePdf: (d, orgId) => {
+    requireArg(str(d.invoiceId), "invoiceId");
+    return zohoPdf(`/invoices/${encodeURIComponent(d.invoiceId)}`, orgId);
+  },
+
+  listInvoices: (d, orgId) => zohoRequest("GET", "/invoices", {
+    orgId,
     query: {
       status: d.status,
       customer_id: d.customerId,
       search_text: d.searchText,
+      // Sorting and date-ranging are done by Zoho so a paged client stays
+      // correct. Note Zoho rejects sort_column=status.
+      sort_column: d.sortColumn,
+      sort_order: d.sortOrder,
+      date_start: d.dateStart,
+      date_end: d.dateEnd,
       page: d.page,
       per_page: d.perPage,
     },
@@ -227,28 +362,28 @@ const OPS = {
 
   // Status changes go through the action endpoints — PUT-ing `status` is
   // ignored by Zoho.
-  markInvoiceSent: (d) => {
+  markInvoiceSent: (d, orgId) => {
     requireArg(str(d.invoiceId), "invoiceId");
-    return zohoRequest("POST", `/invoices/${encodeURIComponent(d.invoiceId)}/status/sent`);
+    return zohoRequest("POST", `/invoices/${encodeURIComponent(d.invoiceId)}/status/sent`, { orgId });
   },
 
-  voidInvoice: (d) => {
+  voidInvoice: (d, orgId) => {
     requireArg(str(d.invoiceId), "invoiceId");
-    return zohoRequest("POST", `/invoices/${encodeURIComponent(d.invoiceId)}/status/void`);
+    return zohoRequest("POST", `/invoices/${encodeURIComponent(d.invoiceId)}/status/void`, { orgId });
   },
 
-  draftInvoice: (d) => {
+  draftInvoice: (d, orgId) => {
     requireArg(str(d.invoiceId), "invoiceId");
-    return zohoRequest("POST", `/invoices/${encodeURIComponent(d.invoiceId)}/status/draft`);
+    return zohoRequest("POST", `/invoices/${encodeURIComponent(d.invoiceId)}/status/draft`, { orgId });
   },
 
   // "Paid" is not a toggle — it's a recorded payment.
-  recordPayment: (d) => {
+  recordPayment: (d, orgId) => {
     requireArg(obj(d.payment), "payment");
     requireArg(str(d.payment.customer_id), "payment.customer_id");
     requireArg(typeof d.payment.amount === "number" && d.payment.amount > 0,
       "payment.amount (positive number)");
-    return zohoRequest("POST", "/customerpayments", { body: d.payment });
+    return zohoRequest("POST", "/customerpayments", { orgId, body: d.payment });
   },
 };
 
@@ -270,6 +405,8 @@ exports.zohoBooks = onCall(
       );
     }
 
-    return OPS[op](data);
+    const { organizationId, ...args } = data;
+    const orgId = op === "listOrganizations" ? null : await resolveOrgId(organizationId);
+    return OPS[op](args, orgId);
   },
 );

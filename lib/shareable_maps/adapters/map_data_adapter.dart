@@ -1,3 +1,4 @@
+import '../models/map_layer.dart';
 import '../models/shareable_map.dart';
 
 /// Feature flags that control which editor UI elements are available.
@@ -32,6 +33,11 @@ class MapEditorCapabilities {
   /// Can delete elements from the map.
   final bool canDelete;
 
+  /// Can run the boundary cleanup pass (weld/snap adjacent polygons so shared
+  /// edges are literally shared). Available wherever polygons can be drawn —
+  /// hand-drawn areas are exactly where gaps and overlaps come from.
+  final bool canCleanBoundaries;
+
   /// Shows an explicit Save button in the app bar.
   /// When false, the adapter is either auto-save or read-only.
   final bool showSaveButton;
@@ -55,6 +61,7 @@ class MapEditorCapabilities {
     this.canManageLayers = true,
     this.canEditStyle = true,
     this.canDelete = true,
+    this.canCleanBoundaries = true,
     this.showSaveButton = true,
     this.readOnly = false,
     this.canLinkExistingMap = false,
@@ -71,6 +78,7 @@ class MapEditorCapabilities {
         canManageLayers = true,
         canEditStyle = true,
         canDelete = true,
+        canCleanBoundaries = true,
         showSaveButton = false,
         readOnly = false,
         canLinkExistingMap = false;
@@ -86,6 +94,7 @@ class MapEditorCapabilities {
         canManageLayers = false,
         canEditStyle = true,
         canDelete = true,
+        canCleanBoundaries = true,
         showSaveButton = true,
         readOnly = false,
         canLinkExistingMap = false;
@@ -101,6 +110,7 @@ class MapEditorCapabilities {
         canManageLayers = false,
         canEditStyle = false,
         canDelete = false,
+        canCleanBoundaries = false,
         showSaveButton = false,
         readOnly = true,
         canLinkExistingMap = false;
@@ -172,6 +182,32 @@ abstract class MapDataAdapter {
     required String mapName,
     String? storageFolderPath,
   }) async {}
+
+  /// Id of a layer the editor shows for reference only — drawn on the map so
+  /// the user can see it and copy from it, but never written back by [save].
+  /// Null when the adapter has no such layer.
+  String? get referenceLayerId => null;
+
+  /// Builds (or rebuilds) the reference layer named by [referenceLayerId].
+  /// Called on load and again after the backing entity's link changes, so
+  /// the editor can show the newly linked map without a full reload.
+  /// Returns null when there is nothing to show.
+  Future<MapLayer?> loadReferenceLayer() async => null;
+
+  /// Id of a second reference layer holding recorded GPS tracks from the
+  /// linked map(s) — the same overlay the print map offers. Kept separate
+  /// from [referenceLayerId] so the user can show or hide the tracks without
+  /// losing sight of the polygons. Null when the adapter has none.
+  String? get referenceTracksLayerId => null;
+
+  /// True when there is linked data to fetch tracks for, so the editor can
+  /// offer the toggle before anything has been downloaded.
+  bool get hasReferenceTracks => false;
+
+  /// Downloads the recorded tracks for [referenceTracksLayerId]. Called the
+  /// first time the user turns the overlay on, not on load — the tracks are
+  /// a Storage download and most editing sessions never ask for them.
+  Future<MapLayer?> loadReferenceTracksLayer() async => null;
 
   /// Called when the editor is closed. Use for cleanup.
   Future<void> dispose() async {}

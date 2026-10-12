@@ -8,6 +8,7 @@ import '../../models/advance_repayment.dart';
 import '../../models/payroll_payslip.dart';
 import '../../providers/payroll_provider.dart';
 import '../../utils/payroll_calculator.dart' as calc;
+import '../../utils/payroll_week.dart';
 
 final _currencyFormat = NumberFormat.currency(symbol: 'R ', decimalDigits: 2);
 final _dateFormat = DateFormat('d MMM yyyy');
@@ -28,6 +29,10 @@ class AdvanceSection extends riverpod.ConsumerStatefulWidget {
   final List<Advance> advances;
   final List<AdvanceRepayment> repayments;
 
+  /// The week being viewed — decides which settled deductions still belong
+  /// on this payslip (see the item filter in `build`).
+  final DateTime weekStart;
+
   /// False once this week is more than 2 pay-week cycles old — locks only
   /// the "deduct this week" controls tied to THIS payslip
   /// (`PayrollProvider.updateAdvanceDeduction`); recording a brand-new
@@ -42,6 +47,7 @@ class AdvanceSection extends riverpod.ConsumerStatefulWidget {
     required this.payslip,
     required this.advances,
     required this.repayments,
+    required this.weekStart,
     required this.editable,
   });
 
@@ -103,11 +109,10 @@ class _AdvanceSectionState extends riverpod.ConsumerState<AdvanceSection> {
         ? (double.tryParse(_amountController.text.trim()) ?? 0)
         : 0.0;
 
-    // The auto-suggested amount (see the checkbox's onChanged above) is
-    // already capped to keep at least R500 net, so this only ever fires
-    // for a manually-typed amount beyond that cap — payment can't be
-    // negative, so require an explicit confirmation rather than silently
-    // applying or silently blocking it.
+    // The automatic pass never breaks the R500 net floor — it skips the week
+    // entirely instead. Deducting by hand IS allowed to break it (that's what
+    // the override is for), but never silently: confirm rather than applying
+    // or blocking on the admin's behalf.
     if (amount > 0) {
       final projectedNet = calc.netWage(
         gross: widget.payslip.grossWage,
@@ -117,16 +122,19 @@ class _AdvanceSectionState extends riverpod.ConsumerState<AdvanceSection> {
             ? widget.payslip.savingsWithdrawalAmount
             : 0,
       );
-      if (projectedNet < 0) {
+      if (projectedNet < 500) {
         final proceed = await showDialog<bool>(
           context: context,
           builder: (_) => AlertDialog(
-            title: const Text('Deduction exceeds this week\'s wages'),
+            title: Text(projectedNet < 0
+                ? 'Deduction exceeds this week\'s wages'
+                : 'Leaves less than R500 net'),
             content: Text(
               'Deducting ${_currencyFormat.format(amount)} against a gross '
               'wage of ${_currencyFormat.format(widget.payslip.grossWage)} '
-              'would leave a negative net wage of '
-              '${_currencyFormat.format(projectedNet)} this week. '
+              'would leave a net wage of '
+              '${_currencyFormat.format(projectedNet)} this week — under the '
+              'R500 floor the automatic deduction never goes below. '
               'Continue anyway?',
             ),
             actions: [
@@ -182,9 +190,20 @@ class _AdvanceSectionState extends riverpod.ConsumerState<AdvanceSection> {
 
   @override
   Widget build(BuildContext context) {
-    final items = widget.advances;
     final repayments = widget.repayments;
-    final outstanding = items.where((a) => a.balance > 0.005).toList();
+    // A settled deduction drops off the list once it's history — it only
+    // still belongs on this payslip if one of ITS repayments was posted in
+    // the week being viewed (i.e. this is the week that settled it). Same
+    // rule the printed payslip's deductions table already uses, so the admin
+    // view and the print-out never disagree about what's still relevant.
+    final weekId = weekIdFor(widget.weekStart);
+    final items = widget.advances.where((a) {
+      final touchedThisWeek = repayments
+          .any((r) => r.advanceId == a.id && r.linkedWeekId == weekId);
+      return a.balance > 0.005 || touchedThisWeek;
+    }).toList();
+    final outstanding =
+        widget.advances.where((a) => a.balance > 0.005).toList();
     final totalOutstanding =
         outstanding.fold<double>(0, (t, a) => t + a.balance);
 
@@ -242,21 +261,19 @@ class _AdvanceSectionState extends riverpod.ConsumerState<AdvanceSection> {
                         _amountController.text.trim().isEmpty &&
                         outstanding.isNotEmpty) {
                       final oldest = outstanding.first;
-                      final rawSuggestion =
+                      final instalment =
                           oldest.preferredInstallmentAmount > 0
                               ? oldest.preferredInstallmentAmount
                               : oldest.balance;
-                      // Never suggest a deduction that would leave the
-                      // distributor with less than R500 net for the week
-                      // — the admin can still type a larger amount
-                      // manually if that's genuinely intended.
-                      final wageBeforeDeduction = widget.payslip.grossWage;
-                      final maxAllowed = (wageBeforeDeduction - 500) < 0
-                          ? 0.0
-                          : (wageBeforeDeduction - 500);
-                      final suggested = rawSuggestion > maxAllowed
-                          ? maxAllowed
-                          : rawSuggestion;
+                      // A WHOLE instalment, or everything still owed when
+                      // that's less — matching the automatic pass, which
+                      // never splits an instalment. Deliberately NOT clipped
+                      // to the R500 net floor: ticking this box by hand is
+                      // an explicit admin decision, and `_apply` confirms
+                      // before actually breaking the floor.
+                      final suggested = instalment > totalOutstanding
+                          ? totalOutstanding
+                          : instalment;
                       _amountController.text = suggested.toStringAsFixed(2);
                     }
                   });

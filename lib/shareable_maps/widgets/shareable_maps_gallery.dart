@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -598,6 +599,13 @@ class _MapTile extends riverpod.ConsumerWidget {
   }
 
   Future<void> _openMap(BuildContext context, riverpod.WidgetRef ref) async {
+    // On web each map gets its own browser tab so several can be open at
+    // once and the gallery stays put.
+    if (kIsWeb) {
+      _openMapInNewTab(item);
+      return;
+    }
+
     final openSw = Stopwatch()..start();
     debugPrint('[MapOpen] START opening map ${item.docId}');
 
@@ -652,6 +660,16 @@ class _MapTile extends riverpod.ConsumerWidget {
       }
     }
   }
+}
+
+/// Opens [item] in a separate browser tab (via the admin map route), so
+/// several maps can be open at once. No-op off the web.
+void _openMapInNewTab(MapGalleryItem item) {
+  final path = Uri(
+    path: '/admin/map',
+    queryParameters: {'doc': item.docId, 'month': item.monthKey},
+  ).toString();
+  url_updater.openInNewTab(path);
 }
 
 // =============================================================================
@@ -1043,7 +1061,7 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
       onSelected: (value) async {
         switch (value) {
           case 'newtab':
-            _openInNewTab();
+            _openMapInNewTab(item);
             break;
           case 'share':
             await _shareMap(context);
@@ -1060,16 +1078,6 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
         }
       },
     );
-  }
-
-  /// Opens this map in a separate browser tab (via the admin map route), so
-  /// several maps can be open at once. No-op off the web.
-  void _openInNewTab() {
-    final path = Uri(
-      path: '/admin/map',
-      queryParameters: {'doc': item.docId, 'month': item.monthKey},
-    ).toString();
-    url_updater.openInNewTab(path);
   }
 
   Future<void> _shareMap(BuildContext context) async {

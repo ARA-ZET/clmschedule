@@ -71,7 +71,7 @@ class DropsheetDriverSection {
     // read so every section always has it pinned at the bottom.
     final hasArrive = rawTasks.any((t) => t.type == DropsheetTaskType.arrive);
     final id = data['id'] as String;
-    final tasks = hasArrive
+    final withArrive = hasArrive
         ? rawTasks
         : [
             ...rawTasks,
@@ -82,6 +82,10 @@ class DropsheetDriverSection {
               isMandatory: true,
             ),
           ];
+    // Backward compatibility: sections saved before the Inspect task covered
+    // the trailer only name the vehicle. Fill the trailer in on read, unless
+    // the user has reworded the row.
+    final tasks = _withTrailerOnInspect(withArrive, vehicle, trailer);
     return DropsheetDriverSection(
       id: id,
       driverId: data['driverId'] as String? ?? '',
@@ -119,6 +123,87 @@ class DropsheetDriverSection {
         if (routeDurationSeconds > 0)
           'routeDurationSeconds': routeDurationSeconds,
       };
+
+  /// Re-derives the Inspect row's details/typeData from [vehicle]/[trailer]
+  /// when the row still carries the auto-filled text (or nothing at all).
+  /// Rows the user has reworded are returned untouched.
+  static List<DropsheetTask> _withTrailerOnInspect(
+    List<DropsheetTask> tasks,
+    VehicleType? vehicle,
+    TrailerType? trailer,
+  ) {
+    final takingTrailer = trailer != null && trailer != TrailerType.noTrailer;
+    if (!takingTrailer) return tasks;
+    final label = DropsheetTask.inspectDetails(
+      vehicleLabel: vehicle?.displayName,
+      trailerLabel: trailer.displayName,
+    );
+    return tasks.map((t) {
+      if (t.type != DropsheetTaskType.inspect) return t;
+      final details = t.details.trim();
+      // Only the pre-trailer auto-fill (bare vehicle name) or an empty row.
+      if (details.isNotEmpty && details != (vehicle?.displayName ?? '')) {
+        return t;
+      }
+      if (details == label) return t;
+      return t.copyWith(
+        details: label,
+        typeData: {
+          ...t.typeData,
+          ...DropsheetTask.inspectTypeData(
+            vehicleKey: vehicle?.name,
+            trailerKey: trailer.name,
+          ),
+        },
+      );
+    }).toList();
+  }
+
+  /// True when a trailer is actually being taken today.
+  bool get hasTrailer => trailer != null && trailer != TrailerType.noTrailer;
+
+  /// `Hyundai + Big Trailer` — the vehicle plus the trailer when one is
+  /// being taken. Empty when no vehicle/trailer is set.
+  String get vehicleTrailerLabel => DropsheetTask.inspectDetails(
+        vehicleLabel: vehicle?.displayName,
+        trailerLabel: hasTrailer ? trailer!.displayName : null,
+      );
+
+  /// Swap the vehicle/trailer for the day and keep the mandatory Inspect
+  /// task in step — when a trailer is taken the driver has to inspect both
+  /// the vehicle and the trailer.
+  ///
+  /// The Inspect details are free text after creation, so only rows that are
+  /// still empty or still read as the previous vehicle/trailer label are
+  /// refreshed; anything the user reworded is left alone.
+  DropsheetDriverSection withVehicleTrailer(
+    VehicleType? vehicle,
+    TrailerType? trailer,
+  ) {
+    final previousLabel = vehicleTrailerLabel;
+    final next = copyWith(vehicle: vehicle, trailer: trailer);
+    final nextLabel = next.vehicleTrailerLabel;
+    if (nextLabel == previousLabel) return next;
+    return next.copyWith(
+      tasks: next.tasks.map((t) {
+        if (t.type != DropsheetTaskType.inspect) return t;
+        final details = t.details.trim();
+        if (details.isNotEmpty && details != previousLabel) return t;
+        return t.copyWith(
+          details: nextLabel,
+          typeData: {
+            ...t.typeData,
+            ...DropsheetTask.inspectTypeData(
+              vehicleKey: next.vehicle?.name,
+              trailerKey: next.hasTrailer ? next.trailer!.name : null,
+            ),
+          }..removeWhere((k, v) =>
+              (k == 'vehicle' && next.vehicle == null) ||
+              (k == 'trailer' && !next.hasTrailer)),
+        );
+      }).toList(),
+    );
+  }
 
   DropsheetDriverSection copyWith({
     String? driverName,
@@ -164,6 +249,12 @@ class DropsheetDriverSection {
         idPrefix: driverId,
         vehicleLabel: vehicle?.displayName,
         vehicleKey: vehicle?.name,
+        trailerLabel: trailer != null && trailer != TrailerType.noTrailer
+            ? trailer.displayName
+            : null,
+        trailerKey: trailer != null && trailer != TrailerType.noTrailer
+            ? trailer.name
+            : null,
         depotAddress: depot?.address.isNotEmpty == true ? depot!.address : null,
         depotLat: depot?.lat,
         depotLng: depot?.lng,

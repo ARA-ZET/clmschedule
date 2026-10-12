@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
@@ -39,6 +40,8 @@ class ReferenceCacheService {
       _firestore.collection('meta').doc('referenceVersions');
 
   static const String _hiveBoxName = 'reference_cache_versions';
+
+  static bool get _isSignedIn => FirebaseAuth.instance.currentUser != null;
 
   /// Per-session fallback when Hive is unavailable.
   static final Map<String, int> _memoryVersions = {};
@@ -104,6 +107,14 @@ class ReferenceCacheService {
   /// collection — subsequent calls are served from an in-memory session
   /// cache.
   static Future<int> _getRemoteVersion(String collectionName) async {
+    if (!_isSignedIn) {
+      if (kDebugMode) {
+        debugPrint(
+            'ReferenceCacheService: skipped remote version read for $collectionName because no user is signed in.');
+      }
+      return 0;
+    }
+
     final cached = _sessionRemoteVersions[collectionName];
     if (cached != null) return cached;
 
@@ -133,6 +144,10 @@ class ReferenceCacheService {
   /// not re-fetch from the server on the very next load (the caller's
   /// local Firestore cache already reflects the change).
   static Future<void> bumpVersion(String collectionName) async {
+    if (!_isSignedIn) {
+      return;
+    }
+
     try {
       await _metaDoc.set(
         {collectionName: FieldValue.increment(1)},
@@ -179,6 +194,14 @@ class ReferenceCacheService {
     required String collectionName,
     required T Function(QueryDocumentSnapshot<Object?> doc) fromDoc,
   }) async {
+    if (!_isSignedIn) {
+      if (kDebugMode) {
+        debugPrint(
+            'ReferenceCacheService[$collectionName]: skipped Firestore fetch because no user is signed in.');
+      }
+      return const [];
+    }
+
     final remoteVersion = await _getRemoteVersion(collectionName);
     final storedVersion = await _getStoredVersion(collectionName);
 

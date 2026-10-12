@@ -1,656 +1,480 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import '../models/address.dart';
-import '../models/route_data.dart';
-import '../services/route_optimization_service.dart';
+import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 
-/// Map viewer for displaying geocoded addresses as markers
-class GeocodedAddressesMapViewer extends StatefulWidget {
-  final List<Address> addresses;
+import '../services/route_export_service.dart';
+import '../services/route_planner_service.dart';
+import 'geocode/geocode_ui.dart';
+import 'geocode/route_export_sheet.dart';
+import '../utils/route_marker_icons.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import '../shareable_maps/providers/map_gesture_provider.dart';
+import '../shareable_maps/widgets/map_overlay.dart';
+
+/// Full-screen presentation of a planned run: the map on one side, the
+/// driver's itinerary on the other.
+///
+/// This is the hand-to-the-driver view. Where the workspace is for
+/// building a route, this is for reading one — every stop in order with
+/// its leg distance, drive time and ETA, and a per-stop link that opens
+/// navigation on a phone.
+class GeocodedAddressesMapViewer extends riverpod.ConsumerStatefulWidget {
+  final PlannedRoute route;
   final String title;
-  final OptimizedRoute? optimizedRoute;
-  final SuburbRouteData? routeData;
 
   const GeocodedAddressesMapViewer({
     super.key,
-    required this.addresses,
-    this.title = 'Geocoded Addresses',
-    this.optimizedRoute,
-    this.routeData,
+    required this.route,
+    this.title = 'Route',
   });
 
   @override
-  State<GeocodedAddressesMapViewer> createState() =>
+  riverpod.ConsumerState<GeocodedAddressesMapViewer> createState() =>
       _GeocodedAddressesMapViewerState();
 }
 
 class _GeocodedAddressesMapViewerState
-    extends State<GeocodedAddressesMapViewer> {
+    extends riverpod.ConsumerState<GeocodedAddressesMapViewer> {
+  static final DateFormat _timeFormat = DateFormat('HH:mm');
+
   GoogleMapController? _mapController;
-  Address? _selectedAddress;
   Set<Marker> _markers = {};
   Set<Polyline> _polylines = {};
-  bool _showRouteStats = false;
+  MapType _mapType = MapType.normal;
+  String? _selectedId;
 
   @override
   void initState() {
     super.initState();
-    _createMarkers();
-    if (widget.optimizedRoute != null) {
-      _createRoutePolylines();
-    }
-  }
-
-  void _createMarkers() {
-    final markers = <Marker>{};
-    final displayAddresses =
-        widget.optimizedRoute?.addresses ?? widget.addresses;
-
-    for (int i = 0; i < displayAddresses.length; i++) {
-      final address = displayAddresses[i];
-      if (address.latitude == null || address.longitude == null) continue;
-
-      final marker = Marker(
-        markerId: MarkerId(address.id),
-        position: LatLng(address.latitude!, address.longitude!),
-        infoWindow: InfoWindow(
-          title: widget.optimizedRoute != null
-              ? '${i + 1}. ${address.streetAddress.isNotEmpty ? address.streetAddress : address.suburb}'
-              : address.streetAddress.isNotEmpty
-                  ? address.streetAddress
-                  : address.suburb,
-          snippet: 'Tap for details',
-        ),
-        onTap: () {
-          setState(() {
-            _selectedAddress = address;
-          });
-        },
-        icon: widget.optimizedRoute != null
-            ? BitmapDescriptor.defaultMarkerWithHue(
-                _getRouteMarkerHue(i, displayAddresses.length))
-            : BitmapDescriptor.defaultMarkerWithHue(_getMarkerHue(i)),
-      );
-
-      markers.add(marker);
-    }
-
-    setState(() {
-      _markers = markers;
-    });
-  }
-
-  void _createRoutePolylines() {
-    if (widget.optimizedRoute == null) return;
-
-    final polylines = <Polyline>{};
-
-    // If we have routeData with actual Google Directions polylines, use those
-    if (widget.routeData != null && widget.routeData!.segments.isNotEmpty) {
-      for (int i = 0; i < widget.routeData!.segments.length; i++) {
-        final segment = widget.routeData!.segments[i];
-        final polyline = Polyline(
-          polylineId: PolylineId('route_segment_$i'),
-          points: segment.polylinePoints,
-          color: Colors.blue,
-          width: 4,
-          patterns: [PatternItem.dash(20), PatternItem.gap(10)],
-        );
-        polylines.add(polyline);
-      }
-    } else {
-      // Fallback to straight lines if no routeData available
-      final points = <LatLng>[];
-      for (final address in widget.optimizedRoute!.addresses) {
-        if (address.latitude != null && address.longitude != null) {
-          points.add(LatLng(address.latitude!, address.longitude!));
-        }
-      }
-
-      final polyline = Polyline(
-        polylineId: const PolylineId('optimized_route'),
-        points: points,
-        color: Colors.blue,
-        width: 4,
-        patterns: [PatternItem.dash(20), PatternItem.gap(10)],
-      );
-      polylines.add(polyline);
-    }
-
-    setState(() {
-      _polylines = polylines;
-    });
-  }
-
-  double _getRouteMarkerHue(int index, int total) {
-    // Gradient from green (start) to red (end)
-    if (index == 0) return BitmapDescriptor.hueGreen;
-    if (index == total - 1) return BitmapDescriptor.hueRed;
-    return BitmapDescriptor.hueOrange;
-  }
-
-  double _getMarkerHue(int index) {
-    // Use different colors for different markers
-    final hues = [
-      BitmapDescriptor.hueRed,
-      BitmapDescriptor.hueOrange,
-      BitmapDescriptor.hueYellow,
-      BitmapDescriptor.hueGreen,
-      BitmapDescriptor.hueCyan,
-      BitmapDescriptor.hueBlue,
-      BitmapDescriptor.hueViolet,
-      BitmapDescriptor.hueMagenta,
-    ];
-    return hues[index % hues.length];
-  }
-
-  void _fitBounds() {
-    if (_mapController == null || widget.addresses.isEmpty) return;
-
-    double minLat = widget.addresses.first.latitude!;
-    double maxLat = widget.addresses.first.latitude!;
-    double minLng = widget.addresses.first.longitude!;
-    double maxLng = widget.addresses.first.longitude!;
-
-    for (final address in widget.addresses) {
-      if (address.latitude == null || address.longitude == null) continue;
-
-      if (address.latitude! < minLat) minLat = address.latitude!;
-      if (address.latitude! > maxLat) maxLat = address.latitude!;
-      if (address.longitude! < minLng) minLng = address.longitude!;
-      if (address.longitude! > maxLng) maxLng = address.longitude!;
-    }
-
-    final bounds = LatLngBounds(
-      southwest: LatLng(minLat, minLng),
-      northeast: LatLng(maxLat, maxLng),
-    );
-
-    _mapController!.animateCamera(
-      CameraUpdate.newLatLngBounds(bounds, 50),
-    );
-  }
-
-  LatLng _getCenter() {
-    if (widget.addresses.isEmpty) {
-      return const LatLng(-33.9249, 18.4241); // Cape Town default
-    }
-
-    double totalLat = 0;
-    double totalLng = 0;
-    int count = 0;
-
-    for (final address in widget.addresses) {
-      if (address.latitude != null && address.longitude != null) {
-        totalLat += address.latitude!;
-        totalLng += address.longitude!;
-        count++;
-      }
-    }
-
-    if (count == 0) {
-      return const LatLng(-33.9249, 18.4241);
-    }
-
-    return LatLng(totalLat / count, totalLng / count);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-        actions: [
-          if (widget.optimizedRoute != null)
-            IconButton(
-              icon: Icon(_showRouteStats ? Icons.map : Icons.bar_chart),
-              tooltip: _showRouteStats ? 'Show Map' : 'Show Route Stats',
-              onPressed: () {
-                setState(() {
-                  _showRouteStats = !_showRouteStats;
-                });
-              },
-            ),
-          IconButton(
-            icon: const Icon(Icons.zoom_out_map),
-            tooltip: 'Fit all markers',
-            onPressed: _fitBounds,
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          GoogleMap(
-            initialCameraPosition: CameraPosition(
-              target: _getCenter(),
-              zoom: 14,
-            ),
-            markers: _markers,
-            polylines: _polylines,
-            onMapCreated: (controller) {
-              _mapController = controller;
-              // Fit bounds after a short delay to ensure map is ready
-              Future.delayed(const Duration(milliseconds: 500), () {
-                _fitBounds();
-              });
-            },
-            myLocationButtonEnabled: true,
-            myLocationEnabled: true,
-            zoomControlsEnabled: true,
-            mapToolbarEnabled: false,
-          ),
-          if (_selectedAddress != null && !_showRouteStats)
-            _buildAddressDetailsPanel(),
-          if (_showRouteStats && widget.optimizedRoute != null)
-            _buildRouteStatisticsPanel(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAddressDetailsPanel() {
-    return Positioned(
-      bottom: 16,
-      left: 16,
-      right: 16,
-      child: Card(
-        elevation: 8,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      _selectedAddress!.streetAddress.isNotEmpty
-                          ? _selectedAddress!.streetAddress
-                          : _selectedAddress!.suburb,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () {
-                      setState(() {
-                        _selectedAddress = null;
-                      });
-                    },
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _selectedAddress!.fullAddress,
-                style: const TextStyle(fontSize: 14),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  const Icon(Icons.location_on, size: 16, color: Colors.grey),
-                  const SizedBox(width: 4),
-                  Text(
-                    'Lat: ${_selectedAddress!.latitude!.toStringAsFixed(6)}, '
-                    'Lng: ${_selectedAddress!.longitude!.toStringAsFixed(6)}',
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton.icon(
-                    icon: const Icon(Icons.navigation),
-                    label: const Text('Navigate'),
-                    onPressed: () {
-                      // Center map on this address
-                      _mapController?.animateCamera(
-                        CameraUpdate.newLatLngZoom(
-                          LatLng(
-                            _selectedAddress!.latitude!,
-                            _selectedAddress!.longitude!,
-                          ),
-                          17,
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildRouteStatisticsPanel() {
-    // If we have actual routeData from Google, use that for accurate stats
-    if (widget.routeData != null) {
-      return _buildActualRouteStatistics();
-    }
-
-    // Fallback to estimated stats from Haversine distance
-    final service = RouteOptimizationService();
-    final stats = service.getRouteStatistics(widget.optimizedRoute!);
-    final segments =
-        service.calculateRouteSegments(widget.optimizedRoute!.addresses);
-
-    return Positioned(
-      top: 16,
-      left: 16,
-      right: 16,
-      bottom: 16,
-      child: Card(
-        elevation: 8,
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.blue.shade50,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(12)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.route, color: Colors.blue),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'Route Statistics (Estimated)',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const Spacer(),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () {
-                      setState(() {
-                        _showRouteStats = false;
-                      });
-                    },
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Summary stats
-                    _buildStatRow(Icons.straighten, 'Total Distance',
-                        stats.formattedTotalDistance, Colors.blue),
-                    _buildStatRow(Icons.location_on, 'Number of Stops',
-                        '${stats.numberOfStops}', Colors.green),
-                    _buildStatRow(Icons.timer, 'Est. Time',
-                        stats.formattedEstimatedTime, Colors.orange),
-                    _buildStatRow(Icons.speed, 'Avg. Distance/Stop',
-                        stats.formattedAverageDistance, Colors.purple),
-                    _buildStatRow(Icons.auto_graph, 'Strategy', stats.strategy,
-                        Colors.teal),
-
-                    const Divider(height: 32),
-
-                    // Route details
-                    const Text(
-                      'Route Details',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 12),
-
-                    ...segments.map((segment) => _buildSegmentTile(segment)),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildActualRouteStatistics() {
-    final routeData = widget.routeData!;
-
-    // Parse algorithm name
-    final isEstimated = routeData.algorithm.contains('_estimated');
-    final algorithmBase = routeData.algorithm
-        .replaceAll('_estimated', '')
-        .replaceAll('_actual', '');
-    final algorithmName =
-        algorithmBase == '2opt' ? '2-Opt' : 'Nearest Neighbor';
-    final algorithmSuffix = isEstimated ? ' (Estimated)' : ' (Actual Roads)';
-
-    return Positioned(
-      top: 16,
-      left: 16,
-      right: 16,
-      bottom: 16,
-      child: Card(
-        elevation: 8,
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.blue.shade50,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(12)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.route, color: Colors.blue),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Route Statistics${isEstimated ? ' (Estimated)' : ' (Actual)'}',
-                          style: const TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                        Text(
-                          isEstimated
-                              ? 'Straight-line distances'
-                              : 'Google Directions API',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: isEstimated ? Colors.orange : Colors.grey,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () {
-                      setState(() {
-                        _showRouteStats = false;
-                      });
-                    },
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Summary stats
-                    _buildStatRow(
-                      Icons.straighten,
-                      'Total Distance',
-                      '${routeData.totalDistanceKm.toStringAsFixed(1)} km',
-                      Colors.blue,
-                    ),
-                    _buildStatRow(
-                      Icons.location_on,
-                      'Number of Stops',
-                      '${routeData.segments.length + 1}',
-                      Colors.green,
-                    ),
-                    _buildStatRow(
-                      Icons.timer,
-                      'Total Duration',
-                      routeData.totalDurationFormatted,
-                      Colors.orange,
-                    ),
-                    _buildStatRow(
-                      Icons.speed,
-                      'Avg. Distance/Segment',
-                      '${(routeData.totalDistanceKm / routeData.segments.length).toStringAsFixed(2)} km',
-                      Colors.purple,
-                    ),
-                    _buildStatRow(
-                      Icons.auto_graph,
-                      'Algorithm',
-                      algorithmName + algorithmSuffix,
-                      Colors.teal,
-                    ),
-                    _buildStatRow(
-                      Icons.access_time,
-                      'Optimized At',
-                      '${routeData.optimizedAt.day}/${routeData.optimizedAt.month}/${routeData.optimizedAt.year} ${routeData.optimizedAt.hour}:${routeData.optimizedAt.minute.toString().padLeft(2, '0')}',
-                      Colors.grey,
-                    ),
-
-                    const Divider(height: 32),
-
-                    // Route segment details
-                    const Text(
-                      'Route Segments',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 12),
-
-                    ...routeData.segments.asMap().entries.map((entry) {
-                      final index = entry.key;
-                      final segment = entry.value;
-                      return _buildActualSegmentTile(index + 1, segment);
-                    }),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildActualSegmentTile(int segmentNumber, RouteSegmentData segment) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: Colors.blue.shade100,
-          child: Text(
-            '$segmentNumber',
-            style: const TextStyle(
-                fontWeight: FontWeight.bold, color: Colors.blue),
-          ),
-        ),
-        title: Row(
-          children: [
-            Expanded(
-              child: Text(
-                '${segment.distanceKm.toStringAsFixed(2)} km',
-                style: const TextStyle(fontWeight: FontWeight.w500),
-              ),
-            ),
-            Text(
-              segment.durationFormatted,
-              style: const TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-          ],
-        ),
-        subtitle: Text(
-          'Stop $segmentNumber → Stop ${segmentNumber + 1}',
-          style: const TextStyle(fontSize: 12),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStatRow(IconData icon, String label, String value, Color color) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        children: [
-          Icon(icon, size: 20, color: color),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              label,
-              style: const TextStyle(fontSize: 14, color: Colors.grey),
-            ),
-          ),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              color: color,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSegmentTile(RouteSegment segment) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: Colors.blue.shade100,
-          child: Text(
-            '${segment.order}',
-            style: TextStyle(
-                color: Colors.blue.shade900, fontWeight: FontWeight.bold),
-          ),
-        ),
-        title: Text(
-          segment.from.streetAddress.isNotEmpty
-              ? segment.from.streetAddress
-              : segment.from.suburb,
-          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-        ),
-        subtitle: Row(
-          children: [
-            const Icon(Icons.arrow_downward, size: 12, color: Colors.grey),
-            const SizedBox(width: 4),
-            Text(
-              segment.to.streetAddress.isNotEmpty
-                  ? segment.to.streetAddress
-                  : segment.to.suburb,
-              style: const TextStyle(fontSize: 11),
-            ),
-          ],
-        ),
-        trailing: Text(
-          '${segment.distance.toStringAsFixed(2)} km',
-          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-        ),
-      ),
-    );
+    _buildLayers();
   }
 
   @override
   void dispose() {
     _mapController?.dispose();
     super.dispose();
+  }
+
+  Future<void> _buildLayers() async {
+    final stops = widget.route.stops;
+    final markers = <Marker>{};
+
+    for (var i = 0; i < stops.length; i++) {
+      final stop = stops[i];
+      final address = stop.address;
+      if (address.latitude == null || address.longitude == null) continue;
+
+      final icon = await RouteMarkerIcons.numbered(
+        stop.isDepot ? 'S' : '${stop.sequence}',
+        color: stop.isDepot
+            ? GeocodeColors.depot
+            : RouteMarkerIcons.colorForPosition(i, stops.length),
+        highlighted: _selectedId == address.id,
+      );
+
+      markers.add(Marker(
+        markerId: MarkerId(address.id),
+        position: LatLng(address.latitude!, address.longitude!),
+        icon: icon,
+        anchor: const Offset(0.5, 1),
+        infoWindow: InfoWindow(
+          title: stop.isDepot
+              ? 'Start · ${address.displayName}'
+              : '${stop.sequence}. ${address.displayName}',
+          snippet: address.fullAddress,
+        ),
+        onTap: () {
+          // The click that landed on a panel over the map.
+          if (ref.read(mapGestureRiverpod).isHeld) return;
+          _select(stop);
+        },
+      ));
+    }
+
+    final polylines = <Polyline>{};
+    for (var i = 1; i < stops.length; i++) {
+      final stop = stops[i];
+      if (stop.pathFromPrevious.length < 2) continue;
+      polylines.add(Polyline(
+        polylineId: PolylineId('leg_$i'),
+        points: stop.pathFromPrevious,
+        color: RouteMarkerIcons.colorForPosition(i, stops.length)
+            .withValues(alpha: 0.9),
+        width: 5,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+      ));
+    }
+    final back = widget.route.returnLeg;
+    if (back != null && back.pathFromPrevious.length >= 2) {
+      polylines.add(Polyline(
+        polylineId: const PolylineId('leg_return'),
+        points: back.pathFromPrevious,
+        color: GeocodeColors.neutral,
+        width: 4,
+        patterns: [PatternItem.dash(24), PatternItem.gap(14)],
+      ));
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _markers = markers;
+      _polylines = polylines;
+    });
+  }
+
+  void _select(PlannedStop stop) {
+    setState(() => _selectedId = stop.address.id);
+    _buildLayers();
+    final a = stop.address;
+    if (a.latitude != null && a.longitude != null) {
+      _mapController?.animateCamera(
+        CameraUpdate.newLatLngZoom(LatLng(a.latitude!, a.longitude!), 17),
+      );
+    }
+  }
+
+  void _fitBounds() {
+    final points = <LatLng>[
+      for (final s in widget.route.stops)
+        if (s.address.latitude != null && s.address.longitude != null)
+          LatLng(s.address.latitude!, s.address.longitude!),
+    ];
+    if (points.isEmpty || _mapController == null) return;
+    if (points.length == 1) {
+      _mapController!
+          .animateCamera(CameraUpdate.newLatLngZoom(points.first, 16));
+      return;
+    }
+
+    var minLat = points.first.latitude;
+    var maxLat = points.first.latitude;
+    var minLng = points.first.longitude;
+    var maxLng = points.first.longitude;
+    for (final p in points) {
+      minLat = p.latitude < minLat ? p.latitude : minLat;
+      maxLat = p.latitude > maxLat ? p.latitude : maxLat;
+      minLng = p.longitude < minLng ? p.longitude : minLng;
+      maxLng = p.longitude > maxLng ? p.longitude : maxLng;
+    }
+    _mapController!.animateCamera(
+      CameraUpdate.newLatLngBounds(
+        LatLngBounds(
+          southwest: LatLng(minLat, minLng),
+          northeast: LatLng(maxLat, maxLng),
+        ),
+        60,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.title),
+            Text(
+              '${widget.route.deliveryStops.length} stops · '
+              '${widget.route.totalDistanceFormatted} · '
+              '${widget.route.totalDrivingFormatted} driving',
+              style:
+                  const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w400),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Fit all stops',
+            icon: const Icon(Icons.zoom_out_map_rounded),
+            onPressed: _fitBounds,
+          ),
+          IconButton(
+            tooltip: 'Copy the itinerary',
+            icon: const Icon(Icons.copy_all_rounded),
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(
+                text: RouteExportService.buildTsv(widget.route),
+              ));
+              if (context.mounted) {
+                showGeocodeSnack(context, 'Itinerary copied.');
+              }
+            },
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 4, right: 12),
+            child: FilledButton.icon(
+              onPressed: () => RouteExportSheet.show(
+                context,
+                route: widget.route,
+                baseName: widget.title,
+              ),
+              icon: const Icon(Icons.ios_share_rounded, size: 18),
+              label: const Text('Export'),
+            ),
+          ),
+        ],
+      ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth >= 940) {
+            return Row(
+              children: [
+                SizedBox(width: 400, child: _buildItinerary()),
+                const VerticalDivider(width: 1),
+                Expanded(child: _buildMap()),
+              ],
+            );
+          }
+          return Column(
+            children: [
+              Expanded(flex: 3, child: _buildMap()),
+              const Divider(height: 1),
+              Expanded(flex: 4, child: _buildItinerary()),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildMap() {
+    final first = widget.route.stops.isEmpty
+        ? const LatLng(-33.9249, 18.4241)
+        : LatLng(
+            widget.route.stops.first.address.latitude ?? -33.9249,
+            widget.route.stops.first.address.longitude ?? 18.4241,
+          );
+
+    return Stack(
+      children: [
+        GoogleMap(
+          webGestureHandling: ref.watch(mapGestureRiverpod).gestureHandling,
+          initialCameraPosition: CameraPosition(target: first, zoom: 13),
+          markers: _markers,
+          polylines: _polylines,
+          mapType: _mapType,
+          zoomControlsEnabled: true,
+          mapToolbarEnabled: false,
+          myLocationButtonEnabled: false,
+          onMapCreated: (controller) {
+            _mapController = controller;
+            Future.delayed(const Duration(milliseconds: 400), _fitBounds);
+          },
+        ),
+        Positioned(
+          top: 12,
+          right: 12,
+          child: MapOverlay(
+            child: Material(
+              elevation: 3,
+              shape: const CircleBorder(),
+              color: Theme.of(context).colorScheme.surface,
+              child: IconButton(
+                tooltip:
+                    _mapType == MapType.normal ? 'Satellite view' : 'Map view',
+                icon: Icon(
+                  _mapType == MapType.normal
+                      ? Icons.satellite_alt_rounded
+                      : Icons.map_rounded,
+                  size: 20,
+                ),
+                onPressed: () => setState(() {
+                  _mapType = _mapType == MapType.normal
+                      ? MapType.hybrid
+                      : MapType.normal;
+                }),
+              ),
+            ),
+          ),
+        ),
+        if (!widget.route.usedRealRoads)
+          Positioned(
+            left: 12,
+            top: 12,
+            child: MapOverlay(
+              child: GlassPanel(
+                maxWidth: 300,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded,
+                        size: 18, color: GeocodeColors.warning),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Straight-line estimates — the Directions service '
+                        'did not answer.',
+                        style: TextStyle(fontSize: 11.5),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildItinerary() {
+    final stops = [
+      ...widget.route.stops,
+      if (widget.route.returnLeg != null) widget.route.returnLeg!,
+    ];
+
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 24),
+      itemCount: stops.length,
+      itemBuilder: (context, index) {
+        final stop = stops[index];
+        final isReturn = index == widget.route.stops.length;
+        return _buildStopCard(stop, index, isReturn);
+      },
+    );
+  }
+
+  Widget _buildStopCard(PlannedStop stop, int index, bool isReturn) {
+    final address = stop.address;
+    final selected = !isReturn && _selectedId == address.id;
+    final color = isReturn
+        ? GeocodeColors.neutral
+        : stop.isDepot
+            ? GeocodeColors.depot
+            : RouteMarkerIcons.colorForPosition(
+                index, widget.route.stops.length);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Material(
+        color: selected
+            ? GeocodeColors.brand.withValues(alpha: 0.08)
+            : Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: isReturn ? null : () => _select(stop),
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: selected
+                    ? GeocodeColors.brand
+                    : Theme.of(context).dividerColor,
+                width: selected ? 1.5 : 1,
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SequenceBadge(
+                  label: isReturn
+                      ? '⌂'
+                      : stop.isDepot
+                          ? 'S'
+                          : '${stop.sequence}',
+                  color: color,
+                  selected: selected,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isReturn
+                            ? 'Return to ${address.displayName}'
+                            : address.displayName,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13.5,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        address.fullAddress,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: Theme.of(context).hintColor,
+                        ),
+                      ),
+                      if (address.notes?.isNotEmpty ?? false) ...[
+                        const SizedBox(height: 4),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(Icons.sticky_note_2_outlined, size: 13),
+                            const SizedBox(width: 5),
+                            Expanded(
+                              child: Text(
+                                address.notes!,
+                                style: const TextStyle(
+                                  fontSize: 11.5,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
+                        children: [
+                          if (!stop.isDepot || isReturn)
+                            _fact(Icons.straighten_rounded,
+                                '${stop.legDistanceKm.toStringAsFixed(1)} km'),
+                          if (!stop.isDepot || isReturn)
+                            _fact(Icons.timer_outlined,
+                                stop.legDurationFormatted),
+                          if (stop.arrival != null)
+                            _fact(Icons.schedule_rounded,
+                                'ETA ${_timeFormat.format(stop.arrival!)}'),
+                          _fact(Icons.route_rounded,
+                              '${stop.cumulativeDistanceKm.toStringAsFixed(1)} km total'),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Navigate to this stop',
+                  icon: const Icon(Icons.near_me_rounded, size: 18),
+                  onPressed: () => launchUrl(
+                    Uri.parse(RouteExportService.mapsPinUrl(address)),
+                    mode: LaunchMode.externalApplication,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _fact(IconData icon, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 12, color: Theme.of(context).hintColor),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: Theme.of(context).hintColor,
+          ),
+        ),
+      ],
+    );
   }
 }

@@ -18,6 +18,8 @@ import 'dropsheet_task_config_provider.dart';
 import 'job_list_provider.dart';
 import 'job_type_provider.dart';
 import 'schedule_provider.dart';
+import '../shareable_maps/services/map_link_service.dart';
+import '../track_editor/services/te_place_names.dart' as place_names;
 
 /// Synthetic section id used for distributors auto-imported from the
 /// schedule that haven't yet been assigned to a driver. Lives at the
@@ -34,6 +36,10 @@ const List<String> _distributorTaskDataKeys = [
   // Carried so a pick-up built from a per-area drop-off renders at that same
   // per-area coordinate (see day_planner_page _stopPointsFor).
   'workAreaPin',
+  // The resolved street corner stays valid for the same point.
+  DropsheetTask.kPointOnlyKey,
+  DropsheetTask.kIntersectionKey,
+  DropsheetTask.kIntersectionAtKey,
 ];
 
 class DropsheetPickupSyncResult {
@@ -112,7 +118,7 @@ class DropsheetProvider extends ChangeNotifier {
       return localCached;
     }
 
-    final fetched = await fs.fetchDistributorsOnce();
+    final fetched = await fs.fetchDistributorsOnce(fromServer: true);
     _resolvedDistributorsCache = fetched;
     _resolvedDistributorsCacheAt = now;
     return fetched;
@@ -153,6 +159,27 @@ class DropsheetProvider extends ChangeNotifier {
     return false;
   }
 
+  /// Whether [date] is a **historical** dropsheet — any day before today.
+  ///
+  /// A past dropsheet is an audit record of what the drivers actually ran
+  /// that day. Re-running the schedule/job-list sync against it would
+  /// rewrite that record: Pass 1 drops every drop-off task whose schedule
+  /// job no longer exists (jobs get deleted, moved, or recreated with a
+  /// new id long after the fact) and Pass 2 then re-appends the current
+  /// schedule's jobs to the "Unassigned stops" bucket — which is exactly
+  /// how a fully allocated past day "reverts to unallocated".
+  ///
+  /// So every automated recompute path checks this first and leaves the
+  /// stored day alone. Direct user edits (drag a task, edit a row, add a
+  /// driver) are deliberately NOT blocked — the user can still correct an
+  /// old sheet by hand; only automation is locked out.
+  static bool isHistorical(DateTime date) =>
+      DateTime(date.year, date.month, date.day).isBefore(_today());
+
+  /// Whether the day currently being viewed is a historical record.
+  /// Drives the "archived" badge and the manual-sync confirmation prompt.
+  bool get isHistoricalDate => isHistorical(_date);
+
   void setDate(DateTime d) {
     final normalised = DateTime(d.year, d.month, d.day);
     if (normalised == _date) return;
@@ -176,13 +203,19 @@ class DropsheetProvider extends ChangeNotifier {
     _sub = _service.streamDay(activeDate).listen(
       (day) {
         if (activeDate != _date) return;
+        final wasReady = _dayReady;
         _day = day;
         _isLoading = false;
         _error = null;
         _dayReady = true;
         notifyListeners();
-        // Once we know the live day state, run any pending syncs.
-        if (_pendingJobs.isNotEmpty || _day.sections.isEmpty) {
+        // Run the pending schedule sync once the live day state is known —
+        // on the FIRST snapshot only (or when the day is empty). Re-syncing
+        // on every snapshot made each save by another client trigger a sync
+        // here; any client whose sync disagrees (e.g. an older build) then
+        // wrote back, and the two overwrote each other indefinitely.
+        // Schedule changes still sync via the schedule stream below.
+        if ((!wasReady && _pendingJobs.isNotEmpty) || _day.sections.isEmpty) {
           _scheduleAutoSync();
         }
         // Open the job-list stream now if JobTypeProvider wasn't ready yet
@@ -343,10 +376,19 @@ class DropsheetProvider extends ChangeNotifier {
   ///   added to the Unassigned section with their type-appropriate task data.
   ///
   /// Only operates within the auto-sync eligibility window. Can be called
-  /// manually (e.g. from a "Refresh" button) to force a re-sync.
-  Future<void> syncJobListTasks({List<JobListItem>? items}) async {
+  /// manually (e.g. from a "Refresh" button) to force a re-sync, but never
+  /// against a historical day unless [force] is set — Pass A deletes tasks
+  /// whose source job-list item is gone, which would quietly strip an
+  /// archived sheet (see [isHistorical]).
+  Future<void> syncJobListTasks(
+      {List<JobListItem>? items, bool force = false}) async {
     final jtp = JobTypeProvider.instance;
     if (jtp == null) return;
+    if (isHistorical(_date) && !force) {
+      debugPrint('DropsheetProvider: skipped job-list sync for archived '
+          '${DropsheetDay.docIdFor(_date)}');
+      return;
+    }
 
     final jobListItems = items ?? _pendingJobListItems;
 
@@ -378,20 +420,34 @@ class DropsheetProvider extends ChangeNotifier {
           nextTasks.add(task);
           continue;
         }
+        final userCreated = task.isUserCreatedJobListTask;
         final item = itemsById[srcId];
         if (item == null) {
-          // Job was deleted from the job list — remove the task.
+          // Not in this date's eligible items. For a task the sync created
+          // that means its source item is gone (deleted, moved to another
+          // date, or its job type no longer appears on the dropsheet), so
+          // drop it.
+          //
+          // For a HAND-BUILT task it means no such thing: [jobListItems] is
+          // a filtered view and the editor's picker will happily offer items
+          // the sync does not manage. Deleting on that basis is what made a
+          // freshly added task vanish a few hundred ms later.
+          if (userCreated) {
+            nextTasks.add(task);
+            continue;
+          }
           changed = true;
           continue;
         }
         // Re-build only when the item's fingerprint changed.
         final fp = _jobListTaskFingerprint(item);
-        if (task.typeData['_jlFp'] == fp) {
+        if (task.typeData[DropsheetTask.kJobListFingerprintKey] == fp) {
           nextTasks.add(task);
           continue;
         }
         changed = true;
-        nextTasks.add(_buildJobListTask(item, jtp, existingTask: task));
+        nextTasks.add(_buildJobListTask(item, jtp,
+            existingTask: task, manual: userCreated));
       }
       return section.copyWith(tasks: nextTasks);
     }).toList();
@@ -418,10 +474,8 @@ class DropsheetProvider extends ChangeNotifier {
         final td = Map<String, dynamic>.from(task.typeData);
         if (task.type == DropsheetTaskType.furnitureMove) {
           // Two-stop tasks need separate coords for each stop.
-          final loadAddr =
-              (td['loadingAddress'] as String?)?.trim() ?? '';
-          final offAddr =
-              (td['offloadAddress'] as String?)?.trim() ?? '';
+          final loadAddr = (td['loadingAddress'] as String?)?.trim() ?? '';
+          final offAddr = (td['offloadAddress'] as String?)?.trim() ?? '';
           final results = await Future.wait([
             if (loadAddr.isNotEmpty && !td.containsKey('loadingLat'))
               GeocodingService()
@@ -549,6 +603,21 @@ class DropsheetProvider extends ChangeNotifier {
     }
 
     if (!changed) return;
+
+    // Pass B / Pass C geocode over the network, so this method can be several
+    // seconds old by the time it gets here. `nextSections` is derived from the
+    // snapshot taken at the top — writing it now would overwrite anything the
+    // user saved in the meantime (edit a task, drag a stop, add a driver).
+    // Bail out instead and let the debounced listener re-run against the
+    // current day; the same work is cheap the second time because the
+    // geocoded coordinates have already been persisted.
+    if (!_sectionsEquivalent(_day.sections, daySnapshot.sections)) {
+      debugPrint('DropsheetProvider: job-list sync raced a local edit — '
+          'discarding stale pass and re-running');
+      _scheduleJobListSync();
+      return;
+    }
+
     await _save(daySnapshot.copyWith(sections: nextSections),
         skipIfUnchanged: true);
   }
@@ -564,19 +633,29 @@ class DropsheetProvider extends ChangeNotifier {
   /// When [existingTask] is supplied, geocoded coordinates, the user's
   /// manually adjusted [DropsheetTask.startTime], and any user-edited
   /// `offloadAddress` are preserved.
+  ///
+  /// Set [manual] for a task the user built in the editor and linked to a
+  /// job-list item by hand. Such a task keeps the type the user chose (and
+  /// its `dynamicTypeId`) instead of adopting the type the job-list mapping
+  /// implies, and is re-stamped as hand-built so later passes keep treating
+  /// it that way — see [DropsheetTask.isUserCreatedJobListTask].
   static DropsheetTask _buildJobListTask(
     JobListItem item,
     JobTypeProvider jtp, {
     DropsheetTask? existingTask,
+    bool manual = false,
   }) {
     // Two-stop job types (e.g. trailer towing, furniture moves) must render as
     // a furnitureMove dropsheet task — it is the only task type that carries a
     // loading + offloading address and two routing stops. Force the mapping so
     // a two-stop job never collapses to a single-stop collection/custom task.
     final isTwoStop = jtp.hasTwoStops(item.jobTypeId);
-    final taskType = isTwoStop
+    final derivedType = isTwoStop
         ? DropsheetTaskType.furnitureMove
         : DropsheetTaskType.fromKey(jtp.dropsheetTaskTypeKey(item.jobTypeId));
+    // The user picked the type for a hand-built task; never override it.
+    final taskType =
+        manual && existingTask != null ? existingTask.type : derivedType;
     final label = jtp.getJobTypeLabel(item.jobTypeId);
 
     // Address: prefer area unless it is a map link (mirrors _addressForJobListItem).
@@ -657,11 +736,25 @@ class DropsheetProvider extends ChangeNotifier {
         ? (existingTask?.typeData['offloadLng'] as num?)?.toDouble()
         : null;
 
+    // Once the user has edited this task by hand, their wording wins over the
+    // regenerated text — otherwise the next job-list change would silently
+    // revert every field they typed. Everything else in `typeData` still
+    // refreshes, so the map, PDF and route planner keep current job-list data.
+    // A field the user blanked falls back to the generated value.
+    final userEdited = existingTask?.hasUserEdits == true;
+    String keep(String? edited, String generated) =>
+        userEdited && edited != null && edited.trim().isNotEmpty
+            ? edited
+            : generated;
+
     // Build type-specific typeData (matches dialog setState block).
     final typeData = <String, dynamic>{
       'jobListItemId': item.id,
       'client': item.client,
-      'address': address,
+      // The editor writes the collection address here; keep the user's
+      // version so it stays consistent with the task's `location` field and
+      // with the Maps link built from it.
+      'address': keep(existingTask?.typeData['address'] as String?, address),
       'jobType': item.jobTypeId,
       'jobTypeLabel': label,
       if (item.area.isNotEmpty) 'area': item.area,
@@ -669,7 +762,17 @@ class DropsheetProvider extends ChangeNotifier {
       if (item.invoice.isNotEmpty) 'invoice': item.invoice,
       if (item.specialInstructions.isNotEmpty)
         'specialInstructions': item.specialInstructions,
-      '_jlFp': _jobListTaskFingerprint(item),
+      DropsheetTask.kJobListFingerprintKey: _jobListTaskFingerprint(item),
+      // Carry the ownership + user-edit markers across the rebuild, or the
+      // task would silently become sync-managed on its first refresh and the
+      // next pass could delete or reword it.
+      if (manual) DropsheetTask.kJobListManualKey: true,
+      if (existingTask?.hasUserEdits == true)
+        DropsheetTask.kUserEditedKey: true,
+      // A hand-built task may belong to a user-defined ("dynamic") task type;
+      // that id lives only in typeData, so it must be carried over too.
+      if (manual && existingTask?.typeData['dynamicTypeId'] != null)
+        'dynamicTypeId': existingTask!.typeData['dynamicTypeId'],
       if (lat != null) 'lat': lat,
       if (lng != null) 'lng': lng,
       if (isTwoStopTask) ...{
@@ -686,13 +789,16 @@ class DropsheetProvider extends ChangeNotifier {
     return DropsheetTask(
       id: existingTask?.id ?? 't_jl_${item.id}',
       type: taskType,
-      job: '$typeLabel: $clientName',
-      details: item.specialInstructions,
+      job: keep(existingTask?.job, '$typeLabel: $clientName'),
+      details: keep(existingTask?.details, item.specialInstructions),
       startTime: existingTask?.startTime ?? autoTime,
-      location: address,
-      contact: clientName,
-      tel: tel,
+      location: keep(existingTask?.location, address),
+      contact: keep(existingTask?.contact, clientName),
+      tel: keep(existingTask?.tel, tel),
       sourceJobListItemId: item.id,
+      // Never derived from the job-list item, so it must always survive a
+      // rebuild — it was previously dropped on every re-sync.
+      serviceTimeMinutes: existingTask?.serviceTimeMinutes,
       typeData: typeData,
     );
   }
@@ -728,7 +834,7 @@ class DropsheetProvider extends ChangeNotifier {
     if (v.isEmpty) return false;
     return v.startsWith('http://') ||
         v.startsWith('https://') ||
-        v.contains('clm-maps.web.app/map/') ||
+        MapLinkService.containsShareUrl(v) ||
         v.contains('google.com/maps') ||
         v.contains('maps.app.goo.gl') ||
         v.contains('goo.gl/maps');
@@ -762,12 +868,92 @@ class DropsheetProvider extends ChangeNotifier {
   /// When [jobs] is provided we skip the one-off Firestore read and use
   /// the caller's pre-fetched list (the auto-sync path passes the live
   /// schedule stream snapshot).
-  Future<void> syncFromSchedule({List<Job>? jobs}) async {
+  ///
+  /// Refuses to touch a historical day (see [isHistorical]) unless [force]
+  /// is set — the UI only sets it after the user confirms they really want
+  /// to overwrite an archived sheet. Returns `false` when the sync was
+  /// skipped for that reason so the caller can say so.
+  Future<bool> syncFromSchedule({List<Job>? jobs, bool force = false}) async {
+    if (isHistorical(_date) && !force) {
+      debugPrint('DropsheetProvider: skipped schedule sync for archived '
+          '${DropsheetDay.docIdFor(_date)}');
+      return false;
+    }
     final fs = FirestoreService();
     final scheduleJobs = jobs ?? await fs.fetchJobsForDate(_date);
     final distributors = await _resolveDistributors(fs);
     final synced = _computeSyncedDay(_day, scheduleJobs, distributors);
     await _save(synced, skipIfUnchanged: true);
+    // Name the street corner of any new or moved drop-off point.
+    unawaited(resolveIntersections());
+    return true;
+  }
+
+  Future<DropsheetDay>? _intersectionsInFlight;
+
+  /// Looks up the nearest street intersection ("Voortrekker Rd & Durban Rd")
+  /// for every point-only distributor task (no work-area polygons — see
+  /// [DropsheetTask.kPointOnlyKey]) whose point has none yet, so the printed
+  /// sheet says where to stop instead of only naming the work area.
+  ///
+  /// Names come from OpenStreetMap (Overpass) in one batched query and are
+  /// stored in the task's typeData against the point they describe, so each
+  /// point is resolved once. Returns the day with the names applied. On a
+  /// historical day the names are returned for printing but never saved —
+  /// the archived sheet stays exactly as it was run. Best-effort: when the
+  /// map servers don't answer, the day comes back unchanged.
+  Future<DropsheetDay> resolveIntersections() => _intersectionsInFlight ??=
+      _resolveIntersections().whenComplete(() => _intersectionsInFlight = null);
+
+  Future<DropsheetDay> _resolveIntersections() async {
+    bool needsName(DropsheetTask t) =>
+        t.wantsIntersection && t.pointKey != null && !t.hasCurrentIntersection;
+
+    final points = <(double, double)>[
+      for (final s in _day.sections)
+        for (final t in s.tasks)
+          if (needsName(t))
+            (
+              (t.typeData['lat'] as num).toDouble(),
+              (t.typeData['lng'] as num).toDouble(),
+            ),
+    ];
+    if (points.isEmpty) return _day;
+
+    final date = _date;
+    Map<String, String?> names;
+    try {
+      names = await place_names.resolveIntersections(points);
+    } catch (e) {
+      debugPrint('DropsheetProvider: intersection lookup failed: $e');
+      return _day;
+    }
+    if (names.isEmpty ||
+        DropsheetDay.docIdFor(date) != DropsheetDay.docIdFor(_date)) {
+      return _day;
+    }
+
+    // Apply to the live day — it may have changed while Overpass answered.
+    var changed = false;
+    final sections = _day.sections.map((s) {
+      final tasks = s.tasks.map((t) {
+        if (!needsName(t)) return t;
+        final key = t.pointKey!;
+        if (!names.containsKey(key)) return t;
+        changed = true;
+        return t.copyWith(typeData: {
+          ...t.typeData,
+          DropsheetTask.kIntersectionKey: names[key] ?? '',
+          DropsheetTask.kIntersectionAtKey: key,
+        });
+      }).toList();
+      return s.copyWith(tasks: tasks);
+    }).toList();
+    if (!changed) return _day;
+    final updated = _day.copyWith(sections: sections);
+    if (isHistorical(_date)) return updated;
+    await _save(updated);
+    return updated;
   }
 
   /// One-shot sync of an **arbitrary** dropsheet date that the current
@@ -787,6 +973,14 @@ class DropsheetProvider extends ChangeNotifier {
     final ds = service ?? DropsheetService();
     final fs = firestoreService ?? FirestoreService();
     final normalised = DateTime(date.year, date.month, date.day);
+    // Never rewrite a past dropsheet. A schedule edit made today (deleting
+    // an old job, dragging one off a past date) must not reshuffle what
+    // that day's drivers actually ran — see [isHistorical].
+    if (isHistorical(normalised)) {
+      debugPrint('[DropsheetProvider] syncDateOneShot skipped archived '
+          '${DropsheetDay.docIdFor(normalised)}');
+      return;
+    }
     try {
       final day = await ds.getDay(normalised);
       final jobs = await fs.fetchJobsForDate(normalised);
@@ -807,7 +1001,7 @@ class DropsheetProvider extends ChangeNotifier {
             now.difference(cachedAt) <= _distributorCacheTtl) {
           dists = cached;
         } else {
-          dists = await fs.fetchDistributorsOnce();
+          dists = await fs.fetchDistributorsOnce(fromServer: true);
           _syncDistributorsCache = dists;
           _syncDistributorsCacheAt = now;
         }
@@ -830,6 +1024,14 @@ class DropsheetProvider extends ChangeNotifier {
   /// Pure helper that returns a new [DropsheetDay] with Pass-1 updates +
   /// Pass-2 appends applied. Shared by [syncFromSchedule] (live `_day`)
   /// and [syncDateOneShot] (arbitrary date fetched off-stream).
+  @visibleForTesting
+  static DropsheetDay computeSyncedDayForTest(
+    DropsheetDay day,
+    List<Job> scheduleJobs,
+    List<Distributor> distributors,
+  ) =>
+      _computeSyncedDay(day, scheduleJobs, distributors);
+
   static DropsheetDay _computeSyncedDay(
     DropsheetDay day,
     List<Job> scheduleJobs,
@@ -842,44 +1044,129 @@ class DropsheetProvider extends ChangeNotifier {
     // recompute it 2-3 times per job.
     final jobById = <String, Job>{for (final j in scheduleJobs) j.id: j};
     final workAreaByJobId = <String, String>{
-      for (final j in scheduleJobs) j.id: j.workingAreas.join(', '),
+      for (final j in scheduleJobs) j.id: _workAreaText(j),
     };
+    // Work-area fallback (a job removed and recreated for the same area).
+    // Only names that belong to exactly one job qualify: point jobs are named
+    // after their street corner, so several distributors can share a name,
+    // and matching on it would hand one distributor's drop-off to another.
     final jobByWorkArea = <String, Job>{};
+    final sharedWorkAreas = <String>{};
     for (final j in scheduleJobs) {
       final wa = workAreaByJobId[j.id]!;
-      if (wa.isNotEmpty) jobByWorkArea[wa] = j;
+      if (wa.isEmpty) continue;
+      if (jobByWorkArea.containsKey(wa)) sharedWorkAreas.add(wa);
+      jobByWorkArea[wa] = j;
     }
+    sharedWorkAreas.forEach(jobByWorkArea.remove);
 
     // Track which schedule job IDs are claimed by existing tasks.
     final consumedJobIds = <String>{};
 
-    // ── Pass 1: update existing drop-off tasks in-place ───────────────────
-    // (Mandatory tasks and non-dropOff tasks are always kept.)
-    final updatedSections = day.sections.map((section) {
+    Job? matchFor(DropsheetTask task) {
+      final jobId = task.typeData['distributorJobId'] as String?;
+      if (jobId == null) return null;
+      // Match by job ID first, then by work area.
+      final byJob = jobById[jobId];
+      if (byJob != null) return byJob;
+      final wa = task.typeData['workArea'] as String?;
+      return (wa != null && wa.isNotEmpty) ? jobByWorkArea[wa] : null;
+    }
+
+    // A driver can't be dropped off: when a job's distributor has the Driver
+    // role, the job becomes a Distribute task on that driver's own section.
+    final sectionIdByDriverName = <String, String>{
+      for (final s in day.sections)
+        if (s.id != kUnassignedSectionId && s.driverName.trim().isNotEmpty)
+          _normaliseName(s.driverName): s.id,
+    };
+    // A distributor missing from [distributors] (list still loading, or a
+    // partial cache on another client) says nothing about their role — keep
+    // the task's current type instead of flipping it back to a drop-off.
+    DropsheetTaskType typeFor(Job job, DropsheetTaskType current) {
+      final dist = byId[job.distributorId];
+      if (dist == null) return current;
+      return dist.role == DistributorRole.driver
+          ? DropsheetTaskType.distribute
+          : DropsheetTaskType.dropOff;
+    }
+
+    String? ownSectionIdFor(Job job) {
+      final dist = byId[job.distributorId];
+      if (dist == null || dist.role != DistributorRole.driver) return null;
+      return sectionIdByDriverName[_normaliseName(dist.name)];
+    }
+
+    // One job-wide task per schedule job. A duplicate appears when the
+    // dispatcher adds a drop-off by hand for a distributor the sync already
+    // placed in "Unassigned stops" — both rows then showed the same name.
+    // Keep the copy on a driver (it is the one being worked), else the first;
+    // per-area pinned drop-offs are deliberate splits and never collapse.
+    final keeperByJobId = <String, String>{};
+    for (final section in day.sections) {
+      final onDriver = section.id != kUnassignedSectionId;
+      for (final task in section.tasks) {
+        if (!_isScheduleSyncedType(task.type)) continue;
+        if (task.typeData['workAreaPin'] == true) continue;
+        final match = matchFor(task);
+        if (match == null) continue;
+        final current = keeperByJobId[match.id];
+        if (current == null || (onDriver && current.startsWith('u:'))) {
+          keeperByJobId[match.id] = '${onDriver ? 'd' : 'u'}:${task.id}';
+        }
+      }
+    }
+
+    // Distribute tasks found in "Unassigned stops" whose driver has a
+    // section — moved there after Pass 1, keyed by target section id.
+    final movesBySectionId = <String, List<DropsheetTask>>{};
+
+    // ── Pass 1: update existing drop-off / distribute tasks in-place ──────
+    // (Mandatory tasks and other task types are always kept.)
+    var updatedSections = day.sections.map((section) {
       final updatedTasks = <DropsheetTask>[];
       for (final task in section.tasks) {
-        if (task.type != DropsheetTaskType.dropOff) {
+        if (task.type == DropsheetTaskType.pickUp) {
+          updatedTasks.add(_refreshPickUp(task, jobById, byId));
+          continue;
+        }
+        if (!_isScheduleSyncedType(task.type)) {
           updatedTasks.add(task);
           continue;
         }
         final jobId = task.typeData['distributorJobId'] as String?;
         if (jobId == null) {
-          // Drop-off task that wasn't seeded from a schedule job — keep.
+          // Task that wasn't seeded from a schedule job — keep.
           updatedTasks.add(task);
           continue;
         }
 
-        // Match by job ID first, then by work area.
-        Job? match = jobById[jobId];
-        if (match == null) {
-          final wa = task.typeData['workArea'] as String?;
-          if (wa != null && wa.isNotEmpty) match = jobByWorkArea[wa];
-        }
+        final match = matchFor(task);
         if (match == null) {
           // Job moved to another date or was deleted — drop the task so
           // the dropsheet always reflects the current schedule.
           continue;
         }
+        if (task.typeData['workAreaPin'] != true &&
+            keeperByJobId[match.id]?.substring(2) != task.id) {
+          // Duplicate of a task kept elsewhere on the sheet.
+          continue;
+        }
+
+        // Notes (`details`) are the user's — the sync never writes them. An
+        // older build's auto-filled distributor name is left in place and
+        // hidden by `DropsheetTask.notes`: rewriting it here would make old
+        // and new clients overwrite each other on every snapshot.
+        // Once reworded in the editor, the label / location / contact are the
+        // user's too; a blanked field falls back to the generated value.
+        final userEdited = task.hasUserEdits;
+        String keep(String edited, String generated) =>
+            userEdited && edited.trim().isNotEmpty ? edited : generated;
+
+        // Drop-off ↔ distribute follows the distributor's current role. The
+        // label names the task type, so it is regenerated on a switch.
+        final type = typeFor(match, task.type);
+        final typeChanged = type != task.type;
 
         // Per-area drop-off (added manually for a specific work area): keep its
         // pinned work area + coordinate intact; only refresh the distributor's
@@ -890,14 +1177,18 @@ class DropsheetProvider extends ChangeNotifier {
           final dist = byId[match.distributorId];
           final name = dist?.name ?? match.distributorId;
           final phone = dist?.phone1 ?? '';
+          final pinnedArea = (task.typeData['workArea'] as String?) ?? '';
           final td = Map<String, dynamic>.from(task.typeData)
             ..['distributorJobId'] = match.id
             ..['distributorId'] = match.distributorId
-            ..['distributorName'] = name;
+            ..['distributorName'] = name
+            ..[DropsheetTask.kPointOnlyKey] =
+                DropsheetTask.isPointOnlyJob(match);
           updatedTasks.add(task.copyWith(
-            details: name,
-            contact: name,
-            tel: phone,
+            type: type,
+            job: typeChanged ? _scheduleTaskLabel(type, pinnedArea) : null,
+            contact: keep(task.contact, name),
+            tel: keep(task.tel, phone),
             typeData: td,
           ));
           continue;
@@ -907,7 +1198,7 @@ class DropsheetProvider extends ChangeNotifier {
         final dist = byId[match.distributorId];
         final name = dist?.name ?? match.distributorId;
         final phone = dist?.phone1 ?? '';
-        final wa = workAreaByJobId[match.id] ?? match.workingAreas.join(', ');
+        final wa = workAreaByJobId[match.id] ?? _workAreaText(match);
 
         // Rebuild typeData, preserving any custom drop-off lat/lng the user
         // placed unless the task migrated to a different job.
@@ -915,7 +1206,8 @@ class DropsheetProvider extends ChangeNotifier {
           ..['distributorJobId'] = match.id
           ..['distributorId'] = match.distributorId
           ..['distributorName'] = name
-          ..['workArea'] = wa;
+          ..['workArea'] = wa
+          ..[DropsheetTask.kPointOnlyKey] = DropsheetTask.isPointOnlyJob(match);
         if (match.dropOffPoint != null) {
           td['lat'] = match.dropOffPoint!.latitude;
           td['lng'] = match.dropOffPoint!.longitude;
@@ -925,24 +1217,64 @@ class DropsheetProvider extends ChangeNotifier {
           td.remove('lng');
         }
 
-        updatedTasks.add(task.copyWith(
-          job: wa.isEmpty ? 'Drop off' : 'Drop off: $wa',
-          details: name,
-          location: wa,
-          contact: name,
-          tel: phone,
+        final generatedLabel = _scheduleTaskLabel(type, wa);
+        // Builds without the distribute type relabel it "Drop off: …" on
+        // every sync. Accept that wording (it is displayed as "Distribute")
+        // rather than rewriting it back, so mixed clients stop fighting.
+        final legacyLabel = type == DropsheetTaskType.distribute &&
+            task.job == _scheduleTaskLabel(DropsheetTaskType.dropOff, wa);
+        final updated = task.copyWith(
+          type: type,
+          job: typeChanged
+              ? generatedLabel
+              : (legacyLabel ? task.job : keep(task.job, generatedLabel)),
+          location: keep(task.location, wa),
+          contact: keep(task.contact, name),
+          tel: keep(task.tel, phone),
           typeData: td,
-        ));
+        );
+
+        final ownSectionId = ownSectionIdFor(match);
+        if (section.id == kUnassignedSectionId && ownSectionId != null) {
+          movesBySectionId.putIfAbsent(ownSectionId, () => []).add(updated);
+          continue;
+        }
+        updatedTasks.add(updated);
       }
       return section.copyWith(tasks: updatedTasks);
     }).toList();
 
-    // ── Pass 2: append genuinely new work areas to Unassigned ─────────────
+    // ── Pass 2: add genuinely new work areas ──────────────────────────────
+    // Distribute tasks go straight to their driver's section; everything
+    // else (and drivers without a section yet) lands in Unassigned.
     final newJobs =
         scheduleJobs.where((j) => !consumedJobIds.contains(j.id)).toList();
-    List<DropsheetDriverSection> finalSections = updatedSections;
+    final newUnassigned = <DropsheetTask>[];
     if (newJobs.isNotEmpty) {
       final newTasks = _buildDropOffTasksStatic(newJobs, byId);
+      for (var i = 0; i < newJobs.length; i++) {
+        final ownSectionId = ownSectionIdFor(newJobs[i]);
+        if (ownSectionId != null) {
+          movesBySectionId.putIfAbsent(ownSectionId, () => []).add(newTasks[i]);
+        } else {
+          newUnassigned.add(newTasks[i]);
+        }
+      }
+    }
+
+    if (movesBySectionId.isNotEmpty) {
+      updatedSections = [
+        for (final s in updatedSections)
+          movesBySectionId.containsKey(s.id)
+              ? s.copyWith(
+                  tasks:
+                      _insertBeforeAfternoon(s.tasks, movesBySectionId[s.id]!))
+              : s,
+      ];
+    }
+
+    List<DropsheetDriverSection> finalSections = updatedSections;
+    if (newUnassigned.isNotEmpty) {
       final idx = finalSections.indexWhere((s) => s.id == kUnassignedSectionId);
       if (idx == -1) {
         finalSections = [
@@ -950,7 +1282,7 @@ class DropsheetProvider extends ChangeNotifier {
             id: kUnassignedSectionId,
             driverId: kUnassignedSectionId,
             driverName: 'Unassigned stops',
-            tasks: newTasks,
+            tasks: newUnassigned,
           ),
           ...finalSections,
         ];
@@ -958,8 +1290,8 @@ class DropsheetProvider extends ChangeNotifier {
         finalSections = [
           for (var i = 0; i < finalSections.length; i++)
             i == idx
-                ? finalSections[i]
-                    .copyWith(tasks: [...finalSections[i].tasks, ...newTasks])
+                ? finalSections[i].copyWith(
+                    tasks: [...finalSections[i].tasks, ...newUnassigned])
                 : finalSections[i],
         ];
       }
@@ -1123,6 +1455,74 @@ class DropsheetProvider extends ChangeNotifier {
     return true;
   }
 
+  /// Task types the schedule sync creates and keeps in step with the
+  /// schedule (one per schedule job).
+  static bool _isScheduleSyncedType(DropsheetTaskType t) =>
+      t == DropsheetTaskType.dropOff || t == DropsheetTaskType.distribute;
+
+  static String _scheduleTaskLabel(DropsheetTaskType type, String workArea) {
+    final base = type.displayName;
+    return workArea.isEmpty ? base : '$base: $workArea';
+  }
+
+  /// The job's working areas as one label, without the "To be assigned"
+  /// placeholder — an unnamed point job reads as just "Drop off" (and its
+  /// Location shows the street corner) rather than "Drop off: To be assigned".
+  static String _workAreaText(Job j) => j.workingAreas
+      .map((a) => a.trim())
+      .where((a) => a.isNotEmpty && !DropsheetTask.isPlaceholderArea(a))
+      .join(', ');
+
+  /// Keeps a pick-up in step with its schedule job. Pick-ups are copied from
+  /// a drop-off once (Sync pickups), so without this they kept whatever the
+  /// job said then — "Pick up: To be assigned" long after the job was named,
+  /// and no point-only flag, so no street corner either. Only descriptive
+  /// fields refresh: the pick-up's position, coordinates and any wording the
+  /// user changed stay as they are, and a pick-up whose job is gone is kept.
+  static DropsheetTask _refreshPickUp(DropsheetTask task,
+      Map<String, Job> jobById, Map<String, Distributor> byId) {
+    final job = jobById[task.typeData['distributorJobId']];
+    if (job == null) return task;
+    final pinned = task.typeData['workAreaPin'] == true;
+    final area = pinned
+        ? ((task.typeData['workArea'] as String?) ?? '')
+        : _workAreaText(job);
+    final name = byId[job.distributorId]?.name ??
+        (task.typeData['distributorName'] as String?) ??
+        job.distributorId;
+    final userEdited = task.hasUserEdits;
+    final label = _scheduleTaskLabel(DropsheetTaskType.pickUp, area);
+    return task.copyWith(
+      job: userEdited && task.job.trim().isNotEmpty ? task.job : label,
+      location:
+          userEdited && task.location.trim().isNotEmpty ? task.location : area,
+      typeData: {
+        ...task.typeData,
+        'distributorId': job.distributorId,
+        'distributorName': name,
+        'workArea': area,
+        DropsheetTask.kPointOnlyKey: DropsheetTask.isPointOnlyJob(job),
+      },
+    );
+  }
+
+  static String _normaliseName(String v) =>
+      v.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  /// Inserts [tasks] into a driver's list ahead of the afternoon: before the
+  /// pick-up divider when there is one, else before the trailing Arrive.
+  static List<DropsheetTask> _insertBeforeAfternoon(
+      List<DropsheetTask> existing, List<DropsheetTask> tasks) {
+    var at = existing.indexWhere((t) =>
+        t.type == DropsheetTaskType.leave &&
+        t.typeData['isPickupDivider'] == true);
+    if (at == -1) at = existing.indexWhere(DropsheetTask.isTrailing);
+    if (at == -1) return [...existing, ...tasks];
+    return [...existing.sublist(0, at), ...tasks, ...existing.sublist(at)];
+  }
+
+  /// Builds one schedule-synced task per job, index-aligned with [jobs]:
+  /// a drop-off, or a Distribute task when the distributor is a driver.
   static List<DropsheetTask> _buildDropOffTasksStatic(
       List<Job> jobs, Map<String, Distributor> byId) {
     final out = <DropsheetTask>[];
@@ -1131,13 +1531,15 @@ class DropsheetProvider extends ChangeNotifier {
       final dist = byId[j.distributorId];
       final name = dist?.name ?? j.distributorId;
       final phone = dist?.phone1 ?? '';
-      final wa = j.workingAreas.join(', ');
+      final wa = _workAreaText(j);
+      final type = dist?.role == DistributorRole.driver
+          ? DropsheetTaskType.distribute
+          : DropsheetTaskType.dropOff;
       out.add(
         DropsheetTask(
           id: 't_dropoff_${j.id}_${timestamp}_${out.length}',
-          type: DropsheetTaskType.dropOff,
-          job: wa.isEmpty ? 'Drop off' : 'Drop off: $wa',
-          details: name,
+          type: type,
+          job: _scheduleTaskLabel(type, wa),
           location: wa,
           contact: name,
           tel: phone,
@@ -1146,6 +1548,7 @@ class DropsheetProvider extends ChangeNotifier {
             'distributorId': j.distributorId,
             'distributorName': name,
             'workArea': wa,
+            DropsheetTask.kPointOnlyKey: DropsheetTask.isPointOnlyJob(j),
             if (j.dropOffPoint != null) 'lat': j.dropOffPoint!.latitude,
             if (j.dropOffPoint != null) 'lng': j.dropOffPoint!.longitude,
           },
@@ -1175,7 +1578,7 @@ class DropsheetProvider extends ChangeNotifier {
       id: 't_pickup_${timestamp}_$sequence',
       type: DropsheetTaskType.pickUp,
       job: _pickUpJobLabelFor(dropOff),
-      details: dropOff.details,
+      details: dropOff.notes,
       location: dropOff.location,
       contact: dropOff.contact,
       tel: dropOff.tel,
@@ -1260,13 +1663,18 @@ class DropsheetProvider extends ChangeNotifier {
   /// user manually presses "Sync schedule".
   ///
   /// Pass `null` for [position] to clear the cached coordinate.
+  ///
+  /// Skipped while a historical day is open: moving a pin in the schedule
+  /// today must not rewrite the coordinates, ETAs and cached route stored
+  /// on an archived sheet.
   Future<void> refreshDropOffCoords(String jobId, dynamic position) async {
+    if (isHistorical(_date)) return;
     var changed = false;
     var routeInvalidatedSectionIds = <String>{};
     final nextSections = _day.sections.map((s) {
       var sectionChanged = false;
       final tasks = s.tasks.map((t) {
-        if (t.type != DropsheetTaskType.dropOff) return t;
+        if (!_isScheduleSyncedType(t.type)) return t;
         if (t.typeData['distributorJobId'] != jobId) return t;
         final td = Map<String, dynamic>.from(t.typeData);
         if (position == null) {
@@ -1306,7 +1714,10 @@ class DropsheetProvider extends ChangeNotifier {
   /// Optimistically refresh the cached `lat`/`lng` in any pick-up task
   /// linked to [jobId] so the route optimiser and map view stop reading the
   /// stale position immediately after a `Job.pickUpPoint` change.
+  ///
+  /// Skipped for historical days, same as [refreshDropOffCoords].
   Future<void> refreshPickUpCoords(String jobId, dynamic position) async {
+    if (isHistorical(_date)) return;
     var changed = false;
     var routeInvalidatedSectionIds = <String>{};
     final nextSections = _day.sections.map((s) {
@@ -1397,6 +1808,7 @@ class DropsheetProvider extends ChangeNotifier {
       return s.copyWith(tasks: tasks);
     }).toList();
     await _save(_day.copyWith(sections: next));
+    if (newTask.isDistributorTask) unawaited(resolveIntersections());
   }
 
   Future<void> updateTask(String sectionId, DropsheetTask task) async {
@@ -1407,6 +1819,7 @@ class DropsheetProvider extends ChangeNotifier {
       );
     }).toList();
     await _save(_day.copyWith(sections: next));
+    if (task.isDistributorTask) unawaited(resolveIntersections());
   }
 
   /// Updates the geocoded coordinates stored in a task's typeData.
@@ -1518,8 +1931,8 @@ class DropsheetProvider extends ChangeNotifier {
         final newData = Map<String, dynamic>.from(task.typeData)
           ..['loadingEta'] = loadEta
           ..['offloadEta'] = offEta
-          ..['eta'] = offEta;
-        updatedTasks.add(task.copyWith(startTime: offEta, typeData: newData));
+          ..['eta'] = loadEta;
+        updatedTasks.add(task.copyWith(startTime: loadEta, typeData: newData));
       } else {
         final legS = (task.typeData['legDurationS'] as num?)?.toInt() ?? 0;
         if (legS == 0) {
@@ -1632,7 +2045,7 @@ class DropsheetProvider extends ChangeNotifier {
         clock = clock.subtract(Duration(seconds: loadLegS));
         if (loadLegS != 0 || offLegS != 0) hasLegs = true;
         etaUpdates[task.id] = {
-          'eta': offEta,
+          'eta': loadEta,
           'offloadEta': offEta,
           'loadingEta': loadEta,
         };
@@ -1651,7 +2064,8 @@ class DropsheetProvider extends ChangeNotifier {
     final updatedTasks = section.tasks.map((task) {
       // Always pin the Arrive task's own time/ETA to the target.
       if (task.type == DropsheetTaskType.arrive) {
-        final td = Map<String, dynamic>.from(task.typeData)..['eta'] = arriveTime;
+        final td = Map<String, dynamic>.from(task.typeData)
+          ..['eta'] = arriveTime;
         return task.copyWith(startTime: arriveTime, typeData: td);
       }
       if (!applyEtas) return task;
@@ -1763,7 +2177,9 @@ class DropsheetProvider extends ChangeNotifier {
   /// `arrivalByTaskKey` keys are `<taskId>__<role>` where role matches
   /// `DropsheetTaskRole.name` ("single" / "loading" / "offload"). For
   /// single-stop tasks the `__single` arrival is used as the task's
-  /// `startTime`; for furniture-move tasks the offload arrival wins.
+  /// `startTime`; for furniture-move tasks it is the loading arrival — when
+  /// the driver must be at the first address. The offload arrival is kept
+  /// in `typeData['offloadEta']`.
   Future<void> applyOptimizedRoute({
     required String sectionId,
     required List<String> taskOrder,
@@ -1807,7 +2223,7 @@ class DropsheetProvider extends ChangeNotifier {
         final singleEta = arrivalByTaskKey['${id}__single'];
         final offEta = arrivalByTaskKey['${id}__offload'];
         final loadEta = arrivalByTaskKey['${id}__loading'];
-        final taskEta = singleEta ?? offEta ?? loadEta;
+        final taskEta = singleEta ?? loadEta ?? offEta;
         if (loadEta != null) newTypeData['loadingEta'] = loadEta;
         if (offEta != null) newTypeData['offloadEta'] = offEta;
         if (taskEta != null) newTypeData['eta'] = taskEta;
@@ -1815,7 +2231,8 @@ class DropsheetProvider extends ChangeNotifier {
         final legSingle = legByTaskKey['${id}__single'];
         final legOff = legByTaskKey['${id}__offload'];
         final legLoad = legByTaskKey['${id}__loading'];
-        final leg = legSingle ?? legOff ?? legLoad;
+        // The leg that brings the driver to this task.
+        final leg = legSingle ?? legLoad ?? legOff;
         if (leg != null) {
           newTypeData['legDistanceM'] = leg['distanceMeters'];
           newTypeData['legDurationS'] = leg['durationSeconds'];

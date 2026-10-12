@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/styled_polygon.dart';
 import '../models/tab_item.dart';
+import '../providers/te_letterbox_check_provider.dart';
 import '../providers/te_tabs_provider.dart';
 import '../services/file_manager.dart';
 import '../services/point_in_polygon.dart';
+import 'te_letterbox_comparison_panel.dart';
 
 class TEProcessing extends riverpod.ConsumerStatefulWidget {
   const TEProcessing({super.key});
@@ -31,6 +33,8 @@ class _TEProcessingState extends riverpod.ConsumerState<TEProcessing> {
               waypoints: [],
               targetPolygons: targetPolygons,
             ));
+        // The letterbox comparison picks the new grouping up on its own:
+        // [TELetterboxCheckProvider] rechecks any tab whose data changed.
       }
     } finally {
       if (mounted) setState(() => _processing = false);
@@ -42,6 +46,8 @@ class _TEProcessingState extends riverpod.ConsumerState<TEProcessing> {
     final currentTab = ref.watch(teTabsRiverpod).currentTab;
     final tabData = ref.watch(teTabsRiverpod).tabs[currentTab];
     final List<TETargetPolygon> polygons = tabData.targetPolygons;
+    final checker = ref.watch(teLetterboxCheckRiverpod);
+    final check = tabData.letterboxCheck;
 
     // Count waypoints inside any polygon vs outside all polygons.
     final totalWaypoints = tabData.waypoints.length;
@@ -122,10 +128,18 @@ class _TEProcessingState extends riverpod.ConsumerState<TEProcessing> {
                 ],
               ),
             ),
+          // ── Letterbox comparison ────────────────────────────────────────
+          if (hasResults)
+            TELetterboxComparisonSummary(
+              check: check,
+              polygons: polygons,
+              busy: checker.isBusy(tabData),
+            ),
           // ── Per-polygon breakdown ───────────────────────────────────────
           ...polygons.asMap().entries.map(
             (entry) {
               final polygon = entry.value;
+              final comparison = check.resultFor(polygon);
               return Row(
                 spacing: 6,
                 children: [
@@ -136,15 +150,25 @@ class _TEProcessingState extends riverpod.ConsumerState<TEProcessing> {
                         borderRadius: BorderRadius.circular(10),
                       ),
                       padding: const EdgeInsets.all(10),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(polygon.name,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w500)),
-                          Text(polygon.waypoints.length.toString(),
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w500)),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Expanded(
+                                child: Text(polygon.name,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.w500)),
+                              ),
+                              Text(polygon.waypoints.length.toString(),
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w500)),
+                            ],
+                          ),
+                          if (comparison != null)
+                            TELetterboxComparisonLine(comparison),
                         ],
                       ),
                     ),

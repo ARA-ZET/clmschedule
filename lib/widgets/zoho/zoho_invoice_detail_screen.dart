@@ -1,10 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
+import 'package:printing/printing.dart';
 
+import '../../models/invoice_message_subject.dart';
 import '../../models/zoho_invoice.dart';
+import '../../providers/zoho_customers_provider.dart';
 import '../../providers/zoho_invoices_provider.dart';
+import '../../utils/save_file.dart'
+    if (dart.library.io) '../../utils/save_file_stub.dart';
+import 'edit_invoice_dialog.dart';
+import 'invoice_share.dart';
 import 'zoho_status_chip.dart';
+import 'zoho_table.dart';
 
 /// Invoice detail with the three write actions: mark sent, void, record
 /// payment. Each re-reads the invoice from Zoho afterwards rather than
@@ -12,7 +20,11 @@ import 'zoho_status_chip.dart';
 class ZohoInvoiceDetailScreen extends riverpod.ConsumerStatefulWidget {
   final String invoiceId;
 
-  const ZohoInvoiceDetailScreen({super.key, required this.invoiceId});
+  /// Zoho Books organisation id — see `ZohoOrg`.
+  final String orgId;
+
+  const ZohoInvoiceDetailScreen(
+      {super.key, required this.orgId, required this.invoiceId});
 
   @override
   riverpod.ConsumerState<ZohoInvoiceDetailScreen> createState() =>
@@ -24,8 +36,42 @@ class _ZohoInvoiceDetailScreenState
   bool _isBusy = false;
   String? _actionError;
 
+  /// The one-off fetch used when this screen is opened without the invoice list
+  /// having been loaded — from the Job List, say.
+  ///
+  /// Held in state rather than created in `build()`. Calling `reloadInvoice()`
+  /// inline in a `FutureBuilder`'s `future:` starts a fresh request on every
+  /// rebuild, and since that call notifies listeners, each response triggers
+  /// the next rebuild: an endless spinner and an endless stream of requests
+  /// against a rate-limited API.
+  Future<ZohoInvoice>? _coldLoad;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final provider = ref.read(zohoInvoicesRiverpod(widget.orgId));
+      if (provider.getById(widget.invoiceId) == null) {
+        setState(() => _coldLoad = provider.reloadInvoice(widget.invoiceId));
+      }
+    });
+  }
+
+  /// Zoho's flat, square-cornered primary action styling.
+  static ButtonStyle _actionStyle(Color background) {
+    return FilledButton.styleFrom(
+      backgroundColor: background,
+      foregroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+    );
+  }
+
   /// Run a write action, surfacing both progress and failure.
-  Future<void> _run(Future<void> Function() action, String successMessage) async {
+  Future<void> _run(
+      Future<void> Function() action, String successMessage) async {
     setState(() {
       _isBusy = true;
       _actionError = null;
@@ -45,6 +91,88 @@ class _ZohoInvoiceDetailScreenState
       if (mounted) setState(() => _actionError = e.toString());
     } finally {
       if (mounted) setState(() => _isBusy = false);
+    }
+  }
+
+  /// Open Zoho's own rendering of the invoice in the system print/preview
+  /// sheet — same template Zoho Books prints, so what you see here is what
+  /// the customer receives.
+  /// [download] saves the file directly with the correct name; otherwise the
+  /// print dialog opens.
+  Future<void> _printInvoice(ZohoInvoice invoice,
+      {bool download = false}) async {
+    setState(() {
+      _isBusy = true;
+      _actionError = null;
+    });
+    try {
+      final provider = ref.read(zohoInvoicesRiverpod(widget.orgId));
+      final bytes = await provider.getInvoicePdf(invoice.invoiceId);
+      if (!mounted) return;
+      final fileName = invoiceFileName(InvoiceMessageSubject.fromZoho(invoice));
+      if (download) {
+        // Prefer the OS Save-As dialog so the file lands in the user's own
+        // folder. Falls back to an ordinary download where the File System
+        // Access API is unavailable (Firefox, Safari).
+        //
+        // Either way the filename is set explicitly — unlike layoutPdf, which
+        // prints a blob in an iframe and lets Chrome name the output after the
+        // page title ("CLM Schedule").
+        final saved = await saveFileWithPicker(
+          suggestedName: '$fileName.pdf',
+          bytes: bytes,
+        );
+        if (!saved) {
+          await Printing.sharePdf(bytes: bytes, filename: '$fileName.pdf');
+        }
+      } else {
+        await Printing.layoutPdf(
+          onLayout: (_) async => bytes,
+          name: fileName, // honoured on native; ignored on web
+        );
+      }
+    } catch (e) {
+      if (mounted) setState(() => _actionError = 'Could not load PDF: $e');
+    } finally {
+      if (mounted) setState(() => _isBusy = false);
+    }
+  }
+
+  Future<void> _editInvoice(ZohoInvoice invoice) async {
+    // The list response carries line items, but re-read first so the editor
+    // starts from Zoho's current state rather than a possibly stale copy.
+    setState(() {
+      _isBusy = true;
+      _actionError = null;
+    });
+    ZohoInvoice fresh;
+    try {
+      fresh = await ref
+          .read(zohoInvoicesRiverpod(widget.orgId))
+          .reloadInvoice(invoice.invoiceId);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isBusy = false;
+          _actionError = 'Could not load invoice for editing: $e';
+        });
+      }
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _isBusy = false);
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => EditInvoiceDialog(orgId: widget.orgId, invoice: fresh),
+    );
+    if (saved == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Invoice updated'),
+          backgroundColor: Colors.green,
+        ),
+      );
     }
   }
 
@@ -74,7 +202,9 @@ class _ZohoInvoiceDetailScreenState
 
     if (confirmed != true) return;
     await _run(
-      () => ref.read(zohoInvoicesRiverpod).voidInvoice(invoice.invoiceId),
+      () => ref
+          .read(zohoInvoicesRiverpod(widget.orgId))
+          .voidInvoice(invoice.invoiceId),
       'Invoice voided',
     );
   }
@@ -87,7 +217,7 @@ class _ZohoInvoiceDetailScreenState
     if (amount == null) return;
 
     await _run(
-      () => ref.read(zohoInvoicesRiverpod).recordPayment(
+      () => ref.read(zohoInvoicesRiverpod(widget.orgId)).recordPayment(
             invoiceId: invoice.invoiceId,
             customerId: invoice.customerId,
             amount: amount,
@@ -98,7 +228,7 @@ class _ZohoInvoiceDetailScreenState
 
   @override
   Widget build(BuildContext context) {
-    final provider = ref.watch(zohoInvoicesRiverpod);
+    final provider = ref.watch(zohoInvoicesRiverpod(widget.orgId));
     final invoice = provider.getById(widget.invoiceId);
     final currency = NumberFormat.currency(symbol: 'R ', decimalDigits: 2);
     final dateFormat = DateFormat('d MMM y');
@@ -107,18 +237,40 @@ class _ZohoInvoiceDetailScreenState
       // Reached via a deep link or after the list was filtered out from under
       // us — fetch it on its own rather than showing an empty screen.
       return Scaffold(
-        appBar: AppBar(title: const Text('Invoice')),
+        backgroundColor: ZohoPalette.pageBackground,
+        appBar: AppBar(
+          title: const Text('Invoice'),
+          backgroundColor: ZohoPalette.surface,
+          foregroundColor: ZohoPalette.textPrimary,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          shape: const Border(bottom: BorderSide(color: ZohoPalette.border)),
+        ),
         body: FutureBuilder<ZohoInvoice>(
-          future: provider.reloadInvoice(widget.invoiceId),
+          future: _coldLoad,
           builder: (context, snapshot) {
             if (snapshot.hasError) {
               return Center(
                 child: Padding(
                   padding: const EdgeInsets.all(24),
-                  child: Text(
-                    'Could not load invoice: ${snapshot.error}',
-                    style: const TextStyle(color: Colors.red),
-                    textAlign: TextAlign.center,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Could not load invoice: ${snapshot.error}',
+                        style: const TextStyle(color: Colors.red),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 12),
+                      FilledButton(
+                        onPressed: () => setState(() {
+                          _coldLoad = ref
+                              .read(zohoInvoicesRiverpod(widget.orgId))
+                              .reloadInvoice(widget.invoiceId);
+                        }),
+                        child: const Text('Retry'),
+                      ),
+                    ],
                   ),
                 ),
               );
@@ -135,15 +287,26 @@ class _ZohoInvoiceDetailScreenState
     final canPay = invoice.balance > 0 &&
         invoice.status != ZohoInvoiceStatus.isVoid &&
         invoice.status != ZohoInvoiceStatus.draft;
+    // Zoho rejects edits to void invoices, and editing a settled one would
+    // desync the recorded payment from the total.
+    final canEdit = invoice.status != ZohoInvoiceStatus.isVoid &&
+        invoice.status != ZohoInvoiceStatus.paid;
 
     return Scaffold(
+      backgroundColor: ZohoPalette.pageBackground,
       appBar: AppBar(
         title: Text(invoice.invoiceNumber.isNotEmpty
             ? invoice.invoiceNumber
             : 'Invoice'),
+        backgroundColor: ZohoPalette.surface,
+        foregroundColor: ZohoPalette.textPrimary,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        shape: const Border(bottom: BorderSide(color: ZohoPalette.border)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(Icons.refresh, size: 20),
+            color: ZohoPalette.textMuted,
             tooltip: 'Reload from Zoho',
             onPressed: _isBusy
                 ? null
@@ -157,60 +320,101 @@ class _ZohoInvoiceDetailScreenState
       body: Stack(
         children: [
           ListView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(20),
             children: [
-              Row(
-                children: [
-                  ZohoStatusChip(status: invoice.status),
-                  const Spacer(),
-                  Text(
-                    currency.format(invoice.total),
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          decoration: invoice.status.isStruckThrough
-                              ? TextDecoration.lineThrough
-                              : null,
-                        ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              _DetailRow(label: 'Customer', value: invoice.customerName),
-              if (invoice.referenceNumber.isNotEmpty)
-                _DetailRow(label: 'Reference', value: invoice.referenceNumber),
-              if (invoice.date != null)
-                _DetailRow(
-                    label: 'Date', value: dateFormat.format(invoice.date!)),
-              if (invoice.dueDate != null)
-                _DetailRow(
-                    label: 'Due', value: dateFormat.format(invoice.dueDate!)),
-              _DetailRow(
-                label: 'Balance',
-                value: currency.format(invoice.balance),
-                emphasise: invoice.balance > 0,
-              ),
-
-              if (invoice.lineItems.isNotEmpty) ...[
-                const SizedBox(height: 24),
-                Text('Line items',
-                    style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 8),
-                ...invoice.lineItems.map(
-                  (li) => Card(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    child: ListTile(
-                      title: Text(li.name),
-                      subtitle: li.description.isEmpty
-                          ? null
-                          : Text(li.description),
-                      trailing: Text(
-                        '${li.quantity.toStringAsFixed(li.quantity == li.quantity.roundToDouble() ? 0 : 2)}'
-                        ' × ${currency.format(li.rate)}',
-                      ),
-                    ),
-                  ),
+              // The invoice itself, presented as a document panel the way
+              // Zoho Books shows it.
+              Container(
+                decoration: BoxDecoration(
+                  color: ZohoPalette.surface,
+                  border: Border.all(color: ZohoPalette.border),
+                  borderRadius: BorderRadius.circular(4),
                 ),
-              ],
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                invoice.invoiceNumber.isNotEmpty
+                                    ? invoice.invoiceNumber
+                                    : 'Invoice',
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w700,
+                                  color: ZohoPalette.textPrimary,
+                                  decoration: invoice.status.isStruckThrough
+                                      ? TextDecoration.lineThrough
+                                      : null,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              ZohoStatusChip(status: invoice.status),
+                            ],
+                          ),
+                        ),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            const Text(
+                              'TOTAL',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.4,
+                                color: ZohoPalette.textMuted,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              currency.format(invoice.total),
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w700,
+                                color: ZohoPalette.textPrimary,
+                                decoration: invoice.status.isStruckThrough
+                                    ? TextDecoration.lineThrough
+                                    : null,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    const Divider(height: 1, color: ZohoPalette.border),
+                    const SizedBox(height: 12),
+                    _DetailRow(label: 'Customer', value: invoice.customerName),
+                    if (invoice.referenceNumber.isNotEmpty)
+                      _DetailRow(
+                          label: 'Reference', value: invoice.referenceNumber),
+                    if (invoice.date != null)
+                      _DetailRow(
+                          label: 'Invoice Date',
+                          value: dateFormat.format(invoice.date!)),
+                    if (invoice.dueDate != null)
+                      _DetailRow(
+                          label: 'Due Date',
+                          value: dateFormat.format(invoice.dueDate!)),
+                    _DetailRow(
+                      label: 'Balance Due',
+                      value: currency.format(invoice.balance),
+                      emphasise: invoice.balance > 0,
+                    ),
+                    if (invoice.lineItems.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      _LineItemsTable(
+                          lineItems: invoice.lineItems, currency: currency),
+                    ],
+                  ],
+                ),
+              ),
 
               if (_actionError != null) ...[
                 const SizedBox(height: 16),
@@ -239,32 +443,98 @@ class _ZohoInvoiceDetailScreenState
                 spacing: 12,
                 runSpacing: 12,
                 children: [
+                  // Available whatever the status — you can always reprint.
+                  // Saves as "Customer - INV-001234.pdf". Separate from Print
+                  // because only this path can set the filename on web.
                   FilledButton.icon(
+                    style: _actionStyle(const Color(0xFF5C6BC0)),
+                    onPressed: _isBusy
+                        ? null
+                        : () => _printInvoice(invoice, download: true),
+                    icon: const Icon(Icons.download, size: 16),
+                    label: const Text('Download PDF'),
+                  ),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF5C6BC0),
+                      side: const BorderSide(color: ZohoPalette.border),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(4)),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
+                      textStyle: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
+                    onPressed: _isBusy ? null : () => _printInvoice(invoice),
+                    icon: const Icon(Icons.print, size: 16),
+                    label: const Text('Print / Preview'),
+                  ),
+                  FilledButton.icon(
+                    style: _actionStyle(const Color(0xFF25D366)),
+                    onPressed: _isBusy
+                        ? null
+                        : () => showInvoiceShareSheet(
+                              context,
+                              InvoiceMessageSubject.fromZoho(invoice),
+                              customerEmail: ref
+                                  .read(zohoCustomersRiverpod(widget.orgId))
+                                  .getById(invoice.customerId)
+                                  ?.email,
+                            ),
+                    icon: const Icon(Icons.share, size: 16),
+                    label: const Text('Share'),
+                  ),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: ZohoPalette.link,
+                      side: const BorderSide(color: ZohoPalette.border),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(4)),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
+                      textStyle: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
+                    onPressed: (_isBusy || !canEdit)
+                        ? null
+                        : () => _editInvoice(invoice),
+                    icon: const Icon(Icons.edit, size: 16),
+                    label: const Text('Edit items'),
+                  ),
+                  FilledButton.icon(
+                    style: _actionStyle(ZohoPalette.link),
                     onPressed: (_isBusy || !canMarkSent)
                         ? null
                         : () => _run(
                               () => provider.markSent(invoice.invoiceId),
                               'Invoice marked as sent',
                             ),
-                    icon: const Icon(Icons.send),
-                    label: const Text('Mark sent'),
+                    icon: const Icon(Icons.send, size: 16),
+                    label: const Text('Mark as Sent'),
                   ),
                   FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                        backgroundColor: Colors.green.shade700),
+                    style: _actionStyle(const Color(0xFF2E9E4F)),
                     onPressed: (_isBusy || !canPay)
                         ? null
                         : () => _recordPayment(invoice),
-                    icon: const Icon(Icons.payments),
-                    label: const Text('Record payment'),
+                    icon: const Icon(Icons.payments, size: 16),
+                    label: const Text('Record Payment'),
                   ),
                   OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.red),
+                      foregroundColor: const Color(0xFFE03E3E),
+                      side: const BorderSide(color: ZohoPalette.border),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(4)),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
+                      textStyle: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
                     onPressed: (_isBusy || !canVoid)
                         ? null
                         : () => _confirmVoid(invoice),
-                    icon: const Icon(Icons.block),
+                    icon: const Icon(Icons.block, size: 16),
                     label: const Text('Void'),
                   ),
                 ],
@@ -274,8 +544,7 @@ class _ZohoInvoiceDetailScreenState
                   padding: const EdgeInsets.only(top: 12),
                   child: Text(
                     'Only draft invoices can be marked sent.',
-                    style: TextStyle(
-                        fontSize: 12, color: Colors.grey.shade600),
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
                 ),
             ],
@@ -307,27 +576,152 @@ class _DetailRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 110,
+            width: 130,
             child: Text(
               label,
-              style: TextStyle(color: Colors.grey.shade600),
+              style: const TextStyle(
+                fontSize: 13,
+                color: ZohoPalette.textMuted,
+              ),
             ),
           ),
           Expanded(
             child: Text(
               value.isEmpty ? '—' : value,
               style: TextStyle(
-                fontWeight: emphasise ? FontWeight.bold : FontWeight.normal,
-                color: emphasise ? Colors.red.shade700 : null,
+                fontSize: 13,
+                fontWeight: emphasise ? FontWeight.w700 : FontWeight.w500,
+                color: emphasise
+                    ? const Color(0xFFE03E3E)
+                    : ZohoPalette.textPrimary,
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Line items rendered as a compact Zoho-style table rather than Material
+/// cards, matching the list screens.
+class _LineItemsTable extends StatelessWidget {
+  final List<ZohoLineItem> lineItems;
+  final NumberFormat currency;
+
+  const _LineItemsTable({required this.lineItems, required this.currency});
+
+  static String _qty(double q) =>
+      q.toStringAsFixed(q == q.roundToDouble() ? 0 : 2);
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          height: ZohoPalette.headerHeight,
+          color: ZohoPalette.headerBackground,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: const Row(
+            children: [
+              Expanded(child: _HeaderCell('Item')),
+              SizedBox(width: 70, child: _HeaderCell('Qty', right: true)),
+              SizedBox(width: 110, child: _HeaderCell('Rate', right: true)),
+              SizedBox(width: 110, child: _HeaderCell('Amount', right: true)),
+            ],
+          ),
+        ),
+        ...lineItems.map(
+          (li) => Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: ZohoPalette.border)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        li.name,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          color: ZohoPalette.textPrimary,
+                        ),
+                      ),
+                      if (li.description.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          li.description,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: ZohoPalette.textMuted,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                SizedBox(
+                  width: 70,
+                  child: Text(_qty(li.quantity),
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                          fontSize: 13, color: ZohoPalette.textPrimary)),
+                ),
+                SizedBox(
+                  width: 110,
+                  child: Text(currency.format(li.rate),
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                          fontSize: 13, color: ZohoPalette.textPrimary)),
+                ),
+                SizedBox(
+                  width: 110,
+                  child: Text(currency.format(li.rate * li.quantity),
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: ZohoPalette.textPrimary,
+                      )),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _HeaderCell extends StatelessWidget {
+  final String label;
+  final bool right;
+
+  const _HeaderCell(this.label, {this.right = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: right ? Alignment.centerRight : Alignment.centerLeft,
+      child: Text(
+        label.toUpperCase(),
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.4,
+          color: ZohoPalette.textMuted,
+        ),
       ),
     );
   }
@@ -369,8 +763,7 @@ class _RecordPaymentDialogState extends State<_RecordPaymentDialog> {
       return;
     }
     if (amount > widget.invoice.balance) {
-      setState(() => _error =
-          'Amount exceeds the outstanding balance of '
+      setState(() => _error = 'Amount exceeds the outstanding balance of '
           '${widget.invoice.balance.toStringAsFixed(2)}.');
       return;
     }

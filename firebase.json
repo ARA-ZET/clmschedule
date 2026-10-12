@@ -78,6 +78,18 @@
         {
           "source": "/manifest.json",
           "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+        },
+        {
+          "source": "/@(main.dart|map_init|maps_config|places_helper).js",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+        },
+        {
+          "source": "/version.json",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+        },
+        {
+          "source": "/assets/**",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
         }
       ],
       "rewrites": [
@@ -89,7 +101,7 @@
     },
     {
       "target": "maps",
-      "public": "build/web",
+      "public": "build/web_maps",
       "ignore": [
         "firebase.json",
         "**/.*",
@@ -115,9 +127,29 @@
         {
           "source": "/manifest.json",
           "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+        },
+        {
+          "source": "/@(main.dart|map_init|maps_config|places_helper).js",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+        },
+        {
+          "source": "/version.json",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+        },
+        {
+          "source": "/assets/**",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+        },
+        {
+          "regex": "^/(login|admin)(/.*)?$",
+          "headers": [{ "key": "X-Robots-Tag", "value": "noindex, nofollow" }]
         }
       ],
       "rewrites": [
+        {
+          "source": "/map/**",
+          "function": { "functionId": "mapPage", "region": "us-central1" }
+        },
         {
           "source": "**",
           "destination": "/index.html"

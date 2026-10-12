@@ -3,8 +3,10 @@ import 'dart:math' show atan, cos, exp, log, max, min, pi, pow, sin;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
+import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
@@ -21,7 +23,10 @@ import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 import '../shareable_maps/utils/point_marker_icons.dart';
 import '../utils/browser_screenshot.dart';
 import '../utils/map_pdf.dart';
+import '../utils/vertex_delete_key.dart';
 import 'job_map_link.dart';
+import '../shareable_maps/providers/map_gesture_provider.dart';
+import '../shareable_maps/widgets/map_overlay.dart';
 
 // Class to store polygon override settings
 class PolygonOverride {
@@ -222,9 +227,9 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
   String? _pendingJobSignature;
 
   // Linked-map overlay data (recorded tracks + polygons), populated when the
-  // job has a linked map (`_job.linkedMapId` non-empty). Fetched live from
-  // the full ShareableMap document each time the link changes — not cached
-  // on the Job — so this always reflects the linked map's current state.
+  // job has linked maps (`_job.effectiveLinkedMaps`). Fetched live from the
+  // full ShareableMap documents each time the links change — not cached on
+  // the Job — so this always reflects the linked maps' current state.
   List<MapPolyline> _linkedMapTracks = [];
   List<CustomPolygon> _linkedMapPolygons = [];
   bool _isLoadingCloudMapData = false;
@@ -261,6 +266,10 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
     target: LatLng(-33.925, 18.425),
     zoom: 12,
   );
+  // Clockwise quarter turns applied to the map layer itself. The map ID is a
+  // raster map, which ignores camera heading, so the widget is turned
+  // instead — 90° steps, enough to fit a tall area on a wide page.
+  int _mapQuarterTurns = 0;
 
   @override
   void initState() {
@@ -294,7 +303,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
   /// its compiled GPS tracks. No-op (and the overlay UI stays entirely
   /// hidden) when no map is linked.
   Future<void> _maybeLoadCloudMapData() async {
-    if (_job.linkedMapId.isEmpty) {
+    if (!_job.hasLinkedMaps) {
       if (_linkedMapTracks.isNotEmpty || _linkedMapPolygons.isNotEmpty) {
         setState(() {
           _linkedMapTracks = [];
@@ -305,27 +314,32 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
       }
       return;
     }
-    final loadKey = '${_job.id}::${_job.linkedMapId}::${_job.linkedMapMonthKey}';
+    final loadKey = [
+      _job.id,
+      for (final link in _job.effectiveLinkedMaps)
+        '${link.mapId}:${link.monthKey}',
+    ].join('::');
     if (_cloudMapDataLoadedForJobId == loadKey) return;
 
     setState(() => _isLoadingCloudMapData = true);
     var tracks = <MapPolyline>[];
     var polygons = <CustomPolygon>[];
     try {
-      final linkedMap = await ShareableMapsFirestoreService()
-          .getMap(_job.linkedMapMonthKey, _job.linkedMapId);
-      if (linkedMap != null) {
-        polygons = linkedMap.layers.expand((l) => l.polygons).toList();
+      for (final link in _job.effectiveLinkedMaps) {
+        final linkedMap = await ShareableMapsFirestoreService()
+            .getMap(link.monthKey, link.mapId);
+        if (linkedMap == null) continue;
+        polygons.addAll(linkedMap.layers.expand((l) => l.polygons));
         final folderPath = linkedMap.cloudFolderPaths.isNotEmpty
             ? linkedMap.cloudFolderPaths.first
             : linkedMap.storageFolderPath;
         if (folderPath != null && folderPath.isNotEmpty) {
-          tracks =
-              await JobCloudMapDataService().fetchCompiledTracks(folderPath);
+          tracks.addAll(
+              await JobCloudMapDataService().fetchCompiledTracks(folderPath));
         }
       }
     } catch (_) {
-      // Leave tracks/polygons empty if the linked map fails to fetch/parse.
+      // Keep whatever loaded if a linked map fails to fetch/parse.
     }
     if (!mounted) return;
     setState(() {
@@ -392,8 +406,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
       job.clients.join(','),
       job.workingAreas.join(','),
       job.statusId,
-      job.linkedMapId,
-      job.linkedMapMonthKey,
+      job.effectiveLinkedMaps.map((m) => '${m.mapId}:${m.monthKey}').join(','),
       drop,
       maps,
     ].join('|');
@@ -588,6 +601,7 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
             strokeWidth: strokeWidth,
             consumeTapEvents: _isEditingVertices,
             onTap: () {
+              if (ref.read(mapGestureRiverpod).isHeld) return;
               if (_isEditingVertices) {
                 _selectPolygonForEditing(i);
               }
@@ -785,10 +799,9 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
     final cy = worldY(_currentCamera.target.latitude) * scale;
     final px = worldX(point.longitude) * scale;
     final py = worldY(point.latitude) * scale;
-    return Offset(
-      screen.width / 2 + (px - cx),
-      screen.height / 2 + (py - cy),
-    );
+    // The map layer is turned clockwise by _mapQuarterTurns × 90°.
+    final d = _rotateOffset(Offset(px - cx, py - cy), _mapQuarterTurns * 90.0);
+    return Offset(screen.width / 2 + d.dx, screen.height / 2 + d.dy);
   }
 
   /// Inverse of [_labelLatLngToScreen] – converts a screen offset back to
@@ -803,13 +816,208 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
 
     final cx = worldX(_currentCamera.target.longitude) * scale;
     final cy = worldY(_currentCamera.target.latitude) * scale;
-    final px = cx + (offset.dx - screen.width / 2);
-    final py = cy + (offset.dy - screen.height / 2);
+    final d = _rotateOffset(
+      Offset(offset.dx - screen.width / 2, offset.dy - screen.height / 2),
+      -_mapQuarterTurns * 90.0,
+    );
+    final px = cx + d.dx;
+    final py = cy + d.dy;
 
     final lng = (px / scale) / 256 * 360 - 180;
     final n = pi - 2 * pi * (py / scale) / 256;
     final lat = (180 / pi) * atan((exp(n) - exp(-n)) / 2);
     return LatLng(lat, lng);
+  }
+
+  /// Rotates [v] clockwise by [degrees] in screen (y-down) coordinates.
+  static Offset _rotateOffset(Offset v, double degrees) {
+    final r = degrees * pi / 180;
+    final c = cos(r), s = sin(r);
+    return Offset(v.dx * c - v.dy * s, v.dx * s + v.dy * c);
+  }
+
+  /// Web-Mercator world pixel (zoom 0, 256px world) for [p].
+  static Offset _worldPixel(LatLng p) {
+    final s = sin(p.latitude * pi / 180).clamp(-0.9999, 0.9999);
+    return Offset(
+      (p.longitude + 180) / 360 * 256,
+      (0.5 - log((1 + s) / (1 - s)) / (4 * pi)) * 256,
+    );
+  }
+
+  static LatLng _latLngFromWorldPixel(Offset w) {
+    final lng = w.dx / 256 * 360 - 180;
+    final n = pi - 2 * pi * w.dy / 256;
+    final lat = (180 / pi) * atan((exp(n) - exp(-n)) / 2);
+    return LatLng(lat, lng);
+  }
+
+  /// Every point the print map frames: work maps, recorded tracks and the
+  /// linked maps' polygons.
+  List<LatLng> _framingPoints() => [
+        for (final workMap in _job.workMaps) ...workMap.points,
+        for (final track in _currentCloudTracks()) ...track.points,
+        for (final polygon in _currentLinkedMapPolygons()) ...polygon.points,
+      ];
+
+  /// Turn the map layer by [turns] clockwise quarter turns. The camera
+  /// target stays on the frame centre, so the view turns in place.
+  void _rotateMapBy(int turns) {
+    setState(() => _mapQuarterTurns = (_mapQuarterTurns + turns) % 4);
+  }
+
+  // Drag state for the turned map: the camera at drag start plus the total
+  // pointer movement since, applied at most once per frame.
+  CameraPosition? _turnedPanStart;
+  Offset _turnedPanDelta = Offset.zero;
+  bool _turnedPanFrameScheduled = false;
+
+  void _startTurnedPan() {
+    _turnedPanStart = _currentCamera;
+    _turnedPanDelta = Offset.zero;
+  }
+
+  void _updateTurnedPan(Offset screenDelta, Size frame) {
+    if (_turnedPanStart == null || ref.read(mapGestureRiverpod).isHeld) return;
+    _turnedPanDelta += screenDelta;
+    if (_turnedPanFrameScheduled) return;
+    _turnedPanFrameScheduled = true;
+    SchedulerBinding.instance.scheduleFrameCallback((_) {
+      _turnedPanFrameScheduled = false;
+      _applyTurnedPan(frame);
+    });
+  }
+
+  void _endTurnedPan(Size frame) {
+    _applyTurnedPan(frame);
+    _turnedPanStart = null;
+  }
+
+  /// Move the turned map so its content follows the pointer on screen.
+  ///
+  /// The web plugin's pan calls (panBy/panTo) animate, and a fresh animation
+  /// per pointer event stutters. fitBounds jumps without animating, so the
+  /// camera is set with bounds 90% of the viewport around the new centre —
+  /// on a whole-level raster map that keeps the zoom unchanged.
+  void _applyTurnedPan(Size frame) {
+    final start = _turnedPanStart;
+    final controller = _controller;
+    if (start == null || controller == null || !mounted) return;
+    final scale = pow(2, start.zoom).toDouble();
+    // Total movement in the map's own (unturned) frame, in world pixels.
+    final moved =
+        _rotateOffset(_turnedPanDelta, -_mapQuarterTurns * 90.0) / scale;
+    final centre = _worldPixel(start.target) - moved;
+    // RotatedBox hands the map a swapped size on odd turns.
+    final own =
+        _mapQuarterTurns.isOdd ? Size(frame.height, frame.width) : frame;
+    final half = Offset(own.width, own.height) * (0.45 / scale);
+    controller.moveCamera(CameraUpdate.newLatLngBounds(
+      LatLngBounds(
+        southwest: _latLngFromWorldPixel(
+            Offset(centre.dx - half.dx, centre.dy + half.dy)),
+        northeast: _latLngFromWorldPixel(
+            Offset(centre.dx + half.dx, centre.dy - half.dy)),
+      ),
+      0,
+    ));
+  }
+
+  DateTime _lastWheelZoom = DateTime(0);
+
+  /// Wheel zoom on the turned map, one whole level per notch (raster maps
+  /// take no fractional zoom), keeping the point under the cursor fixed.
+  void _zoomTurnedMap(PointerScrollEvent event, Size frame) {
+    final controller = _controller;
+    final dy = event.scrollDelta.dy;
+    if (controller == null || dy == 0) return;
+    if (ref.read(mapGestureRiverpod).isHeld) return;
+    // Trackpads send a burst of small events per swipe.
+    final now = DateTime.now();
+    if (now.difference(_lastWheelZoom) < const Duration(milliseconds: 250)) {
+      return;
+    }
+    _lastWheelZoom = now;
+
+    final current = _currentCamera.zoom.roundToDouble();
+    final zoom = (current + (dy < 0 ? 1 : -1)).clamp(2.0, 21.0);
+    if (zoom == current) return;
+    final focus = _worldPixel(_labelScreenToLatLng(event.localPosition, frame));
+    final target = _worldPixel(_currentCamera.target);
+    final k = pow(2, _currentCamera.zoom - zoom).toDouble();
+    controller.moveCamera(CameraUpdate.newLatLngZoom(
+      _latLngFromWorldPixel(focus + (target - focus) * k),
+      zoom,
+    ));
+  }
+
+  /// Pick upright or sideways — whichever lets the job's area fill the
+  /// print frame (the capture area when shown, otherwise the whole map) at
+  /// the higher zoom — then zoom in as far as that allows. A tall area on a
+  /// wide page gets turned on its side, so the roads print in more detail.
+  void _rotateToFit() {
+    final controller = _controller;
+    final mapContext = _mapKey.currentContext;
+    final box = mapContext?.findRenderObject();
+    if (controller == null || box is! RenderBox || !box.hasSize) return;
+
+    final points = _framingPoints();
+    if (points.length < 2) return;
+    final origin = _worldPixel(points.first);
+    final world = [for (final p in points) _worldPixel(p) - origin];
+
+    final mapSize = box.size;
+    final Rect frame;
+    if (_printSelectionVisible) {
+      _ensurePrintSelectionForMap(mapSize);
+      frame = _printSelectionPosition & _printSelectionSize;
+    } else {
+      frame = Offset.zero & mapSize;
+    }
+    const padding = 32.0;
+    final frameW = max(frame.width - padding * 2, 40.0);
+    final frameH = max(frame.height - padding * 2, 40.0);
+
+    double fitScale(Rect b) => min(
+          frameW / max(b.width, 1e-9),
+          frameH / max(b.height, 1e-9),
+        );
+    Rect screenBounds(int turns) {
+      var minX = double.infinity, minY = double.infinity;
+      var maxX = -double.infinity, maxY = -double.infinity;
+      for (final w in world) {
+        final q = _rotateOffset(w, turns * 90.0);
+        minX = min(minX, q.dx);
+        maxX = max(maxX, q.dx);
+        minY = min(minY, q.dy);
+        maxY = max(maxY, q.dy);
+      }
+      return Rect.fromLTRB(minX, minY, maxX, maxY);
+    }
+
+    // Stay north-up unless sideways is clearly tighter. Sideways keeps the
+    // current direction if already turned, else turns clockwise.
+    final upright = screenBounds(0);
+    final sidewaysTurns = _mapQuarterTurns == 3 ? 3 : 1;
+    final sideways = screenBounds(sidewaysTurns);
+    final turnSideways = fitScale(sideways) > fitScale(upright) * 1.03;
+    final turns = turnSideways ? sidewaysTurns : 0;
+    final bounds = turnSideways ? sideways : upright;
+
+    // Raster maps only take whole zoom levels; round down so it still fits.
+    final zoom =
+        (log(fitScale(bounds)) / log(2)).floorToDouble().clamp(2.0, 21.0);
+    final appliedScale = pow(2, zoom).toDouble();
+    // Put the area's centre on the frame centre, which sits off the map
+    // centre when the capture area is shown.
+    final frameOffset = frame.center - mapSize.center(Offset.zero);
+    final targetScreen = bounds.center - frameOffset / appliedScale;
+    final target = _latLngFromWorldPixel(
+      _rotateOffset(targetScreen, -turns * 90.0) + origin,
+    );
+
+    setState(() => _mapQuarterTurns = turns);
+    controller.animateCamera(CameraUpdate.newLatLngZoom(target, zoom));
   }
 
   void _commitLabelTextEdit() {
@@ -944,6 +1152,10 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
         icon: vertexIcon,
         position: points[i],
         draggable: true,
+        // Hold Delete / Backspace and click to remove the point.
+        onTap: () {
+          if (isVertexDeleteHeld()) _deleteVertex(i);
+        },
         onDrag: (pos) {
           _editingPoints![i] = pos;
           setState(() {
@@ -987,6 +1199,27 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
     }
 
     _vertexMarkers = markers;
+  }
+
+  /// Remove the vertex at [index] from the edit in progress — no
+  /// confirmation, for fast cleanup. Cancel brings it back.
+  void _deleteVertex(int index) {
+    final points = _editingPoints;
+    if (points == null || index < 0 || index >= points.length) return;
+    if (points.length <= 3) {
+      ScaffoldMessenger.maybeOf(context)
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+          content: Text('An area needs at least 3 points'),
+          duration: Duration(seconds: 2),
+        ));
+      return;
+    }
+    points.removeAt(index);
+    setState(() {
+      _rebuildVertexMarkers();
+      _updateMapView();
+    });
   }
 
   void _saveVertexEditing() {
@@ -1431,54 +1664,57 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
           Positioned(
             left: _printSelectionPosition.dx,
             top: _printSelectionPosition.dy,
-            child: MouseRegion(
-              cursor: SystemMouseCursors.move,
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onPanStart: (_) {
-                  setState(() => _isDraggingPrintSelection = true);
-                },
-                onPanUpdate: (details) => _movePrintSelection(details, mapSize),
-                onPanEnd: (_) {
-                  setState(() => _isDraggingPrintSelection = false);
-                },
-                onPanCancel: () {
-                  setState(() => _isDraggingPrintSelection = false);
-                },
-                child: Container(
-                  width: _printSelectionSize.width,
-                  height: _printSelectionSize.height,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1967D2).withValues(alpha: 0.06),
-                    border: Border.all(
-                      color: const Color(0xFF1967D2),
-                      width: 2,
+            child: MapOverlay(
+              child: MouseRegion(
+                cursor: SystemMouseCursors.move,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanStart: (_) {
+                    setState(() => _isDraggingPrintSelection = true);
+                  },
+                  onPanUpdate: (details) =>
+                      _movePrintSelection(details, mapSize),
+                  onPanEnd: (_) {
+                    setState(() => _isDraggingPrintSelection = false);
+                  },
+                  onPanCancel: () {
+                    setState(() => _isDraggingPrintSelection = false);
+                  },
+                  child: Container(
+                    width: _printSelectionSize.width,
+                    height: _printSelectionSize.height,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1967D2).withValues(alpha: 0.06),
+                      border: Border.all(
+                        color: const Color(0xFF1967D2),
+                        width: 2,
+                      ),
                     ),
-                  ),
-                  child: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      _buildPrintSelectionHandle(
-                        _PrintSelectionHandle.topLeft,
-                        Alignment.topLeft,
-                        mapSize,
-                      ),
-                      _buildPrintSelectionHandle(
-                        _PrintSelectionHandle.topRight,
-                        Alignment.topRight,
-                        mapSize,
-                      ),
-                      _buildPrintSelectionHandle(
-                        _PrintSelectionHandle.bottomLeft,
-                        Alignment.bottomLeft,
-                        mapSize,
-                      ),
-                      _buildPrintSelectionHandle(
-                        _PrintSelectionHandle.bottomRight,
-                        Alignment.bottomRight,
-                        mapSize,
-                      ),
-                    ],
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        _buildPrintSelectionHandle(
+                          _PrintSelectionHandle.topLeft,
+                          Alignment.topLeft,
+                          mapSize,
+                        ),
+                        _buildPrintSelectionHandle(
+                          _PrintSelectionHandle.topRight,
+                          Alignment.topRight,
+                          mapSize,
+                        ),
+                        _buildPrintSelectionHandle(
+                          _PrintSelectionHandle.bottomLeft,
+                          Alignment.bottomLeft,
+                          mapSize,
+                        ),
+                        _buildPrintSelectionHandle(
+                          _PrintSelectionHandle.bottomRight,
+                          Alignment.bottomRight,
+                          mapSize,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -1571,36 +1807,9 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
 
   Future<void> _handleLinkMapTap() async {
     final scheduleProvider = ref.read(scheduleRiverpod);
-    if (_job.linkedMapId.isNotEmpty) {
-      final action = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Map Linked'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop('unlink'),
-              child: const Text('Unlink'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop('relink'),
-              child: const Text('Re-link'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Close'),
-            ),
-          ],
-        ),
-      );
-      if (action == 'unlink') {
-        await unlinkMapFromScheduleJob(scheduleProvider, _job);
-      } else if (action == 'relink') {
-        if (!mounted) return;
-        await linkExistingMapToScheduleJob(context, scheduleProvider, _job);
-      }
-      return;
-    }
-    await linkExistingMapToScheduleJob(context, scheduleProvider, _job);
+    // One dialog for every case: no maps linked yet goes straight to the
+    // picker, otherwise it lists what's linked with add/unlink per map.
+    await showLinkedMapsDialog(context, scheduleProvider, _job);
   }
 
   Future<void> _persistDropOffPoint(LatLng point) async {
@@ -1835,6 +2044,61 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
             },
           ),
 
+          // Rotate the map so a tall area fits a wide page (or vice versa)
+          // at a higher zoom.
+          PopupMenuButton<String>(
+            icon: Icon(
+              Icons.screen_rotation_alt,
+              color: _mapQuarterTurns != 0 ? const Color(0xFF1967D2) : null,
+            ),
+            tooltip: 'Rotate map',
+            onSelected: (value) {
+              switch (value) {
+                case 'fit':
+                  _rotateToFit();
+                case 'cw90':
+                  _rotateMapBy(1);
+                case 'ccw90':
+                  _rotateMapBy(3);
+                case 'north':
+                  setState(() => _mapQuarterTurns = 0);
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'fit',
+                child: ListTile(
+                  leading: Icon(Icons.fit_screen),
+                  title: Text('Rotate to fit area'),
+                  subtitle: Text('Turn and zoom for the most detail'),
+                ),
+              ),
+              PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'cw90',
+                child: ListTile(
+                  leading: Icon(Icons.rotate_right),
+                  title: Text('Rotate 90° clockwise'),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'ccw90',
+                child: ListTile(
+                  leading: Icon(Icons.rotate_left),
+                  title: Text('Rotate 90° anticlockwise'),
+                ),
+              ),
+              PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'north',
+                child: ListTile(
+                  leading: Icon(Icons.north),
+                  title: Text('Reset to north up'),
+                ),
+              ),
+            ],
+          ),
+
           IconButton(
             icon: Icon(
               Icons.crop_free,
@@ -1914,20 +2178,18 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
           // tracks overlay below once linked).
           IconButton(
             icon: Icon(
-              _job.linkedMapId.isNotEmpty ? Icons.link : Icons.link_off,
-              color: _job.linkedMapId.isNotEmpty
-                  ? const Color(0xFF1967D2)
-                  : null,
+              _job.hasLinkedMaps ? Icons.link : Icons.link_off,
+              color: _job.hasLinkedMaps ? const Color(0xFF1967D2) : null,
             ),
-            tooltip: _job.linkedMapId.isNotEmpty
-                ? 'Map linked — tap to unlink or relink'
+            tooltip: _job.hasLinkedMaps
+                ? 'Maps linked — tap to add polygons, unlink or link another'
                 : 'Link an existing map',
             onPressed: _handleLinkMapTap,
           ),
 
           // Linked-map overlay toggle (tracks + polygons) — only shown once
           // a map is linked and its data has loaded (or is loading).
-          if (_job.linkedMapId.isNotEmpty) ...[
+          if (_job.hasLinkedMaps) ...[
             IconButton(
               icon: _isLoadingCloudMapData
                   ? const SizedBox(
@@ -1975,57 +2237,90 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                 color: Colors.white,
                 child: Stack(
                   children: [
-                    // Google Map
-                    GoogleMap(
-                      onMapCreated: (controller) {
-                        try {
-                          _controller = controller;
-                          if (mounted) {
-                            _updateMapCenter();
+                    // Google Map, turned as a whole (see _mapQuarterTurns).
+                    // RotatedBox swaps its child's width/height, so a
+                    // sideways map still fills the frame exactly.
+                    RotatedBox(
+                      quarterTurns: _mapQuarterTurns,
+                      child: GoogleMap(
+                        // Turned, Google would pan along its own unturned
+                        // axes, so it takes no input and the layer below
+                        // pans/zooms instead.
+                        webGestureHandling: _mapQuarterTurns != 0
+                            ? WebGestureHandling.none
+                            : ref.watch(mapGestureRiverpod).gestureHandling,
+                        onMapCreated: (controller) {
+                          try {
+                            _controller = controller;
+                            if (mounted) {
+                              _updateMapCenter();
+                            }
+                          } catch (e) {
+                            debugPrint('Error in onMapCreated: $e');
                           }
-                        } catch (e) {
-                          debugPrint('Error in onMapCreated: $e');
-                        }
-                      },
-                      initialCameraPosition:
-                          CameraPosition(target: _center, zoom: 12),
-                      onCameraMove: (pos) {
-                        // Track the camera so polygon labels stay glued to
-                        // their geographic anchors on pan/zoom.
-                        _currentCamera = pos;
-                        if (mounted &&
-                            _polygonLabels.isNotEmpty &&
-                            _showPolygonLabels) {
-                          setState(() {});
-                        }
-                      },
-                      polygons: _polygons,
-                      polylines: _polylines,
-                      markers: {
-                        if (!hideMapChrome) ..._vertexMarkers,
-                        ..._customPointMarkers,
-                        if (_dropOffMarker != null) _dropOffMarker!,
-                      },
-                      mapType: MapType.normal,
-                      mapId: "89c628d2bb3002712797ce42",
-                      zoomControlsEnabled: false,
-                      mapToolbarEnabled: false,
-                      myLocationButtonEnabled: false,
-                      scrollGesturesEnabled: !_isDraggingInfoBox &&
-                          !_isResizingInfoBox &&
-                          !_isDraggingWorkAreasBox &&
-                          !_isResizingWorkAreasBox &&
-                          _draggingLabelIndex == null &&
-                          !selectionIsInteracting,
-                      zoomGesturesEnabled: !_isDraggingInfoBox &&
-                          !_isResizingInfoBox &&
-                          !_isDraggingWorkAreasBox &&
-                          !_isResizingWorkAreasBox &&
-                          _draggingLabelIndex == null &&
-                          !selectionIsInteracting,
-                      rotateGesturesEnabled: false,
-                      tiltGesturesEnabled: false,
+                        },
+                        initialCameraPosition:
+                            CameraPosition(target: _center, zoom: 12),
+                        onCameraMove: (pos) {
+                          // Track the camera so polygon labels stay glued to
+                          // their geographic anchors on pan/zoom.
+                          _currentCamera = pos;
+                          if (mounted &&
+                              _polygonLabels.isNotEmpty &&
+                              _showPolygonLabels) {
+                            setState(() {});
+                          }
+                        },
+                        polygons: _polygons,
+                        polylines: _polylines,
+                        markers: {
+                          if (!hideMapChrome) ..._vertexMarkers,
+                          ..._customPointMarkers,
+                          if (_dropOffMarker != null) _dropOffMarker!,
+                        },
+                        mapType: MapType.normal,
+                        mapId: "89c628d2bb3002712797ce42",
+                        zoomControlsEnabled: false,
+                        mapToolbarEnabled: false,
+                        myLocationButtonEnabled: false,
+                        scrollGesturesEnabled: !_isDraggingInfoBox &&
+                            !_isResizingInfoBox &&
+                            !_isDraggingWorkAreasBox &&
+                            !_isResizingWorkAreasBox &&
+                            _draggingLabelIndex == null &&
+                            !selectionIsInteracting,
+                        zoomGesturesEnabled: !_isDraggingInfoBox &&
+                            !_isResizingInfoBox &&
+                            !_isDraggingWorkAreasBox &&
+                            !_isResizingWorkAreasBox &&
+                            _draggingLabelIndex == null &&
+                            !selectionIsInteracting,
+                        rotateGesturesEnabled: false,
+                        tiltGesturesEnabled: false,
+                      ),
                     ),
+                    // Pan/zoom for the turned map, with the pointer movement
+                    // turned to match. Off while editing points so vertex
+                    // drags don't also pan.
+                    if (_mapQuarterTurns != 0 && !_isEditingVertices)
+                      Positioned.fill(
+                        child: Listener(
+                          behavior: HitTestBehavior.opaque,
+                          onPointerSignal: (event) {
+                            if (event is PointerScrollEvent) {
+                              _zoomTurnedMap(event, currentMapSize);
+                            }
+                          },
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onPanStart: (_) => _startTurnedPan(),
+                            onPanUpdate: (details) =>
+                                _updateTurnedPan(details.delta, currentMapSize),
+                            onPanEnd: (_) => _endTurnedPan(currentMapSize),
+                            onPanCancel: () => _turnedPanStart = null,
+                          ),
+                        ),
+                      ),
                     // Loading overlay
                     if (_isLoading)
                       Container(
@@ -2042,77 +2337,79 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                       Positioned(
                         left: _infoBoxPosition.dx,
                         top: _infoBoxPosition.dy,
-                        child: GestureDetector(
-                          onPanStart: (_) =>
-                              setState(() => _isDraggingInfoBox = true),
-                          onPanUpdate: (details) {
-                            setState(() {
-                              final newX =
-                                  _infoBoxPosition.dx + details.delta.dx;
-                              final newY =
-                                  _infoBoxPosition.dy + details.delta.dy;
-                              _infoBoxPosition = Offset(
-                                newX.clamp(0, mapWidth - _infoBoxSize.width),
-                                newY.clamp(0, mapHeight - 60),
-                              );
-                            });
-                          },
-                          onPanEnd: (_) =>
-                              setState(() => _isDraggingInfoBox = false),
-                          child: Stack(
-                            clipBehavior: Clip.none,
-                            children: [
-                              _buildInfoBox(),
-                              // Resize handle (width only — height is content-driven)
-                              Positioned(
-                                right: 0,
-                                bottom: 0,
-                                child: GestureDetector(
-                                  onPanStart: (_) =>
-                                      setState(() => _isResizingInfoBox = true),
-                                  onPanUpdate: (details) {
-                                    setState(() {
-                                      final newWidth =
-                                          _infoBoxSize.width + details.delta.dx;
-                                      const minWidth = 150.0;
-                                      final maxWidth = mapWidth * 0.45;
-                                      _infoBoxSize = Size(
-                                        newWidth.clamp(minWidth, maxWidth),
-                                        _infoBoxSize.height,
-                                      );
-                                      final sizeRatio =
-                                          _infoBoxSize.width / 250;
-                                      _fontScale = sizeRatio.clamp(0.6, 2.0);
-                                      _infoBoxPosition = Offset(
-                                        _infoBoxPosition.dx.clamp(
-                                            0, mapWidth - _infoBoxSize.width),
-                                        _infoBoxPosition.dy,
-                                      );
-                                    });
-                                  },
-                                  onPanEnd: (_) => setState(
-                                      () => _isResizingInfoBox = false),
-                                  child: Container(
-                                    width: 20,
-                                    height: 20,
-                                    decoration: BoxDecoration(
-                                      color: _isResizingInfoBox
-                                          ? Colors.red.withValues(alpha: 0.8)
-                                          : Colors.blue.withValues(
-                                              alpha: _isDraggingInfoBox
-                                                  ? 0.6
-                                                  : 0.25),
-                                      borderRadius: BorderRadius.circular(2),
-                                    ),
-                                    child: const Icon(
-                                      Icons.drag_handle,
-                                      color: Colors.white,
-                                      size: 12,
+                        child: MapOverlay(
+                          child: GestureDetector(
+                            onPanStart: (_) =>
+                                setState(() => _isDraggingInfoBox = true),
+                            onPanUpdate: (details) {
+                              setState(() {
+                                final newX =
+                                    _infoBoxPosition.dx + details.delta.dx;
+                                final newY =
+                                    _infoBoxPosition.dy + details.delta.dy;
+                                _infoBoxPosition = Offset(
+                                  newX.clamp(0, mapWidth - _infoBoxSize.width),
+                                  newY.clamp(0, mapHeight - 60),
+                                );
+                              });
+                            },
+                            onPanEnd: (_) =>
+                                setState(() => _isDraggingInfoBox = false),
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                _buildInfoBox(),
+                                // Resize handle (width only — height is content-driven)
+                                Positioned(
+                                  right: 0,
+                                  bottom: 0,
+                                  child: GestureDetector(
+                                    onPanStart: (_) => setState(
+                                        () => _isResizingInfoBox = true),
+                                    onPanUpdate: (details) {
+                                      setState(() {
+                                        final newWidth = _infoBoxSize.width +
+                                            details.delta.dx;
+                                        const minWidth = 150.0;
+                                        final maxWidth = mapWidth * 0.45;
+                                        _infoBoxSize = Size(
+                                          newWidth.clamp(minWidth, maxWidth),
+                                          _infoBoxSize.height,
+                                        );
+                                        final sizeRatio =
+                                            _infoBoxSize.width / 250;
+                                        _fontScale = sizeRatio.clamp(0.6, 2.0);
+                                        _infoBoxPosition = Offset(
+                                          _infoBoxPosition.dx.clamp(
+                                              0, mapWidth - _infoBoxSize.width),
+                                          _infoBoxPosition.dy,
+                                        );
+                                      });
+                                    },
+                                    onPanEnd: (_) => setState(
+                                        () => _isResizingInfoBox = false),
+                                    child: Container(
+                                      width: 20,
+                                      height: 20,
+                                      decoration: BoxDecoration(
+                                        color: _isResizingInfoBox
+                                            ? Colors.red.withValues(alpha: 0.8)
+                                            : Colors.blue.withValues(
+                                                alpha: _isDraggingInfoBox
+                                                    ? 0.6
+                                                    : 0.25),
+                                        borderRadius: BorderRadius.circular(2),
+                                      ),
+                                      child: const Icon(
+                                        Icons.drag_handle,
+                                        color: Colors.white,
+                                        size: 12,
+                                      ),
                                     ),
                                   ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -2121,7 +2418,9 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                       Positioned(
                         left: _workAreasBoxPosition.dx,
                         top: _workAreasBoxPosition.dy,
-                        child: _buildWorkAreasBox(),
+                        child: MapOverlay(
+                          child: _buildWorkAreasBox(),
+                        ),
                       ),
                     // Vertex editing toolbar
                     if (!hideMapChrome &&
@@ -2131,49 +2430,51 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                         bottom: 16,
                         left: 0,
                         right: 0,
-                        child: Center(
-                          child: Material(
-                            elevation: 4,
-                            borderRadius: BorderRadius.circular(24),
-                            color: Colors.white,
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 4),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    'Editing: ${_job.workMaps[_editingPolygonIndex!].name}',
-                                    style: const TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w500,
+                        child: MapOverlay(
+                          child: Center(
+                            child: Material(
+                              elevation: 4,
+                              borderRadius: BorderRadius.circular(24),
+                              color: Colors.white,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 4),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      'Editing: ${_job.workMaps[_editingPolygonIndex!].name}',
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  IconButton(
-                                    icon: const Icon(
-                                        Icons.remove_circle_outline,
-                                        size: 20,
-                                        color: Colors.red),
-                                    tooltip: 'Remove last vertex',
-                                    onPressed: _editingPoints != null &&
-                                            _editingPoints!.length > 3
-                                        ? _removeLastVertex
-                                        : null,
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.close,
-                                        size: 20, color: Color(0xFF5F6368)),
-                                    tooltip: 'Cancel',
-                                    onPressed: _cancelVertexEditing,
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.check,
-                                        size: 20, color: Color(0xFF1967D2)),
-                                    tooltip: 'Save changes',
-                                    onPressed: _saveVertexEditing,
-                                  ),
-                                ],
+                                    const SizedBox(width: 8),
+                                    IconButton(
+                                      icon: const Icon(
+                                          Icons.remove_circle_outline,
+                                          size: 20,
+                                          color: Colors.red),
+                                      tooltip: 'Remove last vertex',
+                                      onPressed: _editingPoints != null &&
+                                              _editingPoints!.length > 3
+                                          ? _removeLastVertex
+                                          : null,
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.close,
+                                          size: 20, color: Color(0xFF5F6368)),
+                                      tooltip: 'Cancel',
+                                      onPressed: _cancelVertexEditing,
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.check,
+                                          size: 20, color: Color(0xFF1967D2)),
+                                      tooltip: 'Save changes',
+                                      onPressed: _saveVertexEditing,
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ),
@@ -2187,20 +2488,22 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                         bottom: 16,
                         left: 0,
                         right: 0,
-                        child: Center(
-                          child: Material(
-                            elevation: 4,
-                            borderRadius: BorderRadius.circular(24),
-                            color: Colors.white,
-                            child: const Padding(
-                              padding: EdgeInsets.symmetric(
-                                  horizontal: 16, vertical: 10),
-                              child: Text(
-                                'Tap a polygon to edit its points',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w500,
-                                  color: Color(0xFF5F6368),
+                        child: MapOverlay(
+                          child: Center(
+                            child: Material(
+                              elevation: 4,
+                              borderRadius: BorderRadius.circular(24),
+                              color: Colors.white,
+                              child: const Padding(
+                                padding: EdgeInsets.symmetric(
+                                    horizontal: 16, vertical: 10),
+                                child: Text(
+                                  'Tap a polygon to edit its points',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                    color: Color(0xFF5F6368),
+                                  ),
                                 ),
                               ),
                             ),
@@ -2438,32 +2741,35 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
           top: top,
           width: approxWidth,
           height: approxHeight,
-          child: GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            onTap: isEditing ? null : () => _beginLabelTextEdit(index),
-            onPanStart: isEditing
-                ? null
-                : (_) {
-                    setState(() => _draggingLabelIndex = index);
-                  },
-            onPanUpdate: isEditing
-                ? null
-                : (details) {
-                    final current = _labelLatLngToScreen(label.anchor, mapSize);
-                    final next = current + details.delta;
-                    setState(() {
-                      label.anchor = _labelScreenToLatLng(next, mapSize);
-                    });
-                  },
-            onPanEnd: isEditing
-                ? null
-                : (_) {
-                    setState(() => _draggingLabelIndex = null);
-                  },
-            child: Center(
-              child: isEditing
-                  ? _buildLabelEditor(index)
-                  : _buildLabelText(label.text),
+          child: MapOverlay(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: isEditing ? null : () => _beginLabelTextEdit(index),
+              onPanStart: isEditing
+                  ? null
+                  : (_) {
+                      setState(() => _draggingLabelIndex = index);
+                    },
+              onPanUpdate: isEditing
+                  ? null
+                  : (details) {
+                      final current =
+                          _labelLatLngToScreen(label.anchor, mapSize);
+                      final next = current + details.delta;
+                      setState(() {
+                        label.anchor = _labelScreenToLatLng(next, mapSize);
+                      });
+                    },
+              onPanEnd: isEditing
+                  ? null
+                  : (_) {
+                      setState(() => _draggingLabelIndex = null);
+                    },
+              child: Center(
+                child: isEditing
+                    ? _buildLabelEditor(index)
+                    : _buildLabelText(label.text),
+              ),
             ),
           ),
         ),
@@ -2621,7 +2927,8 @@ class _PrintMapViewState extends ConsumerState<PrintMapView> {
                                       color: visible ? null : Colors.grey,
                                     ),
                                   ),
-                                  onChanged: (v) => toggle(entry.key, v ?? true),
+                                  onChanged: (v) =>
+                                      toggle(entry.key, v ?? true),
                                 );
                               }).toList(),
                             ),

@@ -2,9 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, listEquals, mapEquals;
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../../letterbox/models/letterbox_suburb.dart';
+import '../../letterbox/services/letterbox_count_service.dart';
+import '../../letterbox/utils/letterbox_split.dart';
+import '../../letterbox/utils/letterbox_clusters.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/work_area.dart';
 import '../../models/work_suburb.dart';
@@ -20,8 +24,49 @@ import '../models/map_polyline.dart';
 import '../models/map_point.dart';
 import '../services/map_thumbnail_service.dart';
 import '../services/shareable_maps_firestore_service.dart';
-import '../services/cloud_dataset_service.dart';
+import '../utils/drawn_gpx.dart';
+import '../utils/gpx_track_rename.dart';
+import '../utils/linked_map_polygons.dart';
+import '../utils/polygon_topology.dart';
 import '../utils/waypoint_spatial_index.dart';
+import '../../utils/text_encoding.dart';
+
+/// One polygon's finished letterbox count.
+class LetterboxEstimateResult {
+  final String? name;
+  final LetterboxCount count;
+  const LetterboxEstimateResult(this.name, this.count);
+}
+
+/// An area whose letterbox estimate leans on suburbs nobody has verified yet.
+class UnverifiedLetterboxArea {
+  final String layerId;
+  final int polygonIndex;
+  final CustomPolygon polygon;
+
+  /// The contributing suburbs that are not verified, by current status.
+  final List<LetterboxSuburb> suburbs;
+
+  const UnverifiedLetterboxArea({
+    required this.layerId,
+    required this.polygonIndex,
+    required this.polygon,
+    required this.suburbs,
+  });
+
+  String get elementId => '${layerId}_polygon_$polygonIndex';
+  String get displayName =>
+      polygon.name.trim().isEmpty ? 'Unnamed area' : polygon.name.trim();
+}
+
+/// Every count that finished in one batch, announced together.
+class LetterboxEstimateNotice {
+  final List<LetterboxEstimateResult> results;
+  const LetterboxEstimateNotice(this.results);
+
+  int get total => results.fold(0, (sum, r) => sum + r.count.count);
+  bool get isTrusted => results.every((r) => r.count.isTrusted);
+}
 
 /// Riverpod provider for ShareableMapProvider.
 final shareableMapRiverpod =
@@ -39,7 +84,8 @@ ParsedMapResult _parseGpxInIsolate(_IsolateParseInput input) {
   for (final entry in input.files) {
     try {
       final result = KmlParserService.parseKmlDataSync(entry.bytes, entry.name);
-      allPolylines.addAll(result.polylines);
+      allPolylines.addAll(
+          result.polylines.map((p) => p.copyWith(sourceFile: entry.name)));
       allPoints.addAll(result.points);
       allPolygons.addAll(result.polygons);
     } catch (_) {
@@ -82,8 +128,10 @@ List<MapPoint> _parseCompiledWaypoints(Uint8List bytes) {
     final lon = (w['lon'] as num?)?.toDouble();
     if (lat == null || lon == null) continue;
 
-    final name = (w['name'] as String?) ?? 'Waypoint ${seq + 1}';
-    final desc = (w['desc'] as String?) ?? '';
+    final rawName = w['name'] as String?;
+    final name =
+        rawName != null ? repairMojibake(rawName) : 'Waypoint ${seq + 1}';
+    final desc = repairMojibake((w['desc'] as String?) ?? '');
 
     results.add(MapPoint(
       id: 'compiled_wpt_${now.millisecondsSinceEpoch}_${seq++}',
@@ -109,6 +157,18 @@ class InfoWindowData {
   final LatLng anchor; // geographic point reprojected to screen on each frame
   final int letterBoxEstimate;
 
+  /// Houses-versus-apartments split for a polygon info window. Read straight
+  /// off the polygon, which stores it from the moment the shape was drawn,
+  /// edited or imported — so opening an info window costs no fetch. Null only
+  /// for non-polygons, or for a polygon whose split was never computed (drawn
+  /// before the split existed, or estimated by hand).
+  final LetterBoxSplit? letterboxBreakdown;
+
+  /// The estimate the polygon was imported with, when a curated count has
+  /// since replaced it. Shown beside the counted number rather than instead
+  /// of it — see [CustomPolygon.importedLetterBoxEstimate].
+  final int? importedLetterBoxEstimate;
+
   const InfoWindowData({
     required this.elementId,
     required this.layerId,
@@ -118,7 +178,26 @@ class InfoWindowData {
     required this.type,
     required this.anchor,
     this.letterBoxEstimate = 0,
+    this.letterboxBreakdown,
+    this.importedLetterBoxEstimate,
   });
+
+  /// Same info window, with the breakdown filled in once a fallback compute
+  /// resolves for a polygon that had none stored.
+  InfoWindowData withLetterboxBreakdown(LetterBoxSplit breakdown) {
+    return InfoWindowData(
+      elementId: elementId,
+      layerId: layerId,
+      title: title,
+      description: description,
+      subtitle: subtitle,
+      type: type,
+      anchor: anchor,
+      letterBoxEstimate: letterBoxEstimate,
+      letterboxBreakdown: breakdown,
+      importedLetterBoxEstimate: importedLetterBoxEstimate,
+    );
+  }
 }
 
 /// Drawing mode for the map editor
@@ -140,6 +219,308 @@ enum DrawingMode {
 /// The [capabilities] getter exposes feature flags from the active adapter
 /// so that UI widgets can show/hide tools dynamically.
 class ShareableMapProvider extends ChangeNotifier {
+  // ── Automatic letterbox estimates ───────────────────────────────────
+  // Same curated primitive the standalone Letterbox Index and the "Letter
+  // Box Estimates" table both use. Constructed lazily and shared across
+  // calls in this provider instance so its per-session suburb cache and
+  // per-suburb payload cache are not rebuilt on every polygon.
+  LetterboxCountService? _letterboxCounter;
+  LetterboxCountService get _counter =>
+      _letterboxCounter ??= LetterboxCountService();
+
+  // ── Letterbox estimate notice ─────────────────────────────────────────
+  //
+  // Every finished count used to bump a version that each mounted editor
+  // turned into its own SnackBar. ScaffoldMessenger queues SnackBars, so
+  // importing 20 areas played 20 five-second notices back to back (long after
+  // the counting had finished), and a second editor route still mounted
+  // underneath — or one opened later — doubled or replayed them.
+  //
+  // Now counts are batched: results collect while any count is in flight and
+  // ONE notice is published when the last one lands. The notice is taken, not
+  // read ([takeEstimateNotice]), so however many widgets listen, it shows once.
+  int _estimatesInFlight = 0;
+  final List<LetterboxEstimateResult> _estimateBatch = [];
+  LetterboxEstimateNotice? _estimateNotice;
+
+  /// Letterbox counts still running — drives the "Counting…" indicator.
+  int get estimatesInFlight => _estimatesInFlight;
+
+  /// Whether a finished batch is waiting to be announced.
+  bool get hasEstimateNotice => _estimateNotice != null;
+
+  // ── Letterbox provenance (unverified suburbs) ─────────────────────────
+  //
+  // Each counted polygon stores the suburb ids its number came from. Whether
+  // those suburbs are verified is looked up LIVE, never stored, so an area's
+  // warning clears as soon as an admin verifies the suburb.
+  Map<String, LetterboxSuburb>? _letterboxSuburbs;
+  bool _loadingLetterboxSuburbs = false;
+
+  /// Load (or, with [force], reload) suburb curation statuses. [force] drops
+  /// the counter's session cache — for after an admin has verified suburbs
+  /// elsewhere and this map should reflect it without a page reload.
+  Future<void> refreshLetterboxStatuses({bool force = false}) async {
+    if (_loadingLetterboxSuburbs) return;
+    _loadingLetterboxSuburbs = true;
+    try {
+      if (force) _counter.invalidateAll();
+      _letterboxSuburbs = await _counter.suburbsById();
+    } catch (e) {
+      debugPrint('[LetterboxEstimate] could not load suburb statuses: $e');
+    } finally {
+      _loadingLetterboxSuburbs = false;
+      if (!_isDisposed) notifyListeners();
+    }
+  }
+
+  /// The unverified suburbs behind [polygon]'s estimate, by current status.
+  /// Empty when all are verified, or when statuses are not loaded yet.
+  List<LetterboxSuburb> unverifiedSuburbsFor(CustomPolygon polygon) {
+    if (polygon.letterBoxLocked) return const [];
+    final ids = polygon.letterboxSuburbIds;
+    final lookup = _letterboxSuburbs;
+    if (ids == null || ids.isEmpty || lookup == null) return const [];
+    return [
+      for (final id in ids)
+        if (lookup[id] case final suburb? when !suburb.isTrusted) suburb,
+    ];
+  }
+
+  /// Every saved area on this map whose estimate uses unverified suburbs.
+  List<UnverifiedLetterboxArea> get unverifiedLetterboxAreas {
+    final map = _currentMap;
+    if (map == null || _letterboxSuburbs == null) return const [];
+    final out = <UnverifiedLetterboxArea>[];
+    for (final layer in map.layers) {
+      for (var i = 0; i < layer.polygons.length; i++) {
+        final polygon = layer.polygons[i];
+        if (!polygon.isPolygon) continue;
+        final suburbs = unverifiedSuburbsFor(polygon);
+        if (suburbs.isEmpty) continue;
+        out.add(UnverifiedLetterboxArea(
+          layerId: layer.id,
+          polygonIndex: i,
+          polygon: polygon,
+          suburbs: suburbs,
+        ));
+      }
+    }
+    return out;
+  }
+
+  /// Areas with an index-style estimate (it has a houses/flats split) but no
+  /// recorded suburbs — counted before provenance was stored, so whether they
+  /// are verified is unknown until recounted.
+  int get uncheckedLetterboxAreaCount {
+    final map = _currentMap;
+    if (map == null) return 0;
+    var n = 0;
+    for (final layer in map.layers) {
+      for (final p in layer.polygons) {
+        if (p.isPolygon &&
+            !p.letterBoxLocked &&
+            p.letterBoxSplit != null &&
+            p.letterboxSuburbIds == null &&
+            p.points.length >= 3) {
+          n++;
+        }
+      }
+    }
+    return n;
+  }
+
+  /// Recount every area whose provenance is unknown, so its suburbs are
+  /// recorded and any unverified ones are flagged.
+  void recheckUncheckedLetterboxAreas() {
+    final map = _currentMap;
+    if (map == null || capabilities.readOnly) return;
+    for (final layer in map.layers) {
+      for (var i = 0; i < layer.polygons.length; i++) {
+        final p = layer.polygons[i];
+        if (p.isPolygon &&
+            !p.letterBoxLocked &&
+            p.letterBoxSplit != null &&
+            p.letterboxSuburbIds == null &&
+            p.points.length >= 3) {
+          // ignore: unawaited_futures
+          _autoEstimateLetterboxes(
+            layerId: layer.id,
+            polygonIndex: i,
+            expectedPointCount: p.points.length,
+          );
+        }
+      }
+    }
+  }
+
+  /// Set an area's letterbox number by hand and lock it.
+  ///
+  /// This is how an admin resolves an area counted from unverified data: the
+  /// typed number replaces the count, the houses/flats split and suburb
+  /// provenance are dropped (they describe a number that is no longer shown),
+  /// and no later edit recounts it until [unlockLetterboxEstimate].
+  void setManualLetterboxEstimate(
+    String layerId,
+    int polygonIndex,
+    int value, {
+    required String setBy,
+  }) {
+    if (_currentMap == null || capabilities.readOnly) return;
+    final layer = _currentMap!.getLayer(layerId);
+    if (layer == null || polygonIndex >= layer.polygons.length) return;
+    final current = layer.polygons[polygonIndex];
+    updatePolygon(
+      layer,
+      polygonIndex,
+      current.copyWith(
+        letterBoxEstimate: value,
+        clearLetterBoxSplit: true,
+        letterBoxLocked: true,
+        letterBoxLockedBy: setBy.isEmpty ? null : setBy,
+        // Keep whatever figure it arrived with, like a recount would.
+        importedLetterBoxEstimate: current.importedLetterBoxEstimate ??
+            (current.letterBoxEstimate > 0 && !current.letterBoxLocked
+                ? current.letterBoxEstimate
+                : null),
+      ),
+    );
+  }
+
+  /// Release a hand-set number and count the area from the index again.
+  void unlockLetterboxEstimate(String layerId, int polygonIndex) {
+    if (_currentMap == null || capabilities.readOnly) return;
+    final layer = _currentMap!.getLayer(layerId);
+    if (layer == null || polygonIndex >= layer.polygons.length) return;
+    final current = layer.polygons[polygonIndex];
+    if (!current.letterBoxLocked) return;
+    updatePolygon(
+        layer, polygonIndex, current.copyWith(letterBoxLocked: false));
+    // ignore: unawaited_futures
+    _autoEstimateLetterboxes(
+      layerId: layerId,
+      polygonIndex: polygonIndex,
+      expectedPointCount: current.points.length,
+    );
+  }
+
+  /// Hand the pending notice to exactly one caller and clear it.
+  LetterboxEstimateNotice? takeEstimateNotice() {
+    final notice = _estimateNotice;
+    _estimateNotice = null;
+    return notice;
+  }
+
+  /// The letterbox module's breakdown, as the model type that gets stored on
+  /// the polygon. Delegates to the module's own mapper so this and the track
+  /// editor's Client Maps write cannot drift apart.
+  static LetterBoxSplit _toSplit(LetterboxBreakdown b) => b.toLetterBoxSplit();
+
+  /// Apply a curated count to [polygon], preserving whatever estimate it
+  /// already carried.
+  ///
+  /// Every path that replaces an estimate with a counted one goes through
+  /// here, so the rule lives in one place: the FIRST count to land on a
+  /// polygon that already had a non-zero number stashes that number in
+  /// [CustomPolygon.importedLetterBoxEstimate], and later recounts leave the
+  /// stash alone. Without it, importing a "Target Areas" polygon into Client
+  /// Maps silently destroys the figure the client was quoted on — the two
+  /// numbers are both wanted, and only one of them can be recomputed.
+  ///
+  /// A locked polygon (a number someone set by hand) is returned unchanged —
+  /// this is the single choke point that keeps every recount off it.
+  static CustomPolygon _applyCount(
+      CustomPolygon polygon, LetterboxCount count) {
+    if (polygon.letterBoxLocked) return polygon;
+    return polygon.copyWith(
+      letterBoxEstimate: count.count,
+      letterBoxSplit: _toSplit(count.breakdown),
+      letterboxSuburbIds: List.unmodifiable(count.suburbIds),
+      importedLetterBoxEstimate: polygon.importedLetterBoxEstimate ??
+          (polygon.letterBoxEstimate > 0 ? polygon.letterBoxEstimate : null),
+    );
+  }
+
+  /// Estimate the letterboxes in the polygon at [layerId]/[polygonIndex] and
+  /// write the total back, without blocking whatever just finished (drawing
+  /// or vertex editing) — this always runs after the polygon already exists
+  /// on the map.
+  ///
+  /// [CustomPolygon] has no stable id once drawn (`completeDrawing` never
+  /// sets one), so — matching this file's own existing convention for
+  /// addressing a polygon transiently (see `startVertexEditing`'s
+  /// `'${layerId}_polygon_$index'`) — this identifies the target positionally
+  /// by layer id and index, captured at the moment the polygon was created or
+  /// finished editing.
+  ///
+  /// That index can only drift if an EARLIER polygon in the same layer is
+  /// deleted while this count is still in flight — a narrow window, but
+  /// guarded anyway: the vertex count of whatever now sits at that index is
+  /// compared against [expectedPointCount], and the write is skipped rather
+  /// than risking the wrong polygon's estimate.
+  Future<void> _autoEstimateLetterboxes({
+    required String layerId,
+    required int polygonIndex,
+    required int expectedPointCount,
+  }) async {
+    final mapId = _currentMap?.id;
+    if (mapId == null) return;
+
+    MapLayer? findLayer() =>
+        _currentMap?.layers.where((l) => l.id == layerId).firstOrNull;
+
+    final layer = findLayer();
+    if (layer == null || polygonIndex >= layer.polygons.length) return;
+    final polygon = layer.polygons[polygonIndex];
+    if (polygon.points.length < 3) return;
+    if (polygon.letterBoxLocked) return;
+
+    _estimatesInFlight++;
+    if (_estimatesInFlight == 1) notifyListeners();
+    try {
+      final LetterboxCount result;
+      try {
+        result = await _counter.countIn(polygon.points);
+      } catch (e) {
+        debugPrint('[LetterboxEstimate] auto-calculate failed: $e');
+        return;
+      }
+
+      // The map, or this layer's polygon list, may have changed while the
+      // count ran — re-validate everything rather than trusting the captured
+      // index blindly.
+      if (_currentMap?.id != mapId) return;
+      final freshLayer = findLayer();
+      if (freshLayer == null || polygonIndex >= freshLayer.polygons.length) {
+        return;
+      }
+      final current = freshLayer.polygons[polygonIndex];
+      if (current.points.length != expectedPointCount) {
+        debugPrint('[LetterboxEstimate] skipped — polygon at index '
+            '$polygonIndex changed while counting');
+        return;
+      }
+      // Locked by hand while the count was running.
+      if (current.letterBoxLocked) return;
+
+      updatePolygon(freshLayer, polygonIndex, _applyCount(current, result));
+      _estimateBatch.add(LetterboxEstimateResult(current.name, result));
+      // The count loaded the suburb list; share it with the provenance check.
+      _letterboxSuburbs ??= await _counter.suburbsById();
+    } finally {
+      _estimatesInFlight--;
+      if (_estimatesInFlight == 0) {
+        // A notice for a map that has since been closed is stale.
+        if (_estimateBatch.isNotEmpty && _currentMap?.id == mapId) {
+          _estimateNotice =
+              LetterboxEstimateNotice(List.unmodifiable(_estimateBatch));
+        }
+        _estimateBatch.clear();
+        notifyListeners();
+      }
+    }
+  }
+
   // Adapter state
   MapDataAdapter? _adapter;
   bool _isSaving = false;
@@ -166,7 +547,8 @@ class ShareableMapProvider extends ChangeNotifier {
   bool _isEditingPolygon =
       false; // true when the element being edited is a polygon
   String? _editingElementId; // Track which element is being edited
-  int _editingPointsVersion = 0; // Monotonically incremented on every vertex mutation
+  int _editingPointsVersion =
+      0; // Monotonically incremented on every vertex mutation
 
   // ── Cloud overlay layers (ephemeral — never persisted to Firestore) ───
   final Map<String, MapLayer> _cloudTracksLayers = {};
@@ -176,14 +558,10 @@ class ShareableMapProvider extends ChangeNotifier {
   final Set<String> _loadedCloudTrackFolders = {};
   final Set<String> _loadedCloudWaypointFolders = {};
 
-  // ── Dataset API metadata & spatial indexes (keyed by folder path) ─────
-  // When a Maps Platform Dataset exists for a folder, the editor renders
-  // its waypoints via TileOverlay instead of creating Marker DOM nodes.
-  // The spatial index lets the editor do hit-testing on map tap without
-  // needing any Marker objects.
-  final Map<String, CloudDatasetMeta> _cloudDatasetMeta = {};
+  // ── Waypoint spatial indexes (keyed by folder path) ──────────────────
+  // Lets the editor viewport-cull waypoint markers and hit-test a tap
+  // without holding a Marker object per waypoint.
   final Map<String, WaypointSpatialIndex> _cloudWaypointIndexes = {};
-  final Set<String> _creatingDatasetFolders = {};
 
   /// Layer IDs currently mid-visibility-toggle. The map widget needs a
   /// frame to push the marker-set diff across the JS bridge; ignoring
@@ -218,6 +596,17 @@ class ShareableMapProvider extends ChangeNotifier {
   // UI state
   bool _isSidebarVisible = true;
   bool _isWorkAreaPickerVisible = false;
+
+  /// Leave layers with nothing in them out of the sidebar. On by default:
+  /// imports and folder links each leave a layer behind, and a map that has
+  /// been worked on for a while ends up with more empty rows than real ones.
+  /// Session-wide rather than per map — it is a viewing preference.
+  bool _hideEmptyLayers = true;
+
+  /// Layers added through "Add layer" (or the draw dialog) on this map in
+  /// this session. They stay listed while still empty — a layer that
+  /// vanishes the moment it is created looks like the create failed.
+  final Set<String> _layersCreatedThisSession = {};
   bool _isLassoSelectActive = false;
   bool _showWorkAreasOverlay = false;
   bool _showSuburbsOverlay = false;
@@ -300,6 +689,90 @@ class ShareableMapProvider extends ChangeNotifier {
     ]..sort((a, b) => a.order.compareTo(b.order));
     if (overlays.isEmpty) return base;
     return [...base, ...overlays];
+  }
+
+  bool get hideEmptyLayers => _hideEmptyLayers;
+
+  void setHideEmptyLayers(bool hide) {
+    if (_hideEmptyLayers == hide) return;
+    _hideEmptyLayers = hide;
+    notifyListeners();
+  }
+
+  /// [layers] as the sidebar lists them.
+  ///
+  /// Cloud track and waypoint layers are never hidden here, empty or not:
+  /// they are views of a linked folder, and an empty one still says which
+  /// folder is linked and is where "Load waypoints" lives.
+  List<MapLayer> get sidebarLayers {
+    final all = layers;
+    if (!_hideEmptyLayers) return all;
+    return all
+        .where((l) =>
+            l.isNotEmpty ||
+            isCloudOverlayLayer(l.id) ||
+            _layersCreatedThisSession.contains(l.id))
+        .toList();
+  }
+
+  /// Saved layers with nothing in them. Cloud overlays are not saved layers
+  /// and are never included — see [sidebarLayers].
+  List<MapLayer> get emptyLayers => (_currentMap?.layers ?? const <MapLayer>[])
+      .where((l) => l.isEmpty)
+      .toList();
+
+  /// How many empty layers the sidebar is currently leaving out.
+  int get hiddenEmptyLayerCount {
+    if (!_hideEmptyLayers) return 0;
+    return emptyLayers
+        .where((l) => !_layersCreatedThisSession.contains(l.id))
+        .length;
+  }
+
+  /// Delete every saved layer that holds nothing, and return how many went.
+  ///
+  /// Cloud track and waypoint layers are untouched: they are not stored on
+  /// the map, so "removing" one could only mean unlinking its folder, which
+  /// is a different decision from tidying up.
+  int removeEmptyLayers() {
+    final map = _currentMap;
+    if (map == null) return 0;
+    // Filter by content, not by id: layer ids are millisecond timestamps, so
+    // two layers made in the same millisecond share one, and removing "the
+    // empty one" by id would take its non-empty twin with it.
+    final kept = map.layers.where((l) => l.isNotEmpty).toList();
+    final removed = map.layers.length - kept.length;
+    if (removed == 0) return 0;
+
+    final next = map.copyWith(layers: kept);
+    _currentMap = next;
+    _layersCreatedThisSession.removeWhere((id) => next.getLayer(id) == null);
+    if (_selectedLayerId != null && next.getLayer(_selectedLayerId!) == null) {
+      _selectedLayerId = kept.isNotEmpty ? kept.first.id : null;
+    }
+    debugPrint('Removed $removed empty layer(s)');
+    _notifyAndSave();
+    return removed;
+  }
+
+  /// The layers a just-drawn element of [mode] can be added to: every saved
+  /// layer, plus the cloud layers whose files can hold that kind of element —
+  /// waypoint layers for a point, track layers for a line. A polygon has no
+  /// GPX form, so it only ever goes into a saved layer.
+  ///
+  /// Every linked folder's cloud layer is offered, loaded or not and empty
+  /// or not: which folder a drop belongs to does not depend on what has been
+  /// downloaded this session.
+  List<MapLayer> drawTargetsFor(DrawingMode mode) {
+    final saved = _currentMap?.layers ?? const <MapLayer>[];
+    final Iterable<MapLayer> cloud = switch (mode) {
+      DrawingMode.point => _cloudWaypointsLayers.values,
+      DrawingMode.polyline => _cloudTracksLayers.values,
+      _ => const <MapLayer>[],
+    };
+    final sortedCloud = cloud.toList()
+      ..sort((a, b) => a.order.compareTo(b.order));
+    return [...saved, ...sortedCloud];
   }
 
   bool _shouldShowCloudTrackLayer(MapLayer layer) {
@@ -434,11 +907,6 @@ class ShareableMapProvider extends ChangeNotifier {
   bool get isLoadingCloudWaypoints => _loadingCloudWaypointFolders.isNotEmpty;
   bool get cloudTracksLoaded => _loadedCloudTrackFolders.isNotEmpty;
   bool get cloudWaypointsLoaded => _loadedCloudWaypointFolders.isNotEmpty;
-
-  /// Dataset API metadata keyed by folder path.
-  /// Non-empty when at least one folder has a synced Maps Platform Dataset.
-  Map<String, CloudDatasetMeta> get cloudDatasetMeta =>
-      Map.unmodifiable(_cloudDatasetMeta);
 
   /// Spatial indexes for viewport hit-testing, keyed by folder path.
   Map<String, WaypointSpatialIndex> get cloudWaypointIndexes =>
@@ -654,7 +1122,7 @@ class ShareableMapProvider extends ChangeNotifier {
   static const String waypointsLayerName = 'Letter Boxes Reached';
 
   /// The default user layer name.
-  static const String _targetAreasLayerName = 'Target Areas';
+  static const String _targetAreasLayerName = MapLayer.targetAreasName;
 
   /// Initialise empty cloud overlay layers when a folder is linked.
   /// Tracks are auto-loaded (deferred); waypoints show as empty until
@@ -677,14 +1145,21 @@ class ShareableMapProvider extends ChangeNotifier {
       final waypointId = _cloudLayerId('waypoints', folder);
       validTrackIds.add(trackId);
       validWaypointIds.add(waypointId);
+      // Names are re-derived every time: linking a second folder must turn
+      // the single-folder default names into per-month ones, and back.
       final trackLayer = _cloudTracksLayers[trackId] ??
           _cloudTrackLayerShell(folder, order: 900 + i * 2);
       _cloudTracksLayers[trackId] = _applyCloudTrackColor(
         folder,
-        trackLayer.copyWith(order: 900 + i * 2),
+        trackLayer.copyWith(
+          order: 900 + i * 2,
+          name: _cloudTrackLayerName(folder),
+        ),
       );
-      _cloudWaypointsLayers.putIfAbsent(waypointId,
-          () => _cloudWaypointLayerShell(folder, order: 901 + i * 2));
+      final waypointLayer = _cloudWaypointsLayers[waypointId] ??
+          _cloudWaypointLayerShell(folder, order: 901 + i * 2);
+      _cloudWaypointsLayers[waypointId] =
+          waypointLayer.copyWith(name: _cloudWaypointLayerName(folder));
     }
 
     _cloudTracksLayers.removeWhere((id, _) => !validTrackIds.contains(id));
@@ -708,14 +1183,31 @@ class ShareableMapProvider extends ChangeNotifier {
     return hash.toRadixString(16);
   }
 
+  /// A user rename always wins. Otherwise a map with one linked folder gets
+  /// the plain [tracksLayerName]; with several, each layer is labelled by its
+  /// month so they can be told apart until the user renames them.
+  String _cloudTrackLayerName(String folderPath) {
+    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
+    final customName = _currentMap?.cloudLayerNames[cleanPath];
+    if (customName != null) return customName;
+    if (linkedCloudFolders.length <= 1) return tracksLayerName;
+    return '${cloudFolderMonthLabel(folderPath)} Movements';
+  }
+
+  /// Same rule as [_cloudTrackLayerName], for the waypoints layer.
+  String _cloudWaypointLayerName(String folderPath) {
+    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
+    final customName = _currentMap?.cloudLayerNames['wpt:$cleanPath'];
+    if (customName != null) return customName;
+    if (linkedCloudFolders.length <= 1) return waypointsLayerName;
+    return '${cloudFolderMonthLabel(folderPath)} Letter Boxes';
+  }
+
   MapLayer _cloudTrackLayerShell(String folderPath, {required int order}) {
     final now = DateTime.now();
-    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
-    final label = cloudFolderMonthLabel(folderPath);
-    final customName = _currentMap?.cloudLayerNames[cleanPath];
     return MapLayer(
       id: _cloudLayerId('tracks', folderPath),
-      name: customName ?? '$label Movements',
+      name: _cloudTrackLayerName(folderPath),
       description: folderPath,
       order: order,
       defaultColor: cloudTrackColorForFolder(folderPath),
@@ -780,12 +1272,9 @@ class ShareableMapProvider extends ChangeNotifier {
 
   MapLayer _cloudWaypointLayerShell(String folderPath, {required int order}) {
     final now = DateTime.now();
-    final cleanPath = folderPath.trim().replaceAll(RegExp(r'/+$'), '');
-    final label = cloudFolderMonthLabel(folderPath);
-    final customName = _currentMap?.cloudLayerNames['wpt:$cleanPath'];
     return MapLayer(
       id: _cloudLayerId('waypoints', folderPath),
-      name: customName ?? '$label Letter Boxes',
+      name: _cloudWaypointLayerName(folderPath),
       description: folderPath,
       order: order,
       defaultColor: Colors.red,
@@ -846,9 +1335,7 @@ class ShareableMapProvider extends ChangeNotifier {
     _loadedCloudWaypointFolders.clear();
     _loadingCloudTrackFolders.clear();
     _loadingCloudWaypointFolders.clear();
-    _cloudDatasetMeta.clear();
     _cloudWaypointIndexes.clear();
-    _creatingDatasetFolders.clear();
 
     // Selection / overlays
     _selectedElementId = null;
@@ -867,6 +1354,12 @@ class ShareableMapProvider extends ChangeNotifier {
     _lassoPoints.clear();
     _isWorkAreaPickerVisible = false;
     _hasUnsavedChanges = false;
+    _layersCreatedThisSession.clear();
+
+    // A boundary-cleanup snapshot belongs to the map it was taken from —
+    // restoring it into a different map would write one map's polygons over
+    // another's.
+    _preCleanupLayers = null;
   }
 
   /// Link a cloud storage folder to this map.
@@ -894,6 +1387,8 @@ class ShareableMapProvider extends ChangeNotifier {
       // Rename existing first layer or create a new one
       if (_currentMap!.layers.isNotEmpty) {
         final first = _currentMap!.layers.first;
+        // 'Layer 1' was the default layer name on maps made before
+        // "Target Areas" became the default.
         if (first.name == 'Layer 1' && first.elementCount == 0) {
           _currentMap = _currentMap!.updateLayer(
               first.id, first.copyWith(name: _targetAreasLayerName));
@@ -953,9 +1448,7 @@ class ShareableMapProvider extends ChangeNotifier {
       _cloudWaypointsLayers.clear();
       _loadedCloudTrackFolders.clear();
       _loadedCloudWaypointFolders.clear();
-      _cloudDatasetMeta.clear();
       _cloudWaypointIndexes.clear();
-      _creatingDatasetFolders.clear();
     } else {
       final trackId = _cloudLayerId('tracks', cleanPath!);
       final waypointId = _cloudLayerId('waypoints', cleanPath);
@@ -963,7 +1456,6 @@ class ShareableMapProvider extends ChangeNotifier {
       _cloudWaypointsLayers.remove(waypointId);
       _loadedCloudTrackFolders.remove(cleanPath);
       _loadedCloudWaypointFolders.remove(cleanPath);
-      _cloudDatasetMeta.remove(cleanPath);
       _cloudWaypointIndexes.remove(cleanPath);
     }
     _notifyAndSave();
@@ -1214,32 +1706,15 @@ class ShareableMapProvider extends ChangeNotifier {
             .toList());
         _cloudWaypointIndexes[resolvedFolderPath] = index;
 
-        // Check for a Maps Platform Dataset. If one exists the editor renders
-        // via TileOverlay so we keep the layer shell empty (no Marker objects).
-        final datasetMeta =
-            await CloudDatasetService().getDatasetMeta(resolvedFolderPath);
-        if (datasetMeta != null) {
-          _cloudDatasetMeta[resolvedFolderPath] = datasetMeta;
-          debugPrint(
-              '[CloudWaypoints] dataset found: ${datasetMeta.datasetId} (${datasetMeta.featureCount} features)');
-        } else if (!_creatingDatasetFolders.contains(resolvedFolderPath)) {
-          _triggerDatasetCreationInBackground(resolvedFolderPath);
-        }
-
         final layerId = _cloudLayerId('waypoints', resolvedFolderPath);
         var layer = _cloudWaypointsLayers[layerId] ??
             _cloudWaypointLayerShell(resolvedFolderPath, order: 901);
-        layer = layer.copyWith(
-          // Dataset present → render via TileOverlay, keep layer shell empty.
-          // No dataset → fall back to Marker-based rendering as before.
-          points: datasetMeta != null ? const [] : clippedPoints,
-        );
+        layer = layer.copyWith(points: clippedPoints);
         _cloudWaypointsLayers[layerId] = layer;
         _loadedCloudWaypointFolders.add(resolvedFolderPath);
         debugPrint(
             '[CloudWaypoints] DONE (compiled) in ${sw.elapsedMilliseconds}ms — '
-            '${clippedPoints.length}/${points.length} waypoints, '
-            'dataset=${datasetMeta != null}');
+            '${clippedPoints.length}/${points.length} waypoints');
         _loadingCloudWaypointFolders.remove(resolvedFolderPath);
         notifyListeners();
         return;
@@ -1294,50 +1769,23 @@ class ShareableMapProvider extends ChangeNotifier {
           .toList());
       _cloudWaypointIndexes[resolvedFolderPath] = index;
 
-      final datasetMeta =
-          await CloudDatasetService().getDatasetMeta(resolvedFolderPath);
-      if (datasetMeta != null) {
-        _cloudDatasetMeta[resolvedFolderPath] = datasetMeta;
-      } else if (!_creatingDatasetFolders.contains(resolvedFolderPath)) {
-        _triggerDatasetCreationInBackground(resolvedFolderPath);
-      }
-
       final layerId = _cloudLayerId('waypoints', resolvedFolderPath);
       var layer = _cloudWaypointsLayers[layerId] ??
           _cloudWaypointLayerShell(resolvedFolderPath, order: 901);
 
-      layer = layer.copyWith(
-        points: datasetMeta != null ? const [] : clippedFallback,
-      );
+      layer = layer.copyWith(points: clippedFallback);
 
       _cloudWaypointsLayers[layerId] = layer;
       _loadedCloudWaypointFolders.add(resolvedFolderPath);
       debugPrint(
           '[CloudWaypoints] DONE (fallback) in ${sw.elapsedMilliseconds}ms — '
-          '${result.points.length} points from ${downloaded.length} files, '
-          'dataset=${datasetMeta != null}');
+          '${result.points.length} points from ${downloaded.length} files');
     } catch (e) {
       debugPrint('[CloudWaypoints] FAILED at ${sw.elapsedMilliseconds}ms: $e');
     }
 
     _loadingCloudWaypointFolders.remove(resolvedFolderPath);
     notifyListeners();
-  }
-
-  /// Calls the `syncWaypointDataset` Cloud Function in the background to
-  /// create a Maps Platform Dataset for [folderPath]. When the CF returns
-  /// successfully, reloads the waypoints for this folder so the editor
-  /// switches from Marker-based rendering to TileOverlay automatically.
-  void _triggerDatasetCreationInBackground(String folderPath) {
-    _creatingDatasetFolders.add(folderPath);
-    final mapId = _currentMap?.id;
-    CloudDatasetService().triggerDatasetCreation(folderPath).then((datasetId) {
-      _creatingDatasetFolders.remove(folderPath);
-      if (datasetId != null && _currentMap?.id == mapId) {
-        debugPrint('[CloudWaypoints] dataset created ($datasetId), reloading waypoints for $folderPath');
-        loadCloudFolderWaypoints(folderPath: folderPath, force: true);
-      }
-    });
   }
 
   List<List<LatLng>> _cloudClipPolygons() {
@@ -1396,6 +1844,7 @@ class ShareableMapProvider extends ChangeNotifier {
           isDashed: polyline.isDashed,
           createdAt: now,
           updatedAt: now,
+          sourceFile: polyline.sourceFile,
         ));
         segment.clear();
       }
@@ -1431,6 +1880,12 @@ class ShareableMapProvider extends ChangeNotifier {
     try {
       // Mark the timestamp so we can ignore the echoed snapshot
       _lastSaveTimestamp = DateTime.now().millisecondsSinceEpoch;
+      // Give new polygons their stable id in memory too, so the next edit
+      // of the same polygon saves under the same id (the echoed snapshot
+      // that would carry it back is ignored).
+      if (_adapter is FirestoreMapAdapter) {
+        _currentMap = _currentMap!.withStablePolygonIds();
+      }
       await _adapter!.save(_currentMap!);
 
       // If this was the first save of a new map, start listening now
@@ -1576,11 +2031,17 @@ class ShareableMapProvider extends ChangeNotifier {
         }
         // If updatedAt differs but we saved very recently, still skip
         // because the snapshot is from our own write propagating.
-        if (now - _lastSaveTimestamp < 1500) return;
+        if (now - _lastSaveTimestamp < 1500) {
+          _adoptRemoteFolderLinks(remoteMap);
+          return;
+        }
       }
 
       // Don't apply remote changes while the user is actively drawing
-      if (_isDrawing || _isEditingVertices) return;
+      if (_isDrawing || _isEditingVertices) {
+        _adoptRemoteFolderLinks(remoteMap);
+        return;
+      }
 
       // Apply the remote update
       debugPrint(
@@ -1590,6 +2051,42 @@ class ShareableMapProvider extends ChangeNotifier {
 
     debugPrint('[RealtimeSync] Started listening for map ${adapter.docId}');
   }
+
+  /// Take the folder links from a remote snapshot that is otherwise being
+  /// skipped (mid-draw, or right after our own save).
+  ///
+  /// The `onJobListItemWritten` Cloud Function re-points a map at its job's
+  /// folder when the job is renamed or moved. Saves write the whole document,
+  /// so dropping that snapshot would let the next auto-save put the old
+  /// folder back and unlink the map from the job's GPS data.
+  void _adoptRemoteFolderLinks(ShareableMap remote) {
+    final local = _currentMap;
+    if (local == null) return;
+    final same = local.storageFolderPath == remote.storageFolderPath &&
+        local.jobListItemId == remote.jobListItemId &&
+        listEquals(local.cloudFolderPaths, remote.cloudFolderPaths) &&
+        mapEquals(local.cloudTrackColors, remote.cloudTrackColors) &&
+        mapEquals(local.cloudLayerNames, remote.cloudLayerNames);
+    if (same) return;
+    debugPrint('[RealtimeSync] Adopting remote folder links for map '
+        '${remote.id}: ${remote.cloudFolderPaths}');
+    _currentMap = local.copyWith(
+      updatedAt: local.updatedAt,
+      jobListItemId: remote.jobListItemId,
+      storageFolderPath: remote.storageFolderPath,
+      clearStorageFolderPath: remote.storageFolderPath == null,
+      cloudFolderPaths: remote.cloudFolderPaths,
+      cloudTrackColors: remote.cloudTrackColors,
+      cloudLayerNames: remote.cloudLayerNames,
+    );
+    _initCloudOverlays();
+    notifyListeners();
+  }
+
+  /// Swap in a map the adapter has rebuilt (e.g. restyled after a change the
+  /// adapter persisted itself), keeping selection and the open info window.
+  /// Does not save.
+  void applyAdapterMap(ShareableMap map) => _applyRemoteMap(map);
 
   /// Apply a remote map update, preserving local UI state.
   void _applyRemoteMap(ShareableMap remoteMap) {
@@ -1610,6 +2107,25 @@ class ShareableMapProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Stop delivering remote edits, for when the editor leaves the screen.
+  ///
+  /// This provider is app-scoped — the Riverpod `ChangeNotifierProvider`
+  /// holds one instance for the session — so popping the editor disposes the
+  /// widgets but not the provider, and nothing else cancels the Firestore
+  /// listener. Left running it keeps calling [notifyListeners] into a widget
+  /// tree that has been unmounted, and every remote edit then trips
+  /// `_lifecycleState != defunct` in the framework. It also keeps paying for
+  /// snapshots of a map nobody is looking at.
+  ///
+  /// Deliberately NOT [_stopRealtimeSync]: that one also cancels the pending
+  /// auto-save, and a debounced auto-save is unsaved work. Leaving the screen
+  /// must not throw it away, so the timers are left to fire — they already
+  /// guard themselves on [_isDisposed].
+  ///
+  /// Safe to call on the way out: every route into the editor goes through
+  /// [loadFromAdapter], which starts the listener again.
+  Future<void> pauseRealtimeSync() => _cancelRealtimeSubscription();
+
   /// Stop the real-time Firestore listener and cancel any pending
   /// auto-save / thumbnail timers. Awaiting the returned future ensures the
   /// underlying StreamSubscription has fully closed before a new listener
@@ -1619,6 +2135,11 @@ class ShareableMapProvider extends ChangeNotifier {
     _autoSaveTimer = null;
     _thumbnailTimer?.cancel();
     _thumbnailTimer = null;
+    await _cancelRealtimeSubscription();
+  }
+
+  /// Drop the Firestore listener alone, leaving pending local work in place.
+  Future<void> _cancelRealtimeSubscription() async {
     final sub = _realtimeSubscription;
     _realtimeSubscription = null;
     await sub?.cancel();
@@ -1691,6 +2212,7 @@ class ShareableMapProvider extends ChangeNotifier {
       defaultCenter: center,
     );
     _selectedLayerId = _currentMap!.layers.first.id;
+    _areaImportLayerId = null;
     debugPrint('Created new map: ${_currentMap!.name}');
     notifyListeners();
   }
@@ -1698,6 +2220,11 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Load an existing map
   void loadMap(ShareableMap map) {
     _currentMap = map;
+    if (_letterboxSuburbs == null) {
+      // ignore: unawaited_futures
+      refreshLetterboxStatuses();
+    }
+    _areaImportLayerId = null;
     if (map.layers.isNotEmpty) {
       _selectedLayerId = map.layers.first.id;
     }
@@ -1710,6 +2237,7 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Clear current map
   void clearMap() {
     _currentMap = null;
+    _areaImportLayerId = null;
     _selectedLayerId = null;
     _selectedElementId = null;
     _drawingMode = DrawingMode.none;
@@ -1728,173 +2256,192 @@ class ShareableMapProvider extends ChangeNotifier {
     _notifyAndSave();
   }
 
-  // === WORK AREA IMPORT ===
+  // === WORK AREA & SUBURB IMPORT ===
+  //
+  // Work areas and suburbs both land in ONE "Target Areas" layer. The layer
+  // is resolved once per session and remembered, so ticking areas from both
+  // pickers never grows the layer list. Maps saved before this carry
+  // "Work Areas"/"Suburbs" layers under the ids below — those are still read
+  // (so an old import can be unticked) but never written to.
 
-  /// Add a work area polygon to the map as a new polygon in a dedicated
-  /// "Work Areas" layer. Creates the layer if it doesn't exist yet.
-  void addWorkAreaToMap(WorkArea workArea, {Color? color}) {
-    if (_currentMap == null) return;
+  static const _legacyWorkAreaLayerId = 'imported_work_areas';
+  static const _legacySuburbLayerId = 'imported_suburbs';
 
-    const workAreaLayerId = 'imported_work_areas';
+  /// The layer this session's work-area/suburb imports go into.
+  String? _areaImportLayerId;
 
-    // Find or create the "Work Areas" import layer
-    var layer = _currentMap!.getLayer(workAreaLayerId);
-    if (layer == null) {
-      layer = MapLayer(
-        id: workAreaLayerId,
-        name: 'Work Areas',
-        description: 'Imported from work area collection',
-        order: _currentMap!.layers.length,
-        defaultColor: WorkArea.defaultColor,
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
-      );
-      _currentMap = _currentMap!.addLayer(layer);
+  /// Default name for a new layer: "Target Areas", numbered if taken.
+  String nextTargetAreasLayerName() {
+    final names = layers.map((l) => l.name).toSet();
+    if (!names.contains(MapLayer.targetAreasName)) {
+      return MapLayer.targetAreasName;
     }
+    var n = 2;
+    while (names.contains('${MapLayer.targetAreasName} $n')) {
+      n++;
+    }
+    return '${MapLayer.targetAreasName} $n';
+  }
 
-    // Convert WorkArea to CustomPolygon and add it
-    final polygon = CustomPolygon(
-      id: workArea.id,
-      name: workArea.name,
-      description: workArea.description,
-      points: List<LatLng>.from(workArea.polygonPoints),
-      color: color ?? workArea.color,
-      fillOpacity: 0.25,
-      strokeWidth: 2,
-      letterBoxEstimate: workArea.letterBoxEstimate,
-    );
+  /// Find — or, once per session, create — the import layer.
+  MapLayer _resolveAreaImportLayer() {
+    final map = _currentMap!;
+    final remembered =
+        _areaImportLayerId == null ? null : map.getLayer(_areaImportLayerId!);
+    if (remembered != null) return remembered;
+
+    MapLayer? layer;
+    for (final l in map.layers) {
+      if (l.name == MapLayer.targetAreasName) {
+        layer = l;
+        break;
+      }
+    }
+    if (layer == null) {
+      layer = MapLayer.create(
+        name: MapLayer.targetAreasName,
+        description: 'Imported from work areas and suburbs',
+        order: map.layers.length,
+        defaultColor: WorkArea.defaultColor,
+      );
+      _currentMap = map.addLayer(layer);
+    }
+    _areaImportLayerId = layer.id;
+    return layer;
+  }
+
+  /// Layers an imported area may live in: this session's import layer (or
+  /// the map's Target Areas layer) plus any legacy import layers.
+  Iterable<MapLayer> _areaImportLayers() sync* {
+    final map = _currentMap;
+    if (map == null) return;
+    final ids = <String>{};
+    final remembered =
+        _areaImportLayerId == null ? null : map.getLayer(_areaImportLayerId!);
+    if (remembered != null) {
+      ids.add(remembered.id);
+      yield remembered;
+    } else {
+      for (final l in map.layers) {
+        if (l.name == MapLayer.targetAreasName) {
+          ids.add(l.id);
+          yield l;
+          break;
+        }
+      }
+    }
+    for (final id in const [_legacyWorkAreaLayerId, _legacySuburbLayerId]) {
+      final l = map.getLayer(id);
+      if (l != null && ids.add(id)) yield l;
+    }
+  }
+
+  /// Add or refresh one imported area in the import layer.
+  void _upsertImportedArea(CustomPolygon polygon, String sourceLabel) {
+    final layer = _resolveAreaImportLayer();
+    final layerId = layer.id;
 
     final existingIndex = layer.polygons.indexWhere(
       (p) =>
-          (workArea.id.isNotEmpty && p.id == workArea.id) ||
-          p.name == workArea.name,
+          ((polygon.id?.isNotEmpty ?? false) && p.id == polygon.id) ||
+          p.name == polygon.name,
     );
+    final MapLayer updatedLayer;
+    final int index;
     if (existingIndex != -1) {
-      final updatedLayer = layer.updatePolygon(existingIndex, polygon);
-      _currentMap = _currentMap!.updateLayer(workAreaLayerId, updatedLayer);
-      debugPrint('Updated imported work area on map: ${workArea.name}');
+      updatedLayer = layer.updatePolygon(existingIndex, polygon);
+      index = existingIndex;
+    } else {
+      updatedLayer = layer.addPolygon(polygon);
+      index = updatedLayer.polygons.length - 1;
+    }
+    _currentMap = _currentMap!.updateLayer(layerId, updatedLayer);
+    // Count once, here, so the imported area carries its own number and split
+    // rather than inheriting the source's hand-entered estimate.
+    // ignore: unawaited_futures
+    _autoEstimateLetterboxes(
+      layerId: layerId,
+      polygonIndex: index,
+      expectedPointCount: polygon.points.length,
+    );
+    debugPrint('${existingIndex != -1 ? 'Updated' : 'Added'} imported '
+        '$sourceLabel on map: ${polygon.name}');
+    _notifyAndSave();
+  }
+
+  /// Remove an imported area by name from whichever import layer holds it.
+  /// The Target Areas layer is kept when emptied (it is the map's working
+  /// layer); an emptied legacy layer is dropped.
+  void _removeImportedArea(String name, String sourceLabel) {
+    if (_currentMap == null) return;
+    for (final layer in _areaImportLayers().toList()) {
+      final index = layer.polygons.indexWhere((p) => p.name == name);
+      if (index == -1) continue;
+      final updatedLayer = layer.removePolygon(index);
+      _currentMap = _currentMap!.updateLayer(layer.id, updatedLayer);
+      final isLegacy = layer.id == _legacyWorkAreaLayerId ||
+          layer.id == _legacySuburbLayerId;
+      if (isLegacy && updatedLayer.polygons.isEmpty) {
+        _currentMap = _currentMap!.removeLayer(layer.id);
+      }
+      debugPrint('Removed $sourceLabel from map: $name');
       _notifyAndSave();
       return;
     }
+  }
 
-    final updatedLayer = layer.addPolygon(polygon);
-    _currentMap = _currentMap!.updateLayer(workAreaLayerId, updatedLayer);
-    debugPrint('Added work area to map: ${workArea.name}');
-    _notifyAndSave();
+  bool _isAreaImported(String name) =>
+      _areaImportLayers().any((l) => l.polygons.any((p) => p.name == name));
+
+  /// Add a work area polygon to the map's Target Areas layer.
+  void addWorkAreaToMap(WorkArea workArea, {Color? color}) {
+    if (_currentMap == null) return;
+    _upsertImportedArea(
+      CustomPolygon(
+        id: workArea.id,
+        name: workArea.name,
+        description: workArea.description,
+        points: List<LatLng>.from(workArea.polygonPoints),
+        color: color ?? workArea.color,
+        fillOpacity: 0.25,
+        strokeWidth: 2,
+        letterBoxEstimate: workArea.letterBoxEstimate,
+      ),
+      'work area',
+    );
   }
 
   /// Remove a previously imported work area polygon by name.
-  void removeWorkAreaFromMap(String workAreaName) {
-    if (_currentMap == null) return;
-
-    const workAreaLayerId = 'imported_work_areas';
-    final layer = _currentMap!.getLayer(workAreaLayerId);
-    if (layer == null) return;
-
-    final index = layer.polygons.indexWhere((p) => p.name == workAreaName);
-    if (index == -1) return;
-
-    final updatedLayer = layer.removePolygon(index);
-    _currentMap = _currentMap!.updateLayer(workAreaLayerId, updatedLayer);
-
-    // If the layer is now empty, remove it entirely
-    if (updatedLayer.polygons.isEmpty) {
-      _currentMap = _currentMap!.removeLayer(workAreaLayerId);
-    }
-
-    debugPrint('Removed work area from map: $workAreaName');
-    _notifyAndSave();
-  }
+  void removeWorkAreaFromMap(String workAreaName) =>
+      _removeImportedArea(workAreaName, 'work area');
 
   /// Check whether a work area (by name) has been imported.
-  bool isWorkAreaImported(String workAreaName) {
-    if (_currentMap == null) return false;
-    const workAreaLayerId = 'imported_work_areas';
-    final layer = _currentMap!.getLayer(workAreaLayerId);
-    if (layer == null) return false;
-    return layer.polygons.any((p) => p.name == workAreaName);
-  }
+  bool isWorkAreaImported(String workAreaName) => _isAreaImported(workAreaName);
 
-  // === SUBURB IMPORT ===
-
-  static const _suburbLayerId = 'imported_suburbs';
-
-  /// Add a suburb polygon to the map as a new polygon in a dedicated
-  /// "Suburbs" layer. Creates the layer if it doesn't exist yet.
+  /// Add a suburb polygon to the map's Target Areas layer.
   void addSuburbToMap(WorkSuburb suburb) {
     if (_currentMap == null) return;
-
-    var layer = _currentMap!.getLayer(_suburbLayerId);
-    if (layer == null) {
-      layer = MapLayer(
-        id: _suburbLayerId,
-        name: 'Suburbs',
-        description: 'Imported from suburb collection',
-        order: _currentMap!.layers.length,
-        defaultColor: WorkSuburb.defaultColor,
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
-      );
-      _currentMap = _currentMap!.addLayer(layer);
-    }
-
-    final polygon = CustomPolygon(
-      id: suburb.id,
-      name: suburb.name,
-      description: suburb.description,
-      points: List<LatLng>.from(suburb.polygonPoints),
-      color: suburb.color,
-      fillOpacity: 0.25,
-      strokeWidth: 2,
-      letterBoxEstimate: suburb.letterBoxEstimate,
+    _upsertImportedArea(
+      CustomPolygon(
+        id: suburb.id,
+        name: suburb.name,
+        description: suburb.description,
+        points: List<LatLng>.from(suburb.polygonPoints),
+        color: suburb.color,
+        fillOpacity: 0.25,
+        strokeWidth: 2,
+        letterBoxEstimate: suburb.letterBoxEstimate,
+      ),
+      'suburb',
     );
-
-    final existingIndex = layer.polygons.indexWhere(
-      (p) =>
-          (suburb.id.isNotEmpty && p.id == suburb.id) || p.name == suburb.name,
-    );
-    if (existingIndex != -1) {
-      final updatedLayer = layer.updatePolygon(existingIndex, polygon);
-      _currentMap = _currentMap!.updateLayer(_suburbLayerId, updatedLayer);
-      debugPrint('Updated imported suburb on map: ${suburb.name}');
-      _notifyAndSave();
-      return;
-    }
-
-    final updatedLayer = layer.addPolygon(polygon);
-    _currentMap = _currentMap!.updateLayer(_suburbLayerId, updatedLayer);
-    debugPrint('Added suburb to map: ${suburb.name}');
-    _notifyAndSave();
   }
 
   /// Remove a previously imported suburb polygon by name.
-  void removeSuburbFromMap(String suburbName) {
-    if (_currentMap == null) return;
-
-    final layer = _currentMap!.getLayer(_suburbLayerId);
-    if (layer == null) return;
-
-    final index = layer.polygons.indexWhere((p) => p.name == suburbName);
-    if (index == -1) return;
-
-    final updatedLayer = layer.removePolygon(index);
-    _currentMap = _currentMap!.updateLayer(_suburbLayerId, updatedLayer);
-
-    if (updatedLayer.polygons.isEmpty) {
-      _currentMap = _currentMap!.removeLayer(_suburbLayerId);
-    }
-
-    debugPrint('Removed suburb from map: $suburbName');
-    _notifyAndSave();
-  }
+  void removeSuburbFromMap(String suburbName) =>
+      _removeImportedArea(suburbName, 'suburb');
 
   /// Check whether a suburb (by name) has been imported.
-  bool isSuburbImported(String suburbName) {
-    if (_currentMap == null) return false;
-    final layer = _currentMap!.getLayer(_suburbLayerId);
-    if (layer == null) return false;
-    return layer.polygons.any((p) => p.name == suburbName);
-  }
+  bool isSuburbImported(String suburbName) => _isAreaImported(suburbName);
 
   /// Add multiple suburbs to the map at once.
   void addSuburbsToMap(List<WorkSuburb> suburbs) {
@@ -1905,13 +2452,13 @@ class ShareableMapProvider extends ChangeNotifier {
 
   // === LAYER OPERATIONS ===
 
-  /// Create a new layer
-  void createLayer({
+  /// Create a new layer, select it, and return its id (null with no map).
+  String? createLayer({
     required String name,
     String description = '',
     Color? color,
   }) {
-    if (_currentMap == null) return;
+    if (_currentMap == null) return null;
 
     final newLayer = MapLayer.create(
       name: name,
@@ -1922,8 +2469,10 @@ class ShareableMapProvider extends ChangeNotifier {
 
     _currentMap = _currentMap!.addLayer(newLayer);
     _selectedLayerId = newLayer.id;
+    _layersCreatedThisSession.add(newLayer.id);
     debugPrint('Created layer: $name');
     _notifyAndSave();
+    return newLayer.id;
   }
 
   /// Delete a layer
@@ -2073,6 +2622,95 @@ class ShareableMapProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Cloud-track groups (one distributor's segments) the sidebar has opened.
+  /// Keyed by [cloudTrackGroupKey]; session-only UI state, so every group
+  /// starts collapsed.
+  final Set<String> _expandedTrackGroups = {};
+
+  static String cloudTrackGroupKey(String layerId, String groupId) =>
+      '$layerId|$groupId';
+
+  bool isTrackGroupExpanded(String key) => _expandedTrackGroups.contains(key);
+
+  void toggleTrackGroupExpanded(String key) {
+    if (!_expandedTrackGroups.remove(key)) _expandedTrackGroups.add(key);
+    notifyListeners();
+  }
+
+  /// Animate the camera to fit every segment of one track and open a single
+  /// info window for the whole track — the collapsed-group counterpart of
+  /// [focusOnPolyline]. No one segment is highlighted, since the row stands
+  /// for all of them.
+  Future<void> focusOnPolylineGroup(
+    String layerId,
+    List<String> polylineIds, {
+    required String title,
+  }) async {
+    final layer = _cloudTracksLayers[layerId] ??
+        _currentMap?.layers.where((l) => l.id == layerId).firstOrNull;
+    if (layer == null) return;
+    final ids = polylineIds.toSet();
+    final segments = layer.polylines
+        .where((p) => ids.contains(p.id) && p.points.isNotEmpty)
+        .toList();
+    if (segments.isEmpty) return;
+
+    final allPoints = [for (final s in segments) ...s.points];
+    double minLat = allPoints.first.latitude;
+    double maxLat = minLat;
+    double minLng = allPoints.first.longitude;
+    double maxLng = minLng;
+    double sumLat = 0, sumLng = 0;
+    for (final pt in allPoints) {
+      if (pt.latitude < minLat) minLat = pt.latitude;
+      if (pt.latitude > maxLat) maxLat = pt.latitude;
+      if (pt.longitude < minLng) minLng = pt.longitude;
+      if (pt.longitude > maxLng) maxLng = pt.longitude;
+      sumLat += pt.latitude;
+      sumLng += pt.longitude;
+    }
+
+    final meters = segments.fold<double>(
+        0, (s, p) => s + (p.distanceMeters ?? p.totalDistanceMeters));
+    final km = meters / 1000;
+    final parts = <String>[
+      km < 1 ? '${meters.round()} m' : '${km.toStringAsFixed(2)} km',
+    ];
+    final durations = segments.map((p) => p.duration).whereType<Duration>();
+    if (durations.isNotEmpty) {
+      final total = durations.fold(Duration.zero, (a, b) => a + b);
+      final h = total.inHours;
+      final m = total.inMinutes % 60;
+      parts.add(h > 0 ? '${h}h ${m}m' : '${m}m');
+    }
+
+    _selectedLayerId = layerId;
+    _selectedElementId = null;
+    _ignoreNextTap = true;
+    _showStylePanel = false;
+    _infoWindowData = InfoWindowData(
+      elementId: segments.first.id,
+      layerId: layerId,
+      title: title.isNotEmpty ? title : 'Unnamed Track',
+      description: segments.first.description,
+      subtitle: parts.join(' · '),
+      type: 'polyline',
+      anchor: LatLng(sumLat / allPoints.length, sumLng / allPoints.length),
+    );
+    notifyListeners();
+
+    if (_mapController == null) return;
+    await _mapController!.animateCamera(
+      CameraUpdate.newLatLngBounds(
+        LatLngBounds(
+          southwest: LatLng(minLat, minLng),
+          northeast: LatLng(maxLat, maxLng),
+        ),
+        80,
+      ),
+    );
+  }
+
   /// Select a layer
   void selectLayer(String layerId) {
     _selectedLayerId = layerId;
@@ -2161,7 +2799,10 @@ class ShareableMapProvider extends ChangeNotifier {
       return;
     }
 
-    _drawingPoints.add(point);
+    // Snap before storing, so the vertex the user sees is the vertex that
+    // gets saved — and is literally the neighbour's coordinate where one was
+    // close enough.
+    _drawingPoints.add(snapPosition(point));
     debugPrint(
         '[WASM-DEBUG] Added drawing point: total=${_drawingPoints.length}');
     notifyListeners();
@@ -2171,7 +2812,7 @@ class ShareableMapProvider extends ChangeNotifier {
   void updateDrawingPoint(int index, LatLng newPosition) {
     if (!_isDrawing) return;
     if (index < 0 || index >= _drawingPoints.length) return;
-    _drawingPoints[index] = newPosition;
+    _drawingPoints[index] = snapPosition(newPosition);
     notifyListeners();
   }
 
@@ -2179,7 +2820,7 @@ class ShareableMapProvider extends ChangeNotifier {
   void insertDrawingPoint(int index, LatLng position) {
     if (!_isDrawing) return;
     if (index < 0 || index > _drawingPoints.length) return;
-    _drawingPoints.insert(index, position);
+    _drawingPoints.insert(index, snapPosition(position));
     notifyListeners();
   }
 
@@ -2196,15 +2837,33 @@ class ShareableMapProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Complete drawing and create element
+  /// Complete drawing and create element.
+  ///
+  /// The element goes into [targetLayerId] when given, into a new layer
+  /// called [newLayerName] when that is given instead, and otherwise into
+  /// the selected layer. The target becomes the selected layer, so the next
+  /// drawing offers the same one by default.
+  ///
+  /// Saved layers only — a cloud layer goes through [completeDrawingToCloud].
   void completeDrawing({
     required String name,
     String description = '',
     Color? color,
     PointCategory? pointCategory,
+    String? targetLayerId,
+    String? newLayerName,
   }) {
     if (!_isDrawing || _drawingPoints.isEmpty) return;
-    if (_currentMap == null || _selectedLayerId == null) return;
+    if (_currentMap == null) return;
+
+    final trimmedNewLayer = newLayerName?.trim();
+    if (trimmedNewLayer != null && trimmedNewLayer.isNotEmpty) {
+      createLayer(name: trimmedNewLayer);
+    } else if (targetLayerId != null &&
+        _currentMap!.getLayer(targetLayerId) != null) {
+      _selectedLayerId = targetLayerId;
+    }
+    if (_selectedLayerId == null) return;
 
     final layer = selectedLayer;
     if (layer == null) return;
@@ -2258,11 +2917,273 @@ class ShareableMapProvider extends ChangeNotifier {
     }
 
     _currentMap = _currentMap!.updateLayer(_selectedLayerId!, updatedLayer);
+
+    if (_drawingMode == DrawingMode.polygon) {
+      final polygonIndex = updatedLayer.polygons.length - 1;
+
+      // Marry the new shape to whatever it was drawn against BEFORE counting:
+      // stitching can add a vertex to it, and the estimate below validates
+      // itself against the vertex count it expects to find.
+      _stitchToNeighbours(_selectedLayerId!, polygonIndex);
+      final stitched = _currentMap?.getLayer(_selectedLayerId!);
+      final pointCount =
+          stitched != null && polygonIndex < stitched.polygons.length
+              ? stitched.polygons[polygonIndex].points.length
+              : _drawingPoints.length;
+
+      // Fire-and-forget: the polygon is already on the map and saved below,
+      // so the estimate fills in a moment later rather than blocking
+      // completion.
+      // ignore: unawaited_futures
+      _autoEstimateLetterboxes(
+        layerId: _selectedLayerId!,
+        polygonIndex: polygonIndex,
+        expectedPointCount: pointCount,
+      );
+    }
+
     _clearDrawingState();
     _drawingMode = DrawingMode.none; // Switch back to select mode
     _ignoreNextTap = true; // Ignore the next tap after completing drawing
     debugPrint('Completed drawing: $name');
     _notifyAndSave();
+  }
+
+  /// Complete drawing into a cloud waypoints or tracks layer, by writing the
+  /// element to that layer's Storage folder as a GPX file.
+  ///
+  /// A cloud layer is rebuilt from its folder on every load, so the file IS
+  /// the element — anything added only in memory would be gone next time.
+  /// Uploading triggers `compileGpxOnUpload`, which folds the file into the
+  /// folder's compiled JSON in the background.
+  ///
+  /// Throws when the upload fails, and leaves the drawing in place so it can
+  /// be retried or sent to a saved layer instead. Returns whether the element
+  /// is already showing: it is added on screen only when that folder's data
+  /// is loaded, because a lone point in an unloaded waypoint layer would
+  /// read as the folder's whole count.
+  Future<bool> completeDrawingToCloud({
+    required String layerId,
+    required String name,
+    String description = '',
+    PointCategory? pointCategory,
+  }) async {
+    if (!_isDrawing || _drawingPoints.isEmpty) return false;
+    final folder = cloudFolderForLayer(layerId)?.trim();
+    if (folder == null || folder.isEmpty) {
+      throw StateError('Layer $layerId is not a cloud folder layer');
+    }
+
+    final isWaypoint = isCloudWaypointsLayer(layerId);
+    final mode = _drawingMode;
+    if (isWaypoint && mode != DrawingMode.point) {
+      throw ArgumentError('Only points can go into a waypoints layer');
+    }
+    if (!isWaypoint && mode != DrawingMode.polyline) {
+      throw ArgumentError('Only lines can go into a tracks layer');
+    }
+    final points = List<LatLng>.from(_drawingPoints);
+    if (!isWaypoint && points.length < 2) return false;
+
+    final gpx = isWaypoint
+        ? drawnWaypointGpx(
+            name: name, description: description, position: points.first)
+        : drawnTrackGpx(name: name, description: description, points: points);
+    final fileName = drawnGpxFileName(
+        isWaypoint: isWaypoint, name: name, at: DateTime.now());
+
+    await GpxStorageService().uploadGpxFile(folder, fileName, gpx);
+    if (_isDisposed) return false;
+
+    var shown = false;
+    if (isWaypoint) {
+      final layer = _cloudWaypointsLayers[layerId];
+      if (layer != null && _loadedCloudWaypointFolders.contains(folder)) {
+        final cat = pointCategory ?? PointCategory.generic;
+        final point = MapPoint.create(
+          name: name,
+          description: description,
+          position: points.first,
+          color: cat.color,
+          pointCategory: cat,
+        );
+        _cloudWaypointsLayers[layerId] =
+            layer.copyWith(points: [...layer.points, point]);
+        _cloudWaypointIndexes[folder]?.insertAll([
+          WaypointMeta(
+            id: point.id,
+            name: name,
+            description: description,
+            position: point.position,
+          ),
+        ]);
+        shown = true;
+      }
+    } else {
+      final layer = _cloudTracksLayers[layerId];
+      if (layer != null && _loadedCloudTrackFolders.contains(folder)) {
+        final line = MapPolyline.create(
+          name: name,
+          description: description,
+          points: points,
+          color: cloudTrackColorForFolder(folder),
+        );
+        _cloudTracksLayers[layerId] =
+            layer.copyWith(polylines: [...layer.polylines, line]);
+        shown = true;
+      }
+    }
+
+    debugPrint('[DrawToCloud] $fileName → $folder (shown=$shown)');
+    _clearDrawingState();
+    _drawingMode = DrawingMode.none;
+    _ignoreNextTap = true;
+    notifyListeners();
+    return shown;
+  }
+
+  // === CLOUD TRACK RENAME ===
+
+  /// The GPX files in cloud tracks layer [layerId] that hold a track shown as
+  /// [oldBase] (see [baseTrackName]), with how many on-screen lines each one
+  /// accounts for. Lines whose file isn't known — a compiled JSON from before
+  /// the compiler recorded it — are counted under the empty key.
+  Map<String, int> cloudTrackFilesNamed(String layerId, String oldBase) {
+    final layer = _cloudTracksLayers[layerId];
+    if (layer == null) return const {};
+    final byFile = <String, int>{};
+    for (final p in layer.polylines) {
+      if (baseTrackName(p.name) != oldBase) continue;
+      final file = p.sourceFile ?? '';
+      byFile[file] = (byFile[file] ?? 0) + 1;
+    }
+    return byFile;
+  }
+
+  /// Rename the track shown as [oldBase] to [newBase] in each of [files]
+  /// (names within the layer's cloud folder), by rewriting the GPX itself.
+  ///
+  /// A cloud tracks layer is rebuilt from its folder on every load, so the
+  /// file is the only place a rename can live. With [renameFiles], a file
+  /// whose own name contains [oldBase] is re-saved under the corrected name
+  /// too — the Track Editor's report scanner reads the distributor from it.
+  /// The new file is written before the old one is deleted, so a failure
+  /// part-way never loses a track.
+  ///
+  /// Returns how many files were rewritten and how many of those renamed.
+  Future<({int files, int filesRenamed})> renameCloudTracks({
+    required String layerId,
+    required String oldBase,
+    required String newBase,
+    required Set<String> files,
+    required bool renameFiles,
+  }) async {
+    final folder = cloudFolderForLayer(layerId)?.trim();
+    if (folder == null || folder.isEmpty || !isCloudTracksLayer(layerId)) {
+      throw StateError('Layer $layerId is not a cloud tracks layer');
+    }
+    final storage = GpxStorageService();
+    final existing = renameFiles
+        ? (await storage.listFolderContents(folder))
+            .files
+            .map((f) => f.name)
+            .toSet()
+        : const <String>{};
+
+    // Old file name → the name it has now.
+    final written = <String, String>{};
+    for (final file in files) {
+      final bytes = await storage.downloadFileBytes('$folder/$file');
+      if (bytes == null) throw StateError('Could not download "$file"');
+      final edit = renameTracksInGpx(
+        decodeTextBytes(bytes),
+        oldBase: oldBase,
+        newBase: newBase,
+      );
+      if (edit.renamed == 0) continue;
+
+      var target = file;
+      if (renameFiles) {
+        final candidate = renamedGpxFileName(file, oldBase, newBase);
+        final safe = candidate == null
+            ? null
+            : GpxStorageService.sanitizeFileName(candidate);
+        // Keep the old name rather than overwrite another file, or flip the
+        // "waypoint in the name" rule the fallback loader sorts files by.
+        if (safe != null &&
+            safe.isNotEmpty &&
+            !existing.contains(safe) &&
+            safe.toLowerCase().contains('waypoint') ==
+                file.toLowerCase().contains('waypoint')) {
+          target = safe;
+        }
+      }
+
+      await storage.uploadGpxFile(folder, target, edit.gpx);
+      if (target != file) {
+        await storage.deleteFile('$folder/$file');
+        existing
+          ..remove(file)
+          ..add(target);
+      }
+      written[file] = target;
+    }
+
+    if (written.isEmpty || _isDisposed) {
+      return (files: written.length, filesRenamed: 0);
+    }
+
+    // The upload triggers recompile the folder on their own; this waits for
+    // one that has seen every change, so a reload straight after shows it.
+    try {
+      await storage.callCompileGpxFolder(folder);
+    } catch (e) {
+      debugPrint('[CloudTrackRename] recompile failed (triggers will): $e');
+    }
+    if (_isDisposed) {
+      return (files: written.length, filesRenamed: 0);
+    }
+
+    final layer = _cloudTracksLayers[layerId];
+    final changedIds = <String>{};
+    if (layer != null) {
+      final polylines = <MapPolyline>[];
+      for (final p in layer.polylines) {
+        final target = written[p.sourceFile];
+        if (target != null && baseTrackName(p.name) == oldBase) {
+          changedIds.add(p.id);
+          polylines.add(p.copyWith(
+            name: renamedDisplayName(p.name, newBase),
+            sourceFile: target,
+          ));
+        } else {
+          polylines.add(p);
+        }
+      }
+      _cloudTracksLayers[layerId] = layer.copyWith(polylines: polylines);
+    }
+
+    final iw = _infoWindowData;
+    if (iw != null && changedIds.contains(iw.elementId)) {
+      _infoWindowData = InfoWindowData(
+        elementId: iw.elementId,
+        layerId: iw.layerId,
+        title: renamedDisplayName(iw.title, newBase),
+        description: iw.description,
+        subtitle: iw.subtitle,
+        type: iw.type,
+        anchor: iw.anchor,
+        letterBoxEstimate: iw.letterBoxEstimate,
+        letterboxBreakdown: iw.letterboxBreakdown,
+        importedLetterBoxEstimate: iw.importedLetterBoxEstimate,
+      );
+    }
+
+    final filesRenamed = written.entries.where((e) => e.key != e.value).length;
+    debugPrint('[CloudTrackRename] "$oldBase" → "$newBase" in '
+        '${written.length} file(s), $filesRenamed renamed, $folder');
+    notifyListeners();
+    return (files: written.length, filesRenamed: filesRenamed);
   }
 
   /// Cancel drawing
@@ -2420,7 +3341,8 @@ class ShareableMapProvider extends ChangeNotifier {
       return;
     }
 
-    _editingPoints![index] = newPosition;
+    _editingPoints![index] =
+        snapPosition(newPosition, excludeElementId: _editingElementId);
     _editingPointsVersion++;
     if (!temporary) {
       _hasUnsavedChanges = true;
@@ -2433,7 +3355,8 @@ class ShareableMapProvider extends ChangeNotifier {
     if (_editingPoints == null) return;
 
     if (index >= 0 && index <= _editingPoints!.length) {
-      _editingPoints!.insert(index, position);
+      _editingPoints!.insert(
+          index, snapPosition(position, excludeElementId: _editingElementId));
       _editingPointsVersion++;
       _hasUnsavedChanges = true;
       debugPrint('Inserted new vertex at index $index');
@@ -2480,6 +3403,25 @@ class ShareableMapProvider extends ChangeNotifier {
       final polygon = layer.polygons[polygonIndex];
       final updatedPolygon = polygon.copyWith(points: _editingPoints!);
       updatePolygon(layer, polygonIndex, updatedPolygon);
+
+      // Re-share the seams this edit touched before counting, so a corner
+      // dragged onto a neighbour is the neighbour's corner rather than a
+      // second one beside it.
+      _stitchToNeighbours(layer.id, polygonIndex);
+      final stitched = _currentMap?.getLayer(layer.id);
+      final pointCount =
+          stitched != null && polygonIndex < stitched.polygons.length
+              ? stitched.polygons[polygonIndex].points.length
+              : updatedPolygon.points.length;
+
+      // Re-estimate now that the shape has changed — the boundary the user
+      // just adjusted is exactly what should be reflected in the count.
+      // ignore: unawaited_futures
+      _autoEstimateLetterboxes(
+        layerId: layer.id,
+        polygonIndex: polygonIndex,
+        expectedPointCount: pointCount,
+      );
     } else {
       // Check polylines
       final polyline =
@@ -2635,6 +3577,299 @@ class ShareableMapProvider extends ChangeNotifier {
     _notifyAndSave();
   }
 
+  // === SHARED VERTICES (SNAP WHILE DRAWING) ===
+
+  /// Whether a click while drawing latches onto nearby existing geometry.
+  ///
+  /// On by default, because a boundary drawn free-hand against a neighbour is
+  /// never the same line twice, and every seam drawn that way is a gap or an
+  /// overlap waiting to be found. Snapping makes the two polygons hold the
+  /// SAME coordinate, which is the only way a shared boundary stays shared
+  /// through later edits.
+  bool _snapToNeighbours = true;
+  bool get snapToNeighbours => _snapToNeighbours;
+
+  void setSnapToNeighbours(bool value) {
+    if (_snapToNeighbours == value) return;
+    _snapToNeighbours = value;
+    notifyListeners();
+  }
+
+  /// What the last snap latched onto, for the editor's cursor feedback.
+  SnapKind _lastSnapKind = SnapKind.none;
+  SnapKind get lastSnapKind => _lastSnapKind;
+
+  /// Snap [raw] onto existing geometry, unless snapping is switched off.
+  ///
+  /// [excludeElementId] keeps a polygon from snapping to itself while its own
+  /// vertices are being dragged — without it, dragging a corner past its
+  /// neighbour in the same ring would weld the shape onto itself.
+  LatLng snapPosition(LatLng raw, {String? excludeElementId}) {
+    if (!_snapToNeighbours) {
+      _lastSnapKind = SnapKind.none;
+      return raw;
+    }
+
+    final excluded = _elementRef(excludeElementId);
+    final result = PolygonTopology.snapPosition(
+      raw,
+      topologyRings(),
+      exclude: excluded == null
+          ? null
+          : (ring) =>
+              ring.layerId == excluded.$1 && ring.polygonIndex == excluded.$2,
+    );
+    _lastSnapKind = result.kind;
+    return result.position;
+  }
+
+  /// Split an element id of the form `<layerId>_polygon_<index>` back into its
+  /// parts. Returns null for anything else (polylines, points, no selection).
+  (String, int)? _elementRef(String? elementId) {
+    if (elementId == null) return null;
+    final marker = elementId.lastIndexOf('_polygon_');
+    if (marker < 0) return null;
+    final index = int.tryParse(elementId.substring(marker + 9));
+    if (index == null) return null;
+    return (elementId.substring(0, marker), index);
+  }
+
+  /// Marry one polygon to its neighbours: weld the corners they share and
+  /// insert its vertices into any neighbouring edge it sits on, so both sides
+  /// of every seam hold the same points.
+  ///
+  /// Runs after a polygon is drawn or vertex-edited, scoped to that polygon,
+  /// so it can never rework a boundary elsewhere on the map that the user did
+  /// not touch. Returns the fix so the caller can refresh the estimates of
+  /// whatever else moved.
+  TopologyFix? _stitchToNeighbours(String layerId, int polygonIndex) {
+    if (!_snapToNeighbours || _currentMap == null) return null;
+
+    final rings = topologyRings();
+    final focus = rings.indexWhere(
+        (r) => r.layerId == layerId && r.polygonIndex == polygonIndex);
+    if (focus < 0) return null;
+
+    final fix = PolygonTopology.snap(
+      rings,
+      toleranceMetres: PolygonTopology.defaultSnapRadiusMetres,
+      focus: {focus},
+    );
+    if (fix.isEmpty) return null;
+
+    var map = _currentMap!;
+    for (final index in fix.changed) {
+      final ring = fix.rings[index];
+      final layer = map.getLayer(ring.layerId);
+      if (layer == null || ring.polygonIndex >= layer.polygons.length) continue;
+      final polygons = List<CustomPolygon>.from(layer.polygons);
+      polygons[ring.polygonIndex] =
+          polygons[ring.polygonIndex].copyWith(points: ring.points);
+      map = map.updateLayer(ring.layerId, layer.copyWith(polygons: polygons));
+    }
+    _currentMap = map;
+    debugPrint('[Topology] stitched ${fix.changed.length} polygon(s) to the '
+        'one just edited: ${fix.verticesMoved} welded, '
+        '${fix.verticesInserted} inserted');
+
+    // The neighbours whose edges gained a vertex now cover slightly different
+    // ground, so their stored estimates are stale. The edited polygon itself
+    // is left to the caller, which runs its own estimate and drives the
+    // on-screen breakdown.
+    final others = fix.changed.where((i) => i != focus).toSet();
+    if (others.isNotEmpty) {
+      // ignore: unawaited_futures
+      _recountAfterCleanup(fix, only: others);
+    }
+    return fix;
+  }
+
+  // === BOUNDARY CLEANUP (TOPOLOGY) ===
+
+  /// Layers whose polygons this map owns — the persisted ones. Cloud overlay
+  /// layers are ephemeral and read-only, so boundary work never touches them.
+  List<MapLayer> get _persistedLayers => _currentMap?.layers ?? const [];
+
+  /// Every polygon eligible for a boundary pass, tagged with where it lives.
+  ///
+  /// Points, markers and polylines are excluded — only closed areas have a
+  /// boundary to share. Pass [layerId] to scope the pass to one layer, which
+  /// is what you want when a map keeps unrelated area sets (say suburbs under
+  /// work areas) in separate layers and they are MEANT to overlap.
+  List<TopologyRing> topologyRings({String? layerId}) {
+    final rings = <TopologyRing>[];
+    for (final layer in _persistedLayers) {
+      if (layerId != null && layer.id != layerId) continue;
+      for (var i = 0; i < layer.polygons.length; i++) {
+        final polygon = layer.polygons[i];
+        if (!polygon.isPolygon || polygon.points.length < 3) continue;
+        rings.add(TopologyRing(
+          layerId: layer.id,
+          polygonIndex: i,
+          name: polygon.name.trim().isEmpty
+              ? 'Polygon ${i + 1}'
+              : polygon.name.trim(),
+          points: polygon.points,
+        ));
+      }
+    }
+    return rings;
+  }
+
+  /// Report the gaps and overlaps between this map's polygons. Read-only.
+  TopologyReport analyzeBoundaries({
+    double toleranceMetres = PolygonTopology.defaultToleranceMetres,
+    String? layerId,
+  }) {
+    return PolygonTopology.analyze(
+      topologyRings(layerId: layerId),
+      toleranceMetres: toleranceMetres,
+    );
+  }
+
+  /// Geometry as it was before the last [cleanBoundaries] run, for undo.
+  List<MapLayer>? _preCleanupLayers;
+
+  /// Whether the last boundary cleanup can still be rolled back.
+  bool get canUndoBoundaryCleanup => _preCleanupLayers != null;
+
+  /// Weld and snap the map's polygons to each other so shared boundaries are
+  /// literally shared, then re-measure what is left.
+  ///
+  /// Fixes only what the tolerance can explain: vertices within
+  /// [toleranceMetres] of a neighbour's corner or edge. A wider overlap is a
+  /// drawing mistake rather than rounding, and clipping it automatically
+  /// would silently delete ground someone drew on purpose — those come back
+  /// in [BoundaryCleanupOutcome.remainingOverlapPairs] to be redrawn by hand.
+  ///
+  /// Every polygon that moves has its letterbox estimate recomputed unless
+  /// [recountLetterboxes] is false: the estimate is a count of boxes inside
+  /// the shape, so a shape that changed carries a stale number until it is
+  /// re-run. The previous geometry is kept for one [undoBoundaryCleanup].
+  Future<BoundaryCleanupOutcome> cleanBoundaries({
+    double toleranceMetres = PolygonTopology.defaultToleranceMetres,
+    String? layerId,
+    bool recountLetterboxes = true,
+  }) async {
+    final rings = topologyRings(layerId: layerId);
+    final before =
+        PolygonTopology.analyze(rings, toleranceMetres: toleranceMetres);
+    final fix = PolygonTopology.snap(rings, toleranceMetres: toleranceMetres);
+
+    if (fix.isEmpty || _currentMap == null) {
+      return BoundaryCleanupOutcome(
+        rings: fix.rings,
+        before: before,
+        after: before,
+        fix: fix,
+        recounted: 0,
+      );
+    }
+
+    // Snapshot for undo BEFORE anything is written.
+    _preCleanupLayers = List<MapLayer>.from(_currentMap!.layers);
+
+    // Apply per layer, in one pass per layer rather than one write per
+    // polygon, so a 200-polygon map does not fire 200 auto-saves.
+    final byLayer = <String, List<TopologyRing>>{};
+    for (final index in fix.changed) {
+      final ring = fix.rings[index];
+      byLayer.putIfAbsent(ring.layerId, () => <TopologyRing>[]).add(ring);
+    }
+
+    var map = _currentMap!;
+    for (final entry in byLayer.entries) {
+      final layer = map.getLayer(entry.key);
+      if (layer == null) continue;
+      final polygons = List<CustomPolygon>.from(layer.polygons);
+      for (final ring in entry.value) {
+        if (ring.polygonIndex >= polygons.length) continue;
+        polygons[ring.polygonIndex] =
+            polygons[ring.polygonIndex].copyWith(points: ring.points);
+      }
+      map = map.updateLayer(entry.key, layer.copyWith(polygons: polygons));
+    }
+    _currentMap = map;
+    debugPrint('[Topology] snapped ${fix.changed.length} polygon(s): '
+        '${fix.verticesMoved} moved, ${fix.verticesInserted} inserted, '
+        '${fix.verticesRemoved} duplicates removed');
+    _notifyAndSave();
+
+    var recounted = 0;
+    if (recountLetterboxes) {
+      recounted = await _recountAfterCleanup(fix);
+    }
+
+    final after = PolygonTopology.analyze(
+      topologyRings(layerId: layerId),
+      toleranceMetres: toleranceMetres,
+    );
+
+    return BoundaryCleanupOutcome(
+      rings: fix.rings,
+      before: before,
+      after: after,
+      fix: fix,
+      recounted: recounted,
+    );
+  }
+
+  /// Re-run the letterbox count for every polygon the cleanup moved.
+  ///
+  /// Batched through [LetterboxCountService.countInEach] so the suburb
+  /// payloads behind them are downloaded once for the whole set rather than
+  /// once per polygon. Each write is re-validated against the live map first —
+  /// the counts are awaited, and the map can be edited or replaced meanwhile.
+  Future<int> _recountAfterCleanup(TopologyFix fix, {Set<int>? only}) async {
+    final indexes = only ?? fix.changed;
+    final targets = indexes.map((i) => fix.rings[i]).toList();
+    if (targets.isEmpty) return 0;
+
+    final mapId = _currentMap?.id;
+    if (mapId == null) return 0;
+
+    List<LetterboxCount> counts;
+    try {
+      counts =
+          await _counter.countInEach(targets.map((r) => r.points).toList());
+    } catch (e) {
+      debugPrint('[Topology] letterbox recount failed: $e');
+      return 0;
+    }
+    if (_isDisposed || _currentMap?.id != mapId) return 0;
+
+    var written = 0;
+    var map = _currentMap!;
+    for (var i = 0; i < targets.length && i < counts.length; i++) {
+      final ring = targets[i];
+      final layer = map.getLayer(ring.layerId);
+      if (layer == null || ring.polygonIndex >= layer.polygons.length) continue;
+      final polygon = layer.polygons[ring.polygonIndex];
+      // The polygon at that index may have been edited or replaced while the
+      // count ran — only write back to the exact shape that was counted.
+      if (polygon.points.length != ring.points.length) continue;
+      final polygons = List<CustomPolygon>.from(layer.polygons);
+      polygons[ring.polygonIndex] = _applyCount(polygon, counts[i]);
+      map = map.updateLayer(ring.layerId, layer.copyWith(polygons: polygons));
+      written++;
+    }
+    if (written > 0) {
+      _currentMap = map;
+      _notifyAndSave();
+    }
+    return written;
+  }
+
+  /// Roll the map back to the geometry it had before the last cleanup.
+  void undoBoundaryCleanup() {
+    final snapshot = _preCleanupLayers;
+    if (snapshot == null || _currentMap == null) return;
+    _preCleanupLayers = null;
+    _currentMap = _currentMap!.copyWith(layers: snapshot);
+    debugPrint('[Topology] boundary cleanup undone');
+    _notifyAndSave();
+  }
+
   /// Update point properties
   void updatePoint(MapLayer layer, String pointId, MapPoint updatedPoint) {
     if (_currentMap == null) return;
@@ -2733,6 +3968,9 @@ class ShareableMapProvider extends ChangeNotifier {
   void updatePolyline(
       MapLayer layer, String polylineId, MapPolyline updatedPolyline) {
     if (_currentMap == null) return;
+    // Callers (e.g. a dialog) may hold a layer from before other edits;
+    // write into the current one so those edits aren't rolled back.
+    layer = _currentMap!.getLayer(layer.id) ?? layer;
 
     final polylines = List<MapPolyline>.from(layer.polylines);
     final polylineIndex = polylines.indexWhere((p) => p.id == polylineId);
@@ -2741,9 +3979,28 @@ class ShareableMapProvider extends ChangeNotifier {
       polylines[polylineIndex] = updatedPolyline;
       final updatedLayer = layer.copyWith(polylines: polylines);
       _currentMap = _currentMap!.updateLayer(layer.id, updatedLayer);
+      _retitleInfoWindow(polylineId, updatedPolyline.name);
       debugPrint('Updated polyline: ${updatedPolyline.name}');
       _notifyAndSave();
     }
+  }
+
+  /// Keep an open info window's title in step with its element's name.
+  void _retitleInfoWindow(String elementId, String title) {
+    final iw = _infoWindowData;
+    if (iw == null || iw.elementId != elementId || iw.title == title) return;
+    _infoWindowData = InfoWindowData(
+      elementId: iw.elementId,
+      layerId: iw.layerId,
+      title: title,
+      description: iw.description,
+      subtitle: iw.subtitle,
+      type: iw.type,
+      anchor: iw.anchor,
+      letterBoxEstimate: iw.letterBoxEstimate,
+      letterboxBreakdown: iw.letterboxBreakdown,
+      importedLetterBoxEstimate: iw.importedLetterBoxEstimate,
+    );
   }
 
   /// Convenience: update only the style of a polygon identified by its composite id.
@@ -2795,6 +4052,8 @@ class ShareableMapProvider extends ChangeNotifier {
       String layerId, String elementId, String type, String newName) {
     final layer = layers.where((l) => l.id == layerId).firstOrNull;
     if (layer == null) return;
+    // Before the update notifies, so the card rebuilds with the new title.
+    _retitleInfoWindow(elementId, newName);
 
     if (type == 'polygon') {
       final match = RegExp(r'^(.+)_polygon_(\d+)$').firstMatch(elementId);
@@ -2811,20 +4070,6 @@ class ShareableMapProvider extends ChangeNotifier {
       final point = layer.points.where((p) => p.id == elementId).firstOrNull;
       if (point == null) return;
       updatePoint(layer, elementId, point.copyWith(name: newName));
-    }
-
-    // Update the info window title to reflect the new name
-    if (_infoWindowData != null && _infoWindowData!.elementId == elementId) {
-      _infoWindowData = InfoWindowData(
-        elementId: _infoWindowData!.elementId,
-        layerId: _infoWindowData!.layerId,
-        title: newName,
-        description: _infoWindowData!.description,
-        subtitle: _infoWindowData!.subtitle,
-        type: _infoWindowData!.type,
-        anchor: _infoWindowData!.anchor,
-        letterBoxEstimate: _infoWindowData!.letterBoxEstimate,
-      );
     }
   }
 
@@ -3186,12 +4431,101 @@ class ShareableMapProvider extends ChangeNotifier {
   // === INFO WINDOW / STYLE PANEL ===
 
   /// Open the info window for a map element.
+  ///
+  /// For a polygon, the houses/apartments split comes straight off the stored
+  /// polygon — no fetch, nothing to wait for. Only a polygon that has never
+  /// had one computed falls back to [_backfillInfoWindowSplit].
   void openInfoWindow(InfoWindowData data) {
     _selectedLayerId = data.layerId;
     _selectedElementId = data.elementId;
     _showStylePanel = false;
+
+    if (data.type == 'polygon' && data.letterboxBreakdown == null) {
+      final stored = _polygonFor(data.elementId, data.layerId)?.letterBoxSplit;
+      _infoWindowData =
+          stored == null ? data : data.withLetterboxBreakdown(stored);
+      notifyListeners();
+      if (stored == null) {
+        // ignore: unawaited_futures
+        _backfillInfoWindowSplit(
+            elementId: data.elementId, layerId: data.layerId);
+      }
+      return;
+    }
+
     _infoWindowData = data;
     notifyListeners();
+  }
+
+  /// Resolve a polygon from the positional element id the map uses
+  /// (`'<layerId>_polygon_<index>'`). Null when it no longer resolves.
+  CustomPolygon? _polygonFor(String elementId, String layerId) {
+    final match = RegExp(r'^(.+)_polygon_(\d+)$').firstMatch(elementId);
+    if (match == null) return null;
+    final layer = _currentMap?.layers.where((l) => l.id == layerId).firstOrNull;
+    if (layer == null) return null;
+    final index = int.parse(match.group(2)!);
+    if (index >= layer.polygons.length) return null;
+    return layer.polygons[index];
+  }
+
+  /// One-time backfill for a polygon that predates stored splits: compute the
+  /// split, show it, and store it so this never runs for that polygon again.
+  ///
+  /// Skipped entirely on a read-only map — someone merely viewing a shared
+  /// link must not trigger writes. There, the split is shown for this session
+  /// without being persisted.
+  Future<void> _backfillInfoWindowSplit({
+    required String elementId,
+    required String layerId,
+  }) async {
+    final polygon = _polygonFor(elementId, layerId);
+    if (polygon == null || polygon.points.length < 3) return;
+    final expectedPointCount = polygon.points.length;
+
+    LetterboxCount result;
+    try {
+      result = await _counter.countIn(polygon.points);
+    } catch (e) {
+      debugPrint('[InfoWindow] letterbox split backfill failed: $e');
+      return;
+    }
+    final split = _toSplit(result.breakdown);
+
+    // Only apply if this exact info window is still the one open — the user
+    // may have tapped elsewhere, or closed it, while the fetch was running.
+    if (_infoWindowData?.elementId != elementId ||
+        _infoWindowData?.layerId != layerId) {
+      return;
+    }
+    _infoWindowData = _infoWindowData!.withLetterboxBreakdown(split);
+    notifyListeners();
+
+    if (capabilities.readOnly) return;
+
+    // Store it, so the next open is instant. Re-resolve first: the polygon
+    // may have been edited or deleted while the count ran, and a stale split
+    // is worse than none.
+    final layer = _currentMap?.layers.where((l) => l.id == layerId).firstOrNull;
+    if (layer == null) return;
+    final index = int.parse(
+        RegExp(r'^(.+)_polygon_(\d+)$').firstMatch(elementId)!.group(2)!);
+    if (index >= layer.polygons.length) return;
+    final current = layer.polygons[index];
+    if (current.points.length != expectedPointCount ||
+        current.letterBoxSplit != null ||
+        current.letterBoxLocked) {
+      return;
+    }
+    updatePolygon(
+      layer,
+      index,
+      current.copyWith(
+        letterBoxSplit: split,
+        letterboxSuburbIds:
+            current.letterboxSuburbIds ?? List.unmodifiable(result.suburbIds),
+      ),
+    );
   }
 
   /// Dismiss the info window and style panel.
@@ -3484,6 +4818,140 @@ class ShareableMapProvider extends ChangeNotifier {
     }
   }
 
+  // === REFERENCE LAYER (adapter-supplied, never saved back) ===
+
+  /// The adapter's reference layer — a schedule job's linked client map —
+  /// or null when the adapter has none or it isn't loaded.
+  MapLayer? get referenceLayer {
+    final id = _adapter?.referenceLayerId;
+    if (id == null) return null;
+    return _currentMap?.getLayer(id);
+  }
+
+  /// Rebuild the reference layer from the adapter, leaving every other layer
+  /// (and any unsaved edits in them) alone. Call after the backing entity's
+  /// link changes — e.g. right after linking a client map in the editor.
+  Future<void> refreshReferenceLayer() async {
+    final adapter = _adapter;
+    final id = adapter?.referenceLayerId;
+    if (adapter == null || id == null || _currentMap == null) return;
+
+    final layer = await adapter.loadReferenceLayer();
+    if (_isDisposed || _currentMap == null) return;
+
+    final existing = _currentMap!.getLayer(id);
+    if (layer == null) {
+      if (existing == null) return;
+      _currentMap = _currentMap!.removeLayer(id);
+    } else if (existing == null) {
+      _currentMap = _currentMap!.addLayer(layer);
+    } else {
+      _currentMap = _currentMap!.updateLayer(id, layer);
+    }
+    // Deliberately no _notifyAndSave: nothing the user owns has changed.
+    notifyListeners();
+  }
+
+  // ── Recorded tracks from the linked map(s), as on the print map ───────
+
+  bool _isLoadingReferenceTracks = false;
+
+  /// True while the tracks overlay is downloading.
+  bool get isLoadingReferenceTracks => _isLoadingReferenceTracks;
+
+  /// True when the adapter can supply a tracks overlay, so the editor knows
+  /// whether to offer the toggle at all.
+  bool get supportsReferenceTracks => _adapter?.hasReferenceTracks ?? false;
+
+  /// True when the tracks overlay is loaded and currently drawn.
+  bool get referenceTracksVisible {
+    final id = _adapter?.referenceTracksLayerId;
+    if (id == null) return false;
+    return _currentMap?.getLayer(id)?.isVisible ?? false;
+  }
+
+  /// Show or hide the linked map(s)' recorded tracks. Downloaded on first
+  /// use rather than at load, since most editing sessions never ask for
+  /// them; after that the toggle just flips the layer's visibility.
+  Future<void> toggleReferenceTracks() async {
+    final adapter = _adapter;
+    final id = adapter?.referenceTracksLayerId;
+    if (adapter == null || id == null || _currentMap == null) return;
+
+    final existing = _currentMap!.getLayer(id);
+    if (existing != null) {
+      toggleLayerVisibility(id);
+      return;
+    }
+
+    _isLoadingReferenceTracks = true;
+    notifyListeners();
+    MapLayer? layer;
+    try {
+      layer = await adapter.loadReferenceTracksLayer();
+    } catch (e) {
+      debugPrint('[referenceTracks] load failed: $e');
+    }
+    if (_isDisposed) return;
+    _isLoadingReferenceTracks = false;
+    if (layer != null && _currentMap != null) {
+      _currentMap = _currentMap!.addLayer(layer);
+    }
+    // Deliberately no _notifyAndSave: the overlay is never part of the map.
+    notifyListeners();
+  }
+
+  /// Copy [polygons] out of the reference layer into the map's own layer, so
+  /// they become the entity's ground (a schedule job's work areas) rather
+  /// than a picture of someone else's. Adopted polygons leave the reference
+  /// layer, so the same outline is never drawn twice.
+  ///
+  /// Returns how many were actually adopted — outlines the map already holds
+  /// are skipped.
+  int adoptReferenceLayerPolygons(List<CustomPolygon> polygons) {
+    if (_currentMap == null || polygons.isEmpty) return 0;
+    final refId = _adapter?.referenceLayerId;
+    final tracksId = _adapter?.referenceTracksLayerId;
+
+    MapLayer? target;
+    for (final l in _currentMap!.layers) {
+      if (l.id != refId && l.id != tracksId) {
+        target = l;
+        break;
+      }
+    }
+    if (target == null) return 0;
+
+    final existing = target.polygons.map(polygonGeometryKey).toSet();
+    var updated = target;
+    final adopted = <CustomPolygon>[];
+    for (final p in polygons) {
+      if (!existing.add(polygonGeometryKey(p))) continue;
+      final copy = allocatedPolygonStyle(
+          p.copyWith(points: List<LatLng>.from(p.points)));
+      updated = updated.addPolygon(copy);
+      adopted.add(copy);
+    }
+    if (adopted.isEmpty) return 0;
+    _currentMap = _currentMap!.updateLayer(updated.id, updated);
+
+    final ref = refId == null ? null : _currentMap!.getLayer(refId);
+    if (ref != null) {
+      final taken = adopted.map(polygonGeometryKey).toSet();
+      final kept = ref.polygons
+          .where((p) => !taken.contains(polygonGeometryKey(p)))
+          .toList();
+      if (kept.length != ref.polygons.length) {
+        _currentMap = kept.isEmpty
+            ? _currentMap!.removeLayer(refId!)
+            : _currentMap!.updateLayer(refId!, ref.copyWith(polygons: kept));
+      }
+    }
+
+    _notifyAndSave();
+    return adopted.length;
+  }
+
   /// Check if a work area's centroid or any vertex falls inside the lasso.
   bool _isWorkAreaInsideLasso(WorkArea wa) {
     if (_lassoPoints.length < 3 || wa.polygonPoints.isEmpty) return false;
@@ -3575,9 +5043,7 @@ class ShareableMapProvider extends ChangeNotifier {
     _loadingCloudWaypointFolders.clear();
     _loadedCloudTrackFolders.clear();
     _loadedCloudWaypointFolders.clear();
-    _cloudDatasetMeta.clear();
     _cloudWaypointIndexes.clear();
-    _creatingDatasetFolders.clear();
     _drawingPoints.clear();
     _lassoPoints.clear();
     _editingPoints = null;

@@ -6,6 +6,10 @@ import 'map_point.dart';
 
 /// Represents a layer in the map that can contain polygons, polylines, and points
 class MapLayer {
+  /// The name every client map's working layer carries — a new map's default
+  /// layer, a new layer, and the one layer work areas and suburbs import into.
+  static const String targetAreasName = 'Target Areas';
+
   final String id;
   final String name;
   final String description;
@@ -237,12 +241,18 @@ class MapLayer {
   /// loaded on the JS side and toggle visibility natively without paying
   /// the cost of removing + re-adding thousands of markers across the
   /// platform-view bridge. Defaults to [isVisible] when not specified.
+  /// Build Google Maps markers for this layer.
+  ///
+  /// [pointIconOverrides] is keyed by element id and takes precedence over
+  /// [pointIcons], which is keyed by category — numbered route pins differ
+  /// per stop, so they can only be supplied per element.
   List<Marker> getGoogleMapsMarkers({
     String? selectedElementId,
     Function(String pointId)? onTap,
     bool draggable = false,
     Function(String pointId, LatLng newPosition)? onDragEnd,
     Map<PointCategory, BitmapDescriptor>? pointIcons,
+    Map<String, BitmapDescriptor>? pointIconOverrides,
     bool useAdvancedMarkers = false,
     LatLngBounds? visibleBounds,
     bool? markerVisible,
@@ -265,7 +275,11 @@ class MapLayer {
         onDragEnd: draggable && onDragEnd != null
             ? (pos) => onDragEnd(point.id, pos)
             : null,
-        customIcon: pointIcons?[point.pointCategory],
+        // A per-point override wins over the category icon: that is what
+        // carries a numbered route pin, which is unique to each stop and
+        // so cannot come from a per-category map.
+        customIcon:
+            pointIconOverrides?[point.id] ?? pointIcons?[point.pointCategory],
         visible: visible,
       ));
     }
@@ -284,7 +298,8 @@ class MapLayer {
         onDragEnd: draggable && onDragEnd != null
             ? (pos) => onDragEnd(markerId, pos)
             : null,
-        customIcon: pointIcons?[cp.pointCategory],
+        customIcon:
+            pointIconOverrides?[markerId] ?? pointIcons?[cp.pointCategory],
         visible: visible,
       );
       if (marker != null) result.add(marker);

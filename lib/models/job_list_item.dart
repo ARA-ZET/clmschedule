@@ -6,6 +6,7 @@ import 'custom_polygon.dart';
 import 'job_reminder.dart';
 import 'happy_sun_shared.dart';
 import 'collection_job.dart';
+import 'job_invoice_link.dart';
 
 /// Sentinel for [JobListItem.copyWith] so that `toolsNeeded` can be left
 /// unchanged (default), explicitly updated, or cleared to `null`. Without it,
@@ -102,6 +103,10 @@ class JobListItem {
   final CategorizedTools?
       toolsNeeded; // Tools needed for Happy Sun jobs (window/solar cleaning)
   final String shareableMapId; // Link to ShareableMap document
+
+  /// The regular client plan (`regularClients/{id}`) this job was created
+  /// from, or empty. Drives the schedule allocation preview on save.
+  final String regularClientId;
   final String storageFolderPath; // Cloud Storage folder for tracks/waypoints
   final String
       vehicleTrailerCombo; // Vehicle+trailer enum name for collection jobs
@@ -169,6 +174,51 @@ class JobListItem {
   /// When [zohoInvoiceStatus] was last refreshed from Zoho.
   final DateTime? zohoSyncedAt;
 
+  // ── Accounting links (provider-neutral) ────────────────────────────────────
+  // The fields above are Zoho-specific and predate CLM invoicing through Xero.
+  // Rather than bolt on a parallel set of `xero*` fields — which would make
+  // every call site `hasZohoInvoice || hasXeroInvoice` forever — new writes go
+  // here, and the `resolved*` getters fall back to the Zoho fields so historical
+  // records keep rendering unchanged. Same pattern as
+  // `CustomJobType.resolvedCompanyId`.
+  //
+  // The Zoho path still writes its own fields as well, so nothing is migrated
+  // and nothing breaks. A backfill can retire them later.
+
+  /// Which accounting provider raised this job's invoice — `zoho` or `xero`.
+  /// Matches [AccountingProvider.name]. Empty on records written before this
+  /// existed; use [resolvedInvoiceProviderId].
+  final String invoiceProviderId;
+
+  /// Provider contact id for this job's customer.
+  final String accountingContactId;
+
+  /// Provider invoice id, once an invoice has been raised.
+  final String accountingInvoiceId;
+
+  /// The invoice number the provider settled on — may differ from [invoice]
+  /// when the provider auto-numbered it.
+  final String accountingInvoiceNumber;
+
+  /// Last known provider status wire value. Zoho's is lowercase
+  /// (`draft`/`sent`/…), Xero's uppercase (`DRAFT`/`AUTHORISED`/…) — each
+  /// provider's own enum parses it. A cache for display; re-read before acting.
+  final String accountingInvoiceStatus;
+
+  /// When [accountingInvoiceStatus] was last refreshed.
+  final DateTime? accountingSyncedAt;
+
+  /// Ids of void invoices that were unlinked from this job so it could be
+  /// invoiced again (see `JobListService.unlinkVoidedInvoiceTxn`). History,
+  /// and the revision counter in Xero idempotency keys — without it a re-issue
+  /// would reuse the first invoice's key and get the voided invoice back.
+  final List<String> voidedInvoiceIds;
+
+  /// Extra invoices raised for this job when two or more clients split the
+  /// bill. The primary invoice stays on the fields above; these are the rest.
+  /// The job's money fields are the total across all of them.
+  final List<JobInvoiceLink> splitInvoices;
+
   JobListItem({
     required this.id,
     required this.invoice,
@@ -194,6 +244,7 @@ class JobListItem {
     this.reminders = const [], // Default to empty list
     this.toolsNeeded, // Optional tools for Happy Sun jobs
     this.shareableMapId = '', // Optional link to shareable map
+    this.regularClientId = '',
     this.storageFolderPath = '', // Optional cloud storage folder path
     this.vehicleTrailerCombo =
         '', // Optional vehicle+trailer combo for collection jobs
@@ -210,10 +261,155 @@ class JobListItem {
     this.zohoInvoiceNumber = '',
     this.zohoInvoiceStatus = '',
     this.zohoSyncedAt,
+    this.invoiceProviderId = '',
+    this.accountingContactId = '',
+    this.accountingInvoiceId = '',
+    this.accountingInvoiceNumber = '',
+    this.accountingInvoiceStatus = '',
+    this.accountingSyncedAt,
+    this.voidedInvoiceIds = const [],
+    this.splitInvoices = const [],
   });
 
   /// Whether an invoice has been raised in Zoho for this job.
   bool get hasZohoInvoice => zohoInvoiceId.isNotEmpty;
+
+  // ── Provider-neutral reads ─────────────────────────────────────────────────
+  // Always read invoice links through these. A job invoiced before the neutral
+  // fields existed has only the `zoho*` ones, and reading those directly would
+  // make every Xero-aware widget blind to Zoho history.
+
+  /// `zoho`, `xero`, or empty when this job has no invoice.
+  String get resolvedInvoiceProviderId {
+    if (invoiceProviderId.isNotEmpty) return invoiceProviderId;
+    return zohoInvoiceId.isNotEmpty ? 'zoho' : '';
+  }
+
+  String get resolvedContactId =>
+      accountingContactId.isNotEmpty ? accountingContactId : zohoContactId;
+
+  String get resolvedInvoiceId =>
+      accountingInvoiceId.isNotEmpty ? accountingInvoiceId : zohoInvoiceId;
+
+  String get resolvedInvoiceNumber => accountingInvoiceNumber.isNotEmpty
+      ? accountingInvoiceNumber
+      : zohoInvoiceNumber;
+
+  String get resolvedInvoiceStatus => accountingInvoiceStatus.isNotEmpty
+      ? accountingInvoiceStatus
+      : zohoInvoiceStatus;
+
+  DateTime? get resolvedSyncedAt => accountingSyncedAt ?? zohoSyncedAt;
+
+  /// Whether an invoice has been raised for this job with any provider.
+  bool get hasAccountingInvoice => resolvedInvoiceId.isNotEmpty;
+
+  /// Whether this job's bill is split across more than one invoice.
+  bool get hasSplitInvoices => splitInvoices.isNotEmpty;
+
+  /// Every invoice linked to this job, primary first.
+  ///
+  /// The primary's [JobInvoiceLink.subTotal] / [JobInvoiceLink.total] are its
+  /// share of the job's money fields — the job total less the split invoices —
+  /// since the primary's own figures are not stored separately.
+  List<JobInvoiceLink> get allInvoices {
+    if (!hasAccountingInvoice) return splitInvoices;
+    final splitSub = splitInvoices.fold<double>(0, (r, i) => r + i.subTotal);
+    final splitTotal = splitInvoices.fold<double>(0, (r, i) => r + i.total);
+    final incl = amountInclVat > 0 ? amountInclVat : amountExclVat;
+    return [
+      JobInvoiceLink(
+        providerId: resolvedInvoiceProviderId,
+        contactId: resolvedContactId,
+        invoiceId: resolvedInvoiceId,
+        invoiceNumber: resolvedInvoiceNumber,
+        status: resolvedInvoiceStatus,
+        subTotal: amountExclVat - splitSub,
+        total: incl - splitTotal,
+        syncedAt: resolvedSyncedAt,
+        isPrimary: true,
+      ),
+      ...splitInvoices,
+    ];
+  }
+
+  /// Every invoice number on this job, for display — the primary's (or the
+  /// hand-typed [invoice] when nothing is linked) followed by the splits.
+  List<String> get allInvoiceNumbers {
+    final primary =
+        resolvedInvoiceNumber.isNotEmpty ? resolvedInvoiceNumber : invoice;
+    return [
+      if (primary.isNotEmpty) primary,
+      for (final s in splitInvoices)
+        if (s.invoiceNumber.isNotEmpty) s.invoiceNumber,
+    ];
+  }
+
+  /// This job with its invoice link removed, for a void invoice that has just
+  /// been unlinked. The money fields stay — they are the job's price, not the
+  /// invoice's. The sync timestamps cannot be nulled through [copyWith] and
+  /// are left; without an invoice id nothing reads them.
+  JobListItem withoutInvoiceLink() {
+    final unlinkedId = resolvedInvoiceId;
+    return copyWith(
+      invoice: invoice == resolvedInvoiceNumber ? '' : invoice,
+      zohoContactId: '',
+      zohoInvoiceId: '',
+      zohoInvoiceNumber: '',
+      zohoInvoiceStatus: '',
+      invoiceProviderId: '',
+      accountingContactId: '',
+      accountingInvoiceId: '',
+      accountingInvoiceNumber: '',
+      accountingInvoiceStatus: '',
+      voidedInvoiceIds: [
+        ...voidedInvoiceIds,
+        if (unlinkedId.isNotEmpty && !voidedInvoiceIds.contains(unlinkedId))
+          unlinkedId,
+      ],
+    );
+  }
+
+  /// Carry across every field that the Add/Edit Job form does not render.
+  ///
+  /// The form rebuilds a [JobListItem] from its controllers, so anything it
+  /// has no input for would come back empty. That is **not** cosmetic:
+  /// `JobListService.moveJobListItemToMonth` recreates the document with
+  /// `batch.set(..., toMap())` and deletes the original, so a field missing
+  /// here is destroyed the moment a job's date moves to another month. A
+  /// same-month save survives only because `.update()` ignores keys that
+  /// `toMap()` omits — an accident, not a safety net.
+  ///
+  /// Passing null (a brand-new job) leaves everything at its defaults. On a
+  /// copy the caller has already blanked the Zoho identifiers on [source], so
+  /// preserving from it is still correct.
+  ///
+  /// **Add every new non-form field here**, or it will silently vanish on the
+  /// next month move.
+  JobListItem withPreservedSystemFields(JobListItem? source) {
+    if (source == null) return this;
+    return copyWith(
+      shareableMapId: source.shareableMapId,
+      storageFolderPath: source.storageFolderPath,
+      timeSlot: source.timeSlot,
+      timeSlots: source.timeSlots,
+      assignedStaff: source.assignedStaff,
+      staffCount: source.staffCount,
+      zohoContactId: source.zohoContactId,
+      zohoInvoiceId: source.zohoInvoiceId,
+      zohoInvoiceNumber: source.zohoInvoiceNumber,
+      zohoInvoiceStatus: source.zohoInvoiceStatus,
+      zohoSyncedAt: source.zohoSyncedAt,
+      invoiceProviderId: source.invoiceProviderId,
+      accountingContactId: source.accountingContactId,
+      accountingInvoiceId: source.accountingInvoiceId,
+      accountingInvoiceNumber: source.accountingInvoiceNumber,
+      accountingInvoiceStatus: source.accountingInvoiceStatus,
+      accountingSyncedAt: source.accountingSyncedAt,
+      voidedInvoiceIds: source.voidedInvoiceIds,
+      splitInvoices: source.splitInvoices,
+    );
+  }
 
   // Create from Firestore
   factory JobListItem.fromMap(String id, Map<String, dynamic> data) {
@@ -246,8 +442,8 @@ class JobListItem {
     if (data['updates'] != null) {
       final updatesData = data['updates'] as List<dynamic>;
       updates = updatesData
-          .map((updateData) =>
-              JobListItemUpdate.fromMap(Map<String, dynamic>.from(updateData as Map)))
+          .map((updateData) => JobListItemUpdate.fromMap(
+              Map<String, dynamic>.from(updateData as Map)))
           .toList();
     }
 
@@ -256,8 +452,8 @@ class JobListItem {
     if (data['customPolygons'] != null) {
       final polygonsData = data['customPolygons'] as List<dynamic>;
       customPolygons = polygonsData
-          .map((polygonData) =>
-              CustomPolygon.fromMap(Map<String, dynamic>.from(polygonData as Map)))
+          .map((polygonData) => CustomPolygon.fromMap(
+              Map<String, dynamic>.from(polygonData as Map)))
           .toList();
     }
 
@@ -266,8 +462,8 @@ class JobListItem {
     if (data['reminders'] != null) {
       final remindersData = data['reminders'] as List<dynamic>;
       reminders = remindersData
-          .map((reminderData) =>
-              JobReminder.fromMap(Map<String, dynamic>.from(reminderData as Map)))
+          .map((reminderData) => JobReminder.fromMap(
+              Map<String, dynamic>.from(reminderData as Map)))
           .toList();
     }
 
@@ -303,6 +499,7 @@ class JobListItem {
               Map<String, dynamic>.from(data['toolsNeeded'] as Map))
           : null,
       shareableMapId: data['shareableMapId'] as String? ?? '',
+      regularClientId: data['regularClientId'] as String? ?? '',
       storageFolderPath: data['storageFolderPath'] as String? ?? '',
       vehicleTrailerCombo: _resolveVehicleTrailerCombo(
         data['vehicleTrailerCombo'] as String?,
@@ -325,9 +522,27 @@ class JobListItem {
       zohoInvoiceId: data['zohoInvoiceId'] as String? ?? '',
       zohoInvoiceNumber: data['zohoInvoiceNumber'] as String? ?? '',
       zohoInvoiceStatus: data['zohoInvoiceStatus'] as String? ?? '',
+      invoiceProviderId: data['invoiceProviderId'] as String? ?? '',
+      accountingContactId: data['accountingContactId'] as String? ?? '',
+      accountingInvoiceId: data['accountingInvoiceId'] as String? ?? '',
+      accountingInvoiceNumber:
+          data['accountingInvoiceNumber'] as String? ?? '',
+      accountingInvoiceStatus:
+          data['accountingInvoiceStatus'] as String? ?? '',
+      accountingSyncedAt: data['accountingSyncedAt'] != null
+          ? (data['accountingSyncedAt'] as Timestamp).toDate()
+          : null,
       zohoSyncedAt: data['zohoSyncedAt'] != null
           ? (data['zohoSyncedAt'] as Timestamp).toDate()
           : null,
+      voidedInvoiceIds:
+          (data['voidedInvoiceIds'] as List<dynamic>?)?.cast<String>() ??
+              const [],
+      splitInvoices: (data['splitInvoices'] as List<dynamic>?)
+              ?.map((e) =>
+                  JobInvoiceLink.fromMap(Map<String, dynamic>.from(e as Map)))
+              .toList() ??
+          const [],
     );
   }
 
@@ -386,7 +601,8 @@ class JobListItem {
       'manDays': manDays,
       'date': Timestamp.fromDate(scheduleCivilToInstant(date)),
       'collectionAddress': collectionAddress,
-      'collectionDate': Timestamp.fromDate(scheduleCivilToInstant(collectionDate)),
+      'collectionDate':
+          Timestamp.fromDate(scheduleCivilToInstant(collectionDate)),
       'specialInstructions': specialInstructions,
       'quantityDistributed': quantityDistributed,
       'invoiceDetails': invoiceDetails,
@@ -399,6 +615,7 @@ class JobListItem {
       'reminders': reminders.map((reminder) => reminder.toMap()).toList(),
       if (toolsNeeded != null) 'toolsNeeded': toolsNeeded!.toMap(),
       if (shareableMapId.isNotEmpty) 'shareableMapId': shareableMapId,
+      'regularClientId': regularClientId,
       if (storageFolderPath.isNotEmpty) 'storageFolderPath': storageFolderPath,
       if (vehicleTrailerCombo.isNotEmpty)
         'vehicleTrailerCombo': vehicleTrailerCombo,
@@ -419,6 +636,21 @@ class JobListItem {
       if (zohoInvoiceStatus.isNotEmpty) 'zohoInvoiceStatus': zohoInvoiceStatus,
       if (zohoSyncedAt != null)
         'zohoSyncedAt': Timestamp.fromDate(zohoSyncedAt!),
+      // Provider-neutral links — written only once a job is actually invoiced.
+      if (invoiceProviderId.isNotEmpty) 'invoiceProviderId': invoiceProviderId,
+      if (accountingContactId.isNotEmpty)
+        'accountingContactId': accountingContactId,
+      if (accountingInvoiceId.isNotEmpty)
+        'accountingInvoiceId': accountingInvoiceId,
+      if (accountingInvoiceNumber.isNotEmpty)
+        'accountingInvoiceNumber': accountingInvoiceNumber,
+      if (accountingInvoiceStatus.isNotEmpty)
+        'accountingInvoiceStatus': accountingInvoiceStatus,
+      if (accountingSyncedAt != null)
+        'accountingSyncedAt': Timestamp.fromDate(accountingSyncedAt!),
+      if (voidedInvoiceIds.isNotEmpty) 'voidedInvoiceIds': voidedInvoiceIds,
+      if (splitInvoices.isNotEmpty)
+        'splitInvoices': splitInvoices.map((i) => i.toMap()).toList(),
     };
   }
 
@@ -448,6 +680,7 @@ class JobListItem {
     List<CustomPolygon>? customPolygons,
     List<JobReminder>? reminders,
     String? shareableMapId,
+    String? regularClientId,
     String? storageFolderPath,
     String? vehicleTrailerCombo,
     String? offloadingAddress,
@@ -464,6 +697,14 @@ class JobListItem {
     String? zohoInvoiceNumber,
     String? zohoInvoiceStatus,
     DateTime? zohoSyncedAt,
+    String? invoiceProviderId,
+    String? accountingContactId,
+    String? accountingInvoiceId,
+    String? accountingInvoiceNumber,
+    String? accountingInvoiceStatus,
+    DateTime? accountingSyncedAt,
+    List<String>? voidedInvoiceIds,
+    List<JobInvoiceLink>? splitInvoices,
   }) {
     return JobListItem(
       id: id ?? this.id,
@@ -489,6 +730,7 @@ class JobListItem {
       customPolygons: customPolygons ?? this.customPolygons,
       reminders: reminders ?? this.reminders,
       shareableMapId: shareableMapId ?? this.shareableMapId,
+      regularClientId: regularClientId ?? this.regularClientId,
       storageFolderPath: storageFolderPath ?? this.storageFolderPath,
       vehicleTrailerCombo: vehicleTrailerCombo ?? this.vehicleTrailerCombo,
       offloadingAddress: offloadingAddress ?? this.offloadingAddress,
@@ -507,6 +749,16 @@ class JobListItem {
       zohoInvoiceNumber: zohoInvoiceNumber ?? this.zohoInvoiceNumber,
       zohoInvoiceStatus: zohoInvoiceStatus ?? this.zohoInvoiceStatus,
       zohoSyncedAt: zohoSyncedAt ?? this.zohoSyncedAt,
+      invoiceProviderId: invoiceProviderId ?? this.invoiceProviderId,
+      accountingContactId: accountingContactId ?? this.accountingContactId,
+      accountingInvoiceId: accountingInvoiceId ?? this.accountingInvoiceId,
+      accountingInvoiceNumber:
+          accountingInvoiceNumber ?? this.accountingInvoiceNumber,
+      accountingInvoiceStatus:
+          accountingInvoiceStatus ?? this.accountingInvoiceStatus,
+      accountingSyncedAt: accountingSyncedAt ?? this.accountingSyncedAt,
+      voidedInvoiceIds: voidedInvoiceIds ?? this.voidedInvoiceIds,
+      splitInvoices: splitInvoices ?? this.splitInvoices,
     );
   }
 

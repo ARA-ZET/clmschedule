@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:clmschedule/letterbox/pages/letterbox_curation_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -7,6 +8,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'config/flavor_config.dart';
+import 'providers/payroll_provider.dart' show payrollScheduleSyncRiverpod;
 // import 'providers/toggler_provider.dart'; // Migrated to Riverpod
 import 'providers/schedule_provider.dart';
 import 'providers/collection_schedule_provider.dart';
@@ -44,6 +46,7 @@ import 'widgets/job_status_management_dialog.dart';
 import 'widgets/job_list_status_management_dialog.dart';
 import 'widgets/invoice_status_management_dialog.dart';
 import 'widgets/job_type_management_dialog.dart';
+import 'widgets/company_management_dialog.dart';
 import 'widgets/map_instruction_management_dialog.dart';
 import 'widgets/vat_settings_dialog.dart';
 import 'widgets/auth_gate.dart';
@@ -52,8 +55,13 @@ import 'widgets/chat_admin_panel.dart';
 import 'widgets/unfinished_work_areas_panel.dart';
 import 'widgets/app_update_dialog.dart';
 import 'widgets/happy_sun_inventory_view.dart';
+import 'widgets/zoho/zoho_customers_view.dart';
+import 'widgets/zoho/zoho_invoices_view.dart';
+import 'models/company.dart';
+import 'utils/zoho_org.dart';
 import 'widgets/happy_sun_job_projects_screen.dart';
 import 'shareable_maps/widgets/shareable_map_editor.dart';
+import 'shareable_maps/adapters/client_area_adapter.dart';
 import 'shareable_maps/adapters/work_area_adapter.dart';
 import 'shareable_maps/adapters/work_suburbs_adapter.dart';
 import 'shareable_maps/adapters/firestore_adapter.dart';
@@ -66,7 +74,7 @@ import 'track_editor/pages/track_editor_screen.dart';
 // ErfPropertyProvider migrated to Riverpod
 import 'erf_property/pages/erf_property_screen.dart';
 import 'widgets/ward_map_screen.dart';
-import 'services/version_service.dart';
+import 'widgets/regular_clients_screen.dart';
 
 // import 'services/work_area_service.dart'; // Migrated to Riverpod
 // import 'services/job_list_service.dart'; // Migrated to Riverpod
@@ -91,6 +99,7 @@ import 'firebase_options.dart';
 import 'utils/web_reload.dart'
     if (dart.library.io) 'utils/web_reload_stub.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
+import 'shareable_maps/providers/map_gesture_provider.dart';
 
 // Simple test command for debugging undo functionality
 class TestCommand extends Command {
@@ -117,20 +126,39 @@ void main() async {
   usePathUrlStrategy();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  // Enable offline persistence on all platforms (web uses IndexedDB via WASM-compatible JS interop).
-  // cloud_firestore_web 4.2.0 serializes long-polling options whenever web
-  // settings are applied, so keep timeoutDuration non-null for Firebase JS.
-  try {
-    FirebaseFirestore.instance.settings = const Settings(
-      persistenceEnabled: true,
-      cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
-      webExperimentalLongPollingOptions: WebExperimentalLongPollingOptions(
-        timeoutDuration: Duration(seconds: 30),
-      ),
-    );
-  } catch (e) {
-    // Settings may have already been applied, continue silently
-    debugPrint('Firestore settings already configured: $e');
+  // Enable offline persistence on all platforms.
+  if (kIsWeb) {
+    // Web: multi-tab IndexedDB persistence, so every open tab shares ONE
+    // cache. The SDK elects a primary tab that owns the network connection and
+    // runs the listeners for all tabs; the others read from the shared cache,
+    // so two tabs on the same schedule month cost one set of reads, not two.
+    // (The default single-tab mode drops later tabs to a private memory cache
+    // that re-reads everything — the reason web/index.html used to block them.)
+    //
+    // Must run before any Firestore call and must NOT be combined with
+    // `settings =`: cloud_firestore_web 4.4 always sends a localCache with
+    // settings, and the JS SDK then rejects this call. That means the web
+    // cache uses the SDK default size (40 MB, LRU-collected) instead of
+    // unlimited — docs under an active listener are never collected.
+    try {
+      await FirebaseFirestore.instance.enablePersistence(
+        const PersistenceSettings(synchronizeTabs: true),
+      );
+    } catch (e) {
+      // IndexedDB unavailable (private mode, old browser) or a hot restart —
+      // the SDK keeps working on a memory cache.
+      debugPrint('Firestore multi-tab persistence not enabled: $e');
+    }
+  } else {
+    try {
+      FirebaseFirestore.instance.settings = const Settings(
+        persistenceEnabled: true,
+        cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+      );
+    } catch (e) {
+      // Settings may have already been applied, continue silently
+      debugPrint('Firestore settings already configured: $e');
+    }
   }
 
   // Preload shareable-map BitmapDescriptors (vertex, midpoint, firstVertex,
@@ -158,8 +186,14 @@ class MyApp extends riverpod.ConsumerStatefulWidget {
 }
 
 class _MyAppState extends riverpod.ConsumerState<MyApp> {
-  late final VersionService _versionService;
   bool _isInitialized = false;
+
+  /// The update dialog is raised from outside the widget tree, so it needs a
+  /// context that actually sits *below* MaterialApp — this state's own context
+  /// is above it and has no Navigator.
+  final GlobalKey<NavigatorState> _rootNavigatorKey =
+      GlobalKey<NavigatorState>();
+  bool _updateDialogOpen = false;
 
   // Offline services for Happy Sun flavor
   ConnectivityService? _connectivityService;
@@ -177,7 +211,6 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
   @override
   void initState() {
     super.initState();
-    _versionService = VersionService(FirebaseFirestore.instance);
     // Initialize all providers asynchronously in parallel
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _initializeProvidersAsync();
@@ -479,7 +512,11 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
     authProvider.addListener(_handleAuthStateForProviderInit);
 
     if (authProvider.isAuthenticated) {
-      await _initializeAuthenticatedProviders();
+      // Don't hold the splash for data loads — the dashboard renders as soon
+      // as auth is known and each provider notifies when its data lands. On a
+      // second tab those reads route through the primary tab's connection, so
+      // awaiting them here is what made new tabs feel slow.
+      unawaited(_initializeAuthenticatedProviders());
     } else {
       debugPrint('Skipping Firestore provider initialization until sign-in.');
     }
@@ -581,26 +618,45 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
   }
 
   void _showUpdateDialog(AppVersionProvider versionProvider) async {
-    if (!mounted) return;
+    if (!mounted || _updateDialogOpen) return;
 
     final newVersion = versionProvider.currentVersion;
     final currentVersion = versionProvider.localVersion?.version ?? '0.0.0';
 
     if (newVersion == null) return;
 
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: !versionProvider.forceUpdate,
-      builder: (context) => AppUpdateDialog(
-        newVersion: newVersion,
-        currentVersion: currentVersion,
-        forceUpdate: versionProvider.forceUpdate,
-      ),
-    );
+    // Not `context`: this State sits above MaterialApp, so its context has no
+    // Navigator and showDialog would throw — which is exactly why the update
+    // prompt never appeared. The navigator key gives us a context inside the
+    // app. It is null until the first frame is laid out, so retry next frame.
+    final navigatorContext = _rootNavigatorKey.currentContext;
+    if (navigatorContext == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && versionProvider.needsUpdate) {
+          _showUpdateDialog(versionProvider);
+        }
+      });
+      return;
+    }
 
-    if (result == true && mounted) {
-      // Refresh the page
-      _refreshApp();
+    _updateDialogOpen = true;
+    try {
+      final result = await showDialog<bool>(
+        context: navigatorContext,
+        barrierDismissible: !versionProvider.forceUpdate,
+        builder: (context) => AppUpdateDialog(
+          newVersion: newVersion,
+          currentVersion: currentVersion,
+          forceUpdate: versionProvider.forceUpdate,
+        ),
+      );
+
+      if (result == true && mounted) {
+        // Refresh the page
+        _refreshApp();
+      }
+    } finally {
+      _updateDialogOpen = false;
     }
   }
 
@@ -614,9 +670,6 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
   @override
   void dispose() {
     _authProviderForListener?.removeListener(_handleAuthStateForProviderInit);
-    if (kIsWeb) {
-      _versionService.dispose();
-    }
     // Dispose offline services for Happy Sun
     if (FlavorConfig.instance.isHappySun) {
       _connectivityService?.dispose();
@@ -632,6 +685,8 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: FlavorConfig.instance.appName,
+      navigatorKey: _rootNavigatorKey,
+      navigatorObservers: [ref.read(mapModalObserverRiverpod)],
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -640,24 +695,43 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
         ),
         useMaterial3: true,
       ),
-      onGenerateRoute: (settings) {
-        final uri = Uri.parse(settings.name ?? '');
-        // Handle deep links: /map/{shareCode}
-        if (uri.pathSegments.length == 2 && uri.pathSegments[0] == 'map') {
-          final shareCode = uri.pathSegments[1];
-          return MaterialPageRoute(
-            builder: (_) => _isInitialized
-                ? _DeepLinkMapLoader(shareCode: shareCode)
-                : _buildLoadingScaffold(),
-          );
-        }
-        // Default route (dashboard)
-        return MaterialPageRoute(
-          builder: (_) => _isInitialized
-              ? AuthGate(child: const DashboardScreen())
-              : _buildLoadingScaffold(),
-        );
-      },
+      // One route per URL. Flutter's default splits '/admin/map?doc=..' into
+      // '/', '/admin' and '/admin/map?..' and stacks all three, so every
+      // map tab also booted two full dashboards underneath the map.
+      onGenerateInitialRoutes: (initialRoute) =>
+          [_generateRoute(RouteSettings(name: initialRoute))],
+      onGenerateRoute: _generateRoute,
+    );
+  }
+
+  Route<dynamic> _generateRoute(RouteSettings settings) {
+    final uri = Uri.parse(settings.name ?? '');
+    // Gallery "open in new tab": /admin/map?doc={docId}&month={monthKey}
+    final docId = uri.queryParameters['doc'] ?? '';
+    final monthKey = uri.queryParameters['month'] ?? '';
+    if (uri.path == '/admin/map' && docId.isNotEmpty && monthKey.isNotEmpty) {
+      return MaterialPageRoute(
+        builder: (_) => _isInitialized
+            ? AuthGate(
+                child:
+                    _DeepLinkMapLoader.byId(docId: docId, monthKey: monthKey))
+            : _buildLoadingScaffold(),
+      );
+    }
+    // Handle deep links: /map/{shareCode}
+    if (uri.pathSegments.length == 2 && uri.pathSegments[0] == 'map') {
+      final shareCode = uri.pathSegments[1];
+      return MaterialPageRoute(
+        builder: (_) => _isInitialized
+            ? _DeepLinkMapLoader(shareCode: shareCode)
+            : _buildLoadingScaffold(),
+      );
+    }
+    // Default route (dashboard)
+    return MaterialPageRoute(
+      builder: (_) => _isInitialized
+          ? AuthGate(child: const DashboardScreen())
+          : _buildLoadingScaffold(),
     );
   }
 
@@ -666,10 +740,18 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
   }
 }
 
-/// Stateful widget that resolves a share code and opens the map editor.
+/// Stateful widget that resolves a share code (or takes a map's Firestore
+/// id/month directly) and opens the map editor.
 class _DeepLinkMapLoader extends StatefulWidget {
-  final String shareCode;
-  const _DeepLinkMapLoader({required this.shareCode});
+  final String? shareCode;
+  final String? docId;
+  final String? monthKey;
+  const _DeepLinkMapLoader({required String this.shareCode})
+      : docId = null,
+        monthKey = null;
+  const _DeepLinkMapLoader.byId(
+      {required String this.docId, required String this.monthKey})
+      : shareCode = null;
 
   @override
   State<_DeepLinkMapLoader> createState() => _DeepLinkMapLoaderState();
@@ -687,27 +769,37 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
 
   Future<void> _resolveAndOpen() async {
     try {
-      final linkService = MapLinkService();
-      final linkData = await linkService.resolveShareCode(widget.shareCode);
-      if (linkData == null) {
-        setState(() {
-          _loading = false;
-          _error = 'Map not found. The link may have expired or been deleted.';
-        });
-        return;
+      var docId = widget.docId;
+      var monthKey = widget.monthKey;
+      if (docId == null || monthKey == null) {
+        final linkService = MapLinkService();
+        final linkData = await linkService.resolveShareCode(widget.shareCode!);
+        if (linkData == null) {
+          setState(() {
+            _loading = false;
+            _error =
+                'Map not found. The link may have expired or been deleted.';
+          });
+          return;
+        }
+        docId = linkData.mapId;
+        monthKey = linkData.monthKey;
       }
 
       if (!mounted) return;
 
       // Load the map via the Firestore adapter
       final service = ShareableMapsFirestoreService();
-      final container = riverpod.ProviderScope.containerOf(context);
+      // listen: false — on the byId path this runs synchronously inside
+      // initState, where a dependency lookup asserts in debug builds.
+      final container =
+          riverpod.ProviderScope.containerOf(context, listen: false);
       final unfinishedProvider = FlavorConfig.instance.isMaps
           ? null
           : container.read(unfinishedWorkAreasRiverpod);
       final adapter = FirestoreMapAdapter.existing(
-        docId: linkData.mapId,
-        monthKey: linkData.monthKey,
+        docId: docId,
+        monthKey: monthKey,
         service: service,
         unfinishedProvider: unfinishedProvider,
       );
@@ -752,7 +844,15 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
             ),
             const SizedBox(height: 24),
             FilledButton(
-              onPressed: () => Navigator.pop(context),
+              // A deep-link tab has nothing underneath to pop back to.
+              onPressed: () {
+                final navigator = Navigator.of(context);
+                if (navigator.canPop()) {
+                  navigator.pop();
+                } else {
+                  navigator.pushReplacementNamed('/');
+                }
+              },
               child: const Text('Go Back'),
             ),
           ],
@@ -776,6 +876,11 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
   int _currentTabIndex = 0;
   bool _showAiChat = false;
   final _bodyNavKey = GlobalKey<NavigatorState>();
+
+  /// Holds map gestures for dialogs pushed onto the nested Navigator
+  /// (`useRootNavigator: false`); the root one has its own observer.
+  late final _bodyNavMapObserver =
+      MapModalGestureObserver(ref.read(mapGestureRiverpod));
 
   // Dynamic tab count based on flavor
   int get _tabCount {
@@ -911,552 +1016,656 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
 
   @override
   Widget build(BuildContext context) {
+    // Keeps payroll in step with the schedule while an admin is signed in.
+    if (FlavorConfig.instance.isCLM) ref.watch(payrollScheduleSyncRiverpod);
     final isSmallScreen = MediaQuery.of(context).size.width < 600;
     final isMediumScreen = MediaQuery.of(context).size.width < 900;
 
     return Scaffold(
-        backgroundColor: const Color.fromARGB(255, 222, 222, 222),
-        appBar: FlavorConfig.instance.isHappySun ||
-                FlavorConfig.instance.isDropsheet
-            ? null // No AppBar for Happy Sun or Dropsheet flavors (each tab provides its own header)
-            : AppBar(
-                leading: isSmallScreen
-                    ? null
-                    : const Padding(
-                        padding: EdgeInsets.only(left: 16.0),
-                        child: Center(
-                          child: Text(
-                            'CLM DASHBOARD',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
+      backgroundColor: const Color.fromARGB(255, 222, 222, 222),
+      appBar: FlavorConfig.instance.isHappySun ||
+              FlavorConfig.instance.isDropsheet
+          ? null // No AppBar for Happy Sun or Dropsheet flavors (each tab provides its own header)
+          : AppBar(
+              leading: isSmallScreen
+                  ? null
+                  : const Padding(
+                      padding: EdgeInsets.only(left: 16.0),
+                      child: Center(
+                        child: Text(
+                          'CLM DASHBOARD',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
                       ),
-                leadingWidth: isSmallScreen ? 0 : 200,
-                automaticallyImplyLeading: false,
-                backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-                title: ListenableBuilder(
-                  listenable: _tabController,
-                  builder: (context, _) => TabBar(
-                    controller: _tabController,
-                    // The SOLE place a tab tap dismisses a pushed sub-page
-                    // (Track Editor etc.) — fires on every tap, even
-                    // re-tapping the already-selected tab (unlike the
-                    // TabController listener in _handleTabChange, which
-                    // only fires when the index actually changes). Needed
-                    // so tapping the CURRENT tab (e.g. "Payroll" while
-                    // Track Editor is pushed on top of it) still dismisses
-                    // the pushed sub-page in one click. See the comment on
-                    // _handleTabChange for why this must NOT also be called
-                    // from there (duplicate back-to-back popUntil calls
-                    // locked the Navigator and froze the whole app).
-                    onTap: (_) =>
-                        _bodyNavKey.currentState?.popUntil((r) => r.isFirst),
-                    isScrollable: isSmallScreen, // Scrollable on mobile
-                    labelColor: Colors.black,
-                    unselectedLabelColor: Colors.black,
-                    indicatorColor: _tabConfigs[_tabController.index].color,
-                    indicatorWeight: 3,
-                    dividerColor: Colors.transparent,
-                    splashFactory: NoSplash.splashFactory,
-                    overlayColor: WidgetStateProperty.all(Colors.transparent),
-                    tabAlignment:
-                        isSmallScreen ? TabAlignment.start : TabAlignment.fill,
-                    labelPadding: EdgeInsets.symmetric(
-                      horizontal: isSmallScreen ? 8 : 12,
                     ),
-                    tabs: List.generate(_tabCount, _buildTab),
+              leadingWidth: isSmallScreen ? 0 : 200,
+              automaticallyImplyLeading: false,
+              backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+              title: ListenableBuilder(
+                listenable: _tabController,
+                builder: (context, _) => TabBar(
+                  controller: _tabController,
+                  // The SOLE place a tab tap dismisses a pushed sub-page
+                  // (Track Editor etc.) — fires on every tap, even
+                  // re-tapping the already-selected tab (unlike the
+                  // TabController listener in _handleTabChange, which
+                  // only fires when the index actually changes). Needed
+                  // so tapping the CURRENT tab (e.g. "Payroll" while
+                  // Track Editor is pushed on top of it) still dismisses
+                  // the pushed sub-page in one click. See the comment on
+                  // _handleTabChange for why this must NOT also be called
+                  // from there (duplicate back-to-back popUntil calls
+                  // locked the Navigator and froze the whole app).
+                  onTap: (_) =>
+                      _bodyNavKey.currentState?.popUntil((r) => r.isFirst),
+                  isScrollable: isSmallScreen, // Scrollable on mobile
+                  labelColor: Colors.black,
+                  unselectedLabelColor: Colors.black,
+                  indicatorColor: _tabConfigs[_tabController.index].color,
+                  indicatorWeight: 3,
+                  dividerColor: Colors.transparent,
+                  splashFactory: NoSplash.splashFactory,
+                  overlayColor: WidgetStateProperty.all(Colors.transparent),
+                  tabAlignment:
+                      isSmallScreen ? TabAlignment.start : TabAlignment.fill,
+                  labelPadding: EdgeInsets.symmetric(
+                    horizontal: isSmallScreen ? 8 : 12,
                   ),
+                  tabs: List.generate(_tabCount, _buildTab),
                 ),
-                actions: [
-                  // Cloud Files
-                  _actionBtn(
-                    icon: Icons.cloud,
-                    label: 'Files',
-                    onPressed: () {
-                      final container =
-                          riverpod.ProviderScope.containerOf(context);
-                      _bodyNavKey.currentState?.push(
-                        MaterialPageRoute(
-                          builder: (_) => CloudFileManagerScreen(
-                            onOpenInTrackEditor: (fileName, bytes, sourcePath) {
-                              // Load file into update mode providers first
-                              // (providers are root-scoped and always alive).
-                              loadCloudFileIntoTrackEditor(
-                                container: container,
-                                fileName: fileName,
-                                bytes: bytes,
-                                sourcePath: sourcePath,
-                              );
-                              // Close file manager then open Track Editor.
-                              _bodyNavKey.currentState
-                                ?..pop()
-                                ..push(MaterialPageRoute(
-                                  builder: (_) => const TrackEditorScreen(),
-                                ));
-                            },
+              ),
+              actions: [
+                // Cloud Files
+                _actionBtn(
+                  icon: Icons.cloud,
+                  label: 'Files',
+                  onPressed: () {
+                    final container =
+                        riverpod.ProviderScope.containerOf(context);
+                    _bodyNavKey.currentState?.push(
+                      MaterialPageRoute(
+                        builder: (_) => CloudFileManagerScreen(
+                          onOpenInTrackEditor: (fileName, bytes, sourcePath) {
+                            // Load file into update mode providers first
+                            // (providers are root-scoped and always alive).
+                            loadCloudFileIntoTrackEditor(
+                              container: container,
+                              fileName: fileName,
+                              bytes: bytes,
+                              sourcePath: sourcePath,
+                            );
+                            // Close file manager then open Track Editor.
+                            _bodyNavKey.currentState
+                              ?..pop()
+                              ..push(MaterialPageRoute(
+                                builder: (_) => const TrackEditorScreen(),
+                              ));
+                          },
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                // Track Editor
+                _actionBtn(
+                  icon: Icons.route,
+                  label: 'Editor',
+                  onPressed: () {
+                    _bodyNavKey.currentState?.push(
+                      MaterialPageRoute(
+                        builder: (_) => const TrackEditorScreen(),
+                      ),
+                    );
+                  },
+                ),
+                // Shareable Maps - open gallery / dashboard
+                _actionBtn(
+                  icon: Icons.map_outlined,
+                  label: 'My Maps',
+                  onPressed: () {
+                    _bodyNavKey.currentState?.push(
+                      MaterialPageRoute(
+                        builder: (_) => const ShareableMapsGallery(),
+                      ),
+                    );
+                  },
+                ),
+                // Work Areas - open map editor with all work area polygons
+                _actionBtn(
+                  icon: Icons.layers,
+                  label: 'Work Areas',
+                  onPressed: () async {
+                    final provider = riverpod.ProviderScope.containerOf(context)
+                        .read(shareableMapRiverpod);
+                    try {
+                      await provider
+                          .loadFromAdapter(WorkAreaCollectionAdapter());
+                      if (context.mounted) {
+                        _bodyNavKey.currentState?.push(
+                          MaterialPageRoute(
+                            builder: (_) => const ShareableMapEditor(),
                           ),
-                        ),
-                      );
-                    },
-                  ),
-                  // Track Editor
-                  _actionBtn(
-                    icon: Icons.route,
-                    label: 'Editor',
-                    onPressed: () {
-                      _bodyNavKey.currentState?.push(
-                        MaterialPageRoute(
-                          builder: (_) => const TrackEditorScreen(),
-                        ),
-                      );
-                    },
-                  ),
-                  // Shareable Maps - open gallery / dashboard
-                  _actionBtn(
-                    icon: Icons.map_outlined,
-                    label: 'My Maps',
-                    onPressed: () {
-                      _bodyNavKey.currentState?.push(
-                        MaterialPageRoute(
-                          builder: (_) => const ShareableMapsGallery(),
-                        ),
-                      );
-                    },
-                  ),
-                  // Work Areas - open map editor with all work area polygons
-                  _actionBtn(
-                    icon: Icons.layers,
-                    label: 'Work Areas',
-                    onPressed: () async {
-                      final provider =
-                          riverpod.ProviderScope.containerOf(context)
-                              .read(shareableMapRiverpod);
-                      try {
-                        await provider
-                            .loadFromAdapter(WorkAreaCollectionAdapter());
-                        if (context.mounted) {
-                          _bodyNavKey.currentState?.push(
-                            MaterialPageRoute(
-                              builder: (_) => const ShareableMapEditor(),
-                            ),
-                          );
-                        }
-                      } catch (e) {
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Failed to load work areas: $e'),
-                              backgroundColor: Colors.red.shade800,
-                            ),
-                          );
-                        }
-                      }
-                    },
-                  ),
-
-                  // Work Suburbs - open map editor with single-document suburb polygons
-                  _actionBtn(
-                    icon: Icons.layers_outlined,
-                    label: 'Suburbs',
-                    onPressed: () async {
-                      final provider =
-                          riverpod.ProviderScope.containerOf(context)
-                              .read(shareableMapRiverpod);
-                      try {
-                        await provider.loadFromAdapter(WorkSuburbsAdapter());
-                        if (context.mounted) {
-                          _bodyNavKey.currentState?.push(
-                            MaterialPageRoute(
-                              builder: (_) => const ShareableMapEditor(),
-                            ),
-                          );
-                        }
-                      } catch (e) {
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Failed to load work suburbs: $e'),
-                              backgroundColor: Colors.red.shade800,
-                            ),
-                          );
-                        }
-                      }
-                    },
-                  ),
-
-                  // Distributor management - always visible
-                  if (!isMediumScreen)
-                    _actionBtn(
-                      icon: Icons.people,
-                      label: 'Staff',
-                      onPressed: () {
-                        showDialog(
-                          context: context,
-                          builder: (context) =>
-                              const DistributorManagementDialog(),
                         );
-                      },
-                    ),
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Failed to load work areas: $e'),
+                            backgroundColor: Colors.red.shade800,
+                          ),
+                        );
+                      }
+                    }
+                  },
+                ),
 
-                  // Apps menu — less-frequently-used tools
-                  PopupMenuButton<String>(
-                    tooltip: 'Apps',
-                    offset: const Offset(0, 48),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 4),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: const [
-                          Icon(Icons.apps, size: 20, color: Color(0xFF202124)),
-                          SizedBox(height: 1),
-                          Text('Apps',
-                              style: TextStyle(
-                                  fontSize: 9,
-                                  color: Color(0xFF202124),
-                                  height: 1.1)),
+                // Client Maps - the client-facing twin of Work Areas
+                _actionBtn(
+                  icon: Icons.business_center_outlined,
+                  label: 'Client Maps',
+                  onPressed: () async {
+                    final provider = riverpod.ProviderScope.containerOf(context)
+                        .read(shareableMapRiverpod);
+                    try {
+                      await provider
+                          .loadFromAdapter(ClientAreaCollectionAdapter());
+                      if (context.mounted) {
+                        _bodyNavKey.currentState?.push(
+                          MaterialPageRoute(
+                            builder: (_) => const ShareableMapEditor(),
+                          ),
+                        );
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Failed to load client maps: $e'),
+                            backgroundColor: Colors.red.shade800,
+                          ),
+                        );
+                      }
+                    }
+                  },
+                ),
+
+                // Work Suburbs - open map editor with single-document suburb polygons
+                _actionBtn(
+                  icon: Icons.layers_outlined,
+                  label: 'Suburbs',
+                  onPressed: () async {
+                    final provider = riverpod.ProviderScope.containerOf(context)
+                        .read(shareableMapRiverpod);
+                    try {
+                      await provider.loadFromAdapter(WorkSuburbsAdapter());
+                      if (context.mounted) {
+                        _bodyNavKey.currentState?.push(
+                          MaterialPageRoute(
+                            builder: (_) => const ShareableMapEditor(),
+                          ),
+                        );
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Failed to load work suburbs: $e'),
+                            backgroundColor: Colors.red.shade800,
+                          ),
+                        );
+                      }
+                    }
+                  },
+                ),
+
+                // Distributor management - always visible
+                if (!isMediumScreen)
+                  _actionBtn(
+                    icon: Icons.people,
+                    label: 'Staff',
+                    onPressed: () {
+                      showDialog(
+                        context: context,
+                        builder: (context) =>
+                            const DistributorManagementDialog(),
+                      );
+                    },
+                  ),
+
+                // Apps menu — Pelisa, team chat, and less-frequently-used
+                // tools. Scoped in a Consumer so unread-count changes
+                // rebuild only this button, not the whole dashboard.
+                riverpod.Consumer(
+                  builder: (context, appsRef, _) {
+                    final chatProvider = appsRef.watch(chatRiverpod);
+                    final authProvider = appsRef.watch(authRiverpod);
+                    final unread = chatProvider.hasUnreadMessages
+                        ? chatProvider.unreadCount
+                        : 0;
+
+                    return PopupMenuButton<String>(
+                      tooltip: 'Apps',
+                      offset: const Offset(0, 48),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          const Padding(
+                            padding: EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 4),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.apps,
+                                    size: 20, color: Color(0xFF202124)),
+                                SizedBox(height: 1),
+                                Text('Apps',
+                                    style: TextStyle(
+                                        fontSize: 9,
+                                        color: Color(0xFF202124),
+                                        height: 1.1)),
+                              ],
+                            ),
+                          ),
+                          // Unread chat is otherwise invisible once the
+                          // chat button lives inside a closed menu.
+                          if (unread > 0)
+                            Positioned(
+                              right: 0,
+                              top: 0,
+                              child: Container(
+                                padding: const EdgeInsets.all(2),
+                                decoration: BoxDecoration(
+                                  color: Colors.red,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                constraints: const BoxConstraints(
+                                    minWidth: 16, minHeight: 16),
+                                child: Text(
+                                  '$unread',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            ),
                         ],
                       ),
-                    ),
-                    onSelected: (String value) {
-                      if (value == 'geocode') {
-                        _bodyNavKey.currentState?.push(
-                          MaterialPageRoute(
-                              builder: (_) => const SuburbListScreen()),
-                        );
-                      } else if (value == 'erf') {
-                        _bodyNavKey.currentState?.push(
-                          MaterialPageRoute(
-                              builder: (_) => const ErfPropertyScreen()),
-                        );
-                      } else if (value == 'ward_maps') {
-                        _bodyNavKey.currentState?.push(
-                          MaterialPageRoute(
-                              builder: (_) => const WardMapScreen()),
-                        );
-                      }
-                    },
-                    itemBuilder: (BuildContext context) => [
-                      const PopupMenuItem<String>(
-                        value: 'geocode',
-                        child: ListTile(
-                          leading: Icon(Icons.location_searching),
-                          title: Text('Geocoding Tool'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const PopupMenuItem<String>(
-                        value: 'erf',
-                        child: ListTile(
-                          leading: Icon(Icons.location_city),
-                          title: Text('ERF Property Viewer'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const PopupMenuItem<String>(
-                        value: 'ward_maps',
-                        child: ListTile(
-                          leading: Icon(Icons.how_to_vote_outlined),
-                          title: Text('SA Ward Mapper'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                    ],
-                  ),
-                  // Settings menu - always visible
-                  PopupMenuButton<String>(
-                    icon: const Icon(Icons.settings),
-                    tooltip: 'Settings',
-                    onSelected: (String value) async {
-                      if (value == 'distributors' && isMediumScreen) {
-                        showDialog(
-                          context: context,
-                          builder: (context) =>
-                              const DistributorManagementDialog(),
-                        );
-                      } else if (value == 'scale') {
-                        showDialog(
-                          context: context,
-                          builder: (context) => const ScaleSettingsDialog(),
-                        );
-                      } else if (value == 'status') {
-                        showDialog(
-                          context: context,
-                          builder: (context) =>
-                              const JobStatusManagementDialog(),
-                        );
-                      } else if (value == 'job_list_status') {
-                        showDialog(
-                          context: context,
-                          builder: (context) =>
-                              const JobListStatusManagementDialog(),
-                        );
-                      } else if (value == 'invoice_status') {
-                        showDialog(
-                          context: context,
-                          builder: (context) =>
-                              const InvoiceStatusManagementDialog(),
-                        );
-                      } else if (value == 'vat_settings') {
-                        showDialog(
-                          context: context,
-                          builder: (context) => const VatSettingsDialog(),
-                        );
-                      } else if (value == 'job_types') {
-                        showDialog(
-                          context: context,
-                          builder: (context) => const JobTypeManagementDialog(),
-                        );
-                      } else if (value == 'map_instructions') {
-                        showDialog(
-                          context: context,
-                          builder: (context) =>
-                              const MapInstructionManagementDialog(),
-                        );
-                      } else if (value == 'signout') {
-                        final confirmed = await showDialog<bool>(
-                          context: context,
-                          builder: (context) => AlertDialog(
-                            title: const Text('Sign Out'),
-                            content: const Text(
-                                'Are you sure you want to sign out?'),
-                            actions: [
-                              TextButton(
-                                onPressed: () =>
-                                    Navigator.of(context).pop(false),
-                                child: const Text('Cancel'),
-                              ),
-                              TextButton(
-                                onPressed: () =>
-                                    Navigator.of(context).pop(true),
-                                child: const Text('Sign Out'),
-                              ),
-                            ],
-                          ),
-                        );
-
-                        if (confirmed == true && context.mounted) {
-                          await riverpod.ProviderScope.containerOf(context)
-                              .read(authRiverpod)
-                              .signOut();
-                        }
-                      }
-                    },
-                    itemBuilder: (BuildContext context) => [
-                      // Add Distributors to menu on mobile/tablet
-                      if (isMediumScreen)
-                        const PopupMenuItem<String>(
-                          value: 'distributors',
-                          child: ListTile(
-                            leading: Icon(Icons.people),
-                            title: Text('Manage Distributors'),
-                            contentPadding: EdgeInsets.zero,
-                          ),
-                        ),
-                      if (isMediumScreen) const PopupMenuDivider(),
-                      const PopupMenuItem<String>(
-                        value: 'scale',
-                        child: ListTile(
-                          leading: Icon(Icons.zoom_in),
-                          title: Text('Interface Scale'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const PopupMenuItem<String>(
-                        value: 'status',
-                        child: ListTile(
-                          leading: Icon(Icons.label),
-                          title: Text('Job Statuses'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const PopupMenuItem<String>(
-                        value: 'job_list_status',
-                        child: ListTile(
-                          leading: Icon(Icons.list_alt),
-                          title: Text('Job List Statuses'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const PopupMenuItem<String>(
-                        value: 'invoice_status',
-                        child: ListTile(
-                          leading: Icon(Icons.receipt),
-                          title: Text('Invoice Statuses'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const PopupMenuItem<String>(
-                        value: 'vat_settings',
-                        child: ListTile(
-                          leading: Icon(Icons.percent),
-                          title: Text('VAT Settings'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const PopupMenuItem<String>(
-                        value: 'job_types',
-                        child: ListTile(
-                          leading: Icon(Icons.category),
-                          title: Text('Job Types'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const PopupMenuItem<String>(
-                        value: 'map_instructions',
-                        child: ListTile(
-                          leading: Icon(Icons.library_books_outlined),
-                          title: Text('Map Instructions'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const PopupMenuDivider(),
-                      const PopupMenuItem<String>(
-                        value: 'signout',
-                        child: ListTile(
-                          leading: Icon(Icons.logout, color: Colors.red),
-                          title: Text('Sign Out',
-                              style: TextStyle(color: Colors.red)),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-        body: Stack(
-          children: [
-            // Nested Navigator — sub-pages render here so the AppBar above
-            // stays visible on every screen. ListenableBuilder wires
-            // _tabController into the Navigator's isolated element tree
-            // (outer setState does not propagate through Navigator boundaries).
-            Navigator(
-              key: _bodyNavKey,
-              onGenerateRoute: (_) => MaterialPageRoute(
-                builder: (_) => ListenableBuilder(
-                  listenable: _tabController,
-                  builder: (_, __) => IndexedStack(
-                    index: _tabController.index,
-                    children: [
-                      if (FlavorConfig.instance.isCLM) ...[
-                        const ScheduleTab(),
-                        const JobListTab(),
-                        const CollectionScheduleTab(),
-                        const DropsheetTab(),
-                        const HappySunTab(),
-                        const _PayrollTabGate(),
-                      ],
-                      if (FlavorConfig.instance.isDropsheet)
-                        const SafeArea(child: DropsheetTab()),
-                      if (FlavorConfig.instance.isHappySun)
-                        const SafeArea(child: HappySunTab()),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            // AI Chat panel floats above everything
-            if (_showAiChat)
-              Positioned(
-                top: 8,
-                bottom: 72,
-                right: 8,
-                width: MediaQuery.of(context).size.width * 0.20,
-                child: Material(
-                  elevation: 12,
-                  borderRadius: BorderRadius.circular(16),
-                  clipBehavior: Clip.antiAlias,
-                  child: AiChatPanel(
-                    onClose: () => setState(() => _showAiChat = false),
-                  ),
-                ),
-              ),
-          ],
-        ),
-        floatingActionButton: Builder(
-          builder: (context) {
-            final chatProvider = ref.watch(chatRiverpod);
-            final authProvider = ref.watch(authRiverpod);
-            return Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // AI Assistant FAB
-                FloatingActionButton.small(
-                  heroTag: 'ai_chat',
-                  onPressed: () {
-                    setState(() => _showAiChat = !_showAiChat);
-                  },
-                  tooltip: _showAiChat ? 'Close Pelisa' : 'Open Pelisa',
-                  backgroundColor: _showAiChat
-                      ? Colors.deepPurple.shade400
-                      : Colors.deepPurple.shade600,
-                  child: Icon(
-                      _showAiChat ? Icons.close_rounded : Icons.auto_awesome,
-                      color: Colors.white,
-                      size: 20),
-                ),
-                const SizedBox(width: 8),
-                // Team Chat FAB
-                Stack(
-                  children: [
-                    GestureDetector(
-                      onLongPress: authProvider.isAdmin
-                          ? () {
-                              showDialog(
-                                context: context,
-                                builder: (context) => const ChatAdminPanel(),
-                              );
-                            }
-                          : null,
-                      child: FloatingActionButton(
-                        heroTag: 'team_chat',
-                        onPressed: () {
+                      onSelected: (String value) {
+                        if (value == 'pelisa') {
+                          setState(() => _showAiChat = !_showAiChat);
+                        } else if (value == 'team_chat') {
                           showDialog(
                             context: context,
                             builder: (context) => const ChatDialog(),
                           );
-                        },
-                        tooltip: authProvider.isAdmin
-                            ? 'Chat (Long press for admin panel)'
-                            : 'Team Chat',
-                        child: const Icon(Icons.chat),
-                      ),
-                    ),
-                    if (chatProvider.hasUnreadMessages)
-                      Positioned(
-                        right: 0,
-                        top: 0,
-                        child: Container(
-                          padding: const EdgeInsets.all(2),
-                          decoration: BoxDecoration(
-                            color: Colors.red,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          constraints: const BoxConstraints(
-                            minWidth: 20,
-                            minHeight: 20,
-                          ),
-                          child: Text(
-                            '${chatProvider.unreadCount}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
+                        } else if (value == 'chat_admin') {
+                          showDialog(
+                            context: context,
+                            builder: (context) => const ChatAdminPanel(),
+                          );
+                        } else if (value == 'geocode') {
+                          _bodyNavKey.currentState?.push(
+                            MaterialPageRoute(
+                                builder: (_) => const SuburbListScreen()),
+                          );
+                        } else if (value == 'erf') {
+                          _bodyNavKey.currentState?.push(
+                            MaterialPageRoute(
+                                builder: (_) =>
+                                    const AuthGate(child: ErfPropertyScreen())),
+                          );
+                        } else if (value == 'regular_clients') {
+                          _bodyNavKey.currentState?.push(
+                            MaterialPageRoute(
+                                builder: (_) => const RegularClientsScreen()),
+                          );
+                        } else if (value == 'ward_maps') {
+                          _bodyNavKey.currentState?.push(
+                            MaterialPageRoute(
+                                builder: (_) => const WardMapScreen()),
+                          );
+                        } else if (value == 'Letterbox Indexing') {
+                          _bodyNavKey.currentState?.push(
+                            MaterialPageRoute(
+                                builder: (_) => const LetterboxCurationPage()),
+                          );
+                        }
+                      },
+                      itemBuilder: (BuildContext context) => [
+                        PopupMenuItem<String>(
+                          value: 'pelisa',
+                          child: ListTile(
+                            leading: Icon(
+                              _showAiChat
+                                  ? Icons.close_rounded
+                                  : Icons.auto_awesome,
+                              color: Colors.deepPurple.shade600,
                             ),
-                            textAlign: TextAlign.center,
+                            title: Text(
+                                _showAiChat ? 'Close Pelisa' : 'Open Pelisa'),
+                            contentPadding: EdgeInsets.zero,
                           ),
                         ),
+                        PopupMenuItem<String>(
+                          value: 'team_chat',
+                          child: ListTile(
+                            leading: const Icon(Icons.chat),
+                            title: const Text('Team Chat'),
+                            trailing: unread == 0
+                                ? null
+                                : Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: Colors.red,
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Text(
+                                      '$unread',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                        // Was a long-press on the chat FAB, which a popup
+                        // menu cannot offer — promoted to its own entry.
+                        if (authProvider.isAdmin)
+                          const PopupMenuItem<String>(
+                            value: 'chat_admin',
+                            child: ListTile(
+                              leading: Icon(Icons.admin_panel_settings),
+                              title: Text('Chat Admin Panel'),
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                        const PopupMenuDivider(),
+                        const PopupMenuItem<String>(
+                          value: 'geocode',
+                          child: ListTile(
+                            leading: Icon(Icons.route_outlined),
+                            title: Text('Geocoding & Routes'),
+                            subtitle: Text(
+                              'Locate addresses, optimise runs, export KML',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                        const PopupMenuItem<String>(
+                          value: 'erf',
+                          child: ListTile(
+                            leading: Icon(Icons.location_city),
+                            title: Text('ERF Property Viewer'),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                        const PopupMenuItem<String>(
+                          value: 'regular_clients',
+                          child: ListTile(
+                            leading: Icon(Icons.groups_outlined),
+                            title: Text('Regular Clients'),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                        const PopupMenuItem<String>(
+                          value: 'ward_maps',
+                          child: ListTile(
+                            leading: Icon(Icons.how_to_vote_outlined),
+                            title: Text('SA Ward Mapper'),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                        const PopupMenuItem<String>(
+                          value: 'Letterbox Indexing',
+                          child: ListTile(
+                            leading: Icon(Icons.house_outlined),
+                            title: Text('Letterbox Indexing'),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                // Settings menu - always visible
+                PopupMenuButton<String>(
+                  icon: const Icon(Icons.settings),
+                  tooltip: 'Settings',
+                  onSelected: (String value) async {
+                    if (value == 'distributors' && isMediumScreen) {
+                      showDialog(
+                        context: context,
+                        builder: (context) =>
+                            const DistributorManagementDialog(),
+                      );
+                    } else if (value == 'scale') {
+                      showDialog(
+                        context: context,
+                        builder: (context) => const ScaleSettingsDialog(),
+                      );
+                    } else if (value == 'status') {
+                      showDialog(
+                        context: context,
+                        builder: (context) => const JobStatusManagementDialog(),
+                      );
+                    } else if (value == 'job_list_status') {
+                      showDialog(
+                        context: context,
+                        builder: (context) =>
+                            const JobListStatusManagementDialog(),
+                      );
+                    } else if (value == 'invoice_status') {
+                      showDialog(
+                        context: context,
+                        builder: (context) =>
+                            const InvoiceStatusManagementDialog(),
+                      );
+                    } else if (value == 'vat_settings') {
+                      showDialog(
+                        context: context,
+                        builder: (context) => const VatSettingsDialog(),
+                      );
+                    } else if (value == 'job_types') {
+                      showDialog(
+                        context: context,
+                        builder: (context) => const JobTypeManagementDialog(),
+                      );
+                    } else if (value == 'companies') {
+                      showDialog(
+                        context: context,
+                        builder: (context) => const CompanyManagementDialog(),
+                      );
+                    } else if (value == 'map_instructions') {
+                      showDialog(
+                        context: context,
+                        builder: (context) =>
+                            const MapInstructionManagementDialog(),
+                      );
+                    } else if (value == 'signout') {
+                      final confirmed = await showDialog<bool>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('Sign Out'),
+                          content:
+                              const Text('Are you sure you want to sign out?'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(false),
+                              child: const Text('Cancel'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(true),
+                              child: const Text('Sign Out'),
+                            ),
+                          ],
+                        ),
+                      );
+
+                      if (confirmed == true && context.mounted) {
+                        await riverpod.ProviderScope.containerOf(context)
+                            .read(authRiverpod)
+                            .signOut();
+                      }
+                    }
+                  },
+                  itemBuilder: (BuildContext context) => [
+                    // Add Distributors to menu on mobile/tablet
+                    if (isMediumScreen)
+                      const PopupMenuItem<String>(
+                        value: 'distributors',
+                        child: ListTile(
+                          leading: Icon(Icons.people),
+                          title: Text('Manage Distributors'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
                       ),
+                    if (isMediumScreen) const PopupMenuDivider(),
+                    const PopupMenuItem<String>(
+                      value: 'scale',
+                      child: ListTile(
+                        leading: Icon(Icons.zoom_in),
+                        title: Text('Interface Scale'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'status',
+                      child: ListTile(
+                        leading: Icon(Icons.label),
+                        title: Text('Job Statuses'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'job_list_status',
+                      child: ListTile(
+                        leading: Icon(Icons.list_alt),
+                        title: Text('Job List Statuses'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'invoice_status',
+                      child: ListTile(
+                        leading: Icon(Icons.receipt),
+                        title: Text('Invoice Statuses'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'vat_settings',
+                      child: ListTile(
+                        leading: Icon(Icons.percent),
+                        title: Text('VAT Settings'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'job_types',
+                      child: ListTile(
+                        leading: Icon(Icons.category),
+                        title: Text('Job Types'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'companies',
+                      child: ListTile(
+                        leading: Icon(Icons.business),
+                        title: Text('Companies'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'map_instructions',
+                      child: ListTile(
+                        leading: Icon(Icons.library_books_outlined),
+                        title: Text('Map Instructions'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem<String>(
+                      value: 'signout',
+                      child: ListTile(
+                        leading: Icon(Icons.logout, color: Colors.red),
+                        title: Text('Sign Out',
+                            style: TextStyle(color: Colors.red)),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
                   ],
                 ),
               ],
-            );
-          },
-        ));
+            ),
+      body: Stack(
+        children: [
+          // Nested Navigator — sub-pages render here so the AppBar above
+          // stays visible on every screen. ListenableBuilder wires
+          // _tabController into the Navigator's isolated element tree
+          // (outer setState does not propagate through Navigator boundaries).
+          Navigator(
+            key: _bodyNavKey,
+            observers: [_bodyNavMapObserver],
+            onGenerateRoute: (_) => MaterialPageRoute(
+              builder: (_) => ListenableBuilder(
+                listenable: _tabController,
+                builder: (_, __) => IndexedStack(
+                  index: _tabController.index,
+                  children: [
+                    if (FlavorConfig.instance.isCLM) ...[
+                      const ScheduleTab(),
+                      const JobListTab(),
+                      const CollectionScheduleTab(),
+                      const DropsheetTab(),
+                      const HappySunTab(),
+                      const _PayrollTabGate(),
+                    ],
+                    if (FlavorConfig.instance.isDropsheet)
+                      const SafeArea(child: DropsheetTab()),
+                    if (FlavorConfig.instance.isHappySun)
+                      const SafeArea(child: HappySunTab()),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // AI Chat panel floats above everything
+          if (_showAiChat)
+            Positioned(
+              top: 8,
+              // Was 72 to clear the chat/Pelisa FABs, which have moved to
+              // the Apps menu — the panel can now use the full height.
+              bottom: 8,
+              right: 8,
+              width: MediaQuery.of(context).size.width * 0.20,
+              child: Material(
+                elevation: 12,
+                borderRadius: BorderRadius.circular(16),
+                clipBehavior: Clip.antiAlias,
+                child: AiChatPanel(
+                  onClose: () => setState(() => _showAiChat = false),
+                ),
+              ),
+            ),
+        ],
+      ),
+      // Pelisa and Team Chat used to live here as FABs; both now sit in the
+      // Apps menu in the app bar, with the unread badge carried across.
+    );
   }
 }
 
@@ -1674,7 +1883,7 @@ class _HappySunTabState extends State<HappySunTab>
   void initState() {
     super.initState();
     _subTabController = TabController(
-      length: 2,
+      length: 4,
       vsync: this,
     );
   }
@@ -1698,18 +1907,27 @@ class _HappySunTabState extends State<HappySunTab>
             labelColor: Colors.blue,
             unselectedLabelColor: Colors.grey,
             indicatorColor: Colors.blue,
+            // Invoices and Customers are Happy Sun's own Zoho Books
+            // organisation — separate from Junk & Stuff's, under one login.
+            isScrollable: MediaQuery.sizeOf(context).width < 600,
             tabs: const [
               Tab(text: 'Projects'),
               Tab(text: 'Tools/Inventory'),
+              Tab(text: 'Invoices'),
+              Tab(text: 'Customers'),
             ],
           ),
         ),
         Expanded(
           child: TabBarView(
             controller: _subTabController,
-            children: const [
-              HappySunJobProjectsScreen(),
-              HappySunInventoryView(),
+            children: [
+              const HappySunJobProjectsScreen(),
+              const HappySunInventoryView(),
+              ZohoInvoicesView(
+                  orgId: ZohoOrg.forCompanyId(Company.happySunId)),
+              ZohoCustomersView(
+                  orgId: ZohoOrg.forCompanyId(Company.happySunId)),
             ],
           ),
         ),

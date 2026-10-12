@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show kIsWeb, kDebugMode, Uint8List;
+import 'package:flutter/foundation.dart' show kDebugMode, Uint8List;
 import 'package:flutter/material.dart' show Color;
 import 'package:xml/xml.dart';
 import '../models/shareable_map.dart';
@@ -7,6 +7,7 @@ import '../models/map_layer.dart';
 import '../../models/custom_polygon.dart';
 import '../models/map_polyline.dart';
 import '../models/map_point.dart';
+import '../../utils/web_file_download.dart';
 
 /// Service for exporting shareable maps to KML format
 class MapExportService {
@@ -98,7 +99,7 @@ class MapExportService {
 
       // Add points
       for (final point in layer.points) {
-        _addPoint(builder, point, layer.id);
+        _addPoint(builder, point, layer.id, layer.points.length);
       }
     });
   }
@@ -186,19 +187,44 @@ class MapExportService {
     XmlBuilder builder,
     MapPoint point,
     String layerId,
+    int layerPointCount,
   ) {
     builder.element('Placemark', nest: () {
-      builder.element('name', nest: point.name);
+      builder.element('name', nest: _pointName(point, layerPointCount));
       if (point.description.isNotEmpty) {
         builder.element('description', nest: point.description);
       }
       builder.element('styleUrl', nest: '#style_$layerId');
+
+      if (point.routeSequence != null) {
+        builder.element('ExtendedData', nest: () {
+          builder.element('Data', nest: () {
+            builder.attribute('name', 'stop');
+            builder.element('value', nest: '${point.routeSequence}');
+          });
+        });
+      }
 
       builder.element('Point', nest: () {
         builder.element('coordinates',
             nest: '${point.position.longitude},${point.position.latitude},0');
       });
     });
+  }
+
+  /// Prefix a routed point's name with its zero-padded stop number.
+  ///
+  /// Google My Maps orders a layer's placemarks alphabetically, not by
+  /// document order, so an unpadded "10" would sort before "2" and the
+  /// imported run would read out of sequence. Padding to the layer's width
+  /// makes the alphabetical order the drive order.
+  static String _pointName(MapPoint point, int layerPointCount) {
+    final sequence = point.routeSequence;
+    if (sequence == null) return point.name;
+
+    final width = layerPointCount.toString().length;
+    final label = sequence.toString().padLeft(width, '0');
+    return point.name.isEmpty ? label : '$label · ${point.name}';
   }
 
   /// Convert Flutter Color to KML color string (AABBGGRR format)
@@ -226,39 +252,28 @@ class MapExportService {
     return '$a$b$g$r'; // KML uses AABBGGRR format
   }
 
-  /// Download KML file (web and mobile)
-  static Future<void> downloadKmlFile(String kmlString, String fileName) async {
+  /// Download a KML file.
+  ///
+  /// On web this hands the bytes to the browser's download flow; on
+  /// desktop/mobile it writes to the downloads folder. Returns the saved
+  /// path where there is one, and null on web.
+  static Future<String?> downloadKmlFile(
+      String kmlString, String fileName) async {
     final bytes = Uint8List.fromList(utf8.encode(kmlString));
+    final safeName =
+        fileName.toLowerCase().endsWith('.kml') ? fileName : '$fileName.kml';
 
-    if (kIsWeb) {
-      // Web: Use blob and download link
-      await _downloadForWeb(bytes, fileName);
-    } else {
-      // Mobile: Save to file system
-      // TODO: Implement mobile file saving using path_provider
-      throw UnimplementedError(
-        'Mobile file download not yet implemented. Use share instead.',
-      );
-    }
-  }
+    final path = await triggerFileDownload(
+      bytes,
+      safeName,
+      'application/vnd.google-earth.kml+xml',
+    );
 
-  /// Download file for web platform
-  static Future<void> _downloadForWeb(Uint8List bytes, String fileName) async {
-    // This requires dart:html on web
-    // For now, we'll use a workaround that works in both web and non-web
-    try {
-      // For now, just log success in debug mode
-      // TODO: Implement actual web download using dart:html
+    if (kDebugMode) {
       // ignore: avoid_print
-      if (kDebugMode) {
-        print('KML generated successfully: $fileName (${bytes.length} bytes)');
-      }
-    } catch (e) {
-      // ignore: avoid_print
-      if (kDebugMode) {
-        print('Error downloading file: $e');
-      }
-      rethrow;
+      print('KML export: $safeName (${bytes.length} bytes)'
+          '${path == null ? '' : ' → $path'}');
     }
+    return path;
   }
 }

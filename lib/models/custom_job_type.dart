@@ -1,3 +1,5 @@
+import 'company.dart';
+
 /// Configurable job type. All per-type behaviour (form fields, schedule
 /// participation, sync targets) is driven by flags on this model so new
 /// services can be added entirely from Settings without an app update.
@@ -60,8 +62,8 @@ class CustomJobType {
   /// window). The dropsheet task type is given by [dropsheetTaskTypeKey].
   final bool appearsOnDropsheet;
 
-  /// When true, this job type charges VAT. The add/edit dialog shows the
-  /// incl/excl VAT toggle and the job list shows the coloured VAT badge.
+  /// When true, this job type charges VAT on top of its amount, which is
+  /// always entered excl VAT. Invoices for it are raised VAT-exclusive.
   /// Defaults to false so all existing job types are treated as no-VAT.
   final bool chargesVat;
 
@@ -74,9 +76,66 @@ class CustomJobType {
   /// created. Used only when `isHappySunService` is true.
   final List<String> defaultTools;
 
+  // ─── Company ownership ───────────────────────────────────────────────
+  /// Which business this job type belongs to — see [Company].
+  ///
+  /// The single source of truth for ownership, and what selects the accounting
+  /// provider (CLM → Xero, Junk & Stuff and Happy Sun → Zoho).
+  ///
+  /// Empty on records written before companies existed; use
+  /// [resolvedCompanyId] to read it, which falls back to deriving from the
+  /// legacy behaviour flags. Set only in job type settings — never per job.
+  final String companyId;
+
+  /// Whether jobs of this type are invoiced at all.
+  ///
+  /// Independent of the company: "returning flyers" belongs to CLM and so maps
+  /// to Xero, but is internal work that never produces an invoice. Defaults to
+  /// true so existing job types are unaffected.
+  final bool createsInvoices;
+
+  /// Catalogue item this job type bills as, e.g. Xero's `DIST-1000`.
+  ///
+  /// Empty means "no catalogue item" — the invoice line is then free text at
+  /// the company's default account and tax rate, which is how every job type
+  /// behaved before this existed.
+  ///
+  /// Named provider-neutrally rather than `xeroItemCode`: Zoho Books has its
+  /// own items list, and the seam elsewhere in this app (`accountingInvoiceId`,
+  /// `resolvedInvoiceProviderId`) already established that these fields are
+  /// shared and the provider is resolved from the company.
+  final String accountingItemCode;
+
+  /// Catalogue items this job type may bill as.
+  ///
+  /// Narrows the invoice line's item picker to the handful that make sense for
+  /// the work, rather than the whole price list. Empty means "no restriction" —
+  /// the picker then offers everything, which is how it behaved before this
+  /// existed.
+  ///
+  /// [accountingItemCode] is always offered whether or not it appears here, so
+  /// setting a default can never put it out of reach of its own picker.
+  final List<String> accountingItemCodes;
+
+  /// Items the picker should offer, with the default always included.
+  ///
+  /// Empty means no restriction — offer everything.
+  List<String> get allowedItemCodes {
+    if (accountingItemCodes.isEmpty) return const [];
+    if (accountingItemCode.isEmpty ||
+        accountingItemCodes.contains(accountingItemCode)) {
+      return accountingItemCodes;
+    }
+    return [accountingItemCode, ...accountingItemCodes];
+  }
+
   const CustomJobType({
     required this.id,
     required this.label,
+    this.companyId = '',
+    this.createsInvoices = true,
+    this.accountingItemCode = '',
+    this.accountingItemCodes = const [],
     this.isDefault = false,
     this.order = 0,
     this.isHappySunService = false,
@@ -99,6 +158,14 @@ class CustomJobType {
     return CustomJobType(
       id: data['id'] as String,
       label: data['label'] as String,
+      companyId: data['companyId'] as String? ?? '',
+      createsInvoices: data['createsInvoices'] as bool? ?? true,
+      accountingItemCode: data['accountingItemCode'] as String? ?? '',
+      accountingItemCodes: (data['accountingItemCodes'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .where((e) => e.isNotEmpty)
+              .toList() ??
+          const [],
       isDefault: data['isDefault'] as bool? ?? false,
       order: (data['order'] as num?)?.toInt() ?? 0,
       isHappySunService: data['isHappySunService'] as bool? ?? false,
@@ -110,7 +177,8 @@ class CustomJobType {
       createsCloudFolder: data['createsCloudFolder'] as bool? ?? false,
       iconName: data['iconName'] as String?,
       colorValue: (data['colorValue'] as num?)?.toInt(),
-      autoAllocatesToSchedule: data['autoAllocatesToSchedule'] as bool? ?? false,
+      autoAllocatesToSchedule:
+          data['autoAllocatesToSchedule'] as bool? ?? false,
       hasTwoStops: data['hasTwoStops'] as bool? ?? false,
       appearsOnDropsheet: data['appearsOnDropsheet'] as bool? ?? false,
       dropsheetTaskTypeKey: data['dropsheetTaskTypeKey'] as String?,
@@ -125,6 +193,15 @@ class CustomJobType {
     return {
       'id': id,
       'label': label,
+      // Written only once set, so job types untouched since before companies
+      // existed stay byte-identical and keep falling back to derivation.
+      if (companyId.isNotEmpty) 'companyId': companyId,
+      'createsInvoices': createsInvoices,
+      // Omitted when unset, so a job type that bills as free text stays
+      // byte-identical to how it was written before items existed.
+      if (accountingItemCode.isNotEmpty) 'accountingItemCode': accountingItemCode,
+      if (accountingItemCodes.isNotEmpty)
+        'accountingItemCodes': accountingItemCodes,
       'isDefault': isDefault,
       'order': order,
       'isHappySunService': isHappySunService,
@@ -138,15 +215,43 @@ class CustomJobType {
       'autoAllocatesToSchedule': autoAllocatesToSchedule,
       'hasTwoStops': hasTwoStops,
       'appearsOnDropsheet': appearsOnDropsheet,
-      if (dropsheetTaskTypeKey != null) 'dropsheetTaskTypeKey': dropsheetTaskTypeKey,
+      if (dropsheetTaskTypeKey != null)
+        'dropsheetTaskTypeKey': dropsheetTaskTypeKey,
       'defaultTools': defaultTools,
       'chargesVat': chargesVat,
     };
   }
 
+  /// The owning company, deriving it from the legacy behaviour flags when
+  /// [companyId] has not been set yet.
+  ///
+  /// Before companies existed, ownership was inferred:
+  /// `appearsOnCollectionSchedule` meant Junk & Stuff, `isHappySunService`
+  /// meant Happy Sun, and everything else was CLM by elimination — CLM was
+  /// never stored anywhere. This keeps that inference working as a fallback so
+  /// the feature can ship before every job type has been assigned by hand.
+  ///
+  /// The derivation is a migration aid, not the model: once [companyId] is set
+  /// it always wins, which is what lets a Junk & Stuff job type exist that does
+  /// *not* appear on the Collection Schedule.
+  String get resolvedCompanyId {
+    if (companyId.isNotEmpty) return companyId;
+    if (appearsOnCollectionSchedule) return Company.junkAndStuffId;
+    if (isHappySunService) return Company.happySunId;
+    return Company.clmId;
+  }
+
+  /// Whether ownership is still being inferred rather than stated — lets
+  /// settings flag which job types have not been assigned yet.
+  bool get companyIsInferred => companyId.isEmpty;
+
   CustomJobType copyWith({
     String? id,
     String? label,
+    String? companyId,
+    bool? createsInvoices,
+    String? accountingItemCode,
+    List<String>? accountingItemCodes,
     bool? isDefault,
     int? order,
     bool? isHappySunService,
@@ -170,6 +275,10 @@ class CustomJobType {
     return CustomJobType(
       id: id ?? this.id,
       label: label ?? this.label,
+      companyId: companyId ?? this.companyId,
+      createsInvoices: createsInvoices ?? this.createsInvoices,
+      accountingItemCode: accountingItemCode ?? this.accountingItemCode,
+      accountingItemCodes: accountingItemCodes ?? this.accountingItemCodes,
       isDefault: isDefault ?? this.isDefault,
       order: order ?? this.order,
       isHappySunService: isHappySunService ?? this.isHappySunService,
@@ -181,7 +290,8 @@ class CustomJobType {
       createsCloudFolder: createsCloudFolder ?? this.createsCloudFolder,
       iconName: clearIcon ? null : (iconName ?? this.iconName),
       colorValue: clearColor ? null : (colorValue ?? this.colorValue),
-      autoAllocatesToSchedule: autoAllocatesToSchedule ?? this.autoAllocatesToSchedule,
+      autoAllocatesToSchedule:
+          autoAllocatesToSchedule ?? this.autoAllocatesToSchedule,
       hasTwoStops: hasTwoStops ?? this.hasTwoStops,
       appearsOnDropsheet: appearsOnDropsheet ?? this.appearsOnDropsheet,
       dropsheetTaskTypeKey: clearDropsheetTaskTypeKey

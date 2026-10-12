@@ -8,16 +8,32 @@
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
+YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}=== CLM Maps Web Deployment ===${NC}"
 echo -e "${BLUE}Target: https://clm-maps.web.app${NC}"
 
+# Deploy as the account that owns clmschedule, whatever the Firebase CLI's
+# default login happens to be. One-time setup:
+#   firebase login:add richardatclm@gmail.com
+# Override with CLM_FIREBASE_ACCOUNT=you@example.com ./deploy_maps.sh
+FIREBASE_ACCOUNT="${CLM_FIREBASE_ACCOUNT:-richardatclm@gmail.com}"
+if ! firebase login:list 2>/dev/null | grep -qF "$FIREBASE_ACCOUNT"; then
+  echo -e "${RED}✗ Firebase CLI is not logged in as ${FIREBASE_ACCOUNT}${NC}"
+  echo -e "${YELLOW}   Run once: firebase login:add ${FIREBASE_ACCOUNT}${NC}"
+  echo -e "${YELLOW}   (your other logins stay as they are)${NC}"
+  exit 1
+fi
+echo -e "${BLUE}Firebase deploys will use: ${GREEN}${FIREBASE_ACCOUNT}${NC}"
+
 # Step 1: Build the maps flavor
 echo -e "\n${BLUE}Step 1: Building maps flavor...${NC}"
 flutter pub get
 dart run tools/replace_maps_key.dart
-flutter build web --wasm --release --target lib/main_maps.dart --dart-define=FLAVOR=maps
+# Own output folder: hosting:main publishes build/web, so building Maps there
+# put the Maps app on clmschedule.web.app whenever the two deploys overlapped.
+flutter build web --release --target lib/main_maps.dart --dart-define=FLAVOR=maps --output "$PWD/build/web_maps"
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Build successful${NC}"
@@ -30,10 +46,15 @@ fi
 echo -e "\n${BLUE}Step 1b: Rebranding build output for CLM Maps...${NC}"
 
 MAPS_TITLE="CLM Maps"
-MAPS_DESC="CLM Maps - Interactive distribution maps and shareable layers"
+MAPS_DESC="Interactive GPS-tracked flyer distribution maps by Community Life Media, Cape Town"
+# Absolute origin for link-preview images (relative og:image URLs are ignored
+# by WhatsApp/Outlook). Switch to https://maps.communitylifemedia.co.za once
+# the custom domain is live. /map/** pages are rendered by the mapPage
+# function, which sets per-map tags on top of this template.
+MAPS_ORIGIN="https://maps.communitylifemedia.co.za"
 
-INDEX_FILE="build/web/index.html"
-MANIFEST_FILE="build/web/manifest.json"
+INDEX_FILE="build/web_maps/index.html"
+MANIFEST_FILE="build/web_maps/manifest.json"
 
 if [ -f "$INDEX_FILE" ]; then
     # macOS/BSD sed requires -i ''
@@ -45,7 +66,15 @@ if [ -f "$INDEX_FILE" ]; then
         -e "s|<meta property=\"og:description\" content=\"CLM Schedule - Enterprise scheduling application\">|<meta property=\"og:description\" content=\"${MAPS_DESC}\">|g" \
         -e "s|<meta name=\"twitter:title\" content=\"CLM Schedule\">|<meta name=\"twitter:title\" content=\"${MAPS_TITLE}\">|g" \
         -e "s|<meta name=\"twitter:description\" content=\"CLM Schedule - Enterprise scheduling application\">|<meta name=\"twitter:description\" content=\"${MAPS_DESC}\">|g" \
+        -e "s|<meta property=\"og:image\" content=\"icons/Icon-512.png\">|<meta property=\"og:image\" content=\"${MAPS_ORIGIN}/assets/clm-official-logo.jpeg\">|g" \
+        -e "s|<meta name=\"twitter:image\" content=\"icons/Icon-512.png\">|<meta name=\"twitter:image\" content=\"${MAPS_ORIGIN}/assets/clm-official-logo.jpeg\">|g" \
+        -e "s|var SINGLE_TAB    = false;|var SINGLE_TAB    = true; |" \
         "$INDEX_FILE"
+    # Maps has no Firestore persistence, so duplicate tabs must stay blocked.
+    if ! grep -q "var SINGLE_TAB    = true;" "$INDEX_FILE"; then
+        echo -e "${RED}✗ Failed to enable single-tab lock in $INDEX_FILE${NC}"
+        exit 1
+    fi
     echo -e "${GREEN}✓ Rebranded $INDEX_FILE${NC}"
 else
     echo -e "${RED}✗ $INDEX_FILE not found${NC}"
@@ -62,8 +91,9 @@ if [ -f "$MANIFEST_FILE" ]; then
 fi
 
 # Step 2: Deploy to Firebase Hosting (maps target → clm-maps site)
-echo -e "\n${BLUE}Step 2: Deploying to Firebase Hosting (maps target)...${NC}"
-firebase deploy --only hosting:maps --project clmschedule
+echo -e "\n${BLUE}Step 2: Deploying mapPage function + Firebase Hosting (maps target)...${NC}"
+# mapPage must ship with (or before) Hosting — the /map/** rewrite points at it.
+firebase deploy --only functions:mapPage,hosting:maps --project clmschedule --account "$FIREBASE_ACCOUNT"
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Deployment successful${NC}"

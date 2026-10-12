@@ -15,7 +15,10 @@ import '../providers/job_list_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/map_view_provider.dart';
 import '../shareable_maps/utils/point_marker_icons.dart';
+import '../utils/vertex_delete_key.dart';
 import 'mymaps_kml_downloader.dart';
+import '../shareable_maps/providers/map_gesture_provider.dart';
+import '../shareable_maps/widgets/map_overlay.dart';
 
 class UpdatedMapView extends riverpod.ConsumerStatefulWidget {
   final String? jobId;
@@ -219,6 +222,15 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
           icon: _circleMarkerIcon!,
           position: editingPoints[i],
           draggable: true,
+          // Hold Delete / Backspace and click to remove the point.
+          onTap: () {
+            if (!isVertexDeleteHeld()) return;
+            if (mapViewProvider.removeEditingPoint(i)) {
+              _updateMapView();
+            } else {
+              _showMinimumPointsMessage();
+            }
+          },
           onDrag: (newPosition) {
             mapViewProvider.updateEditingPoint(i, newPosition);
             _updateMapView();
@@ -266,7 +278,21 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
     return markers;
   }
 
+  void _showMinimumPointsMessage() {
+    ScaffoldMessenger.maybeOf(context)
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(
+        content: Text('An area needs at least 3 points'),
+        duration: Duration(seconds: 2),
+      ));
+  }
+
+  /// UI is over the map (panel under the pointer, or a dialog/menu open).
+  bool get _mapHeld => ref.read(mapGestureRiverpod).isHeld;
+
   void _onMapTap(LatLng tappedPoint) {
+    // The click that landed on a panel or dialog over the map.
+    if (_mapHeld) return;
     final mapViewProvider = ref.read(mapViewRiverpod);
 
     if (mapViewProvider.isPlacingMarker) {
@@ -492,6 +518,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                   : [],
               onTap: !isEditing && !isCreatingNewPolygon && !isPopupVisible
                   ? () {
+                      if (_mapHeld) return;
                       mapViewProvider.selectPolygon(i);
                       _updateMapView();
                       final center =
@@ -533,6 +560,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                     : 2,
             onTap: !isEditing && !isCreatingNewPolygon && !isPopupVisible
                 ? () {
+                    if (_mapHeld) return;
                     mapViewProvider.selectPolygon(i);
                     _updateMapView();
                     // Show polygon info popup at polygon center
@@ -575,6 +603,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
             onTap: !mapViewProvider.isEditing &&
                     !mapViewProvider.isCreatingNewPolygon
                 ? () {
+                    if (_mapHeld) return;
                     _selectedWorkArea = area;
                     _updateMapView();
                   }
@@ -1613,6 +1642,8 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                 child: Stack(
                   children: [
                     GoogleMap(
+                      webGestureHandling:
+                          ref.watch(mapGestureRiverpod).gestureHandling,
                       onMapCreated: (controller) {
                         try {
                           _controller = controller;
@@ -1656,18 +1687,20 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                     Positioned(
                       top: 16,
                       left: 16,
-                      child: FloatingActionButton(
-                        mini: true,
-                        onPressed: () {
-                          mapViewProvider.toggleSidebar();
-                          // No setState needed as toggleSidebar already calls notifyListeners
-                        },
-                        tooltip: mapViewProvider.isSidebarVisible
-                            ? 'Hide sidebar'
-                            : 'Show sidebar',
-                        child: Icon(mapViewProvider.isSidebarVisible
-                            ? Icons.close
-                            : Icons.menu),
+                      child: MapOverlay(
+                        child: FloatingActionButton(
+                          mini: true,
+                          onPressed: () {
+                            mapViewProvider.toggleSidebar();
+                            // No setState needed as toggleSidebar already calls notifyListeners
+                          },
+                          tooltip: mapViewProvider.isSidebarVisible
+                              ? 'Hide sidebar'
+                              : 'Show sidebar',
+                          child: Icon(mapViewProvider.isSidebarVisible
+                              ? Icons.close
+                              : Icons.menu),
+                        ),
                       ),
                     ),
 
@@ -1681,63 +1714,65 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                       Positioned(
                         bottom: 16,
                         right: 16,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // Undo button for editing existing polygon
-                            if (mapViewProvider.isEditing &&
-                                mapViewProvider.editingPoints.isNotEmpty)
-                              FloatingActionButton(
-                                heroTag: 'undo_edit',
-                                onPressed: () {
-                                  mapViewProvider.updateEditingPoints(
-                                    List<LatLng>.from(
-                                        mapViewProvider.editingPoints)
-                                      ..removeLast(),
-                                  );
-                                  _updateMapView();
-                                },
-                                child: const Icon(Icons.undo),
-                              ),
-                            // Undo button for creating new polygon
-                            if (mapViewProvider.isCreatingNewPolygon &&
-                                mapViewProvider.newPolygonPoints.isNotEmpty)
-                              FloatingActionButton(
-                                heroTag: 'undo_create',
-                                onPressed: () {
-                                  if (mapViewProvider
-                                      .newPolygonPoints.isNotEmpty) {
-                                    // Create a copy of the current points without the last one
-                                    final points = List<LatLng>.from(
-                                        mapViewProvider.newPolygonPoints);
-                                    points.removeLast();
-
-                                    // Store current polygons
-                                    final existingPolygons =
-                                        List<CustomPolygon>.from(
-                                            mapViewProvider.customPolygons);
-
-                                    // Reset polygon creation state and restart with fewer points
-                                    mapViewProvider.cancelCreatingPolygon();
-                                    mapViewProvider.startCreatingPolygon();
-
-                                    // Add all points except the last one back
-                                    for (var point in points) {
-                                      mapViewProvider.addPolygonPoint(point);
-                                    }
-
-                                    // Ensure existing polygons are preserved
-                                    if (existingPolygons.isNotEmpty) {
-                                      mapViewProvider
-                                          .updateAllPolygons(existingPolygons);
-                                    }
-
+                        child: MapOverlay(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // Undo button for editing existing polygon
+                              if (mapViewProvider.isEditing &&
+                                  mapViewProvider.editingPoints.isNotEmpty)
+                                FloatingActionButton(
+                                  heroTag: 'undo_edit',
+                                  onPressed: () {
+                                    mapViewProvider.updateEditingPoints(
+                                      List<LatLng>.from(
+                                          mapViewProvider.editingPoints)
+                                        ..removeLast(),
+                                    );
                                     _updateMapView();
-                                  }
-                                },
-                                child: const Icon(Icons.undo),
-                              ),
-                          ],
+                                  },
+                                  child: const Icon(Icons.undo),
+                                ),
+                              // Undo button for creating new polygon
+                              if (mapViewProvider.isCreatingNewPolygon &&
+                                  mapViewProvider.newPolygonPoints.isNotEmpty)
+                                FloatingActionButton(
+                                  heroTag: 'undo_create',
+                                  onPressed: () {
+                                    if (mapViewProvider
+                                        .newPolygonPoints.isNotEmpty) {
+                                      // Create a copy of the current points without the last one
+                                      final points = List<LatLng>.from(
+                                          mapViewProvider.newPolygonPoints);
+                                      points.removeLast();
+
+                                      // Store current polygons
+                                      final existingPolygons =
+                                          List<CustomPolygon>.from(
+                                              mapViewProvider.customPolygons);
+
+                                      // Reset polygon creation state and restart with fewer points
+                                      mapViewProvider.cancelCreatingPolygon();
+                                      mapViewProvider.startCreatingPolygon();
+
+                                      // Add all points except the last one back
+                                      for (var point in points) {
+                                        mapViewProvider.addPolygonPoint(point);
+                                      }
+
+                                      // Ensure existing polygons are preserved
+                                      if (existingPolygons.isNotEmpty) {
+                                        mapViewProvider.updateAllPolygons(
+                                            existingPolygons);
+                                      }
+
+                                      _updateMapView();
+                                    }
+                                  },
+                                  child: const Icon(Icons.undo),
+                                ),
+                            ],
+                          ),
                         ),
                       ),
                     // Instructions overlay for new polygon creation
@@ -1746,20 +1781,22 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                         top: 16,
                         left: 16,
                         right: 16,
-                        child: Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: Colors.blue,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Text(
-                            'Tap on the map to add points for your new area. You need at least 3 points to create an area.',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
+                        child: MapOverlay(
+                          child: Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Colors.blue,
+                              borderRadius: BorderRadius.circular(8),
                             ),
-                            textAlign: TextAlign.center,
+                            child: const Text(
+                              'Tap on the map to add points for your new area. You need at least 3 points to create an area.',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
                           ),
                         ),
                       ),
@@ -1770,20 +1807,22 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                         top: 16,
                         left: 16,
                         right: 16,
-                        child: Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: Colors.orange.shade700,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Text(
-                            'Tap on the map to place a marker point. Useful for collection addresses or traffic light intersections.',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
+                        child: MapOverlay(
+                          child: Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.shade700,
+                              borderRadius: BorderRadius.circular(8),
                             ),
-                            textAlign: TextAlign.center,
+                            child: const Text(
+                              'Tap on the map to place a marker point. Useful for collection addresses or traffic light intersections.',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
                           ),
                         ),
                       ),
@@ -1797,20 +1836,22 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                         top: 16,
                         left: 16,
                         right: 16,
-                        child: Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: Colors.green.withValues(alpha: 0.9),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Text(
-                            'Tap on any polygon to select it, then tap the Edit button to modify it.',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
+                        child: MapOverlay(
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.green.withValues(alpha: 0.9),
+                              borderRadius: BorderRadius.circular(8),
                             ),
-                            textAlign: TextAlign.center,
+                            child: const Text(
+                              'Tap on any polygon to select it, then tap the Edit button to modify it.',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
                           ),
                         ),
                       ),

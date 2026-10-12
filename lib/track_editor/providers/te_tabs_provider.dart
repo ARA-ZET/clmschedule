@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:gpx/gpx.dart';
 import '../models/styled_polygon.dart';
 import '../models/tab_item.dart';
+import '../utils/te_track_gaps.dart';
 import 'te_mode_provider.dart';
 
 final teTabsRiverpod =
@@ -24,17 +25,22 @@ List<TETabItem> _defaultTabs() => [
 
 class TETabsProvider with ChangeNotifier {
   // Per-mode independent tab lists and current-tab pointers.
+  // Report mode never actually opens a tab — it's a self-contained workflow
+  // on its own provider — but every mode needs a bucket here or switching to
+  // it throws on the `!` below.
   final Map<TEMode, List<TETabItem>> _tabsByMode = {
     TEMode.import: _defaultTabs(),
     TEMode.trim: _defaultTabs(),
     TEMode.processing: _defaultTabs(),
     TEMode.update: _defaultTabs(),
+    TEMode.report: _defaultTabs(),
   };
   final Map<TEMode, int> _currentByMode = {
     TEMode.import: 0,
     TEMode.trim: 0,
     TEMode.processing: 0,
     TEMode.update: 0,
+    TEMode.report: 0,
   };
 
   TEMode _activeMode = TEMode.processing;
@@ -51,6 +57,11 @@ class TETabsProvider with ChangeNotifier {
   /// this provider use this to perform mutations that the public getter
   /// disallows.
   List<TETabItem> get _activeTabs => _tabsByMode[_activeMode]!;
+
+  /// Read-only view of [mode]'s tab list, whichever mode is active. For work
+  /// that started in one mode and finishes after the user switched away.
+  List<TETabItem> tabsFor(TEMode mode) =>
+      UnmodifiableListView(_tabsByMode[mode]!);
   int get currentTab => _currentByMode[_activeMode]!;
 
   void setActiveMode(TEMode mode) {
@@ -122,6 +133,33 @@ class TETabsProvider with ChangeNotifier {
       storageFolderPath: storageFolderPath,
     );
     notifyListeners();
+  }
+
+  /// Bring [tab] in line with a schedule change, in whichever mode it lives.
+  /// A null argument leaves that part alone. The meta fields sit on a new
+  /// [TETabItem], which is returned (null when [tab] is no longer open).
+  TETabItem? applyScheduleData(
+    TETabItem tab, {
+    List<TEStyledPolygon>? polygons,
+    List<String>? jobIds,
+    List<TEDropOffPoint>? dropOffPoints,
+  }) {
+    for (final list in _tabsByMode.values) {
+      final idx = list.indexWhere((t) => identical(t, tab));
+      if (idx == -1) continue;
+      if (polygons != null) {
+        list[idx].polygons
+          ..clear()
+          ..addAll(polygons);
+      }
+      if (jobIds != null || dropOffPoints != null) {
+        list[idx] =
+            list[idx].copyWith(jobIds: jobIds, dropOffPoints: dropOffPoints);
+      }
+      notifyListeners();
+      return list[idx];
+    }
+    return null;
   }
 
   /// Replace the polygon list of [tabIndex] entirely. Used by the
@@ -268,9 +306,10 @@ class TETabsProvider with ChangeNotifier {
   }
 
   /// Replace the [LatLng] points of a single polygon in-place and notify.
-  void updatePolygonPoints(
-      int tabIndex, int polyIndex, List<LatLng> newPoints) {
-    final list = _activeTabs;
+  /// [mode] defaults to the active mode.
+  void updatePolygonPoints(int tabIndex, int polyIndex, List<LatLng> newPoints,
+      {TEMode? mode}) {
+    final list = _tabsByMode[mode ?? _activeMode]!;
     if (tabIndex < 0 || tabIndex >= list.length) return;
     final polys = list[tabIndex].polygons;
     if (polyIndex < 0 || polyIndex >= polys.length) return;
@@ -316,6 +355,41 @@ class TETabsProvider with ChangeNotifier {
   }
 
   // ── Track operations ──────────────────────────────────────────────────────
+
+  /// Re-split [tabIndex]'s tracks from its pristine [TETabItem.sourceTracks]
+  /// at a gap of [meters].
+  ///
+  /// The whole track list is rebuilt, so track-level edits (renames, deletes,
+  /// scissor splits) on this tab are dropped — the caller warns the user.
+  /// Returns the tracks that were replaced, so an undo can put them back.
+  List<Trk>? setTrackGapSplit(int tabIndex, double meters) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return null;
+    final tab = list[tabIndex];
+    if (tab.sourceTracks.isEmpty) return null;
+
+    final previous = List<Trk>.from(tab.tracks);
+    // Mutate the list in place: widgets and panels hold on to `tab.tracks`.
+    tab.tracks
+      ..clear()
+      ..addAll(splitTracksAtGapsDetached(tab.sourceTracks, meters));
+    list[tabIndex] = tab.copyWith(gapSplitM: meters);
+    notifyListeners();
+    return previous;
+  }
+
+  /// Put a previous track list and gap distance back on [tabIndex]. The undo
+  /// side of [setTrackGapSplit].
+  void restoreTracks(int tabIndex, List<Trk> tracks, double gapM) {
+    final list = _activeTabs;
+    if (tabIndex < 0 || tabIndex >= list.length) return;
+    final tab = list[tabIndex];
+    tab.tracks
+      ..clear()
+      ..addAll(tracks);
+    list[tabIndex] = tab.copyWith(gapSplitM: gapM);
+    notifyListeners();
+  }
 
   /// Remove a track by index from the given tab.
   void removeTrack(int tabIndex, int trackIndex) {

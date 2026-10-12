@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../../models/collection_job.dart';
 import '../../models/zoho_invoice.dart';
 import '../../providers/collection_schedule_provider.dart';
+import '../../utils/zoho_org.dart';
+import '../job_invoices_sheet.dart';
 import 'create_invoice_dialog.dart';
 import 'zoho_invoice_detail_screen.dart';
 import 'zoho_status_chip.dart';
@@ -32,8 +34,8 @@ class _JobInvoiceActionsSheet extends riverpod.ConsumerWidget {
     // the grid renders is only a projection of it.
     final item = ref.watch(collectionScheduleRiverpod).jobListItemFor(job.id);
     final cachedStatus = item?.zohoInvoiceStatus ?? '';
-    final status = ZohoInvoiceStatus.parse(
-        cachedStatus.isEmpty ? null : cachedStatus);
+    final status =
+        ZohoInvoiceStatus.parse(cachedStatus.isEmpty ? null : cachedStatus);
 
     return SafeArea(
       child: Column(
@@ -59,15 +61,13 @@ class _JobInvoiceActionsSheet extends riverpod.ConsumerWidget {
                   const SizedBox(height: 4),
                   Text(
                     item.client,
-                    style:
-                        TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
                 ],
               ],
             ),
           ),
           const Divider(height: 1),
-
           if (item == null)
             const Padding(
               padding: EdgeInsets.all(20),
@@ -90,11 +90,25 @@ class _JobInvoiceActionsSheet extends riverpod.ConsumerWidget {
                 Navigator.of(context).push(
                   MaterialPageRoute(
                     builder: (_) => ZohoInvoiceDetailScreen(
+                        orgId: ZohoOrg.forJob(item),
                         invoiceId: item.zohoInvoiceId),
                   ),
                 );
               },
             ),
+            // Split invoices — other clients' shares of the same job.
+            for (final split in item.splitInvoices)
+              ListTile(
+                leading: const Icon(Icons.call_split),
+                title: Text('Invoice ${split.invoiceNumber}'),
+                subtitle:
+                    split.contactName.isEmpty ? null : Text(split.contactName),
+                trailing: jobInvoiceStatusChip(split),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  openJobInvoice(context, split, orgId: ZohoOrg.forJob(item));
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.add_circle_outline),
               title: const Text('Create another invoice'),

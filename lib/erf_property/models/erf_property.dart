@@ -22,6 +22,10 @@ class ErfProperty {
   final String? streetAddress;
   final String? suburb;
 
+  /// Id of the [ErfArea] download this parcel arrived with, when it came from
+  /// a suburb/extent download. Null for one-off address lookups.
+  final String? areaId;
+
   const ErfProperty({
     required this.id,
     required this.erfNumber,
@@ -37,6 +41,7 @@ class ErfProperty {
     required this.centroid,
     this.streetAddress,
     this.suburb,
+    this.areaId,
   });
 
   /// Create from CSG ArcGIS REST API feature JSON.
@@ -109,6 +114,7 @@ class ErfProperty {
       ),
       streetAddress: data['streetAddress'] as String?,
       suburb: data['suburb'] as String?,
+      areaId: data['areaId'] as String?,
     );
   }
 
@@ -134,12 +140,14 @@ class ErfProperty {
       'centroidLng': centroid.longitude,
       'streetAddress': streetAddress,
       'suburb': suburb,
+      'areaId': areaId,
     };
   }
 
   ErfProperty copyWith({
     String? streetAddress,
     String? suburb,
+    String? areaId,
     List<LatLng>? polygon,
   }) {
     return ErfProperty(
@@ -157,6 +165,7 @@ class ErfProperty {
       centroid: centroid,
       streetAddress: streetAddress ?? this.streetAddress,
       suburb: suburb ?? this.suburb,
+      areaId: areaId ?? this.areaId,
     );
   }
 

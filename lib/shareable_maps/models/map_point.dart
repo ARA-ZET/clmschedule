@@ -11,6 +11,14 @@ class MapPoint {
   final Color color;
   final String icon; // Icon identifier (e.g., 'pin', 'star', 'flag')
   final PointCategory pointCategory;
+
+  /// Position of this point in a planned delivery run, 1-based.
+  ///
+  /// When set, the map draws a numbered pin instead of a category icon, so
+  /// the drive order is readable straight off the map. Null for ordinary
+  /// points that are not part of a route.
+  final int? routeSequence;
+
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -22,6 +30,7 @@ class MapPoint {
     required this.color,
     this.icon = 'pin',
     this.pointCategory = PointCategory.generic,
+    this.routeSequence,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -52,6 +61,7 @@ class MapPoint {
     Color? color,
     String icon = 'pin',
     PointCategory pointCategory = PointCategory.generic,
+    int? routeSequence,
   }) {
     final now = DateTime.now();
     return MapPoint(
@@ -62,6 +72,7 @@ class MapPoint {
       color: color ?? pointCategory.color,
       icon: icon,
       pointCategory: pointCategory,
+      routeSequence: routeSequence,
       createdAt: now,
       updatedAt: now,
     );
@@ -80,6 +91,7 @@ class MapPoint {
       color: Color((data['color'] as num?)?.toInt() ?? Colors.red.toARGB32()),
       icon: data['icon'] as String? ?? 'pin',
       pointCategory: PointCategory.fromId(data['pointCategory'] as String?),
+      routeSequence: (data['routeSequence'] as num?)?.toInt(),
       createdAt: data['createdAt'] != null
           ? DateTime.fromMillisecondsSinceEpoch(
               (data['createdAt'] as num).toInt())
@@ -102,6 +114,7 @@ class MapPoint {
       'icon': icon,
       if (pointCategory != PointCategory.generic)
         'pointCategory': pointCategory.id,
+      if (routeSequence != null) 'routeSequence': routeSequence,
       'createdAt': createdAt.millisecondsSinceEpoch,
       'updatedAt': updatedAt.millisecondsSinceEpoch,
     };
@@ -115,6 +128,7 @@ class MapPoint {
     Color? color,
     String? icon,
     PointCategory? pointCategory,
+    int? routeSequence,
     DateTime? updatedAt,
   }) {
     return MapPoint(
@@ -125,6 +139,7 @@ class MapPoint {
       color: color ?? this.color,
       icon: icon ?? this.icon,
       pointCategory: pointCategory ?? this.pointCategory,
+      routeSequence: routeSequence ?? this.routeSequence,
       createdAt: createdAt,
       updatedAt: updatedAt ?? DateTime.now(),
     );

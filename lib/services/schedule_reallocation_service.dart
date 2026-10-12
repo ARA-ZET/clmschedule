@@ -430,6 +430,12 @@ class ScheduleReallocationService {
       mapInstructions: source.mapInstructions,
       dropOffPoint: source.dropOffPoint,
       pickUpPoint: source.pickUpPoint,
+      linkedMapId: source.linkedMapId,
+      linkedMapMonthKey: source.linkedMapMonthKey,
+      linkedMaps: List.from(source.linkedMaps),
+      areaLinks: List.from(source.areaLinks),
+      resolvedAreaNames: source.resolvedAreaNames,
+      missingAreaLinkKeys: source.missingAreaLinkKeys,
     );
   }
 

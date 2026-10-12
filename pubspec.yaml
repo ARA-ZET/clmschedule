@@ -16,7 +16,7 @@ publish_to: "none" # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.07.31
+version: 2.10.09
 environment:
   sdk: ^3.5.0
 
@@ -50,6 +50,10 @@ dependencies:
   flutter_riverpod: ^2.6.1
 
   # Utilities
+  # Used directly by lib/utils/web_reload.dart and document_title.dart, which
+  # are web-only halves of conditional imports. Already present transitively;
+  # declared so the analyzer stops flagging depend_on_referenced_packages.
+  web: ^1.1.1
   intl: ^0.20.2
   url_launcher: ^6.2.3
   flutter_markdown: ^0.7.6
@@ -120,6 +124,7 @@ flutter:
   # To add assets to your application, add an assets section, like this:
   assets:
     - assets/logo.png
+    - assets/clm-official-logo.jpeg
     - assets/letterbox.png
     - assets/map.jpg
     - assets/maps/

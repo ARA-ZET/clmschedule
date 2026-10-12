@@ -111,16 +111,36 @@ class MapLinkService {
   // URL helpers
   // ---------------------------------------------------------------------------
 
-  /// Build the full deep-link URL for a share code.
+  /// Host that newly generated share links point at.
   ///
-  /// Points to the standalone CLM Maps app at clm-maps.web.app.
+  /// Shared `*.web.app` hosts carry poor spam-filter reputation, so once the
+  /// branded custom domain is live on the `clm-maps` Hosting site, flip this
+  /// to `maps.communitylifemedia.co.za`. Old links keep resolving because
+  /// every host in [shareHosts] is still recognised.
+  static const String shareHost = 'maps.communitylifemedia.co.za';
+
+  /// Every host a CLM Maps share link may have been issued on. Only ever add
+  /// to this list — links already sent to clients must stay recognisable.
+  static const List<String> shareHosts = [
+    'clm-maps.web.app',
+    'clm-maps.firebaseapp.com',
+    'maps.communitylifemedia.co.za',
+  ];
+
+  /// Build the full deep-link URL for a share code.
   static String buildShareUrl(String shareCode) {
-    return 'https://clm-maps.web.app/map/$shareCode';
+    return 'https://$shareHost/map/$shareCode';
   }
+
+  /// True when [text] contains a CLM Maps share link on any known host.
+  static bool containsShareUrl(String? text) =>
+      extractShareCodeFromText(text) != null;
 
   /// Extract the share code from a deep-link path.
   ///
-  /// Accepts paths like `/map/x7Kp2m` and returns `x7Kp2m`.
+  /// Accepts paths like `/map/x7Kp2m` and returns `x7Kp2m`. The whole string
+  /// must be the link — use [extractShareCodeFromText] for a URL sitting
+  /// inside other prose.
   static String? extractShareCode(String path) {
     final uri = Uri.tryParse(path);
     if (uri == null) return null;
@@ -129,6 +149,22 @@ class MapLinkService {
       return segments[1];
     }
     return null;
+  }
+
+  static final RegExp _shareUrlRegex = RegExp(
+    'https?://(?:${shareHosts.map(RegExp.escape).join('|')})'
+    r'/map/([A-Za-z0-9_-]+)',
+    caseSensitive: false,
+  );
+
+  /// Find a CLM Maps share code in free text.
+  ///
+  /// The Job List's `area` column is a free-text field that usually holds a
+  /// share URL but may have notes around it, so this matches anywhere in the
+  /// string rather than requiring the whole value to be the link.
+  static String? extractShareCodeFromText(String? text) {
+    if (text == null || text.isEmpty) return null;
+    return _shareUrlRegex.firstMatch(text)?.group(1);
   }
 
   // ---------------------------------------------------------------------------

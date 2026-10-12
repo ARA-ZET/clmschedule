@@ -60,23 +60,24 @@ enum ZohoInvoiceStatus {
     }
   }
 
+  /// Matched to the Zoho Books web UI's status colours.
   Color get color {
     switch (this) {
       case paid:
-        return Colors.green;
+        return const Color(0xFF2E9E4F);
       case overdue:
-        return Colors.red;
+        return const Color(0xFFE03E3E);
       case sent:
       case viewed:
-        return Colors.blue;
+        return const Color(0xFF2B7DE9);
       case partiallyPaid:
-        return Colors.orange;
+        return const Color(0xFFE8912D);
       case draft:
       case unpaid:
       case unknown:
-        return Colors.grey;
+        return const Color(0xFF8A97A4);
       case isVoid:
-        return Colors.grey.shade600;
+        return const Color(0xFF6B7683);
     }
   }
 
@@ -86,36 +87,77 @@ enum ZohoInvoiceStatus {
 
 /// A single billable line on an invoice.
 class ZohoLineItem {
+  /// Zoho's id for this line. Present on lines read back from an existing
+  /// invoice; empty for lines the user has just added.
+  final String lineItemId;
+
+  /// Links the line to an item in Zoho's item catalogue, when it came from
+  /// one. Preserved on update so the link is not broken.
+  final String itemId;
+
   final String name;
   final String description;
   final double rate;
   final double quantity;
+  final String unit;
 
   const ZohoLineItem({
+    this.lineItemId = '',
+    this.itemId = '',
     required this.name,
     this.description = '',
     required this.rate,
     this.quantity = 1.0,
+    this.unit = '',
   });
 
   factory ZohoLineItem.fromJson(Map<String, dynamic> json) {
     return ZohoLineItem(
+      lineItemId: json['line_item_id'] as String? ?? '',
+      itemId: json['item_id'] as String? ?? '',
       name: json['name'] as String? ?? '',
       description: json['description'] as String? ?? '',
       rate: (json['rate'] as num?)?.toDouble() ?? 0.0,
       quantity: (json['quantity'] as num?)?.toDouble() ?? 1.0,
+      unit: json['unit'] as String? ?? '',
     );
   }
 
-  Map<String, dynamic> toJson() {
+  /// Line total as Zoho computes it.
+  double get amount => rate * quantity;
+
+  /// [forUpdate] includes `line_item_id`. Without it Zoho drops the existing
+  /// line and creates a replacement, losing its identity on the invoice.
+  Map<String, dynamic> toJson({bool forUpdate = false}) {
     return {
+      if (forUpdate && lineItemId.isNotEmpty) 'line_item_id': lineItemId,
+      if (itemId.isNotEmpty) 'item_id': itemId,
       'name': name,
       if (description.isNotEmpty) 'description': description,
+      if (unit.isNotEmpty) 'unit': unit,
       'rate': rate,
       'quantity': quantity,
       // No VAT is charged at present, so no `tax_id` is sent and Zoho treats
       // the line as non-taxable. When VAT starts, add the Zoho tax_id here.
     };
+  }
+
+  ZohoLineItem copyWith({
+    String? name,
+    String? description,
+    double? rate,
+    double? quantity,
+    String? unit,
+  }) {
+    return ZohoLineItem(
+      lineItemId: lineItemId,
+      itemId: itemId,
+      name: name ?? this.name,
+      description: description ?? this.description,
+      rate: rate ?? this.rate,
+      quantity: quantity ?? this.quantity,
+      unit: unit ?? this.unit,
+    );
   }
 }
 
@@ -129,8 +171,19 @@ class ZohoInvoice {
   final DateTime? date;
   final DateTime? dueDate;
   final double total;
+  final double subTotal;
   final double balance;
   final String referenceNumber;
+
+  /// Customer-visible notes printed on the invoice.
+  final String notes;
+
+  /// Zoho's customer-facing secure link (zohosecurepay.com) — the same URL
+  /// Zoho itself emails to customers, where they can view and pay. Safe to
+  /// send onward; treat it as public, since anyone holding it can view the
+  /// invoice.
+  final String invoiceUrl;
+
   final List<ZohoLineItem> lineItems;
 
   const ZohoInvoice({
@@ -142,8 +195,11 @@ class ZohoInvoice {
     this.date,
     this.dueDate,
     this.total = 0.0,
+    this.subTotal = 0.0,
     this.balance = 0.0,
     this.referenceNumber = '',
+    this.notes = '',
+    this.invoiceUrl = '',
     this.lineItems = const [],
   });
 
@@ -157,8 +213,11 @@ class ZohoInvoice {
       date: _parseDate(json['date']),
       dueDate: _parseDate(json['due_date']),
       total: (json['total'] as num?)?.toDouble() ?? 0.0,
+      subTotal: (json['sub_total'] as num?)?.toDouble() ?? 0.0,
       balance: (json['balance'] as num?)?.toDouble() ?? 0.0,
       referenceNumber: json['reference_number'] as String? ?? '',
+      notes: json['notes'] as String? ?? '',
+      invoiceUrl: json['invoice_url'] as String? ?? '',
       lineItems: (json['line_items'] as List<dynamic>?)
               ?.map((e) =>
                   ZohoLineItem.fromJson(Map<String, dynamic>.from(e as Map)))
@@ -182,14 +241,22 @@ class ZohoInvoice {
   /// Payload for POST /invoices. An empty [invoiceNumber] lets Zoho
   /// auto-number; a non-empty one is preserved by the proxy via
   /// `ignore_auto_number_generation`.
-  Map<String, dynamic> toCreateJson() {
+  Map<String, dynamic> toCreateJson() => _toJson(forUpdate: false);
+
+  /// Payload for PUT /invoices/{id}. Line items carry their `line_item_id`
+  /// so existing lines are amended rather than replaced.
+  Map<String, dynamic> toUpdateJson() => _toJson(forUpdate: true);
+
+  Map<String, dynamic> _toJson({required bool forUpdate}) {
     return {
       'customer_id': customerId,
       if (invoiceNumber.isNotEmpty) 'invoice_number': invoiceNumber,
       if (referenceNumber.isNotEmpty) 'reference_number': referenceNumber,
       if (date != null) 'date': formatDate(date!),
       if (dueDate != null) 'due_date': formatDate(dueDate!),
-      'line_items': lineItems.map((e) => e.toJson()).toList(),
+      if (notes.isNotEmpty) 'notes': notes,
+      'line_items':
+          lineItems.map((e) => e.toJson(forUpdate: forUpdate)).toList(),
     };
   }
 }

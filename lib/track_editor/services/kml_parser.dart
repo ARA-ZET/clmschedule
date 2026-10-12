@@ -4,6 +4,7 @@ import 'package:xml/xml.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../models/styled_polygon.dart';
+import '../../utils/text_encoding.dart';
 
 /// Convert KML color string (aabbggrr) → Flutter Color (ARGB).
 Color _kmlColorToFlutter(String kmlColor) {
@@ -17,7 +18,7 @@ Color _kmlColorToFlutter(String kmlColor) {
 
 /// Parse a .kml file's bytes and return all polygons with their styles.
 List<TEStyledPolygon> parseKmlWithStyles(Uint8List bytes) {
-  final doc = XmlDocument.parse(String.fromCharCodes(bytes));
+  final doc = XmlDocument.parse(decodeTextBytes(bytes));
   const kmlNs = 'http://www.opengis.net/kml/2.2';
 
   // 1) Build style map — also index StyleMap normal-style references.

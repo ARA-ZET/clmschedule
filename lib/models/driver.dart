@@ -11,6 +11,11 @@ class Driver {
   final TrailerType? defaultTrailer;
   final bool active;
 
+  /// A member of management who drives, rather than a distributor — paid on
+  /// the separate monthly payroll, so not linked to a distributor and never
+  /// part of the weekly payroll.
+  final bool management;
+
   const Driver({
     required this.id,
     required this.name,
@@ -18,6 +23,7 @@ class Driver {
     this.defaultVehicle,
     this.defaultTrailer,
     this.active = true,
+    this.management = false,
   });
 
   factory Driver.fromMap(String id, Map<String, dynamic> data) {
@@ -44,6 +50,7 @@ class Driver {
       defaultVehicle: vehicle,
       defaultTrailer: trailer,
       active: data['active'] as bool? ?? true,
+      management: data['management'] as bool? ?? false,
     );
   }
 
@@ -53,6 +60,7 @@ class Driver {
         if (defaultVehicle != null) 'defaultVehicle': defaultVehicle!.name,
         if (defaultTrailer != null) 'defaultTrailer': defaultTrailer!.name,
         'active': active,
+        if (management) 'management': true,
       };
 
   Driver copyWith({
@@ -61,6 +69,7 @@ class Driver {
     VehicleType? defaultVehicle,
     TrailerType? defaultTrailer,
     bool? active,
+    bool? management,
   }) =>
       Driver(
         id: id,
@@ -69,5 +78,6 @@ class Driver {
         defaultVehicle: defaultVehicle ?? this.defaultVehicle,
         defaultTrailer: defaultTrailer ?? this.defaultTrailer,
         active: active ?? this.active,
+        management: management ?? this.management,
       );
 }

@@ -10,9 +10,18 @@ class AppVersionService {
   DocumentReference<Map<String, dynamic>> get _versionDoc =>
       _firestore.collection(_collectionName).doc(_versionDocId);
 
-  // Stream the current app version from Firestore
+  // Stream the current app version from Firestore.
+  //
+  // Offline persistence is enabled app-wide, so this document is first served
+  // from the local cache — a *stale* value from the previous session. Emitting
+  // it would make the client think it had just seen a deploy the moment the
+  // real server value arrived. Cache-only snapshots are therefore dropped: an
+  // update prompt must be based on what the server actually says.
   Stream<AppVersion> streamAppVersion() {
-    return _versionDoc.snapshots().map((snapshot) {
+    return _versionDoc
+        .snapshots(includeMetadataChanges: true)
+        .where((snapshot) => !snapshot.metadata.isFromCache)
+        .map((snapshot) {
       if (!snapshot.exists || snapshot.data() == null) {
         // Return default version if document doesn't exist
         return AppVersion(
@@ -25,9 +34,11 @@ class AppVersionService {
     });
   }
 
-  // Get current version once (not streaming)
+  // Get current version once (not streaming). Forced to the server so a
+  // cached copy from the last session cannot masquerade as the live version.
   Future<AppVersion> getCurrentVersion() async {
-    final snapshot = await _versionDoc.get();
+    final snapshot =
+        await _versionDoc.get(const GetOptions(source: Source.server));
     if (!snapshot.exists || snapshot.data() == null) {
       return AppVersion(
         version: '1.0.0',

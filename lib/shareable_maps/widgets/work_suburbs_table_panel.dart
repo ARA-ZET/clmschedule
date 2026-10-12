@@ -8,7 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../models/custom_polygon.dart';
 import '../providers/shareable_map_provider.dart';
-import '../providers/map_gesture_provider.dart';
+import 'map_overlay.dart';
 
 /// A sidebar table that lists all work-suburb polygons with inline editing
 /// for name and letter-box estimate.
@@ -94,9 +94,7 @@ class _WorkSuburbsTablePanelState
         Container(
           padding: const EdgeInsets.fromLTRB(8, 6, 4, 6),
           color: Colors.white,
-          child: MouseRegion(
-            onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
-            onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+          child: MapOverlay(
             child: Row(
               children: [
                 Expanded(
@@ -108,10 +106,10 @@ class _WorkSuburbsTablePanelState
                       isDense: true,
                       hintText: 'Search name...',
                       hintStyle: const TextStyle(fontSize: 12),
-                      prefixIcon:
-                          const Icon(Icons.search, size: 16, color: Colors.grey),
-                      prefixIconConstraints: const BoxConstraints(
-                          minWidth: 28, minHeight: 28),
+                      prefixIcon: const Icon(Icons.search,
+                          size: 16, color: Colors.grey),
+                      prefixIconConstraints:
+                          const BoxConstraints(minWidth: 28, minHeight: 28),
                       suffixIcon: _searchQuery.isEmpty
                           ? null
                           : IconButton(
@@ -203,8 +201,8 @@ class _WorkSuburbsTablePanelState
                   itemCount: filtered.length,
                   separatorBuilder: (_, __) => const Divider(height: 1),
                   itemBuilder: (_, i) => _PolyRow(
-                    key: ValueKey(
-                        '${filtered[i].layerId}_${filtered[i].index}'),
+                    key:
+                        ValueKey('${filtered[i].layerId}_${filtered[i].index}'),
                     entry: filtered[i],
                   ),
                 ),
@@ -333,14 +331,13 @@ class _PolyRowState extends riverpod.ConsumerState<_PolyRow> {
       type: 'polygon',
       anchor: _centroid(polygon.points),
       letterBoxEstimate: polygon.letterBoxEstimate,
+      importedLetterBoxEstimate: polygon.importedLetterBoxEstimate,
     ));
   }
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => ref.read(mapGestureRiverpod).disableMapGestures(),
-      onExit: (_) => ref.read(mapGestureRiverpod).enableMapGestures(),
+    return MapOverlay(
       child: InkWell(
         onTap: _selectAndOpenInfoWindow,
         child: Padding(

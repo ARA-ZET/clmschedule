@@ -14,6 +14,7 @@ import 'package:intl/intl.dart';
 
 import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 import 'storage_upload.dart';
+import '../utils/text_encoding.dart';
 
 class GpxStorageService {
   static GpxStorageService? _instance;
@@ -82,22 +83,44 @@ class GpxStorageService {
   /// decide whether to default save operations into the existing client
   /// folder or to force the user to pick a folder instead.
   Future<bool> clientFolderExists(DateTime date, String clientName) async {
-    final year = date.year.toString();
-    final monthLabel = DateFormat('MMM yyyy').format(date);
-    final monthPath = '$_root/$year/$monthLabel';
     final needle = _sanitize(clientName).toLowerCase();
     if (needle.isEmpty) return false;
-    try {
-      final result = await _storage.ref(monthPath).listAll();
-      for (final p in result.prefixes) {
-        if (p.name.toLowerCase() == needle) return true;
-      }
-      return false;
-    } catch (e) {
-      debugPrint('clientFolderExists($clientName): $e');
-      return false;
-    }
+    final folders = await _clientFoldersIn(date);
+    return folders.contains(needle);
   }
+
+  /// Lower-cased client folder names in [date]'s month folder.
+  ///
+  /// Listing a month folder is a Storage round trip, and a tab asks about
+  /// every client it has — so one listing per month is shared by all of them
+  /// (including callers asking at the same moment) for [_folderCacheTtl].
+  /// Any write through this service drops the cache, so a folder created here
+  /// is seen straight away.
+  Future<Set<String>> _clientFoldersIn(DateTime date) {
+    final monthPath =
+        '$_root/${date.year}/${DateFormat('MMM yyyy').format(date)}';
+    final cached = _folderCache[monthPath];
+    if (cached != null &&
+        DateTime.now().difference(cached.at) < _folderCacheTtl) {
+      return cached.names;
+    }
+    final names = _storage.ref(monthPath).listAll().then(
+      (r) => {for (final p in r.prefixes) p.name.toLowerCase()},
+      onError: (Object e) {
+        debugPrint('clientFoldersIn($monthPath): $e');
+        _folderCache.remove(monthPath);
+        return <String>{};
+      },
+    );
+    _folderCache[monthPath] = (at: DateTime.now(), names: names);
+    return names;
+  }
+
+  static const _folderCacheTtl = Duration(minutes: 2);
+  final Map<String, ({DateTime at, Future<Set<String>> names})> _folderCache =
+      {};
+
+  void _dropFolderCache() => _folderCache.clear();
 
   // ── Upload ────────────────────────────────────────────────────────────────
 
@@ -105,6 +128,7 @@ class GpxStorageService {
   /// Returns the download URL.
   Future<String> uploadGpxFile(
       String folderPath, String fileName, String gpxContent) async {
+    _dropFolderCache();
     // Sanitize the file name so callers can't accidentally smuggle path
     // separators (e.g. a client/work-area name containing '/') which
     // Firebase Storage would interpret as nested folders, producing the
@@ -208,6 +232,27 @@ class GpxStorageService {
     }
   }
 
+  /// Subfolder names and a GPX count for one folder — no per-file metadata
+  /// requests, so it costs one listing call however many files are inside.
+  /// For pickers that only need to walk down to a folder.
+  Future<({List<StorageFolderItem> folders, int gpxCount})> listFolderNames(
+      String folderPath) async {
+    try {
+      final result = await _storage.ref(folderPath).listAll();
+      final folders = result.prefixes
+          .map((p) => StorageFolderItem(name: p.name, fullPath: p.fullPath))
+          .toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
+      final gpx = result.items
+          .where((i) => i.name.toLowerCase().endsWith('.gpx'))
+          .length;
+      return (folders: folders, gpxCount: gpx);
+    } catch (e) {
+      debugPrint('listFolderNames error ($folderPath): $e');
+      rethrow;
+    }
+  }
+
   /// Download any file as bytes.
   Future<Uint8List?> downloadFileBytes(String fullPath) async {
     try {
@@ -222,6 +267,7 @@ class GpxStorageService {
   Future<String> uploadFileBytes(
       String folderPath, String fileName, Uint8List bytes,
       {String? contentType}) async {
+    _dropFolderCache();
     final ref = _storage.ref('$folderPath/$fileName');
     await _safePutData(
       ref,
@@ -235,6 +281,7 @@ class GpxStorageService {
   /// Firebase Storage doesn't have real folders — a folder only exists
   /// while it contains at least one file.
   Future<void> createFolder(String folderPath) async {
+    _dropFolderCache();
     final ref = _storage.ref('$folderPath/.folder');
     await _safePutData(
       ref,
@@ -289,7 +336,7 @@ class GpxStorageService {
     try {
       final ref = _storage.ref(fullPath);
       final data = await ref.getData();
-      if (data != null) return String.fromCharCodes(data);
+      if (data != null) return decodeTextBytes(data);
     } catch (e) {
       debugPrint('downloadGpxFile error ($fullPath): $e');
     }
@@ -300,6 +347,7 @@ class GpxStorageService {
 
   /// Delete a single GPX file by full path.
   Future<void> deleteFile(String fullPath) async {
+    _dropFolderCache();
     await _storage.ref(fullPath).delete();
   }
 
@@ -310,6 +358,7 @@ class GpxStorageService {
   /// Preserves content type when available. If a file already exists at the
   /// destination it will be overwritten.
   Future<String> copyFile(String fromFullPath, String toFullPath) async {
+    _dropFolderCache();
     final srcRef = _storage.ref(fromFullPath);
     final bytes = await srcRef.getData();
     if (bytes == null) {
@@ -333,6 +382,7 @@ class GpxStorageService {
 
   /// Move a file by copying then deleting the source.
   Future<String> moveFile(String fromFullPath, String toFullPath) async {
+    _dropFolderCache();
     if (fromFullPath == toFullPath) return toFullPath;
     await copyFile(fromFullPath, toFullPath);
     try {
@@ -358,6 +408,7 @@ class GpxStorageService {
   ///
   /// Returns the new folder path on success. Throws on failure.
   Future<String> renameFolder(String oldFolderPath, String newName) async {
+    _dropFolderCache();
     final slash = oldFolderPath.lastIndexOf('/');
     final parent = slash > 0 ? oldFolderPath.substring(0, slash) : '';
     final newFolderPath = parent.isEmpty ? newName : '$parent/$newName';
@@ -499,6 +550,7 @@ class GpxStorageService {
   ///
   /// Returns the total number of files removed.
   Future<int> deleteFolderRecursive(String folderPath) async {
+    _dropFolderCache();
     int removed = 0;
     try {
       final result = await _storage.ref(folderPath).listAll();
@@ -551,8 +603,8 @@ class GpxStorageService {
   /// triggered recompilation because it runs on Google's servers and is not
   /// subject to client lifecycle or network constraints.
   Future<void> callCompileGpxFolder(String folderPath) async {
-    final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
-        .httpsCallable(
+    final callable =
+        FirebaseFunctions.instanceFor(region: 'us-central1').httpsCallable(
       'compileGpxFolder',
       options: HttpsCallableOptions(timeout: const Duration(seconds: 120)),
     );
@@ -589,7 +641,7 @@ class GpxStorageService {
         try {
           final bytes = await item.getData();
           if (bytes == null) return null;
-          final xml = String.fromCharCodes(bytes);
+          final xml = decodeTextBytes(bytes);
           final gpx = GpxReader().fromString(xml);
           return (item: item, gpx: gpx);
         } catch (e) {

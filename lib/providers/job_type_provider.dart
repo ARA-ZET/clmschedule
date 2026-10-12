@@ -198,6 +198,10 @@ class JobTypeProvider extends ChangeNotifier {
   Future<void> updateJobTypeFields(
     String id, {
     String? label,
+    String? companyId,
+    bool? createsInvoices,
+    String? accountingItemCode,
+    List<String>? accountingItemCodes,
     bool? isHappySunService,
     bool? needsTimeSlot,
     bool? appearsOnCollectionSchedule,
@@ -221,6 +225,10 @@ class JobTypeProvider extends ChangeNotifier {
 
     final updated = _jobTypes[index].copyWith(
       label: label,
+      companyId: companyId,
+      createsInvoices: createsInvoices,
+      accountingItemCode: accountingItemCode,
+      accountingItemCodes: accountingItemCodes,
       isHappySunService: isHappySunService,
       needsTimeSlot: needsTimeSlot,
       appearsOnCollectionSchedule: appearsOnCollectionSchedule,

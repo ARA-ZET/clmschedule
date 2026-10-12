@@ -11,16 +11,18 @@ import 'package:gpx/gpx.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
 import '../../models/work_area.dart';
-import '../../models/custom_polygon.dart';
 import '../models/styled_polygon.dart';
-import '../models/tab_item.dart';
 import '../providers/te_map_layer_provider.dart';
 import '../providers/te_mode_provider.dart';
+import '../providers/te_processing_provider.dart';
 import '../providers/te_tabs_provider.dart';
 import '../providers/te_undo_provider.dart';
 import '../services/file_manager.dart';
+import '../services/te_work_area_import.dart';
 import '../services/point_in_polygon.dart';
+import '../utils/te_track_gaps.dart';
 import '../utils/te_track_stats.dart';
+import 'te_polygon_visibility_toggle.dart';
 import '../../services/gpx_storage_service.dart';
 import '../../providers/schedule_provider.dart';
 
@@ -39,8 +41,12 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
     final showLegacySaveTrim =
         provider.activeMode != TEMode.processing && !isUpdateMode;
     final hasSource = (tab.sourceStoragePath ?? '').isNotEmpty;
+    // Processing mode lists the same polygons, with their visibility toggle,
+    // in the Delivery vs Letterboxes panel; areas are added off the map there.
+    final showPolygons = provider.activeMode != TEMode.processing;
 
     if (!hasTracks && !hasWaypoints && tab.polygons.isEmpty) {
+      if (!showPolygons) return const SizedBox.shrink();
       return _PolygonsSection(
           polygons: const [], tabIndex: tabIdx, waypoints: tab.waypoints);
     }
@@ -55,9 +61,17 @@ class TETabDetailsPanel extends riverpod.ConsumerWidget {
             waypoints: tab.waypoints,
             sourceStoragePath: tab.sourceStoragePath!,
           ),
-        _PolygonsSection(
-            polygons: tab.polygons, tabIndex: tabIdx, waypoints: tab.waypoints),
-        if (hasTracks) _TracksSection(tracks: tab.tracks),
+        if (showPolygons)
+          _PolygonsSection(
+              polygons: tab.polygons,
+              tabIndex: tabIdx,
+              waypoints: tab.waypoints),
+        if (hasTracks)
+          _TracksSection(
+            tracks: tab.tracks,
+            canResplit: tab.sourceTracks.isNotEmpty,
+            gapSplitM: tab.gapSplitM,
+          ),
         if (hasWaypoints)
           _WaypointsSection(
             waypoints: tab.waypoints,
@@ -133,103 +147,29 @@ class _PolygonsSectionState extends riverpod.ConsumerState<_PolygonsSection> {
         .toList();
   }
 
-  void _addSelected() {
+  Future<void> _addSelected() async {
     if (_selected.isEmpty) return;
     final toAdd = _allWorkAreas.where((w) => _selected.contains(w.id)).toList();
-    final newPolygons = toAdd.map((w) {
-      return TEStyledPolygon(
-        id: 'wa_${w.id}',
-        name: w.name,
-        points: w.polygonPoints,
-        style: TEKmlStyle(
-          strokeColor: Colors.teal.shade700,
-          strokeWidth: 2.0,
-          fillColor: Colors.teal.shade300,
-          fill: true,
-          outline: true,
-        ),
-      );
-    }).toList();
-
-    final tabsP = ref.read(teTabsRiverpod);
-    final undoP = ref.read(teUndoRiverpod);
-    final mode = tabsP.activeMode;
-    final tabIdx = widget.tabIndex;
-    final tab =
-        tabIdx >= 0 && tabIdx < tabsP.tabs.length ? tabsP.tabs[tabIdx] : null;
-    final addedCount = newPolygons.length;
-
-    // Run as an undoable command so Ctrl+Z removes the just-added maps.
-    undoP.run(
-      mode,
-      tabIdx,
-      TECommand(
-        description: 'Add ${addedCount == 1 ? 'map' : '$addedCount maps'}',
-        doFn: () => tabsP.addPolygonsToCurrentTab(newPolygons),
-        undoFn: () {
-          // Remove the trailing N polygons we just appended.
-          if (tabIdx < 0 || tabIdx >= tabsP.tabs.length) return;
-          final current = tabsP.tabs[tabIdx].polygons;
-          final keep = current.length - addedCount;
-          if (keep < 0) return;
-          tabsP.replacePolygons(tabIdx, current.sublist(0, keep));
-        },
-      ),
-    );
-
-    // Write back to the matched schedule jobs when this tab was opened
-    // through the processing flow. We append the new CustomPolygons to
-    // each linked job's `workMaps` and persist via the schedule provider
-    // so the job grid + map view see the new areas immediately.
-    if (mode == TEMode.processing && tab != null && tab.jobIds.isNotEmpty) {
-      _persistMapsToJobs(tab, toAdd);
-    }
 
     setState(() {
       _searchOpen = false;
       _allWorkAreas = [];
       _selected.clear();
     });
-  }
 
-  /// Persist the newly added work-areas back to the matched schedule
-  /// jobs so the same maps are visible on the schedule grid + map view.
-  Future<void> _persistMapsToJobs(
-      TETabItem tab, List<WorkArea> addedAreas) async {
-    final scheduleProvider = ref.read(scheduleRiverpod);
-    final newCustomPolys = addedAreas
-        .map((w) => CustomPolygon(
-              name: w.name,
-              description: w.description,
-              points: List.from(w.polygonPoints),
-              color: Colors.teal.shade700,
-            ))
-        .toList();
-    for (final jobId in tab.jobIds) {
-      try {
-        final job =
-            scheduleProvider.jobs.where((j) => j.id == jobId).firstOrNull;
-        if (job == null) continue;
-        // Skip names that already exist on the job to avoid duplicates.
-        final existingNames =
-            job.workMaps.map((p) => p.name.toLowerCase()).toSet();
-        final toAppend = newCustomPolys
-            .where((p) => !existingNames.contains(p.name.toLowerCase()))
-            .toList();
-        if (toAppend.isEmpty) continue;
-        final updated = job.copyWith(workMaps: [...job.workMaps, ...toAppend]);
-        await scheduleProvider.updateJob(updated);
-      } catch (e) {
-        // Best-effort: keep going even if one job fails.
-        debugPrint('⚠️ _persistMapsToJobs: $e');
-      }
-    }
+    // Shared with the map's work-area overlay: choosing an area from a list
+    // and choosing it off the map must leave exactly the same state.
+    await addWorkAreasToTab(
+      tabs: ref.read(teTabsRiverpod),
+      undo: ref.read(teUndoRiverpod),
+      schedule: ref.read(scheduleRiverpod),
+      tabIndex: widget.tabIndex,
+      areas: toAdd,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final layerProvider = ref.watch(teMapLayerRiverpod);
-    final visible = layerProvider.polygonsVisible(widget.tabIndex);
     final filtered = _filtered;
 
     return Container(
@@ -257,55 +197,7 @@ class _PolygonsSectionState extends riverpod.ConsumerState<_PolygonsSection> {
                         fontSize: 14, fontWeight: FontWeight.bold),
                   ),
                 ),
-                // Visibility toggle
-                Tooltip(
-                  message:
-                      visible ? 'Hide polygons on map' : 'Show polygons on map',
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(6),
-                    onTap: () => ref
-                        .read(teMapLayerRiverpod)
-                        .togglePolygons(widget.tabIndex),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: visible
-                            ? Colors.deepPurple.shade50
-                            : Colors.grey.shade100,
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(
-                          color: visible
-                              ? Colors.deepPurple.shade200
-                              : Colors.grey.shade300,
-                        ),
-                      ),
-                      child: Row(
-                        spacing: 4,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            visible ? Icons.visibility : Icons.visibility_off,
-                            size: 14,
-                            color: visible
-                                ? Colors.deepPurple.shade600
-                                : Colors.grey,
-                          ),
-                          Text(
-                            visible ? 'Visible' : 'Hidden',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: visible
-                                  ? Colors.deepPurple.shade600
-                                  : Colors.grey,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
+                TEPolygonVisibilityToggle(tabIndex: widget.tabIndex),
               ],
             ),
           ),
@@ -654,7 +546,17 @@ Future<bool> _confirmDelete(
 // ════════════════════════════════════════════════════════════════════════════
 class _TracksSection extends riverpod.ConsumerWidget {
   final List<Trk> tracks;
-  const _TracksSection({required this.tracks});
+
+  /// Whether this tab still holds the unsplit file it was opened from, which
+  /// is what the gap slider re-cuts. False for tabs loaded from the cloud.
+  final bool canResplit;
+  final double gapSplitM;
+
+  const _TracksSection({
+    required this.tracks,
+    this.canResplit = false,
+    this.gapSplitM = kTrackGapSplitM,
+  });
 
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
@@ -699,6 +601,8 @@ class _TracksSection extends riverpod.ConsumerWidget {
             ),
           ),
           const Divider(height: 1),
+          if (canResplit)
+            _GapSplitControl(tabIndex: tabIdx, gapSplitM: gapSplitM),
           ...tracks.asMap().entries.map(
             (e) {
               final rawName = e.value.name?.trim() ?? '';
@@ -749,6 +653,119 @@ class _TracksSection extends riverpod.ConsumerWidget {
             },
           ),
           const SizedBox(height: 4),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Gap-split distance ───────────────────────────────────────────────────────
+// Tracks are cut wherever two consecutive points sit further apart than this,
+// so a GPS jump isn't drawn as a line across town. A distributor who drives
+// part of the round leaves legitimate wide steps, and at the 50 m default
+// those come back as a scatter of tiny segments — this lets the user widen
+// the cut and re-split the round on the spot.
+class _GapSplitControl extends riverpod.ConsumerStatefulWidget {
+  final int tabIndex;
+  final double gapSplitM;
+  const _GapSplitControl({required this.tabIndex, required this.gapSplitM});
+
+  @override
+  riverpod.ConsumerState<_GapSplitControl> createState() =>
+      _GapSplitControlState();
+}
+
+class _GapSplitControlState extends riverpod.ConsumerState<_GapSplitControl> {
+  /// Live slider position while dragging; null when it is showing the tab's
+  /// own value. The re-split only runs when the drag ends.
+  double? _dragging;
+
+  void _apply(double value) {
+    setState(() => _dragging = null);
+    final meters = value.roundToDouble();
+    if (meters == widget.gapSplitM) return;
+
+    final tabsP = ref.read(teTabsRiverpod);
+    final idx = widget.tabIndex;
+    if (idx < 0 || idx >= tabsP.tabs.length) return;
+    final tab = tabsP.tabs[idx];
+    if (tab.sourceTracks.isEmpty) return;
+
+    // Snapshot for the undo side — re-splitting rebuilds the whole list, so
+    // renames, deletes and scissor splits on this tab go with it.
+    final previousTracks = List<Trk>.from(tab.tracks);
+    final previousGap = tab.gapSplitM;
+
+    ref.read(teUndoRiverpod).run(
+          tabsP.activeMode,
+          idx,
+          TECommand(
+            description: 'Split tracks at ${meters.round()} m',
+            doFn: () => tabsP.setTrackGapSplit(idx, meters),
+            undoFn: () =>
+                tabsP.restoreTracks(idx, previousTracks, previousGap),
+          ),
+        );
+
+    // Remember it for the rest of the batch: the other rounds from the same
+    // day usually need the same distance.
+    ref.read(teProcessingRiverpod).setDefaultGapSplit(meters);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = _dragging ?? widget.gapSplitM;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.content_cut, size: 14, color: Colors.blueGrey.shade400),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Split where points jump over',
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.blueGrey.shade700),
+                ),
+              ),
+              Text(
+                '${shown.round()} m',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.blueGrey.shade800,
+                ),
+              ),
+            ],
+          ),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+            ),
+            child: Slider(
+              value: shown,
+              min: kTrackGapSplitMinM,
+              max: kTrackGapSplitMaxM,
+              divisions: kTrackGapSplitDivisions,
+              label: '${shown.round()} m',
+              activeColor: Colors.blueGrey.shade600,
+              onChanged: (v) => setState(() => _dragging = v),
+              onChangeEnd: _apply,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(
+              'Widen this when a driven round breaks into many short '
+              'segments. Re-splits from the original file, so track renames '
+              'and manual splits on this tab are lost.',
+              style: TextStyle(fontSize: 10, color: Colors.blueGrey.shade400),
+            ),
+          ),
         ],
       ),
     );
@@ -1070,6 +1087,8 @@ class _WaypointsSectionState extends riverpod.ConsumerState<_WaypointsSection> {
     final layerProvider = ref.watch(teMapLayerRiverpod);
     final visible = layerProvider.waypointsVisible(widget.tabIndex);
     final selectedWptIdx = layerProvider.selectedWaypoint(widget.tabIndex);
+    final keptWpts =
+        layerProvider.liveKeptWaypoints(widget.tabIndex, widget.waypoints);
 
     final allWaypoints = widget.waypoints;
     final filtered = _query.isEmpty
@@ -1104,6 +1123,43 @@ class _WaypointsSectionState extends riverpod.ConsumerState<_WaypointsSection> {
                         fontSize: 14, fontWeight: FontWeight.bold),
                   ),
                 ),
+                if (keptWpts.isNotEmpty) ...[
+                  Tooltip(
+                    message: 'Tap to clear the keep list',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(6),
+                      onTap: () => ref
+                          .read(teMapLayerRiverpod)
+                          .clearKeptWaypoints(widget.tabIndex),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade50,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: Colors.green.shade200),
+                        ),
+                        child: Row(
+                          spacing: 4,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.bookmark,
+                                size: 14, color: Colors.green.shade600),
+                            Text(
+                              '${keptWpts.length} kept',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.green.shade700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
                 Tooltip(
                   message: visible
                       ? 'Hide waypoints on map'
@@ -1219,11 +1275,16 @@ class _WaypointsSectionState extends riverpod.ConsumerState<_WaypointsSection> {
                     separatorBuilder: (_, __) => const SizedBox(height: 2),
                     itemBuilder: (context, i) {
                       final wpt = filtered[i];
-                      final realIdx = widget.waypoints.indexOf(wpt);
+                      // Match on identity, not value: duplicate names and
+                      // coordinates are common in imported files and
+                      // `indexOf` would resolve every duplicate to the first.
+                      final realIdx =
+                          widget.waypoints.indexWhere((w) => identical(w, wpt));
                       final name = (wpt.name?.trim().isNotEmpty ?? false)
                           ? wpt.name!
                           : 'Waypoint ${realIdx + 1}';
                       final isSelected = realIdx == selectedWptIdx;
+                      final isKept = keptWpts.contains(wpt);
                       return GestureDetector(
                           onTap: () {
                             ref.read(teMapLayerRiverpod).selectWaypoint(
@@ -1235,21 +1296,29 @@ class _WaypointsSectionState extends riverpod.ConsumerState<_WaypointsSection> {
                             decoration: BoxDecoration(
                               color: isSelected
                                   ? Colors.orange.shade100
-                                  : Colors.teal.shade50,
+                                  : isKept
+                                      ? Colors.green.shade50
+                                      : Colors.teal.shade50,
                               borderRadius: BorderRadius.circular(6),
                               border: isSelected
                                   ? Border.all(
                                       color: Colors.orange.shade400, width: 1.5)
-                                  : null,
+                                  : isKept
+                                      ? Border.all(
+                                          color: Colors.green.shade300,
+                                          width: 1.5)
+                                      : null,
                             ),
                             child: Row(
                               spacing: 8,
                               children: [
-                                Icon(Icons.place,
+                                Icon(isKept ? Icons.bookmark : Icons.place,
                                     size: 14,
-                                    color: isSelected
-                                        ? Colors.orange.shade700
-                                        : Colors.teal.shade600),
+                                    color: isKept
+                                        ? Colors.green.shade600
+                                        : isSelected
+                                            ? Colors.orange.shade700
+                                            : Colors.teal.shade600),
                                 Expanded(
                                   child: Text(name,
                                       style: TextStyle(
@@ -1258,6 +1327,25 @@ class _WaypointsSectionState extends riverpod.ConsumerState<_WaypointsSection> {
                                               ? FontWeight.bold
                                               : FontWeight.normal),
                                       overflow: TextOverflow.ellipsis),
+                                ),
+                                Tooltip(
+                                  message: isKept
+                                      ? 'Remove from keep list'
+                                      : 'Add to keep list',
+                                  child: GestureDetector(
+                                    onTap: () => ref
+                                        .read(teMapLayerRiverpod)
+                                        .toggleKeptWaypoint(
+                                            widget.tabIndex, wpt),
+                                    child: Icon(
+                                        isKept
+                                            ? Icons.bookmark
+                                            : Icons.bookmark_border,
+                                        size: 15,
+                                        color: isKept
+                                            ? Colors.green.shade600
+                                            : Colors.green.shade300),
+                                  ),
                                 ),
                                 GestureDetector(
                                   onTap: () async {
@@ -1754,7 +1842,6 @@ class _CloudUpdateSection extends StatefulWidget {
 
 class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
   bool _busy = false;
-  bool _recompileBusy = false;
 
   String get _sourceFileName => widget.sourceStoragePath.split('/').last;
 
@@ -1850,38 +1937,11 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
     if (mounted) setState(() => _busy = false);
   }
 
-  Future<void> _onRecompileOnly(BuildContext context) async {
-    if (_folderPath.isEmpty) return;
-    setState(() => _recompileBusy = true);
-    try {
-      await GpxStorageService().callCompileGpxFolder(_folderPath);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Recompiled successfully'),
-            backgroundColor: Colors.blue,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Recompile failed: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-    if (mounted) setState(() => _recompileBusy = false);
-  }
-
   @override
   Widget build(BuildContext context) {
     final hasTracks = widget.tracks.isNotEmpty;
     final hasWaypoints = widget.waypoints.isNotEmpty;
     final canUpdate = hasTracks || hasWaypoints;
-    final busy = _busy || _recompileBusy;
 
     return Container(
       width: 420,
@@ -1923,8 +1983,9 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed:
-                  (busy || !canUpdate) ? null : () => _onUpdateInDrive(context),
+              onPressed: (_busy || !canUpdate)
+                  ? null
+                  : () => _onUpdateInDrive(context),
               icon: _busy
                   ? const SizedBox(
                       width: 14,
@@ -1957,33 +2018,6 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
               ),
             ),
           ),
-          // ── Recompile button (any file carrying waypoints) ──────
-          if (_isWaypointFile || hasWaypoints) ...[
-            const SizedBox(height: 6),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: (busy || _folderPath.isEmpty)
-                    ? null
-                    : () => _onRecompileOnly(context),
-                icon: _recompileBusy
-                    ? const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.refresh, size: 16),
-                label: const Text('Recompile Waypoints Only'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.blue[700],
-                  side: BorderSide(color: Colors.blue[300]!),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                  textStyle: const TextStyle(fontSize: 11),
-                ),
-              ),
-            ),
-          ],
         ],
       ),
     );

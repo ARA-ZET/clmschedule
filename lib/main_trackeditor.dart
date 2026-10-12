@@ -13,6 +13,7 @@ import 'providers/schedule_provider.dart';
 // TE provider imports migrated to Riverpod
 import 'track_editor/pages/track_editor_screen.dart';
 import 'widgets/auth_gate.dart';
+import 'shareable_maps/providers/map_gesture_provider.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -59,6 +60,7 @@ class _TrackEditorAppState extends riverpod.ConsumerState<TrackEditorApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: FlavorConfig.instance.appName,
+      navigatorObservers: [ref.read(mapModalObserverRiverpod)],
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueGrey),

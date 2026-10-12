@@ -41,6 +41,16 @@
 
   <title>CLM Schedule</title>
   <link rel="manifest" href="manifest.json">
+
+  <!-- Warm up connections Flutter needs straight after boot (CanvasKit,
+       Firestore, Auth) so a new tab doesn't pay DNS + TLS for each serially. -->
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://securetoken.googleapis.com" crossorigin>
+  <!-- Start fetching the app bundle while the page is still parsing, instead
+       of waiting for flutter_bootstrap.js to request it. -->
+  <link rel="preload" href="main.dart.js" as="script">
   
   <!-- Splash Screen Styles (matches ClmMapsSplash widget) -->
   <style>
@@ -177,6 +187,26 @@
       border-radius: 2px;
     }
 
+    .splash-footer {
+      position: absolute;
+      left: 16px; right: 16px; bottom: 20px;
+      z-index: 1;
+      text-align: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 11px;
+      line-height: 1.6;
+      color: rgba(255,255,255,0.75);
+    }
+    .splash-footer strong { color: #fff; }
+    .splash-footer a { color: #D4A017; text-decoration: none; }
+
+    .splash-card-body h2 {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
     @keyframes indeterminate {
       0% { transform: translateX(-100%); }
       100% { transform: translateX(350%); }
@@ -234,8 +264,8 @@
         <div class="splash-chip">LOADING</div>
       </div>
       <div class="splash-card-body">
-        <h2>Reliable Flyer Distribution</h2>
-        <p>#1 GPS-tracked flyer distribution in Cape Town</p>
+        <h2 id="splash-title">Reliable Flyer Distribution</h2>
+        <p id="splash-subtitle">#1 GPS-tracked flyer distribution in Cape Town</p>
         <div class="splash-status">
           <span class="splash-status-text">Loading tracks</span>
           <span class="splash-dots">...</span>
@@ -243,8 +273,23 @@
         </div>
       </div>
     </div>
+    <!-- Server-readable page identity. Link scanners (Outlook Safe Links,
+         Mimecast, Gmail) fetch the raw HTML without running Flutter; a page
+         with no text on a *.web.app host scores as phishing. The maps
+         `mapPage` function rewrites #splash-title / #splash-subtitle per map. -->
+    <footer class="splash-footer">
+      <strong>Community Life Media</strong> &middot; GPS-tracked flyer distribution, Cape Town<br>
+      <a href="https://communitylifemedia.co.za">communitylifemedia.co.za</a> &middot;
+      <a href="mailto:sales@communitylifemedia.co.za">sales@communitylifemedia.co.za</a>
+    </footer>
   </div>
- 
+  <noscript>
+    <p style="color:#fff;font-family:sans-serif;text-align:center;padding:24px">
+      This interactive map needs JavaScript enabled. For a copy of this map please
+      contact Community Life Media at sales@communitylifemedia.co.za.
+    </p>
+  </noscript>
+
   <!-- ── App update notification ────────────────────────────────────────────
        Periodically fetches flutter_service_worker.js (cache-busted) and
        compares its CACHE_NAME hash to the one present on page load.
@@ -337,11 +382,16 @@
     })();
   </script>
 
-  <!-- ── Single-tab enforcement (per URL) ────────────────────────────────────
+  <!-- ── Single-tab enforcement (per URL, maps build only) ──────────────────
        Uses a localStorage heartbeat so the SAME page isn't loaded twice (which
        would double the Firestore reads). The check is synchronous on page load
        — no timing race. Duplicate tabs show an overlay WITHOUT ever starting
        Flutter.
+
+       Off for CLM Schedule: main.dart uses Firestore's multi-tab persistence,
+       so extra tabs share one cache and one set of listeners instead of
+       re-reading. The maps build has no persistence, so deploy_maps.sh flips
+       SINGLE_TAB on for it.
 
        The lock is keyed by the current route, not by the origin: on the maps
        flavor /map/{shareCode} and /admin/map?doc=..&month=.. are different
@@ -352,6 +402,7 @@
   <script>
     (function () {
       // ── Config ──────────────────────────────────────────────────────────
+      var SINGLE_TAB    = false;   // deploy_maps.sh rewrites this to true
       var LS_PREFIX     = 'clm_active_tab:';           // + route key
       var LEGACY_LS_KEY = 'clm_schedule_active_tab';   // pre-route-scoped lock
       var HEARTBEAT_MS  = 3000;   // write heartbeat every 3 s
@@ -521,6 +572,12 @@
         }
       } catch (e) {}
 
+      if (!SINGLE_TAB) {
+        // Multi-tab allowed — boot straight away, no lock or heartbeat.
+        loadFlutterApp();
+        return;
+      }
+
       var existing = readEntry(routeKey());
       if (!isStale(existing)) {
         // A fresh heartbeat exists for THIS route in another tab — duplicate.
@@ -574,14 +631,16 @@
       }
     });
     
-    // Fallback: remove splash after 5 seconds
+    // Fallback only — the in-app splash (ClmMapsSplash) looks identical, so
+    // flutter-first-frame hands over seamlessly. A short timeout here used to
+    // pull the splash while Flutter was still booting, leaving a bare screen.
     setTimeout(function() {
       const splash = document.getElementById('splash-screen');
       if (splash) {
         splash.classList.add('fade-out');
         setTimeout(() => splash.remove(), 400);
       }
-    }, 5000);
+    }, 30000);
   </script>
 
   <!-- Browser capture helpers used by PrintMapView (WASM-compatible).

@@ -4,12 +4,15 @@ import 'package:intl/intl.dart';
 
 import '../../models/distributor.dart';
 import '../../models/payment_status.dart';
+import '../../models/payroll_daily_entry.dart';
 import '../../models/payroll_payslip.dart';
 import '../../providers/payroll_provider.dart';
 import '../../providers/schedule_provider.dart';
+import '../../utils/payroll_week.dart';
 import 'manage_payment_accounts_dialog.dart';
 
 final _currencyFormat = NumberFormat.currency(symbol: 'R ', decimalDigits: 2);
+final _dayFormat = DateFormat('EEE d');
 
 // Table-like column layout, shared by the header and every row, so a big
 // screen's width is used edge-to-edge in one line per distributor instead
@@ -78,6 +81,11 @@ class _BankingViewState extends riverpod.ConsumerState<BankingView> {
     }
   }
 
+  static bool _hasWageRecorded(PayrollDailyEntry? e) =>
+      e != null &&
+      e.worked &&
+      ((e.specialCode?.isNotEmpty ?? false) || e.flyerSets != null);
+
   @override
   Widget build(BuildContext context) {
     final payroll = ref.watch(payrollRiverpod);
@@ -86,6 +94,20 @@ class _BankingViewState extends riverpod.ConsumerState<BankingView> {
         payroll.weekStart, payroll.weekEnd)
       ..sort((a, b) => a.index.compareTo(b.index));
     final payslips = payroll.week.payslips;
+
+    // Days each distributor had a schedule job but Ops Stats has no sets or
+    // code for — their wage for those days is missing, so they can't be
+    // marked paid until it's recorded.
+    final days = daysInWeek(payroll.weekStart);
+    final unrecordedDays = <String, List<DateTime>>{
+      for (final d in distributors)
+        d.id: [
+          for (final day in days)
+            if (schedule.getJobsForDistributorAndDate(d.id, day).isNotEmpty &&
+                !_hasWageRecorded(payslips[d.id]?.dailyEntries[dayKeyFor(day)]))
+              day,
+        ],
+    };
 
     final distributorIds = {for (final d in distributors) d.id};
     if (_builtForWeekStart != payroll.weekStart ||
@@ -139,13 +161,30 @@ class _BankingViewState extends riverpod.ConsumerState<BankingView> {
                                     'No payslip for this week yet.'),
                               );
                             }
+                            final missing = unrecordedDays[d.id] ?? const [];
                             return _BankingRow(
                               distributor: d,
                               payslip: payslip,
                               notes: notes,
-                              onStatusChanged: (status) => ref
-                                  .read(payrollRiverpod)
-                                  .updatePaymentStatus(d.id, status),
+                              unrecordedDays: missing,
+                              onStatusChanged: (status) {
+                                if (status == PaymentStatus.paid &&
+                                    missing.isNotEmpty) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                          "Can't mark ${d.name} paid — no "
+                                          'sets or code recorded in Ops Stats '
+                                          'for ${missing.map(_dayFormat.format).join(', ')}.'),
+                                      backgroundColor: Colors.red,
+                                    ),
+                                  );
+                                  return;
+                                }
+                                ref
+                                    .read(payrollRiverpod)
+                                    .updatePaymentStatus(d.id, status);
+                              },
                               onSelectAccount: (accountId) => ref
                                   .read(payrollRiverpod)
                                   .selectPaymentAccountForWeek(
@@ -229,6 +268,9 @@ class _BankingRow extends StatelessWidget {
   final Distributor distributor;
   final PayrollPayslip payslip;
   final TextEditingController notes;
+
+  /// Scheduled days with no sets/code in Ops Stats — see BankingView.
+  final List<DateTime> unrecordedDays;
   final ValueChanged<PaymentStatus> onStatusChanged;
   final ValueChanged<String> onSelectAccount;
   final VoidCallback onManageAccounts;
@@ -238,6 +280,7 @@ class _BankingRow extends StatelessWidget {
     required this.distributor,
     required this.payslip,
     required this.notes,
+    required this.unrecordedDays,
     required this.onStatusChanged,
     required this.onSelectAccount,
     required this.onManageAccounts,
@@ -273,10 +316,47 @@ class _BankingRow extends StatelessWidget {
         children: [
           Expanded(
             flex: _kNameFlex,
-            child: Text(
-              distributor.name,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-              overflow: TextOverflow.ellipsis,
+            child: Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    distributor.name,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 15),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (unrecordedDays.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  // Pushed to the far right, beside the status button.
+                  Expanded(
+                    child: Tooltip(
+                      message: 'Scheduled to work but no sets or code '
+                          'recorded in Ops Stats — no wage for these days.',
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          Icon(Icons.warning_amber_rounded,
+                              size: 16, color: Colors.red.shade700),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              'No wage recorded: '
+                              '${unrecordedDays.map(_dayFormat.format).join(', ')}',
+                              textAlign: TextAlign.right,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.red.shade700),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
           const SizedBox(width: _kRowGap),

@@ -8,18 +8,34 @@ import '../../models/zoho_invoice.dart';
 import '../../providers/collection_schedule_provider.dart';
 import '../../providers/zoho_customers_provider.dart';
 import '../../providers/zoho_invoices_provider.dart';
+import '../../services/job_list_service.dart';
+import '../../providers/job_type_provider.dart';
+import '../../utils/schedule_time.dart';
+import '../../utils/zoho_org.dart';
+import 'line_items_editor.dart';
 import 'zoho_invoice_detail_screen.dart';
+import 'zoho_table.dart';
 
-/// Raise a Zoho invoice for a scheduled collection job.
+/// Raise a Zoho invoice for a Junk & Stuff job.
 ///
-/// Pre-fills the customer from the job's client name and a line item from the
-/// job description, and lets the invoice number be confirmed or overridden.
-/// On success the Zoho ids are written back onto the backing JobListItem, so
-/// the job carries its invoice link on both the schedule and the Job List.
+/// Reachable from two places, hence the two entry points:
+///  * [job] — a scheduled collection job, from the Collection Schedule. The
+///    commercial fields live on the backing JobListItem, which is looked up.
+///  * [item] — a Job List row directly, where there is nothing to look up.
+///
+/// Exactly one must be supplied. Pre-fills the customer from the client name
+/// and a line item from the job description, and lets the invoice number be
+/// confirmed or overridden. On success the Zoho ids are written back onto the
+/// JobListItem, so the job carries its invoice link in both places.
 class CreateInvoiceDialog extends riverpod.ConsumerStatefulWidget {
-  final CollectionJob job;
+  final CollectionJob? job;
 
-  const CreateInvoiceDialog({super.key, required this.job});
+  /// Supplied when invoicing straight from the Job List.
+  final JobListItem? item;
+
+  const CreateInvoiceDialog({super.key, this.job, this.item})
+      : assert(job != null || item != null,
+            'CreateInvoiceDialog needs either a collection job or a job list item');
 
   @override
   riverpod.ConsumerState<CreateInvoiceDialog> createState() =>
@@ -29,9 +45,21 @@ class CreateInvoiceDialog extends riverpod.ConsumerStatefulWidget {
 class _CreateInvoiceDialogState
     extends riverpod.ConsumerState<CreateInvoiceDialog> {
   final _formKey = GlobalKey<FormState>();
+
+  /// The books this job bills through, from its job type's company. A
+  /// collection job's backing item is not loaded yet at first build, so that
+  /// path resolves from the collection job's own type.
+  String get _orgId {
+    final item = widget.item ?? _backingItem;
+    if (item != null) return ZohoOrg.forJob(item);
+    return ZohoOrg.forJobTypeId(widget.job?.jobType ?? '');
+  }
+
   late final TextEditingController _invoiceNumberController;
-  late final TextEditingController _descriptionController;
-  late final TextEditingController _amountController;
+  late final TextEditingController _notesController;
+
+  /// Seeded with one line from the job, then freely editable.
+  late List<ZohoLineItem> _lineItems;
 
   ZohoCustomer? _selectedCustomer;
   JobListItem? _backingItem;
@@ -43,9 +71,10 @@ class _CreateInvoiceDialogState
     super.initState();
 
     // The schedule's CollectionJob is a projection — the commercial fields
-    // (invoice number, amount, client) live on the backing JobListItem.
-    _backingItem =
-        ref.read(collectionScheduleRiverpod).jobListItemFor(widget.job.id);
+    // (invoice number, amount, client) live on the backing JobListItem. From
+    // the Job List we already hold that item, so there is nothing to resolve.
+    _backingItem = widget.item ??
+        ref.read(collectionScheduleRiverpod).jobListItemFor(widget.job!.id);
 
     final amount = _backingItem == null
         ? 0.0
@@ -55,18 +84,33 @@ class _CreateInvoiceDialogState
 
     _invoiceNumberController =
         TextEditingController(text: _backingItem?.invoice ?? '');
-    _descriptionController = TextEditingController(text: _defaultDescription());
-    _amountController = TextEditingController(
-      text: amount > 0 ? amount.toStringAsFixed(2) : '',
-    );
+    _notesController = TextEditingController();
+    _lineItems = [
+      ZohoLineItem(
+        // Junk & Stuff's historical default; other books name the line after
+        // the job type, since "Junk collection" means nothing on a Happy Sun
+        // window-cleaning invoice.
+        name: _orgId == ZohoOrg.junkAndStuff || _backingItem == null
+            ? 'Junk collection'
+            : (JobTypeProvider.instance
+                    ?.getJobTypeById(_backingItem!.jobTypeId)
+                    ?.label ??
+                'Service'),
+        description: _defaultDescription(),
+        rate: amount,
+        quantity: 1,
+      ),
+    ];
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final customers = ref.read(zohoCustomersRiverpod);
+      final customers = ref.read(zohoCustomersRiverpod(_orgId));
       await customers.initialize();
       if (!mounted) return;
       // Best-effort match of the free-text client name against Zoho contacts.
       final clientName = _backingItem?.client ??
-          (widget.job.clients.isNotEmpty ? widget.job.clients.first : '');
+          (widget.job != null && widget.job!.clients.isNotEmpty
+              ? widget.job!.clients.first
+              : '');
       final match = customers.findByName(clientName);
       if (match != null) setState(() => _selectedCustomer = match);
     });
@@ -74,8 +118,21 @@ class _CreateInvoiceDialogState
 
   String _defaultDescription() {
     final parts = <String>[];
-    if (widget.job.location.isNotEmpty) parts.add(widget.job.location);
-    if (widget.job.notes.isNotEmpty) parts.add(widget.job.notes);
+    final job = widget.job;
+    if (job != null) {
+      if (job.location.isNotEmpty) parts.add(job.location);
+      if (job.notes.isNotEmpty) parts.add(job.notes);
+    } else {
+      // From the Job List there is no schedule projection to read location and
+      // notes off, so the item's own fields stand in.
+      final item = _backingItem;
+      if (item != null) {
+        if (item.collectionAddress.isNotEmpty) {
+          parts.add(item.collectionAddress);
+        }
+        if (item.area.isNotEmpty) parts.add(item.area);
+      }
+    }
     final detail = parts.join(' — ');
     return detail.isEmpty ? 'Junk collection' : 'Junk collection – $detail';
   }
@@ -83,8 +140,7 @@ class _CreateInvoiceDialogState
   @override
   void dispose() {
     _invoiceNumberController.dispose();
-    _descriptionController.dispose();
-    _amountController.dispose();
+    _notesController.dispose();
     super.dispose();
   }
 
@@ -95,13 +151,31 @@ class _CreateInvoiceDialogState
       return;
     }
 
+    final usable = _lineItems
+        .where((li) => li.name.isNotEmpty && li.quantity > 0)
+        .toList();
+    if (usable.isEmpty) {
+      setState(() =>
+          _error = 'Add at least one line item with a name and quantity.');
+      return;
+    }
+    if (usable.every((li) => li.amount <= 0)) {
+      setState(() => _error = 'The invoice total must be greater than zero.');
+      return;
+    }
+
     setState(() {
       _isSaving = true;
       _error = null;
     });
 
-    final amount = double.parse(_amountController.text.trim());
     final invoiceNumber = _invoiceNumberController.text.trim();
+
+    // Invoice date and due date are the day the invoice is *issued*, not the
+    // day the job is scheduled for. Anchored to SAST via scheduleToday() so a
+    // client in another timezone cannot stamp the wrong civil day. Matches
+    // the Add/Edit Job invoicing path.
+    final issuedOn = scheduleToday();
 
     final draft = ZohoInvoice(
       invoiceId: '',
@@ -109,30 +183,44 @@ class _CreateInvoiceDialogState
       // ignore_auto_number_generation.
       invoiceNumber: invoiceNumber,
       customerId: _selectedCustomer!.contactId,
-      date: widget.job.date,
-      lineItems: [
-        ZohoLineItem(
-          name: _descriptionController.text.trim(),
-          rate: amount,
-          quantity: 1,
-        ),
-      ],
+      date: issuedOn,
+      dueDate: issuedOn,
+      notes: _notesController.text.trim(),
+      lineItems: usable,
     );
 
     try {
       final created =
-          await ref.read(zohoInvoicesRiverpod).createInvoice(draft);
+          await ref.read(zohoInvoicesRiverpod(_orgId)).createInvoice(draft);
 
       // Write the link back to the JobListItem. If this fails the invoice
       // still exists in Zoho, so say so rather than implying nothing happened.
       try {
-        await ref.read(collectionScheduleRiverpod).linkZohoInvoice(
-              jobId: widget.job.id,
-              contactId: _selectedCustomer!.contactId,
-              invoiceId: created.invoiceId,
-              invoiceNumber: created.invoiceNumber,
-              status: created.status.apiValue,
-            );
+        final item = _backingItem;
+        if (widget.job == null && item != null) {
+          // Straight from the Job List: link transactionally against the
+          // item's own month. Going through the collection-schedule provider
+          // would resolve the job against *its* current month, which need not
+          // be the one this row lives in.
+          await ref.read(jobListServiceRiverpod).linkZohoInvoiceTxn(
+                jobId: item.id,
+                date: item.date,
+                zohoContactId: _selectedCustomer!.contactId,
+                zohoInvoiceId: created.invoiceId,
+                zohoInvoiceNumber: created.invoiceNumber,
+                zohoInvoiceStatus: created.status.apiValue,
+                invoiceNumber: created.invoiceNumber,
+                amount: created.total,
+              );
+        } else {
+          await ref.read(collectionScheduleRiverpod).linkZohoInvoice(
+                jobId: widget.job!.id,
+                contactId: _selectedCustomer!.contactId,
+                invoiceId: created.invoiceId,
+                invoiceNumber: created.invoiceNumber,
+                status: created.status.apiValue,
+              );
+        }
       } catch (e) {
         if (mounted) {
           setState(() {
@@ -155,8 +243,8 @@ class _CreateInvoiceDialogState
             textColor: Colors.white,
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (_) =>
-                    ZohoInvoiceDetailScreen(invoiceId: created.invoiceId),
+                builder: (_) => ZohoInvoiceDetailScreen(
+                    orgId: _orgId, invoiceId: created.invoiceId),
               ),
             ),
           ),
@@ -174,13 +262,14 @@ class _CreateInvoiceDialogState
 
   @override
   Widget build(BuildContext context) {
-    final customersProvider = ref.watch(zohoCustomersRiverpod);
+    final customersProvider = ref.watch(zohoCustomersRiverpod(_orgId));
     final alreadyInvoiced = _backingItem?.hasZohoInvoice ?? false;
 
     return AlertDialog(
       title: const Text('Create invoice'),
       content: SizedBox(
-        width: 460,
+        // Wide enough for the line-item table's fixed qty/rate/amount columns.
+        width: 760,
         child: Form(
           key: _formKey,
           child: SingleChildScrollView(
@@ -206,7 +295,14 @@ class _CreateInvoiceDialogState
                   ),
 
                 Text(
-                  widget.job.location,
+                  // The schedule shows the collection location; the Job List
+                  // has no such projection, so the row identifies itself by
+                  // client and area instead.
+                  widget.job?.location ??
+                      [
+                        _backingItem?.client ?? '',
+                        _backingItem?.area ?? '',
+                      ].where((p) => p.isNotEmpty).join(' · '),
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
                 const SizedBox(height: 12),
@@ -256,8 +352,7 @@ class _CreateInvoiceDialogState
                             ))
                         .toList(),
                     onChanged: (c) => setState(() => _selectedCustomer = c),
-                    validator: (v) =>
-                        v == null ? 'Choose a customer' : null,
+                    validator: (v) => v == null ? 'Choose a customer' : null,
                   ),
 
                 const SizedBox(height: 12),
@@ -269,38 +364,27 @@ class _CreateInvoiceDialogState
                     helperText: 'Leave blank to let Zoho auto-number',
                   ),
                 ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _descriptionController,
-                  decoration: const InputDecoration(
-                    labelText: 'Line item description *',
-                    border: OutlineInputBorder(),
-                  ),
-                  maxLines: 2,
-                  validator: (v) => (v == null || v.trim().isEmpty)
-                      ? 'A description is required'
-                      : null,
+                const SizedBox(height: 16),
+                LineItemsEditor(
+                  orgId: _orgId,
+                  lineItems: _lineItems,
+                  enabled: !_isSaving,
+                  onChanged: (items) => _lineItems = items,
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'No VAT applied.',
+                  style: TextStyle(fontSize: 11, color: ZohoPalette.textMuted),
                 ),
                 const SizedBox(height: 12),
                 TextFormField(
-                  controller: _amountController,
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
+                  controller: _notesController,
+                  maxLines: 2,
+                  style: const TextStyle(fontSize: 13),
                   decoration: const InputDecoration(
-                    labelText: 'Amount *',
-                    prefixText: 'R ',
+                    labelText: 'Notes (printed on the invoice)',
                     border: OutlineInputBorder(),
-                    // No VAT is charged at present, so this is the invoiced
-                    // total with no tax applied.
-                    helperText: 'No VAT applied',
                   ),
-                  validator: (v) {
-                    final parsed = double.tryParse((v ?? '').trim());
-                    if (parsed == null || parsed <= 0) {
-                      return 'Enter an amount greater than zero';
-                    }
-                    return null;
-                  },
                 ),
 
                 if (_error != null) ...[
