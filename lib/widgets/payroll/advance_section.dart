@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import '../../utils/schedule_time.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -9,6 +10,7 @@ import '../../models/payroll_payslip.dart';
 import '../../providers/payroll_provider.dart';
 import '../../utils/payroll_calculator.dart' as calc;
 import '../../utils/payroll_week.dart';
+import '../../utils/friendly_error.dart';
 
 final _currencyFormat = NumberFormat.currency(symbol: 'R ', decimalDigits: 2);
 final _dateFormat = DateFormat('d MMM yyyy');
@@ -177,15 +179,25 @@ class _AdvanceSectionState extends riverpod.ConsumerState<AdvanceSection> {
       builder: (_) => const _AddDeductionDialog(),
     );
     if (result == null) return;
-    await ref.read(payrollRiverpod).addAdvance(
-          widget.distributorId,
-          type: result.type,
-          label: result.label.isEmpty ? null : result.label,
-          amount: result.amount,
-          datePaid: result.datePaid,
-          preferredInstallmentAmount: result.preferredInstallmentAmount,
-          note: result.note.isEmpty ? null : result.note,
-        );
+    // The entry shows at once from the local cache; the dialog is already
+    // closed, so a failure has to be said out loud rather than lost.
+    try {
+      await ref.read(payrollRiverpod).addAdvance(
+            widget.distributorId,
+            type: result.type,
+            label: result.label.isEmpty ? null : result.label,
+            amount: result.amount,
+            datePaid: result.datePaid,
+            preferredInstallmentAmount: result.preferredInstallmentAmount,
+            note: result.note.isEmpty ? null : result.note,
+          );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showToast(SnackBar(
+        content: Text(friendlyFirebaseError(e, action: 'save the deduction')),
+        backgroundColor: Colors.red,
+      ));
+    }
   }
 
   @override

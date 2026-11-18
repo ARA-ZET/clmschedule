@@ -59,7 +59,8 @@ class TEFileManager {
   }
 
   Future<String> _toGpxCombinedString(
-      List<Trk> tracks, List<Wpt> waypoints) async {
+      List<Trk> tracks, List<Wpt> waypoints,
+      {bool pretty = true}) async {
     final gpx = Gpx()
       ..version = '1.1'
       ..creator = 'dart-gpx library'
@@ -68,11 +69,21 @@ class TEFileManager {
         ..time = DateTime.now())
       ..trks = tracks
       ..wpts = waypoints;
-    return _fixNamespace(GpxWriter().asString(gpx, pretty: true));
+    return _fixNamespace(GpxWriter().asString(gpx, pretty: pretty));
   }
 
-  Future<String> toGpxCombinedString(List<Trk> tracks, List<Wpt> waypoints) =>
-      _toGpxCombinedString(tracks, waypoints);
+  /// [pretty] indents the XML for a person to read. Uploads pass false:
+  /// every reader of the cloud copies parses the XML, and for a day's track
+  /// the indentation is about a quarter of the file (≈2.0 MB → 1.5 MB for
+  /// 14,400 points) and roughly doubles the time to build it.
+  Future<String> toGpxCombinedString(List<Trk> tracks, List<Wpt> waypoints,
+          {bool pretty = true}) =>
+      _toGpxCombinedString(tracks, waypoints, pretty: pretty);
+
+  /// Downloads GPX text already built by [toGpxCombinedString], so a caller
+  /// that also uploads it does not build it twice.
+  Future<void> saveGpxString(String fileName, String gpxContent) =>
+      downloadStringAsFile(gpxContent, fileName);
 
   Future<void> saveGpxCombinedFile(
       String fileName, List<Trk> tracks, List<Wpt> waypoints) async {

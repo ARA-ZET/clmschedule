@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
@@ -318,14 +319,14 @@ Future<void> voidInvoiceForJob({
           .read(zohoInvoicesRiverpod(ZohoOrg.forJob(job)))
           .voidInvoice(job.zohoInvoiceId);
     }
-    messenger.showSnackBar(
+    messenger.showToast(
       SnackBar(
         content: Text('Invoice $number voided'),
         backgroundColor: Colors.green,
       ),
     );
   } catch (e) {
-    messenger.showSnackBar(
+    messenger.showToast(
       SnackBar(
         content: Text('Could not void $number: $e'),
         backgroundColor: Colors.red,

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -165,7 +166,7 @@ class _XeroCustomersViewState extends riverpod.ConsumerState<XeroCustomersView>
     );
     if (saved == null || !mounted) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Text('Created ${saved.displayName} in Xero'),
         backgroundColor: Colors.green,
@@ -183,7 +184,8 @@ class _XeroCustomersViewState extends riverpod.ConsumerState<XeroCustomersView>
     final currency = NumberFormat.currency(symbol: 'R ', decimalDigits: 2);
 
     return ColoredBox(
-      color: ZohoPalette.pageBackground,
+      // White: the view sits inside a bordered panel on the Xero screen.
+      color: ZohoPalette.surface,
       child: Column(
         children: [
           ZohoToolbar(

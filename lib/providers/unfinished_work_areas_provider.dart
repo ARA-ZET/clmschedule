@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../models/job.dart';
 import '../models/custom_polygon.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 
 final unfinishedWorkAreasRiverpod =
     riverpod.ChangeNotifierProvider<UnfinishedWorkAreasProvider>(
@@ -176,7 +178,11 @@ class UnfinishedWorkAreasProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _collection.doc(id).delete();
+      await RecycleBinWriter().moveDocToBin(
+        _collection.doc(id) as DocumentReference<Map<String, dynamic>>,
+        type: RecycleBinType.unfinishedWorkArea,
+        label: (d) => binLabel(d, 'unfinished work area'),
+      );
       debugPrint('UnfinishedWorkAreas: removed doc $id');
     } catch (e) {
       debugPrint('UnfinishedWorkAreas: remove failed: $e');

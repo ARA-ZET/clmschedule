@@ -1,15 +1,16 @@
 // Mobile/desktop stub.
 //
 // The File System Access API is web-only. Native platforms get the OS share
-// or save sheet from the printing package instead, so this always reports
-// "unavailable" and the caller falls back.
-import 'dart:typed_data';
+// or save sheet instead, so this always reports "unavailable" and the caller
+// falls back.
+import 'save_file_types.dart';
 
-Future<bool> saveFileWithPicker({
+export 'save_file_types.dart';
+
+Future<SavePick> pickSaveFile({
   required String suggestedName,
-  required Uint8List bytes,
   String mimeType = 'application/pdf',
   String typeDescription = 'PDF document',
   String extension = '.pdf',
 }) async =>
-    false;
+    const SavePick(SavePickStatus.unavailable);

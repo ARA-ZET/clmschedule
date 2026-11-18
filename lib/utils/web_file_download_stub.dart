@@ -6,15 +6,18 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// Save [bytes] as [fileName] to the device downloads folder.
-/// Returns the saved file path on success, or `null` on failure.
+/// Returns the saved file path on success, or `null` on failure — or throws
+/// the failure when [rethrowErrors].
 /// On web this file is never used — see `web_file_download_web.dart`.
 Future<String?> triggerFileDownload(
   Uint8List bytes,
   String fileName,
-  String mimeType,
-) async {
+  String mimeType, {
+  bool rethrowErrors = false,
+}) async {
   try {
     Directory? dir;
     if (Platform.isAndroid ||
@@ -31,6 +34,13 @@ Future<String?> triggerFileDownload(
     return file.path;
   } catch (e) {
     debugPrint('triggerFileDownload error: $e');
+    if (rethrowErrors) rethrow;
     return null;
   }
+}
+
+/// Hand [url] to the system browser, which downloads it. Used for
+/// server-built ZIPs; [fileName] is carried by the response itself.
+Future<void> triggerUrlDownload(String url, String fileName) async {
+  await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
 }

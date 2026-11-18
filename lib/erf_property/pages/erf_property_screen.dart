@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
@@ -59,8 +60,8 @@ class _ErfPropertyScreenState
     if (!mounted) return;
     final scheme = Theme.of(context).colorScheme;
     ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
+      ..hideCurrentToast()
+      ..showToast(SnackBar(
         content: Text(message),
         behavior: SnackBarBehavior.floating,
         width: 520,

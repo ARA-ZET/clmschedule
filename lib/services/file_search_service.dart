@@ -20,8 +20,11 @@
 //      — one exact, indexed lookup against a collection that only grows
 //      with folder count.
 //   2. Client-side: each matching folder doc's `files` map is scanned for
-//      names containing the query, since the search term is often in the
+//      names matching the query, since the search term is often in the
 //      middle of a file name (e.g. client/suburb name), not a prefix of it.
+//      Step 1 runs once per search session (cached); each keystroke only
+//      re-runs step 2 in memory.
+import 'package:clmschedule/utils/text_search.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
@@ -33,6 +36,11 @@ class FileSearchResult {
   final int? sizeBytes;
   final DateTime? updatedAt;
 
+  /// Moved out of Storage into a month archive ZIP ([zipName]).
+  final bool archived;
+  final String? archiveId;
+  final String? zipName;
+
   const FileSearchResult({
     required this.name,
     required this.fullPath,
@@ -40,6 +48,9 @@ class FileSearchResult {
     required this.extension,
     this.sizeBytes,
     this.updatedAt,
+    this.archived = false,
+    this.archiveId,
+    this.zipName,
   });
 
   /// Human-readable file size (e.g. "1.2 MB", "340 KB").
@@ -69,16 +80,52 @@ class FileSearchService {
 
   FirebaseFirestore get _firestore => FirebaseFirestore.instance;
 
-  /// Search for files whose name contains [query] (case-insensitive,
-  /// anywhere in the name), scoped to [folderPath] and every subfolder
-  /// beneath it. Pass the Distribution root to search the whole tree.
+  /// How long a scope's file list is reused. Covers one search session; the
+  /// provider also clears it when the search bar closes, so the next search
+  /// sees fresh uploads.
+  static const Duration _ttl = Duration(minutes: 2);
+
+  final Map<String, ({DateTime at, List<FileSearchResult> files})> _scopes =
+      {};
+  final Map<String, Future<List<FileSearchResult>?>> _inFlight = {};
+
+  /// Start fetching [folderPath]'s file list so the first keystroke doesn't
+  /// wait on the network.
+  void prefetch(String folderPath) => _scope(folderPath);
+
+  /// Drop cached file lists (call when the search closes).
+  void clearCache() => _scopes.clear();
+
+  /// Search for files whose name matches [query] (every word, any order,
+  /// close spellings allowed — see [TextSearch]), scoped to [folderPath] and
+  /// every subfolder beneath it. Pass the Distribution root to search the
+  /// whole tree. Best matches first, then alphabetical.
+  ///
+  /// The scope's names are fetched once and then filtered in memory, so
+  /// typing more letters doesn't go back to Firestore.
   Future<List<FileSearchResult>> search(
     String query,
     String folderPath,
   ) async {
-    final needle = query.trim().toLowerCase();
+    final needle = TextSearch(query);
     if (needle.isEmpty) return [];
+    final files = await _scope(folderPath);
+    if (files == null) return [];
+    return needle.rank(files, (r) => [r.name]);
+  }
 
+  /// Every file under [folderPath], alphabetical. Null on failure (not
+  /// cached, so the next keystroke retries).
+  Future<List<FileSearchResult>?> _scope(String folderPath) {
+    final hit = _scopes[folderPath];
+    if (hit != null && DateTime.now().difference(hit.at) < _ttl) {
+      return Future.value(hit.files);
+    }
+    return _inFlight[folderPath] ??=
+        _load(folderPath).whenComplete(() => _inFlight.remove(folderPath));
+  }
+
+  Future<List<FileSearchResult>?> _load(String folderPath) async {
     try {
       final snap = await _firestore
           .collection(_collection)
@@ -93,7 +140,6 @@ class FileSearchService {
         final files = data['files'] as Map<String, dynamic>? ?? {};
         for (final entry in files.entries) {
           final name = entry.key;
-          if (!name.toLowerCase().contains(needle)) continue;
           final meta = entry.value as Map<String, dynamic>? ?? {};
           final updated = meta['updatedAt'];
           results.add(FileSearchResult(
@@ -106,14 +152,35 @@ class FileSearchService {
             updatedAt: updated is Timestamp ? updated.toDate() : null,
           ));
         }
+        // Files a month archive moved out of Storage (cloud_archive.js).
+        final archived = data['archivedFiles'] as Map<String, dynamic>? ?? {};
+        for (final entry in archived.entries) {
+          final name = entry.key;
+          if (files.containsKey(name)) continue;
+          final meta = entry.value as Map<String, dynamic>? ?? {};
+          final at = meta['archivedAt'];
+          results.add(FileSearchResult(
+            name: name,
+            fullPath: '$docFolderPath/$name',
+            folderPath: docFolderPath,
+            extension:
+                name.contains('.') ? name.split('.').last.toLowerCase() : '',
+            sizeBytes: (meta['sizeBytes'] as num?)?.toInt(),
+            updatedAt: at is Timestamp ? at.toDate() : null,
+            archived: true,
+            archiveId: meta['archiveId'] as String?,
+            zipName: meta['zipName'] as String?,
+          ));
+        }
       }
 
       results.sort(
           (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      _scopes[folderPath] = (at: DateTime.now(), files: results);
       return results;
     } catch (e) {
-      debugPrint('FileSearchService.search("$query", "$folderPath") failed: $e');
-      return [];
+      debugPrint('FileSearchService: loading "$folderPath" failed: $e');
+      return null;
     }
   }
 }

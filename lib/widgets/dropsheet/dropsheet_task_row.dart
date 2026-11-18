@@ -3,6 +3,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../models/dropsheet_day.dart';
 import '../../models/dropsheet_task.dart';
+import '../../utils/dropsheet_layout.dart';
 import '../../utils/dropsheet_maps.dart';
 import 'dropsheet_tab.dart' show TaskDragPayload;
 
@@ -12,9 +13,19 @@ import 'dropsheet_tab.dart' show TaskDragPayload;
 /// `furnitureMove` the cell shows a derived label and tapping the
 /// adjacent map icon opens Google Maps. Drag handle on the left lets the
 /// parent ReorderableListView reorder tasks within the same section.
+/// Row geometry, shared with the column headers so they line up.
+const double kRowPaddingH = 8;
+const double kRowHandleWidth = 36;
+const double kRowNumberWidth = 48;
+const double kRowStartWidth = 70;
+const double kRowMenuWidth = 32;
+const double kRowGap = 6;
+
 class DropsheetTaskRow extends StatelessWidget {
   final DropsheetTask task;
-  final int taskNumber; // 1-based
+  /// The map's stop number (null for fixed rows and stops with no
+  /// location) — the same number the printed sheet shows.
+  final int? stopNumber;
   final int dragIndex;
   final String sectionId;
   final VoidCallback onEdit;
@@ -22,17 +33,40 @@ class DropsheetTaskRow extends StatelessWidget {
   final ValueChanged<String>? onMoveToSection;
   final List<DropsheetDriverSection> otherSections;
 
+  /// "Same drop point as Thabo, Sipho" when this stop shares its point with
+  /// others on the run (see shared_drop_points.dart); null otherwise.
+  final String? sharedNote;
+
+  /// Vehicle-inspection status under the Inspect / Arrive rows (see
+  /// InspectionStatusLine); null on every other row.
+  final Widget? inspectionLine;
+
   const DropsheetTaskRow({
     super.key,
     required this.task,
-    required this.taskNumber,
+    required this.stopNumber,
     required this.dragIndex,
     required this.sectionId,
     required this.onEdit,
     this.onDelete,
     this.onMoveToSection,
     this.otherSections = const [],
+    this.sharedNote,
+    this.inspectionLine,
   });
+
+  String get _numberText {
+    final n = task.isTwoStop
+        ? task.twoStopNumbers(stopNumber).loading
+        : stopNumber;
+    return n == null ? '' : '#$n';
+  }
+
+  /// A two-stop task's Offloading line number (its own map pin).
+  String get _offloadNumberText {
+    final n = task.twoStopNumbers(stopNumber).offload;
+    return n == null ? '' : '#$n';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -144,7 +178,7 @@ class DropsheetTaskRow extends StatelessWidget {
             const SizedBox(width: 6),
             Expanded(
               child: Text(
-                task.job.isNotEmpty ? task.job : 'Leave and start pickups',
+                task.job.isNotEmpty ? task.job : kPickupDividerLabel,
                 style: const TextStyle(
                   color: sepColor,
                   fontWeight: FontWeight.w700,
@@ -252,43 +286,156 @@ class DropsheetTaskRow extends StatelessWidget {
     );
   }
 
+  Widget _sharedNoteLine() => Padding(
+        padding: const EdgeInsets.only(top: 2, bottom: 3),
+        child: Row(
+          children: [
+            const Icon(Icons.groups, size: 14, color: Color(0xFF00796B)),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Text(
+                sharedNote!,
+                style: const TextStyle(
+                  fontSize: 11,
+                  height: 1.2,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF00796B),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+
+  /// Early (blue) or late (red) for a booked time, from route timing.
+  Widget? _lateLine() {
+    final note = task.bookingTimingNote;
+    if (note == null) return null;
+    final late = task.appointmentLateMinutes > 0;
+    final color = late ? const Color(0xFFC62828) : const Color(0xFF1565C0);
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 3),
+      child: Row(
+        children: [
+          Icon(late ? Icons.warning_amber_rounded : Icons.schedule,
+              size: 14, color: color),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              note,
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.2,
+                fontWeight: FontWeight.w700,
+                color: color,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildWideRow(BuildContext context, String jobLabel,
       String locationLabel, List<DropsheetMapLink> mapLinks) {
+    final row = task.isTwoStop
+        ? Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildWideCells(
+                  context,
+                  task.loadingLineLabel,
+                  task.loadingAddress,
+                  DropsheetMaps.twoStopLinks(task.loadingAddress)),
+              _buildWideCells(
+                  context,
+                  task.offloadingLineLabel,
+                  task.offloadAddress,
+                  DropsheetMaps.twoStopLinks(task.offloadAddress),
+                  continuation: true),
+            ],
+          )
+        : _buildWideCells(context, jobLabel, locationLabel, mapLinks);
+    final late = _lateLine();
+    if (sharedNote == null && late == null && inspectionLine == null) {
+      return row;
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        row,
+        if (inspectionLine != null)
+          Padding(
+              padding: const EdgeInsets.only(left: 90),
+              child: inspectionLine),
+        if (late != null)
+          Padding(padding: const EdgeInsets.only(left: 90), child: late),
+        if (sharedNote != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 90),
+            child: _sharedNoteLine(),
+          ),
+      ],
+    );
+  }
+
+  /// One row of cells. [continuation] is a two-stop task's Offloading line:
+  /// no handle, number, details, contact or menu — those sit on the Loading
+  /// line — and the offload time in Start.
+  Widget _buildWideCells(BuildContext context, String jobLabel,
+      String locationLabel, List<DropsheetMapLink> mapLinks,
+      {bool continuation = false}) {
     return Row(
       children: [
-        ReorderableDragStartListener(
-          index: dragIndex,
-          child: const SizedBox(
-            width: 36,
-            child: Icon(Icons.apps, size: 20, color: Colors.grey),
+        if (continuation)
+          const SizedBox(width: kRowHandleWidth)
+        else
+          ReorderableDragStartListener(
+            index: dragIndex,
+            child: const SizedBox(
+              width: 36,
+              child: Icon(Icons.apps, size: 20, color: Colors.grey),
+            ),
           ),
-        ),
         SizedBox(
-          width: 48,
+          width: kRowNumberWidth,
           child: Text(
-            '#$taskNumber',
+            continuation ? _offloadNumberText : _numberText,
             style: const TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.bold,
             ),
           ),
         ),
-        const SizedBox(width: 6),
-        Expanded(flex: 2, child: _cell(jobLabel, bold: true)),
-        const SizedBox(width: 6),
-        Expanded(flex: 3, child: _cell(task.detailsText, bold: true)),
-        const SizedBox(width: 6),
-        SizedBox(width: 70, child: _cell(task.startTime)),
-        const SizedBox(width: 6),
+        const SizedBox(width: kRowGap),
         Expanded(
-          flex: 3,
+            flex: DropsheetColumn.job.flex!,
+            child: _cell(jobLabel, bold: true)),
+        const SizedBox(width: kRowGap),
+        Expanded(
+            flex: DropsheetColumn.details.flex!,
+            child: _cell(continuation ? '' : task.detailsText, bold: true)),
+        const SizedBox(width: 6),
+        SizedBox(
+            width: kRowStartWidth,
+            child: _cell(continuation ? task.offloadTime : task.startTime)),
+        const SizedBox(width: kRowGap),
+        Expanded(
+          flex: DropsheetColumn.location.flex!,
           child: _LocationCell(label: locationLabel, links: mapLinks),
         ),
         const SizedBox(width: 6),
-        Expanded(flex: 2, child: _cell(task.contact, bold: true)),
-        const SizedBox(width: 6),
-        Expanded(flex: 2, child: _cell(task.tel, bold: true)),
-        _buildMenuButton(context),
+        Expanded(
+            flex: DropsheetColumn.contact.flex!,
+            child: _cell(continuation ? '' : task.contact, bold: true)),
+        const SizedBox(width: kRowGap),
+        Expanded(
+            flex: DropsheetColumn.tel.flex!,
+            child: _cell(continuation ? '' : task.tel, bold: true)),
+        if (continuation)
+          const SizedBox(width: kRowMenuWidth)
+        else
+          _buildMenuButton(context),
       ],
     );
   }
@@ -296,6 +443,11 @@ class DropsheetTaskRow extends StatelessWidget {
   Widget _buildNarrowRow(BuildContext context, String jobLabel,
       String locationLabel, List<DropsheetMapLink> mapLinks) {
     const indent = 90.0; // drag(36) + number(48) + gap(6)
+    if (task.isTwoStop) {
+      jobLabel = task.loadingLineLabel;
+      locationLabel = task.loadingAddress;
+      mapLinks = DropsheetMaps.twoStopLinks(task.loadingAddress);
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -312,7 +464,7 @@ class DropsheetTaskRow extends StatelessWidget {
             SizedBox(
               width: 48,
               child: Text(
-                '#$taskNumber',
+                _numberText,
                 style: const TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.bold,
@@ -340,6 +492,52 @@ class DropsheetTaskRow extends StatelessWidget {
             allowWrap: true,
           ),
         ),
+        // A two-stop task's Offloading line, under its Loading line.
+        if (task.isTwoStop) ...[
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Row(
+              children: [
+                const SizedBox(width: kRowHandleWidth),
+                SizedBox(
+                  width: 48,
+                  child: Text(
+                    _offloadNumberText,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(child: _cellWrap(task.offloadingLineLabel)),
+                const SizedBox(width: 6),
+                if (task.offloadTime.isNotEmpty)
+                  SizedBox(width: 60, child: _cell(task.offloadTime)),
+                const SizedBox(width: kRowMenuWidth),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: indent, top: 2),
+            child: _LocationCell(
+              label: task.offloadAddress,
+              links: DropsheetMaps.twoStopLinks(task.offloadAddress),
+              allowWrap: true,
+            ),
+          ),
+        ],
+        if (inspectionLine != null)
+          Padding(
+              padding: const EdgeInsets.only(left: indent),
+              child: inspectionLine),
+        if (_lateLine() case final late?)
+          Padding(padding: const EdgeInsets.only(left: indent), child: late),
+        if (sharedNote != null)
+          Padding(
+            padding: const EdgeInsets.only(left: indent),
+            child: _sharedNoteLine(),
+          ),
         if (task.contact.isNotEmpty || task.tel.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(left: indent, top: 2, bottom: 4),

@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../models/job_list_item.dart';
+import '../../utils/save_timeline.dart';
 
 enum SagaStepState { pending, running, done, failed, skipped }
 
@@ -79,12 +80,17 @@ class InvoiceSaveSaga<C, I> {
   /// types. Returns the step detail when allocated, or null when the user
   /// declined the assignment preview; throws when allocation is impossible.
   ///
-  /// Runs second, straight after the save, so it cannot be forgotten once the
+  /// Starts straight after the save, so it cannot be forgotten once the
   /// invoice is up and the user's attention moves to printing or sharing it.
-  /// Unlike the invoice steps it does **not** halt the sequence: an
-  /// unallocated job is fixable on the Schedule, while holding the invoice
-  /// back over it would leave the job unbilled as well.
+  /// It runs **alongside** the invoice steps — the invoice is raised while
+  /// the user is still looking at the assignment preview — and does not halt
+  /// them: an unallocated job is fixable on the Schedule, while holding the
+  /// invoice back over it would leave the job unbilled as well.
   final Future<String?> Function(JobListItem job)? allocateToSchedule;
+
+  /// Times the save, invoice and link steps for the console (see
+  /// [SaveTimeline]). Optional.
+  final SaveTimeline? timeline;
 
   late final SagaStep _saveStep = SagaStep('Save job to Job List');
   late final SagaStep? allocateStep =
@@ -127,6 +133,7 @@ class InvoiceSaveSaga<C, I> {
     required this.invoiceLabel,
     this.isUpdate = false,
     this.allocateToSchedule,
+    this.timeline,
     JobListItem? alreadySavedJob,
   })  : savedJob = alreadySavedJob,
         _includesSaveStep = alreadySavedJob == null;
@@ -180,6 +187,9 @@ class InvoiceSaveSaga<C, I> {
     }
     onProgress();
 
+    // Started after the save and awaited before [run] returns, so a retry
+    // can never start it a second time while it is still going.
+    Future<void>? allocation;
     try {
       // 1 — Save the job. Skipped entirely if a previous attempt saved it.
       if (savedJob == null) {
@@ -193,25 +203,10 @@ class InvoiceSaveSaga<C, I> {
         _markDone(_saveStep, 'Already saved (${savedJob!.id})');
       }
 
-      // 2 — Allocate to the schedule. Never repeated once done or declined;
-      // a failure is retried but does not stop the invoice.
-      final allocate = allocateToSchedule;
-      final allocStep = allocateStep;
-      if (allocate != null && allocStep != null && !allocStep.isTerminal) {
-        allocStep.state = SagaStepState.running;
-        allocStep.detail = null;
-        onProgress();
-        try {
-          final detail = await allocate(savedJob!);
-          allocStep.state =
-              detail == null ? SagaStepState.skipped : SagaStepState.done;
-          allocStep.detail = detail ?? 'Skipped — not on the Schedule';
-        } catch (e) {
-          allocStep.state = SagaStepState.failed;
-          allocStep.detail = e.toString();
-        }
-        onProgress();
-      }
+      // 2 — Allocate to the schedule, alongside the invoice steps below.
+      // Never repeated once done or declined; a failure is retried but does
+      // not stop the invoice.
+      allocation = _runAllocation(savedJob!);
 
       // 3 — The customer already exists; record it as the settled fact it is.
       _markDone(_customerStep, customerLabel(customer));
@@ -236,9 +231,30 @@ class InvoiceSaveSaga<C, I> {
         return 'Linked to job';
       });
     } finally {
+      if (allocation != null) await allocation;
       _isRunning = false;
       onProgress();
     }
+  }
+
+  /// Step 2. Never throws: a failure is shown on the step, with its retry.
+  Future<void> _runAllocation(JobListItem job) async {
+    final allocate = allocateToSchedule;
+    final allocStep = allocateStep;
+    if (allocate == null || allocStep == null || allocStep.isTerminal) return;
+    allocStep.state = SagaStepState.running;
+    allocStep.detail = null;
+    onProgress();
+    try {
+      final detail = await allocate(job);
+      allocStep.state =
+          detail == null ? SagaStepState.skipped : SagaStepState.done;
+      allocStep.detail = detail ?? 'Skipped — not on the Schedule';
+    } catch (e) {
+      allocStep.state = SagaStepState.failed;
+      allocStep.detail = e.toString();
+    }
+    onProgress();
   }
 
   /// Returns true when the step succeeded.
@@ -247,7 +263,8 @@ class InvoiceSaveSaga<C, I> {
     step.detail = null;
     onProgress();
     try {
-      step.detail = await body();
+      final tl = timeline;
+      step.detail = tl == null ? await body() : await tl.step(step.label, body);
       step.state = SagaStepState.done;
       onProgress();
       return true;

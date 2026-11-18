@@ -17,6 +17,7 @@ import '../shareable_maps/services/map_link_service.dart';
 import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 import '../utils/schedule_time.dart';
 import 'compiled_tracks_parser.dart';
+import 'cloud_archive_service.dart';
 import 'gpx_storage_service.dart';
 
 /// Layer names the map editor generates for cloud overlays. Matched as
@@ -90,6 +91,84 @@ List<String> parseReportAddresses(String raw) {
       .toList();
 }
 
+/// Earliest `dd MMM yyyy` across [fileNames]' GPX files.
+///
+/// Only reached when no track carried a timestamp. Preferred over the
+/// compile time because the filename records the day the distribution
+/// happened, while `compiledAt` records when someone uploaded the file.
+@visibleForTesting
+DateTime? earliestGpxFileNameDate(Iterable<String> fileNames) {
+  DateTime? earliest;
+  for (final name in fileNames) {
+    if (!name.toLowerCase().endsWith('.gpx')) continue;
+    final date = parseGpxFileNameDate(name);
+    if (date == null) continue;
+    if (earliest == null || date.isBefore(earliest)) earliest = date;
+  }
+  return earliest;
+}
+
+bool isPhotoFileName(String name) =>
+    RegExp(r'\.(jpe?g|png)$', caseSensitive: false).hasMatch(name);
+
+/// The distributor a saved file names, as written — not yet matched.
+///
+/// - Track Editor GPX: `Track   09 Mar 2026   Petros   Chand   …fulltrack.gpx`
+///   (fields separated by three spaces; the distributor is the third).
+/// - clmgpx photos: `Petros_Poster 501_2026-10-22_12-37-26.jpg`.
+///
+/// Null for compiled indexes, free-form names and clmgpx's "Unknown".
+@visibleForTesting
+String? workerNameFromFileName(String fileName) {
+  final lower = fileName.toLowerCase();
+  if (fileName.startsWith('_')) return null;
+
+  String? name;
+  if (lower.endsWith('.gpx')) {
+    final parts = fileName.split(RegExp(r'\s{3,}'));
+    if (parts.length >= 4 && _kFileNameDate.hasMatch(parts[1])) {
+      name = parts[2];
+    }
+  } else if (isPhotoFileName(fileName)) {
+    final parts = fileName.split('_');
+    // Name, waypoint/mode, date, time at least — anything shorter is not a
+    // clmgpx photo.
+    if (parts.length >= 4) name = parts.first;
+  }
+
+  name = name?.trim();
+  if (name == null || name.isEmpty || name.toLowerCase() == 'unknown') {
+    return null;
+  }
+  return name;
+}
+
+/// Distinct worker names across [fileNames], case-insensitively, in the
+/// order first seen.
+@visibleForTesting
+List<String> workerNamesFromFileNames(Iterable<String> fileNames) {
+  final seen = <String, String>{};
+  for (final f in fileNames) {
+    final name = workerNameFromFileName(f);
+    if (name != null) seen.putIfAbsent(name.toLowerCase(), () => name);
+  }
+  return seen.values.toList();
+}
+
+/// Whether an invoice with this provider [status] is settled.
+///
+/// Routed by provider because the two rules genuinely differ: Zoho treats a
+/// zero balance as settled, while Xero must key on the status alone — a Xero
+/// DRAFT also reports `AmountDue: 0`, so Zoho's rule would file every draft
+/// as paid and drop the "invoice attached" line from reports that need it.
+bool isInvoiceStatusPaid(String providerId, String status) {
+  if (status.isEmpty) return false;
+  if (providerId == 'xero') {
+    return XeroInvoiceStatus.parse(status) == XeroInvoiceStatus.paid;
+  }
+  return ZohoInvoiceStatus.parse(status) == ZohoInvoiceStatus.paid;
+}
+
 class DistributionReportService {
   final ShareableMapsFirestoreService _maps;
   final MapLinkService _links;
@@ -125,6 +204,7 @@ class DistributionReportService {
       recordedQuantityDistributed: item.quantityDistributed,
       mapName: resolved?.map.name ?? '',
       mapLink: resolved?.shareUrl ?? '',
+      shareCode: resolved?.shareCode ?? '',
       mapError: resolved == null
           ? 'No shareable map is linked to this job. Use the link icon in the '
               'Area column to link one.'
@@ -136,6 +216,12 @@ class DistributionReportService {
       hasInvoice: item.hasAccountingInvoice,
       invoiceIsPaid: _isPaid(item),
     );
+  }
+
+  /// The public share link of [item]'s map, or null when it has none.
+  Future<String?> shareUrlFor(JobListItem item) async {
+    final url = (await _resolveMap(item))?.shareUrl ?? '';
+    return url.isEmpty ? null : url;
   }
 
   // ---------------------------------------------------------------------------
@@ -155,6 +241,7 @@ class DistributionReportService {
           if (map != null) {
             return _ResolvedMap(
               map: map,
+              shareCode: code,
               shareUrl: MapLinkService.buildShareUrl(code),
             );
           }
@@ -199,14 +286,17 @@ class DistributionReportService {
 
   /// Attach the public share URL to a map found without going through one.
   Future<_ResolvedMap> _withShareUrl(ShareableMap map, String monthKey) async {
-    var url = '';
+    String? code;
     try {
-      final code = await _links.getShareCodeForMap(monthKey, map.id);
-      if (code != null) url = MapLinkService.buildShareUrl(code);
+      code = await _links.getShareCodeForMap(monthKey, map.id);
     } catch (e) {
       debugPrint('[DistributionReport] share code lookup failed: $e');
     }
-    return _ResolvedMap(map: map, shareUrl: url);
+    return _ResolvedMap(
+      map: map,
+      shareCode: code ?? '',
+      shareUrl: code == null ? '' : MapLinkService.buildShareUrl(code),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -259,6 +349,12 @@ class DistributionReportService {
 
   Future<DistributionReportFolder> _readFolder(String path) async {
     try {
+      // One listing serves the filename date fallback, the people table and
+      // the photo count.
+      final names = await _fileNames(path);
+      final workers = workerNamesFromFileNames(names);
+      final photos = names.where(isPhotoFileName).length;
+
       final trackBytes =
           await _storage.downloadFileBytes('$path/_compiled_tracks.json');
 
@@ -273,11 +369,13 @@ class DistributionReportService {
             earliestStart: summary.earliestStart,
             compiledAt: summary.compiledAt,
             dateSource: DistributionDateSource.trackTimes,
+            workerNames: workers,
+            photoCount: photos,
           );
         }
         // Tracks with no timestamps — fall through to the weaker sources but
         // keep the counts we already have.
-        final fallback = await _dateFromFileNames(path);
+        final fallback = earliestGpxFileNameDate(names);
         return DistributionReportFolder(
           path: path,
           waypointCount: summary.waypointCount,
@@ -290,6 +388,8 @@ class DistributionReportService {
               : (summary.compiledAt != null
                   ? DistributionDateSource.compiledAt
                   : DistributionDateSource.none),
+          workerNames: workers,
+          photoCount: photos,
         );
       }
 
@@ -301,11 +401,13 @@ class DistributionReportService {
         return DistributionReportFolder(
           path: path,
           error: 'No compiled GPX index — the folder may still be processing.',
+          workerNames: workers,
+          photoCount: photos,
         );
       }
 
       final count = parseCompiledWaypointCount(wptBytes);
-      final fallback = await _dateFromFileNames(path);
+      final fallback = earliestGpxFileNameDate(names);
       return DistributionReportFolder(
         path: path,
         waypointCount: count,
@@ -313,6 +415,8 @@ class DistributionReportService {
         dateSource: fallback != null
             ? DistributionDateSource.fileName
             : DistributionDateSource.none,
+        workerNames: workers,
+        photoCount: photos,
       );
     } catch (e) {
       debugPrint('[DistributionReport] folder read failed for $path: $e');
@@ -320,25 +424,30 @@ class DistributionReportService {
     }
   }
 
-  /// Earliest `dd MMM yyyy` across the folder's GPX filenames.
+  /// Every file name in [path] and its subfolders (poster photos sometimes
+  /// sit in their own subfolder), plus GPX that were moved into an archive
+  /// ZIP and live on only in the manifest.
   ///
-  /// Only reached when no track carried a timestamp. Preferred over the
-  /// compile time because the filename records the day the distribution
-  /// happened, while `compiledAt` records when someone uploaded the file.
-  Future<DateTime?> _dateFromFileNames(String path) async {
+  /// A failed listing is an empty list, not an error: it only costs the
+  /// filename date fallback and the people table, both of which the dialog
+  /// shows as missing.
+  Future<List<String>> _fileNames(String path, {int depth = 0}) async {
     try {
       final contents = await _storage.listFolderContents(path);
-      DateTime? earliest;
-      for (final file in contents.files) {
-        if (!file.name.toLowerCase().endsWith('.gpx')) continue;
-        final date = parseGpxFileNameDate(file.name);
-        if (date == null) continue;
-        if (earliest == null || date.isBefore(earliest)) earliest = date;
+      final names = contents.files.map((f) => f.name).toList();
+      if (names.contains(kArchiveManifestFile)) {
+        final manifest = await CloudArchiveService().readManifest(path);
+        names.addAll(manifest?.files.map((a) => a.name) ?? const []);
       }
-      return earliest;
+      if (depth < 2) {
+        for (final sub in contents.folders) {
+          names.addAll(await _fileNames(sub.fullPath, depth: depth + 1));
+        }
+      }
+      return names;
     } catch (e) {
-      debugPrint('[DistributionReport] filename date scan failed: $e');
-      return null;
+      debugPrint('[DistributionReport] folder listing failed for $path: $e');
+      return const [];
     }
   }
 
@@ -354,19 +463,19 @@ class DistributionReportService {
   /// as paid and drop the "invoice attached" line from reports that need it.
   bool _isPaid(JobListItem item) {
     if (!item.hasAccountingInvoice) return false;
-    final status = item.resolvedInvoiceStatus;
-    if (status.isEmpty) return false;
-
-    if (item.resolvedInvoiceProviderId == 'xero') {
-      return XeroInvoiceStatus.parse(status) == XeroInvoiceStatus.paid;
-    }
-    return ZohoInvoiceStatus.parse(status) == ZohoInvoiceStatus.paid;
+    return isInvoiceStatusPaid(
+        item.resolvedInvoiceProviderId, item.resolvedInvoiceStatus);
   }
 }
 
 class _ResolvedMap {
   final ShareableMap map;
+  final String shareCode;
   final String shareUrl;
 
-  const _ResolvedMap({required this.map, required this.shareUrl});
+  const _ResolvedMap({
+    required this.map,
+    required this.shareCode,
+    required this.shareUrl,
+  });
 }

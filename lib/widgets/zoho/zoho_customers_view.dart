@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
@@ -76,7 +77,7 @@ class _ZohoCustomersViewState extends riverpod.ConsumerState<ZohoCustomersView>
             .loadFullCustomer(existing.contactId);
       } catch (e) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Could not load customer: $e'),
             backgroundColor: Colors.red,
@@ -92,7 +93,7 @@ class _ZohoCustomersViewState extends riverpod.ConsumerState<ZohoCustomersView>
       builder: (_) => CustomerFormDialog(orgId: widget.orgId, existing: toEdit),
     );
     if (saved != null && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content:
               Text(existing == null ? 'Customer created' : 'Customer updated'),
@@ -110,7 +111,8 @@ class _ZohoCustomersViewState extends riverpod.ConsumerState<ZohoCustomersView>
     final currency = NumberFormat.currency(symbol: 'R ', decimalDigits: 2);
 
     return ColoredBox(
-      color: ZohoPalette.pageBackground,
+      // White: the view sits inside a bordered ZohoPanel.
+      color: ZohoPalette.surface,
       child: Column(
         children: [
           ZohoToolbar(

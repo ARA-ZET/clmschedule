@@ -22,6 +22,9 @@
     --pending-bg: #ffedd9;
     --pending-text: #c2570a;
     --pending-border: #f6cf9c;
+    --uploaded-bg: #e0ecff;
+    --uploaded-text: #1d4ed8;
+    --uploaded-border: #a9c7fb;
     --empty-bg: #f1f2f4;
     --border: #e5e7eb;
     --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
@@ -42,6 +45,9 @@
       --pending-bg: #3d2712;
       --pending-text: #ffb066;
       --pending-border: #6b4620;
+      --uploaded-bg: #142a4d;
+      --uploaded-text: #7fb0ff;
+      --uploaded-border: #2a4f8a;
       --empty-bg: #22262d;
       --border: #2a2e35;
       --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
@@ -185,8 +191,35 @@
     color: var(--off-text);
     border-color: var(--off-border);
   }
+  /* Track uploaded from clmgpx — overrides working/off. */
+  .badge-uploaded {
+    background: var(--uploaded-bg);
+    color: var(--uploaded-text);
+    border-color: var(--uploaded-border);
+  }
+  /* Uploads whose name matched no active distributor. */
+  .no-match {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border);
+  }
+  .no-match-label {
+    display: block;
+    color: var(--muted);
+    font-size: 0.75rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .badge-nomatch {
+    background: none;
+    color: var(--uploaded-text);
+    border-color: var(--uploaded-border);
+    border-style: dashed;
+  }
   .legend {
     display: flex;
+    flex-wrap: wrap;
     justify-content: center;
     gap: 18px;
     margin-top: 10px;
@@ -206,6 +239,7 @@
   }
   .legend .dot.working { background: var(--working-text); }
   .legend .dot.off { background: var(--off-text); }
+  .legend .dot.uploaded { background: var(--uploaded-text); }
   .empty {
     background: var(--empty-bg);
     color: var(--muted);
@@ -216,6 +250,8 @@
   }
   .refresh-row {
     display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
     justify-content: center;
     margin-top: 4px;
   }
@@ -232,6 +268,26 @@
     font-size: 0.85rem;
   }
   .refresh-btn:active { opacity: 0.6; }
+  .payslips-btn {
+    display: inline-flex;
+    align-items: center;
+    background: #2563eb;
+    color: #ffffff;
+    border: 1px solid #2563eb;
+    border-radius: 999px;
+    padding: 8px 18px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .payslips-btn:active { opacity: 0.7; }
+  .payslips-link {
+    display: block;
+    margin-top: 14px;
+    color: var(--accent);
+    font-size: 0.9rem;
+    text-decoration: none;
+  }
 
   /* Office-admin controls — only shown when unlocked with the admin passcode. */
   .admin-row {
@@ -375,6 +431,7 @@
     </label>
     <button id="pinSubmit" type="submit">Unlock</button>
     <div class="error" id="pinError"></div>
+    <a class="payslips-link" href="payslips.html">Distributors: see your payslips →</a>
   </form>
 </div>
 
@@ -384,6 +441,7 @@
   <div class="legend">
     <span><span class="dot working"></span>Working</span>
     <span><span class="dot off"></span>Not working</span>
+    <span><span class="dot uploaded"></span>Track uploaded</span>
   </div>
 </header>
 
@@ -398,6 +456,7 @@
     </div>
     <hr class="divider" id="todayDivider" />
     <div class="badges" id="todayBadges"></div>
+    <div class="no-match" id="todayNoMatch" hidden></div>
     <div class="admin-row" id="todayAdmin" hidden></div>
   </section>
 
@@ -411,6 +470,7 @@
     </div>
     <hr class="divider" id="tomorrowDivider" />
     <div class="badges" id="tomorrowBadges"></div>
+    <div class="no-match" id="tomorrowNoMatch" hidden></div>
     <div class="admin-row" id="tomorrowAdmin" hidden></div>
   </section>
 
@@ -418,6 +478,7 @@
     <button class="refresh-btn" id="refreshBtn">Refresh</button>
     <!-- Needed on a shared device: without it, "remember" would be permanent. -->
     <button class="refresh-btn" id="signOutBtn">Forget this device</button>
+    <a class="payslips-btn" href="payslips.html">My payslips</a>
   </div>
   <div class="status" id="statusLine"></div>
 </main>
@@ -426,14 +487,14 @@
 (function () {
   "use strict";
 
-  // Only the SHA-256 hash of each passcode is stored here — not the passcode
-  // itself. Note this gate is client-side and therefore soft: the hashes are
-  // served publicly and a 4-digit PIN is only 10,000 combinations. It keeps
-  // casual visitors out of the roster; it is NOT what protects writing a
-  // confirmation. setWorkingDayConfirmation re-checks the admin passcode
-  // server-side against a Firebase secret, so a direct POST gets nowhere.
+  // Viewer gate: only the SHA-256 hash of the viewer passcode is stored here.
+  // It is client-side and soft — the hash is public and a short PIN falls to
+  // brute force — so it only keeps casual visitors off the roster.
+  //
+  // The admin passcode is NOT in this page in any form. Anything that is not
+  // the viewer passcode is sent to setWorkingDayConfirmation with
+  // `verifyOnly`, and the server (a Firebase secret) is the only check.
   var PIN_HASH = "7931aa2a1bed855457d1ddf6bc06ab4406a9fba0579045a4d6ff78f9c07c440f";
-  var ADMIN_PIN_HASH = "cc3c3b754efdb129d02ab3c0c154a6725f30851ec1c54c018c62997ef2655437";
 
   var UNLOCK_KEY = "clmworking_unlocked";
   var ROLE_KEY = "clmworking_role";
@@ -493,22 +554,51 @@
 
     var persist = rememberMe.checked;
 
-    if (hash === ADMIN_PIN_HASH) {
-      writeStored(UNLOCK_KEY, "1", persist);
-      writeStored(ROLE_KEY, "admin", persist);
-      writeStored(ADMIN_PIN_KEY, value, persist);
-      gate.hidden = true;
-      loadRoster();
-    } else if (hash === PIN_HASH) {
+    if (hash === PIN_HASH) {
       writeStored(UNLOCK_KEY, "1", persist);
       writeStored(ROLE_KEY, "viewer", persist);
       clearStored(ADMIN_PIN_KEY);
       gate.hidden = true;
       loadRoster();
+      return;
+    }
+
+    pinSubmit.disabled = true;
+    pinError.textContent = "";
+    var verdict;
+    try {
+      verdict = await verifyAdminPasscode(value);
+    } finally {
+      pinSubmit.disabled = false;
+    }
+
+    if (verdict === "ok") {
+      writeStored(UNLOCK_KEY, "1", persist);
+      writeStored(ROLE_KEY, "admin", persist);
+      writeStored(ADMIN_PIN_KEY, value, persist);
+      gate.hidden = true;
+      loadRoster();
     } else {
-      pinError.textContent = "Incorrect passcode";
+      pinError.textContent = verdict === "offline"
+        ? "Couldn't check the passcode — check your connection."
+        : "Incorrect passcode";
       pinInput.value = "";
       pinInput.focus();
+    }
+  }
+
+  /// "ok", "rejected" or "offline". Writes nothing on the server.
+  async function verifyAdminPasscode(passcode) {
+    try {
+      var res = await fetch(CONFIRM_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passcode: passcode, verifyOnly: true }),
+      });
+      if (res.ok) return "ok";
+      return res.status === 403 ? "rejected" : "offline";
+    } catch (err) {
+      return "offline";
     }
   }
 
@@ -554,10 +644,36 @@
     }
     roster.forEach(function (person) {
       var badge = document.createElement("span");
-      badge.className = "badge " + (person.working ? "badge-working" : "badge-off");
+      badge.className = "badge " + (person.uploaded
+        ? "badge-uploaded"
+        : person.working ? "badge-working" : "badge-off");
       badge.textContent = person.name;
+      if (person.uploaded) badge.title = "Track uploaded";
       container.appendChild(badge);
     });
+  }
+
+  /// Names clmgpx reported an upload for that match no active distributor.
+  /// textContent only — these are free text typed on a phone.
+  function renderNoMatch(container, names) {
+    container.innerHTML = "";
+    container.hidden = !names || names.length === 0;
+    if (container.hidden) return;
+
+    var label = document.createElement("span");
+    label.className = "no-match-label";
+    label.textContent = "Uploaded — no match";
+    container.appendChild(label);
+
+    var list = document.createElement("div");
+    list.className = "badges";
+    names.forEach(function (name) {
+      var badge = document.createElement("span");
+      badge.className = "badge badge-nomatch";
+      badge.textContent = name;
+      list.appendChild(badge);
+    });
+    container.appendChild(list);
   }
 
   var statusLine = document.getElementById("statusLine");
@@ -634,7 +750,8 @@
   }
 
   async function setConfirmation(offset, status, container, note) {
-    var passcode = sessionStorage.getItem(ADMIN_PIN_KEY);
+    // readStored: "Remember on this device" keeps it in localStorage.
+    var passcode = readStored(ADMIN_PIN_KEY);
     if (!passcode) {
       note.textContent = "Session expired — reload and re-enter the passcode.";
       return;
@@ -653,7 +770,7 @@
 
       if (res.status === 403) {
         note.textContent = "Passcode rejected. Reload and re-enter it.";
-        sessionStorage.removeItem(ADMIN_PIN_KEY);
+        clearStored(ADMIN_PIN_KEY);
         return;
       }
       if (!res.ok) throw new Error("bad status " + res.status);
@@ -682,6 +799,8 @@
       renderStatusChip(document.getElementById("tomorrowStatus"), data.tomorrow.confirmationStatus, data.tomorrow.confirmedAt, document.getElementById("tomorrowDivider"));
       renderBadges(document.getElementById("todayBadges"), data.today.roster);
       renderBadges(document.getElementById("tomorrowBadges"), data.tomorrow.roster);
+      renderNoMatch(document.getElementById("todayNoMatch"), data.today.unmatchedUploads);
+      renderNoMatch(document.getElementById("tomorrowNoMatch"), data.tomorrow.unmatchedUploads);
 
       renderAdminControls(
         document.getElementById("todayAdmin"), 0, data.today.confirmationStatus);

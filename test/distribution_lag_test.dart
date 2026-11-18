@@ -35,6 +35,14 @@ Job _job(String id, List<String> clients, DateTime date) => Job(
     );
 
 void main() {
+  test('client key ignores case and stray spaces', () {
+    // The Job List refuses a second job under the same key, so these must
+    // all count as one name.
+    expect(jobListClientKey('  ABC  Pizza '), 'abc pizza');
+    expect(jobListClientKey('abc\tpizza'), jobListClientKey('ABC Pizza'));
+    expect(jobListClientKey('ABC Pizza 2'), isNot(jobListClientKey('ABC Pizza')));
+  });
+
   test('thresholds: same day green, under 3 orange, else red', () {
     expect(lagForDays(0), DistributionLag.onTime);
     expect(lagForDays(1), DistributionLag.late);

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
 import '../models/happy_sun_shared.dart';
@@ -137,7 +138,7 @@ class _HappySunChecklistScreenState
     // Play success sound
     SoundService().playSuccess();
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Row(
           children: [
@@ -164,7 +165,7 @@ class _HappySunChecklistScreenState
     // Play warning sound
     SoundService().playWarning();
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Row(
           children: [
@@ -224,7 +225,7 @@ class _HappySunChecklistScreenState
       SoundService().playSuccess();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Progress saved'),
             backgroundColor: Colors.green,
@@ -238,7 +239,7 @@ class _HappySunChecklistScreenState
       SoundService().playWarning();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error saving: $e'),
             backgroundColor: Colors.red,
@@ -303,7 +304,7 @@ class _HappySunChecklistScreenState
       SoundService().playSuccess();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Checklist completed successfully!'),
             backgroundColor: Colors.green,
@@ -318,7 +319,7 @@ class _HappySunChecklistScreenState
       SoundService().playWarning();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error completing checklist: $e'),
             backgroundColor: Colors.red,

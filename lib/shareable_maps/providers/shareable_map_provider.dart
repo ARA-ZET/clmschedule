@@ -15,6 +15,7 @@ import '../../models/work_suburb.dart';
 import '../../config/flavor_config.dart';
 import '../../services/compiled_tracks_parser.dart';
 import '../../services/gpx_storage_service.dart';
+import '../../services/cloud_archive_service.dart';
 import '../../services/kml_parser_service.dart';
 import '../adapters/map_data_adapter.dart';
 import '../adapters/firestore_adapter.dart';
@@ -27,9 +28,24 @@ import '../services/shareable_maps_firestore_service.dart';
 import '../utils/drawn_gpx.dart';
 import '../utils/gpx_track_rename.dart';
 import '../utils/linked_map_polygons.dart';
+import '../utils/map_undo_tracker.dart';
+import '../../undo/undo_history.dart';
 import '../utils/polygon_topology.dart';
 import '../utils/waypoint_spatial_index.dart';
+import '../services/map_link_service.dart' show MapLinkService;
+import '../services/map_photos.dart';
 import '../../utils/text_encoding.dart';
+import '../../utils/map_pin_icons.dart' show MapPinStyle;
+
+/// Which points a map draws as descriptive pins, and how: [pinFor] gives a
+/// point of one of [layerIds] its pin and stacking ([PinLayer]), or null to
+/// keep its category icon. Asked of the live points, so pins follow edits.
+class PointPinRule {
+  final Set<String> layerIds;
+  final ({MapPinStyle style, int zIndex})? Function(MapPoint point) pinFor;
+
+  const PointPinRule({required this.layerIds, required this.pinFor});
+}
 
 /// One polygon's finished letterbox count.
 class LetterboxEstimateResult {
@@ -70,8 +86,9 @@ class LetterboxEstimateNotice {
 
 /// Riverpod provider for ShareableMapProvider.
 final shareableMapRiverpod =
-    riverpod.ChangeNotifierProvider<ShareableMapProvider>(
-        (ref) => ShareableMapProvider());
+    riverpod.ChangeNotifierProvider<ShareableMapProvider>((ref) =>
+        ShareableMapProvider(
+            historyFor: (key) => ref.read(undoHistoryRiverpod(key))));
 
 // ── Isolate helper for GPX parsing ──────────────────────────────────────
 /// Top-level function so it can be used with [compute].
@@ -115,12 +132,37 @@ class _IsolateFileEntry {
 // `_compiled_tracks.json` parsing lives in compiled_tracks_parser.dart
 // (parseCompiledTracksBytes) so it can be shared with the print-map flow.
 
+/// Compiled waypoints, with the GPX file each came from by point id — the
+/// file names the distributor and the day, which is how a waypoint finds its
+/// photo.
+class _CompiledWaypoints {
+  final List<MapPoint> points;
+  final Map<String, String> sources;
+
+  const _CompiledWaypoints(this.points, this.sources);
+}
+
+/// [_parseCompiledWaypoints], for tests: the points and each one's file.
+@visibleForTesting
+({List<MapPoint> points, Map<String, String> sources})
+    parseCompiledWaypointsForTest(Uint8List bytes) {
+  final parsed = _parseCompiledWaypoints(bytes);
+  return (points: parsed.points, sources: parsed.sources);
+}
+
 /// Parse a `_compiled_waypoints.json` file produced by the Cloud Function.
-List<MapPoint> _parseCompiledWaypoints(Uint8List bytes) {
+_CompiledWaypoints _parseCompiledWaypoints(Uint8List bytes) {
   final json = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
   final wpts = json['waypoints'] as List<dynamic>? ?? [];
+  // Waypoints name their file by index into `sourceFiles`; older files name
+  // it directly as `file`.
+  final sourceFiles = [
+    for (final f in (json['sourceFiles'] as List<dynamic>? ?? const []))
+      f is String ? f : '',
+  ];
   final now = DateTime.now();
   final results = <MapPoint>[];
+  final sources = <String, String>{};
   int seq = 0;
 
   for (final w in wpts) {
@@ -133,8 +175,15 @@ List<MapPoint> _parseCompiledWaypoints(Uint8List bytes) {
         rawName != null ? repairMojibake(rawName) : 'Waypoint ${seq + 1}';
     final desc = repairMojibake((w['desc'] as String?) ?? '');
 
+    final id = 'compiled_wpt_${now.millisecondsSinceEpoch}_${seq++}';
+    final fi = w['fi'];
+    final source = fi is int && fi >= 0 && fi < sourceFiles.length
+        ? sourceFiles[fi]
+        : (w['file'] is String ? w['file'] as String : '');
+    if (source.isNotEmpty) sources[id] = source;
+
     results.add(MapPoint(
-      id: 'compiled_wpt_${now.millisecondsSinceEpoch}_${seq++}',
+      id: id,
       name: name,
       description: desc,
       position: LatLng(lat, lon),
@@ -143,7 +192,7 @@ List<MapPoint> _parseCompiledWaypoints(Uint8List bytes) {
       updatedAt: now,
     ));
   }
-  return results;
+  return _CompiledWaypoints(results, sources);
 }
 
 /// Data for the currently open info window overlay.
@@ -169,6 +218,10 @@ class InfoWindowData {
   /// of it — see [CustomPolygon.importedLetterBoxEstimate].
   final int? importedLetterBoxEstimate;
 
+  /// The photo taken at this waypoint (clmgpx poster / delivery photos),
+  /// once found in the map's photo index.
+  final MapPhoto? photo;
+
   const InfoWindowData({
     required this.elementId,
     required this.layerId,
@@ -180,7 +233,25 @@ class InfoWindowData {
     this.letterBoxEstimate = 0,
     this.letterboxBreakdown,
     this.importedLetterBoxEstimate,
+    this.photo,
   });
+
+  /// Same info window, with the waypoint's photo.
+  InfoWindowData withPhoto(MapPhoto photo) {
+    return InfoWindowData(
+      elementId: elementId,
+      layerId: layerId,
+      title: title,
+      description: description,
+      subtitle: subtitle,
+      type: type,
+      anchor: anchor,
+      letterBoxEstimate: letterBoxEstimate,
+      letterboxBreakdown: letterboxBreakdown,
+      importedLetterBoxEstimate: importedLetterBoxEstimate,
+      photo: photo,
+    );
+  }
 
   /// Same info window, with the breakdown filled in once a fallback compute
   /// resolves for a polygon that had none stored.
@@ -219,6 +290,18 @@ enum DrawingMode {
 /// The [capabilities] getter exposes feature flags from the active adapter
 /// so that UI widgets can show/hide tools dynamically.
 class ShareableMapProvider extends ChangeNotifier {
+  /// Looks up a map's undo history. Without one (tests), each map gets a
+  /// private history.
+  ShareableMapProvider({ScreenUndoHistory Function(UndoKey key)? historyFor})
+      : _historyFor = historyFor ?? _privateHistories();
+
+  final ScreenUndoHistory Function(UndoKey key) _historyFor;
+
+  static ScreenUndoHistory Function(UndoKey) _privateHistories() {
+    final histories = <UndoKey, ScreenUndoHistory>{};
+    return (key) => histories.putIfAbsent(key, () => ScreenUndoHistory(key));
+  }
+
   // ── Automatic letterbox estimates ───────────────────────────────────
   // Same curated primitive the standalone Letterbox Index and the "Letter
   // Box Estimates" table both use. Constructed lazily and shared across
@@ -503,7 +586,8 @@ class ShareableMapProvider extends ChangeNotifier {
       // Locked by hand while the count was running.
       if (current.letterBoxLocked) return;
 
-      updatePolygon(freshLayer, polygonIndex, _applyCount(current, result));
+      _undo.inBackground(() =>
+          updatePolygon(freshLayer, polygonIndex, _applyCount(current, result)));
       _estimateBatch.add(LetterboxEstimateResult(current.name, result));
       // The count loaded the suburb list; share it with the provenance check.
       _letterboxSuburbs ??= await _counter.suburbsById();
@@ -828,6 +912,9 @@ class ShareableMapProvider extends ChangeNotifier {
     final sw = Stopwatch()..start();
     debugPrint('[loadFromAdapter] START');
     _isLoading = true;
+    // A different map: its own share code and photos.
+    _shareCode = null;
+    _photoIndex = null;
     notifyListeners();
 
     try {
@@ -1000,6 +1087,96 @@ class ShareableMapProvider extends ChangeNotifier {
     return _cloudWaypointIndexes[folderPath]?.count ??
         _cloudWaypointsLayers[layerId]?.points.length ??
         0;
+  }
+
+  /// The polygon an info-window element id (`'{layerId}_polygon_{index}'`)
+  /// names, with its position, or null when it no longer exists.
+  ({String layerId, int index, CustomPolygon polygon})? polygonForElement(
+      String elementId) {
+    final match = RegExp(r'^(.+)_polygon_(\d+)$').firstMatch(elementId);
+    if (match == null || _currentMap == null) return null;
+    final layerId = match.group(1)!;
+    final index = int.parse(match.group(2)!);
+    final layer = _currentMap!.getLayer(layerId);
+    if (layer == null || index >= layer.polygons.length) return null;
+    return (layerId: layerId, index: index, polygon: layer.polygons[index]);
+  }
+
+  /// Positions of the letter-box waypoints inside [area], drawn only from the
+  /// cloud waypoint layers that are loaded AND switched on.
+  ///
+  /// This is what "Update letterbox index" writes, so it is narrower than
+  /// [letterBoxesReachedForPolygon] on purpose: a client map can link several
+  /// rounds of the same ground, and feeding them all in would put each
+  /// letterbox in the index once per round. Hiding a layer is how the
+  /// operator picks the round.
+  ///
+  /// Repeated positions are NOT duplicates and must never be collapsed: a
+  /// distributor drops one waypoint per box at a block of flats, all at the
+  /// same spot (41 at one block in a real round), and that stack is how the
+  /// index tells flats from houses. Within the switched-on layers this
+  /// therefore agrees exactly with [letterBoxesReachedForPolygon].
+  List<LatLng> visibleCloudWaypointsIn(List<LatLng> area) {
+    if (area.length < 3) return const [];
+    final bounds = _latLngBoundsFromPoints(area);
+    final out = <LatLng>[];
+    void take(LatLng p) {
+      if (_pointInPolygon(p, area)) out.add(p);
+    }
+
+    for (final layer in _cloudWaypointsLayers.values) {
+      if (!layer.isVisible || !_shouldShowCloudWaypointLayer(layer)) continue;
+      final index = _cloudWaypointIndexes[layer.description.trim()];
+      if (index != null) {
+        for (final w in index.query(bounds, limit: 200000)) {
+          take(w.position);
+        }
+      } else {
+        for (final point in layer.points) {
+          take(point.position);
+        }
+      }
+    }
+    return out;
+  }
+
+  /// The counter this editor counts letterboxes with. A write to the index
+  /// from this map goes through the same instance, so the payloads it
+  /// replaces are the ones [letterboxIndexChanged] drops.
+  LetterboxCountService get letterboxCounter => _counter;
+
+  /// The letterbox index changed under [suburbIds] (written from this map):
+  /// forget those suburbs' cached payloads and recount the areas they feed —
+  /// [layerId]/[polygonIndex] always, plus any other unlocked area on the map
+  /// whose count came from one of them. Locked areas are left alone, as
+  /// every recount leaves them.
+  void letterboxIndexChanged(
+    Iterable<String> suburbIds, {
+    String? layerId,
+    int? polygonIndex,
+  }) {
+    final touched = suburbIds.toSet();
+    for (final id in touched) {
+      _counter.invalidate(id);
+    }
+    final map = _currentMap;
+    if (map == null || capabilities.readOnly) return;
+    for (final layer in map.layers) {
+      for (var i = 0; i < layer.polygons.length; i++) {
+        final p = layer.polygons[i];
+        if (!p.isPolygon || p.letterBoxLocked || p.points.length < 3) continue;
+        final isSource = layer.id == layerId && i == polygonIndex;
+        final fedByTouched =
+            p.letterboxSuburbIds?.any(touched.contains) ?? false;
+        if (!isSource && !fedByTouched) continue;
+        // ignore: unawaited_futures
+        _autoEstimateLetterboxes(
+          layerId: layer.id,
+          polygonIndex: i,
+          expectedPointCount: p.points.length,
+        );
+      }
+    }
   }
 
   static LatLngBounds _latLngBoundsFromPoints(List<LatLng> pts) {
@@ -1328,6 +1505,9 @@ class ShareableMapProvider extends ChangeNotifier {
   /// cloud overlays (distributor movements, letter boxes), selection,
   /// info windows or in-progress drawing from the previously open map.
   void _resetPerMapState() {
+    _polygonStyleOverride = null;
+    _pointColourOverride = null;
+    _pointPinRule = null;
     // Cloud overlays — discard fully so the new map fetches fresh data.
     _cloudTracksLayers.clear();
     _cloudWaypointsLayers.clear();
@@ -1688,7 +1868,8 @@ class ShareableMapProvider extends ChangeNotifier {
       if (compiledBytes != null) {
         debugPrint(
             '[CloudWaypoints] compiled JSON downloaded in ${sw.elapsedMilliseconds}ms (${(compiledBytes.length / 1024).toStringAsFixed(1)}KB)');
-        final points = await compute(_parseCompiledWaypoints, compiledBytes);
+        final parsed = await compute(_parseCompiledWaypoints, compiledBytes);
+        final points = parsed.points;
         debugPrint(
             '[CloudWaypoints] parsed ${points.length} waypoints from compiled JSON in ${sw.elapsedMilliseconds}ms');
 
@@ -1702,6 +1883,7 @@ class ShareableMapProvider extends ChangeNotifier {
                   name: p.name,
                   description: p.description,
                   position: p.position,
+                  sourceFile: parsed.sources[p.id] ?? '',
                 ))
             .toList());
         _cloudWaypointIndexes[resolvedFolderPath] = index;
@@ -1885,6 +2067,7 @@ class ShareableMapProvider extends ChangeNotifier {
       // that would carry it back is ignored).
       if (_adapter is FirestoreMapAdapter) {
         _currentMap = _currentMap!.withStablePolygonIds();
+        _undo.fold(_currentMap!);
       }
       await _adapter!.save(_currentMap!);
 
@@ -2056,13 +2239,15 @@ class ShareableMapProvider extends ChangeNotifier {
   /// skipped (mid-draw, or right after our own save).
   ///
   /// The `onJobListItemWritten` Cloud Function re-points a map at its job's
-  /// folder when the job is renamed or moved. Saves write the whole document,
-  /// so dropping that snapshot would let the next auto-save put the old
-  /// folder back and unlink the map from the job's GPS data.
+  /// folder, and renames it, when the job is renamed or moved. Saves write
+  /// the whole document, so dropping that snapshot would let the next
+  /// auto-save put the old folder (and name) back and unlink the map from
+  /// the job's GPS data.
   void _adoptRemoteFolderLinks(ShareableMap remote) {
     final local = _currentMap;
     if (local == null) return;
-    final same = local.storageFolderPath == remote.storageFolderPath &&
+    final same = local.name == remote.name &&
+        local.storageFolderPath == remote.storageFolderPath &&
         local.jobListItemId == remote.jobListItemId &&
         listEquals(local.cloudFolderPaths, remote.cloudFolderPaths) &&
         mapEquals(local.cloudTrackColors, remote.cloudTrackColors) &&
@@ -2071,6 +2256,7 @@ class ShareableMapProvider extends ChangeNotifier {
     debugPrint('[RealtimeSync] Adopting remote folder links for map '
         '${remote.id}: ${remote.cloudFolderPaths}');
     _currentMap = local.copyWith(
+      name: remote.name,
       updatedAt: local.updatedAt,
       jobListItemId: remote.jobListItemId,
       storageFolderPath: remote.storageFolderPath,
@@ -2079,20 +2265,81 @@ class ShareableMapProvider extends ChangeNotifier {
       cloudTrackColors: remote.cloudTrackColors,
       cloudLayerNames: remote.cloudLayerNames,
     );
+    _undo.onRemote(local, _currentMap!);
     _initCloudOverlays();
     notifyListeners();
+  }
+
+  CustomPolygon Function(CustomPolygon polygon)? _polygonStyleOverride;
+
+  /// Restyles polygons as they are DRAWN, never in [currentMap] — so a view
+  /// such as the schedule allocation can colour a live, autosaving map
+  /// without its colours ever being saved. Cleared when another map loads.
+  CustomPolygon Function(CustomPolygon polygon)? get polygonStyleOverride =>
+      _polygonStyleOverride;
+
+  Color Function(MapPoint point)? _pointColourOverride;
+
+  /// The point counterpart of [polygonStyleOverride]: each point is drawn as
+  /// a pin in the colour this returns. Draw-time only, like the polygons.
+  Color Function(MapPoint point)? get pointColourOverride =>
+      _pointColourOverride;
+
+  /// Set (or, with nulls, clear) both draw-time overrides.
+  void setStyleOverrides({
+    CustomPolygon Function(CustomPolygon polygon)? polygon,
+    Color Function(MapPoint point)? point,
+  }) {
+    if (identical(polygon, _polygonStyleOverride) &&
+        identical(point, _pointColourOverride)) {
+      return;
+    }
+    _polygonStyleOverride = polygon;
+    _pointColourOverride = point;
+    notifyListeners();
+  }
+
+  PointPinRule? _pointPinRule;
+
+  /// Draws points as descriptive pins (bin, sofa, DROP-OFF sign …) in place
+  /// of their category icons, with their stacking — the schedule's work
+  /// areas maps show the same pins as Print Map. Draw-time only, like the
+  /// style overrides; cleared when another map loads.
+  PointPinRule? get pointPinRule => _pointPinRule;
+
+  void setPointPinRule(PointPinRule? rule) {
+    if (identical(rule, _pointPinRule)) return;
+    _pointPinRule = rule;
+    notifyListeners();
+  }
+
+  /// Drop the overrides without notifying — for an editor being torn down,
+  /// where nothing is left to repaint.
+  void clearStyleOverridesQuietly() {
+    _polygonStyleOverride = null;
+    _pointColourOverride = null;
   }
 
   /// Swap in a map the adapter has rebuilt (e.g. restyled after a change the
   /// adapter persisted itself), keeping selection and the open info window.
   /// Does not save.
-  void applyAdapterMap(ShareableMap map) => _applyRemoteMap(map);
+  void applyAdapterMap(ShareableMap map) =>
+      _applyRemoteMap(map, fromAdapter: true);
 
   /// Apply a remote map update, preserving local UI state.
-  void _applyRemoteMap(ShareableMap remoteMap) {
+  ///
+  /// [fromAdapter]: the adapter rebuilt the map itself (a restyle), which
+  /// joins the latest Undo step rather than counting as someone else's edit.
+  void _applyRemoteMap(ShareableMap remoteMap, {bool fromAdapter = false}) {
     final previousSelectedLayerId = _selectedLayerId;
 
+    final previous = _currentMap;
     _currentMap = remoteMap;
+    if (fromAdapter || previous == null) {
+      _undo.fold(remoteMap);
+    } else {
+      _undo.onRemote(previous, remoteMap);
+    }
 
     // Restore selected layer if it still exists
     if (previousSelectedLayerId != null &&
@@ -2184,6 +2431,8 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Firestore and are received in real-time by other viewers.
   void _notifyMapChanged() {
     _hasUnsavedChanges = true;
+    // Visibility only — not something Undo should step through.
+    if (_currentMap != null) _undo.rebase(_currentMap!);
     notifyListeners();
   }
 
@@ -2192,10 +2441,96 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Call this only at meaningful completion points — e.g. after
   /// completing a drawing, exiting vertex editing, deleting an element,
   /// or updating properties — to minimise Firestore read/write counts.
+  ///
+  /// Also where user edits become Undo steps (see [MapUndoTracker]).
   void _notifyAndSave() {
     _hasUnsavedChanges = true;
+    if (_currentMap != null) _undo.onUserChange(_currentMap!);
     notifyListeners();
     _scheduleAutoSave();
+  }
+
+  // === UNDO / REDO ===
+
+  late final MapUndoTracker _undo = MapUndoTracker(
+    historyFor: _historyFor,
+    currentMap: () => _currentMap,
+    applyRestored: _applyUndoRestore,
+  );
+
+  /// This map's undo history key, or null with no map open.
+  UndoKey? get undoKey => _undo.undoKey;
+
+  ScreenUndoHistory? get undoHistory => _undo.history;
+
+  /// For tests: apply [map] as if it arrived from another user or tab.
+  @visibleForTesting
+  void debugApplyRemoteMap(ShareableMap map) => _applyRemoteMap(map);
+
+  void _applyUndoRestore(ShareableMap restored) {
+    if (_isEditingVertices) _stopVertexEditing();
+    // Polygon element ids are index-based, so a restored layer can put a
+    // different polygon at the selected index.
+    _selectedElementId = null;
+    _infoWindowData = null;
+    _currentMap = restored;
+    if (_selectedLayerId == null ||
+        restored.getLayer(_selectedLayerId!) == null) {
+      _selectedLayerId =
+          restored.layers.isEmpty ? null : restored.layers.first.id;
+    }
+    _notifyAndSave();
+  }
+
+  /// Ctrl+Z while drawing or editing vertices undoes inside that edit first
+  /// (the last point placed, the last vertex dragged) before reaching the
+  /// map's history. Returns true when it handled the key.
+  bool undoInsideCurrentEdit() {
+    if (_isLassoSelectActive && _lassoPoints.isNotEmpty) {
+      removeLastLassoPoint();
+      return true;
+    }
+    if (_isDrawing && _drawingPoints.isNotEmpty) {
+      removeLastDrawingPoint();
+      return true;
+    }
+    if (_isEditingVertices && _vertexEditHistory.isNotEmpty) {
+      _editingPoints = _vertexEditHistory.removeLast();
+      _editingPointsVersion++;
+      notifyListeners();
+      return true;
+    }
+    return false;
+  }
+
+  /// Snapshots of [_editingPoints] before each drag, insert or removal in
+  /// the current vertex edit — the in-edit undo stack.
+  final List<List<LatLng>> _vertexEditHistory = [];
+
+  /// Call when a vertex drag starts, so the drag can be undone as one step.
+  void beginEditingPointDrag() => _snapshotEditingPoints();
+
+  void _snapshotEditingPoints() {
+    final points = _editingPoints;
+    if (points == null) return;
+    _vertexEditHistory.add(List<LatLng>.from(points));
+    if (_vertexEditHistory.length > kUndoDepth) {
+      _vertexEditHistory.removeAt(0);
+    }
+  }
+
+  /// Replace the open map's content with [map] (same map, e.g. after an
+  /// import) as one Undo step.
+  void replaceMapContent(ShareableMap map) {
+    if (_currentMap == null || map.id != _currentMap!.id) {
+      loadMap(map);
+      return;
+    }
+    _currentMap = map;
+    if (_selectedLayerId == null || map.getLayer(_selectedLayerId!) == null) {
+      _selectedLayerId = map.layers.isEmpty ? null : map.layers.first.id;
+    }
+    _notifyAndSave();
   }
 
   // === MAP OPERATIONS ===
@@ -2211,6 +2546,7 @@ class ShareableMapProvider extends ChangeNotifier {
       description: description,
       defaultCenter: center,
     );
+    _undo.reset(_currentMap);
     _selectedLayerId = _currentMap!.layers.first.id;
     _areaImportLayerId = null;
     debugPrint('Created new map: ${_currentMap!.name}');
@@ -2220,6 +2556,7 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Load an existing map
   void loadMap(ShareableMap map) {
     _currentMap = map;
+    _undo.reset(map);
     if (_letterboxSuburbs == null) {
       // ignore: unawaited_futures
       refreshLetterboxStatuses();
@@ -2237,6 +2574,7 @@ class ShareableMapProvider extends ChangeNotifier {
   /// Clear current map
   void clearMap() {
     _currentMap = null;
+    _undo.reset(null);
     _areaImportLayerId = null;
     _selectedLayerId = null;
     _selectedElementId = null;
@@ -2445,9 +2783,11 @@ class ShareableMapProvider extends ChangeNotifier {
 
   /// Add multiple suburbs to the map at once.
   void addSuburbsToMap(List<WorkSuburb> suburbs) {
-    for (final s in suburbs) {
-      addSuburbToMap(s);
-    }
+    _undo.asOneStep(() {
+      for (final s in suburbs) {
+        addSuburbToMap(s);
+      }
+    });
   }
 
   // === LAYER OPERATIONS ===
@@ -2619,6 +2959,7 @@ class ShareableMapProvider extends ChangeNotifier {
       return;
     }
     _currentMap = _currentMap!.toggleLayerExpanded(layerId);
+    _undo.rebase(_currentMap!);
     notifyListeners();
   }
 
@@ -2848,6 +3189,25 @@ class ShareableMapProvider extends ChangeNotifier {
   void completeDrawing({
     required String name,
     String description = '',
+    Color? color,
+    PointCategory? pointCategory,
+    String? targetLayerId,
+    String? newLayerName,
+  }) {
+    // One Undo step, though a new layer and the stitch each save too.
+    _undo.asOneStep(() => _completeDrawing(
+          name: name,
+          description: description,
+          color: color,
+          pointCategory: pointCategory,
+          targetLayerId: targetLayerId,
+          newLayerName: newLayerName,
+        ));
+  }
+
+  void _completeDrawing({
+    required String name,
+    required String description,
     Color? color,
     PointCategory? pointCategory,
     String? targetLayerId,
@@ -3094,7 +3454,14 @@ class ShareableMapProvider extends ChangeNotifier {
     final written = <String, String>{};
     for (final file in files) {
       final bytes = await storage.downloadFileBytes('$folder/$file');
-      if (bytes == null) throw StateError('Could not download "$file"');
+      if (bytes == null) {
+        final manifest = await CloudArchiveService().readManifest(folder);
+        if (manifest?.files.any((a) => a.name == file) ?? false) {
+          throw StateError('"$file" was archived (moved into a ZIP). Upload '
+              'it back into this folder in Cloud Files to rename its tracks.');
+        }
+        throw StateError('Could not download "$file"');
+      }
       final edit = renameTracksInGpx(
         decodeTextBytes(bytes),
         oldBase: oldBase,
@@ -3321,6 +3688,7 @@ class ShareableMapProvider extends ChangeNotifier {
 
     if (points != null && points.isNotEmpty) {
       _editingPoints = List<LatLng>.from(points);
+      _vertexEditHistory.clear();
       _isEditingVertices = true;
       _editingElementId = elementId;
       _hasUnsavedChanges = false;
@@ -3355,6 +3723,7 @@ class ShareableMapProvider extends ChangeNotifier {
     if (_editingPoints == null) return;
 
     if (index >= 0 && index <= _editingPoints!.length) {
+      _snapshotEditingPoints();
       _editingPoints!.insert(
           index, snapPosition(position, excludeElementId: _editingElementId));
       _editingPointsVersion++;
@@ -3372,6 +3741,7 @@ class ShareableMapProvider extends ChangeNotifier {
     }
 
     if (index >= 0 && index < _editingPoints!.length) {
+      _snapshotEditingPoints();
       _editingPoints!.removeAt(index);
       _editingPointsVersion++;
       _hasUnsavedChanges = true;
@@ -3380,8 +3750,11 @@ class ShareableMapProvider extends ChangeNotifier {
     }
   }
 
-  /// Save vertex editing changes back to the element
-  void saveVertexEditing() {
+  /// Save vertex editing changes back to the element — one Undo step for
+  /// the whole edit, including the stitch to its neighbours.
+  void saveVertexEditing() => _undo.asOneStep(_saveVertexEditing);
+
+  void _saveVertexEditing() {
     if (_currentMap == null ||
         _selectedLayerId == null ||
         _editingElementId == null ||
@@ -3450,6 +3823,7 @@ class ShareableMapProvider extends ChangeNotifier {
     _editingElementId = null;
     _hasUnsavedChanges = false;
     _editingPointsVersion = 0;
+    _vertexEditHistory.clear();
     notifyListeners();
   }
 
@@ -3855,7 +4229,7 @@ class ShareableMapProvider extends ChangeNotifier {
     }
     if (written > 0) {
       _currentMap = map;
-      _notifyAndSave();
+      _undo.inBackground(_notifyAndSave);
     }
     return written;
   }
@@ -4435,6 +4809,55 @@ class ShareableMapProvider extends ChangeNotifier {
   /// For a polygon, the houses/apartments split comes straight off the stored
   /// polygon — no fetch, nothing to wait for. Only a polygon that has never
   /// had one computed falls back to [_backfillInfoWindowSplit].
+  // ── Waypoint photos ──────────────────────────────────────────────────────
+
+  /// The map's share code, set by the share-link viewer that opened it by
+  /// that code. Elsewhere it is looked up when first needed.
+  String? _shareCode;
+  Future<MapPhotoIndex>? _photoIndex;
+
+  void setShareCode(String code) {
+    if (_shareCode == code) return;
+    _shareCode = code;
+    _photoIndex = null;
+  }
+
+  /// The map's photos, read once — on the first waypoint opened, so a map
+  /// nobody inspects costs nothing.
+  Future<MapPhotoIndex> _photos() => _photoIndex ??= _loadPhotos();
+
+  Future<MapPhotoIndex> _loadPhotos() async {
+    var code = _shareCode;
+    final adapter = _adapter;
+    if ((code == null || code.isEmpty) &&
+        adapter is FirestoreMapAdapter &&
+        adapter.docId != null) {
+      try {
+        code = await MapLinkService()
+            .getShareCodeForMap(adapter.monthKey, adapter.docId!);
+      } catch (e) {
+        debugPrint('[MapPhotos] share code lookup failed: $e');
+      }
+    }
+    if (code == null || code.isEmpty) return MapPhotoIndex.empty;
+    return MapPhotosService().load(code);
+  }
+
+  /// Open a cloud waypoint's info window, then add its photo when the map has
+  /// one — matched on the waypoint's name and the distributor and day its
+  /// track file names.
+  void openWaypointInfoWindow(InfoWindowData data, {required String sourceFile}) {
+    openInfoWindow(data);
+    _photos().then((index) {
+      if (_isDisposed) return;
+      final photo = index.forWaypoint(data.title, sourceFile);
+      final iw = _infoWindowData;
+      if (photo == null || iw == null || iw.elementId != data.elementId) return;
+      _infoWindowData = iw.withPhoto(photo);
+      notifyListeners();
+    });
+  }
+
   void openInfoWindow(InfoWindowData data) {
     _selectedLayerId = data.layerId;
     _selectedElementId = data.elementId;
@@ -4813,9 +5236,11 @@ class ShareableMapProvider extends ChangeNotifier {
 
   /// Add multiple work areas to the map at once.
   void addWorkAreasToMap(List<WorkArea> workAreas) {
-    for (final wa in workAreas) {
-      addWorkAreaToMap(wa);
-    }
+    _undo.asOneStep(() {
+      for (final wa in workAreas) {
+        addWorkAreaToMap(wa);
+      }
+    });
   }
 
   // === REFERENCE LAYER (adapter-supplied, never saved back) ===
@@ -4849,6 +5274,7 @@ class ShareableMapProvider extends ChangeNotifier {
       _currentMap = _currentMap!.updateLayer(id, layer);
     }
     // Deliberately no _notifyAndSave: nothing the user owns has changed.
+    _undo.rebase(_currentMap!);
     notifyListeners();
   }
 
@@ -4898,6 +5324,7 @@ class ShareableMapProvider extends ChangeNotifier {
       _currentMap = _currentMap!.addLayer(layer);
     }
     // Deliberately no _notifyAndSave: the overlay is never part of the map.
+    if (_currentMap != null) _undo.rebase(_currentMap!);
     notifyListeners();
   }
 
@@ -4908,7 +5335,10 @@ class ShareableMapProvider extends ChangeNotifier {
   ///
   /// Returns how many were actually adopted — outlines the map already holds
   /// are skipped.
-  int adoptReferenceLayerPolygons(List<CustomPolygon> polygons) {
+  int adoptReferenceLayerPolygons(List<CustomPolygon> polygons) =>
+      _undo.asOneStep(() => _adoptReferenceLayerPolygons(polygons));
+
+  int _adoptReferenceLayerPolygons(List<CustomPolygon> polygons) {
     if (_currentMap == null || polygons.isEmpty) return 0;
     final refId = _adapter?.referenceLayerId;
     final tracksId = _adapter?.referenceTracksLayerId;

@@ -17,8 +17,10 @@
 //   * Summary   the title and, when the campaign ran more than one day, one
 //               row per day.
 //   * Each day  one compact block — headline figures, flyers per hour, the
-//               team's figures, a flyers + speed timeline per promoter, and
-//               proof photos. Days flow one after another rather than each
+//               team's figures, then each promoter under their own heading:
+//               half-width maps zoomed in on each position they worked
+//               (linked to the client's interactive map) and a flyers +
+//               speed timeline, two promoters a page — and proof photos. Days flow one after another rather than each
 //               claiming pages of their own.
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -34,6 +36,7 @@ import '../../models/payroll_settings.dart';
 import '../models/te_promoter_day.dart';
 import '../utils/te_track_analysis.dart';
 import 'te_place_names.dart';
+import 'te_report_maps.dart';
 
 final _longDayFmt = DateFormat('EEEE d MMMM yyyy');
 final _shortDayFmt = DateFormat('d MMM yyyy');
@@ -57,7 +60,8 @@ abstract class _C {
   /// Flyers — the one data series in the report.
   static const flyers = PdfColor.fromInt(0xFFEB6834);
 
-  /// Walking speed — the second series on each promoter's timeline.
+  /// Walking speed — the second series on each promoter's timeline — and
+  /// the route line on each promoter's map.
   static const speed = PdfColor.fromInt(0xFF2A78D6);
 }
 
@@ -82,6 +86,16 @@ const pw.EdgeInsets _pageMargin = pw.EdgeInsets.fromLTRB(32, 30, 32, 24);
 ///
 /// [placeNames] names the spots from [teWorkSpots], keyed by [tePlaceKey];
 /// spots with no name print as "—" rather than holding the report up.
+/// [whereOverrides] is "Where worked" text typed in by hand, keyed by
+/// [TEPromoterDay.key], one place per line; it replaces the looked-up names
+/// for that shift.
+///
+/// [mapImages] is the street map behind each promoter's maps, keyed by
+/// [teReportMapKey] (see [fetchReportMaps]); a map without one still gets
+/// its route drawn, on a blank background. [photosByDate] should
+/// already be compressed ([teCompressProofPhotos]) — they go in as given. [mapLinks] is
+/// the client's interactive map for each promoter day, by the same key; the
+/// map and a link under it open it.
 ///
 /// [company] supplies the business details printed under the logo — the
 /// same company settings the payslips use, so an address or phone change
@@ -91,11 +105,15 @@ Future<Uint8List> buildReportPdf(
   Map<DateTime, List<TEProofPhoto>> photosByDate = const {},
   PayrollSettings? company,
   Map<String, TEPlaceName> placeNames = const {},
+  Map<String, String> whereOverrides = const {},
+  Map<String, Uint8List> mapImages = const {},
+  Map<String, String> mapLinks = const {},
 }) async {
   final regular = await PdfGoogleFonts.openSansRegular();
   final bold = await PdfGoogleFonts.openSansBold();
   _boldFont = bold;
   final logo = await _loadLogo();
+  final maps = _MapInputs(mapImages, mapLinks);
   final dates = _ReportDate.group(days, photosByDate);
   final business = company ?? PayrollSettings.defaults();
   final generated = DateTime.now();
@@ -123,13 +141,21 @@ Future<Uint8List> buildReportPdf(
         ],
         for (final d in dates) ...[
           pw.SizedBox(height: 22),
-          ..._dateBlock(d, placeNames),
+          ..._dateBlock(d, placeNames, whereOverrides, maps),
         ],
       ];
     },
   ));
 
   return doc.save();
+}
+
+/// The street maps and client-map links for each promoter day, by
+/// [TEPromoterDay.key].
+class _MapInputs {
+  final Map<String, Uint8List> images;
+  final Map<String, String> links;
+  const _MapInputs(this.images, this.links);
 }
 
 Future<pw.MemoryImage?> _loadLogo() async {
@@ -521,7 +547,8 @@ pw.Widget _dailyTable(List<_ReportDate> dates) {
 // ONE DAY
 // ════════════════════════════════════════════════════════════════════════════
 
-List<pw.Widget> _dateBlock(_ReportDate d, Map<String, TEPlaceName> places) {
+List<pw.Widget> _dateBlock(_ReportDate d, Map<String, TEPlaceName> places,
+    Map<String, String> overrides, _MapInputs maps) {
   final hourly = d.hourly;
   final busiest = d.busiestHour;
 
@@ -585,12 +612,14 @@ List<pw.Widget> _dateBlock(_ReportDate d, Map<String, TEPlaceName> places) {
     _keepTogether(head),
     if (d.shifts.isNotEmpty) ...[
       pw.SizedBox(height: 12),
-      _keepTogether(_teamTable(d, places)),
+      _keepTogether(_teamTable(d, places, overrides)),
     ],
-    ..._timelines(d),
+    ..._promoterBlocks(d, places, overrides, maps),
     if (d.photos.isNotEmpty) ...[
-      pw.SizedBox(height: 12),
-      _photos(d),
+      // Clear room after the last promoter's figures, so the photos read
+      // as their own section.
+      pw.SizedBox(height: 40),
+      ..._photos(d),
     ],
   ];
 }
@@ -608,14 +637,30 @@ List<TEHotspot> teWorkSpots(TETrackAnalysis a) {
   return big.isEmpty ? [sorted.first] : big;
 }
 
-/// The "Where worked" cell: each intersection worked, one per line.
-pw.Widget _whereCell(TETrackAnalysis a, Map<String, TEPlaceName> places) {
-  final intersections = <String>[];
+/// The looked-up intersection for each spot where [a] was worked. Empty when
+/// nothing came back.
+List<String> teAutoWhere(TETrackAnalysis a, Map<String, TEPlaceName> places) {
+  final names = <String>[];
   for (final spot in teWorkSpots(a)) {
-    final i = places[tePlaceKey(spot.centre.latitude, spot.centre.longitude)]
-        ?.intersection;
-    if (i != null && !intersections.contains(i)) intersections.add(i);
+    final name =
+        places[tePlaceKey(spot.centre.latitude, spot.centre.longitude)]
+            ?.intersection;
+    if (name != null && !names.contains(name)) names.add(name);
   }
+  return names;
+}
+
+/// The "Where worked" cell: each place worked, one per line — the hand-typed
+/// text when there is some, otherwise the looked-up names.
+pw.Widget _whereCell(TEPromoterDay day, Map<String, TEPlaceName> places,
+    Map<String, String> overrides) {
+  final override = overrides[day.key];
+  final intersections = override != null
+      ? [
+          for (final line in override.split('\n'))
+            if (line.trim().isNotEmpty) line.trim(),
+        ]
+      : teAutoWhere(day.analysis, places);
   if (intersections.isEmpty) return _cell('—');
 
   return pw.Padding(
@@ -631,7 +676,8 @@ pw.Widget _whereCell(TETrackAnalysis a, Map<String, TEPlaceName> places) {
 
 /// Each promoter's figures for the day. The average counts only time spent
 /// working an intersection, so walking between spots doesn't dilute it.
-pw.Widget _teamTable(_ReportDate d, Map<String, TEPlaceName> places) {
+pw.Widget _teamTable(_ReportDate d, Map<String, TEPlaceName> places,
+    Map<String, String> overrides) {
   return pw.Column(
     crossAxisAlignment: pw.CrossAxisAlignment.start,
     children: [
@@ -660,7 +706,7 @@ pw.Widget _teamTable(_ReportDate d, Map<String, TEPlaceName> places) {
                 verticalAlignment: pw.TableCellVerticalAlignment.top,
                 children: [
                   _cell(d.shifts[i].distributor.name, bold: true),
-                  _whereCell(a, places),
+                  _whereCell(d.shifts[i], places, overrides),
                   _cell(_thousands(a.totalHandouts), right: true, bold: true),
                   _cell(a.isEmpty ? '—' : a.distanceKm.toStringAsFixed(1),
                       right: true),
@@ -679,60 +725,288 @@ pw.Widget _teamTable(_ReportDate d, Map<String, TEPlaceName> places) {
   );
 }
 
-// ── Flyers and speed over the shift — one timeline per promoter ─────────────
+// ── Each promoter under their own heading: maps, link, timeline ─────────────
 
-List<pw.Widget> _timelines(_ReportDate d) {
-  final charted = d.shifts.where((s) => !s.analysis.isEmpty).toList();
-  if (charted.isEmpty) return const [];
-  final any = [for (final s in charted) s.analysis];
+/// Each half-width map, and the gap between two side by side.
+const double _mapGap = 10;
+const double _mapW = (_contentW - _mapGap) / 2;
+const double _mapH = _mapW * teMapHeight / teMapWidth;
+
+List<pw.Widget> _promoterBlocks(_ReportDate d, Map<String, TEPlaceName> places,
+    Map<String, String> overrides, _MapInputs maps) {
+  final blocks = <(TEPromoterDay, TEMapRoute, List<TEReportMap>, int)>[];
+  for (final s in d.shifts) {
+    final route = teMapRoute(s);
+    final shown = teReportMaps(route);
+    if (shown.isEmpty && s.analysis.isEmpty) continue;
+    final more = teMapPositions(route).length - shown.length;
+    blocks.add((s, route, shown, math.max(0, more)));
+  }
+  if (blocks.isEmpty) return const [];
+  final charted = [
+    for (final b in blocks)
+      if (!b.$1.analysis.isEmpty) b.$1.analysis,
+  ];
 
   return [
-    pw.SizedBox(height: 12),
-    for (var i = 0; i < charted.length; i++) ...[
-      if (i > 0) pw.SizedBox(height: 10),
-      _keepTogether(pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: [
-          // The eyebrow rides with the first chart so it never sits alone.
-          if (i == 0) ...[
-            _eyebrow('Flyers and speed over the shift'),
-            pw.SizedBox(height: 5),
-          ],
-          pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.end,
-            children: [
-              pw.Text(charted[i].distributor.name,
-                  style: _style(size: 9, bold: true)),
-              pw.SizedBox(width: 8),
-              pw.Text(
-                '${_thousands(charted[i].analysis.totalHandouts)} Flyers   ·   '
-                'Top Speed ${_topWalkingSpeed(charted[i].analysis).toStringAsFixed(1)} km/h',
-                style: _style(size: 7.5, color: _C.muted),
+    for (var i = 0; i < blocks.length; i++) ...[
+      // Room above each heading marks where one promoter's section starts.
+      pw.SizedBox(height: 22),
+      () {
+        final (shift, route, shown, more) = blocks[i];
+        final a = shift.analysis;
+        final link = maps.links[shift.key] ?? '';
+        final hasStreetMaps = [
+          for (var m = 0; m < shown.length; m++)
+            maps.images[teReportMapKey(shift, m)],
+        ].every((img) => img != null);
+        final cells = [
+          for (var m = 0; m < shown.length; m++)
+            _mapCell(
+              route,
+              shown[m],
+              maps.images[teReportMapKey(shift, m)],
+              link,
+              _positionCaption(shift, shown[m], m, places, overrides),
+            ),
+        ];
+
+        return _keepTogether(pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            _promoterHeading(shift),
+            pw.SizedBox(height: 8),
+            if (cells.length >= 2) ...[
+              pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  cells[0],
+                  pw.SizedBox(width: _mapGap),
+                  cells[1],
+                ],
+              ),
+              pw.SizedBox(height: 5),
+              pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.center,
+                children: [
+                  pw.Expanded(
+                    child: pw.Wrap(
+                      spacing: 14,
+                      crossAxisAlignment: pw.WrapCrossAlignment.center,
+                      children: [
+                        _routeLegend(route, hasStreetMap: hasStreetMaps),
+                        if (more > 0)
+                          pw.Text(
+                              '+$more more position${more == 1 ? '' : 's'} '
+                              'on the interactive map',
+                              style: _style(size: 7, color: _C.muted)),
+                      ],
+                    ),
+                  ),
+                  if (link.isNotEmpty) _mapLink(link),
+                ],
+              ),
+            ] else if (cells.length == 1)
+              // One position: the map on the left, where and how to see
+              // more beside it.
+              pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  cells[0],
+                  pw.SizedBox(width: _mapGap + 6),
+                  pw.Expanded(
+                    child: _mapSidePanel(shift, route, places, overrides,
+                        link: link, hasStreetMap: hasStreetMaps),
+                  ),
+                ],
+              ),
+            if (!a.isEmpty) ...[
+              pw.SizedBox(height: 8),
+              pw.CustomPaint(
+                size: const PdfPoint(_contentW, _promoterTimelineH),
+                painter: (canvas, size) => _paintTimeline(canvas, size, a),
               ),
             ],
-          ),
-          pw.SizedBox(height: 3),
-          pw.CustomPaint(
-            size: const PdfPoint(_contentW, _timelineH),
-            painter: (canvas, size) =>
-                _paintTimeline(canvas, size, charted[i].analysis),
-          ),
-          // The legend rides with the last chart so it can't be stranded at
-          // the top of the next page.
-          if (i == charted.length - 1) ...[
-            pw.SizedBox(height: 6),
-            _timelineLegend(any),
+            // The timeline legend rides with the last promoter so it can't be
+            // stranded at the top of the next page.
+            if (i == blocks.length - 1 && charted.isNotEmpty) ...[
+              pw.SizedBox(height: 6),
+              _timelineLegend(charted),
+            ],
           ],
-        ],
-      )),
+        ));
+      }(),
     ],
   ];
 }
 
+/// "Talent – 13 Oct 2026" and the day in figures, bold, over an orange
+/// rule — the heading of the promoter's section.
+pw.Widget _promoterHeading(TEPromoterDay shift) {
+  final a = shift.analysis;
+  final stats = [
+    '${_thousands(a.totalHandouts)} flyers',
+    if (!a.isEmpty) '${a.distanceKm.toStringAsFixed(1)} km walked',
+    if (!a.isEmpty)
+      'top speed ${_topWalkingSpeed(a).toStringAsFixed(1)} km/h',
+  ].join('   ·   ');
+  return pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.start,
+    children: [
+      pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.end,
+        children: [
+          pw.Expanded(
+            child: pw.RichText(
+              text: pw.TextSpan(
+                style: _style(size: 12.5, bold: true),
+                children: [
+                  pw.TextSpan(text: shift.distributor.name),
+                  pw.TextSpan(
+                    text: '  –  ${_shortDayFmt.format(shift.date)}',
+                    style: _style(
+                        size: 12.5, bold: true, color: _C.secondaryInk),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          pw.Text(stats,
+              style: _style(size: 8.5, bold: true, color: _C.secondaryInk)),
+        ],
+      ),
+      pw.SizedBox(height: 3),
+      pw.Container(height: 1, color: _C.flyers),
+    ],
+  );
+}
+
+/// One half-width map with its caption: the intersection and how many
+/// flyers went out there.
+pw.Widget _mapCell(TEMapRoute route, TEReportMap map, Uint8List? image,
+    String link, String? caption) {
+  final flyers = map.position?.flyers.length;
+  final mapWidget = _routeMap(route, map.frame, image);
+  return pw.SizedBox(
+    width: _mapW,
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        link.isEmpty
+            ? mapWidget
+            : pw.UrlLink(destination: link, child: mapWidget),
+        if (caption != null || flyers != null) ...[
+          pw.SizedBox(height: 3),
+          pw.RichText(
+            maxLines: 1,
+            overflow: pw.TextOverflow.clip,
+            text: pw.TextSpan(children: [
+              if (caption != null)
+                pw.TextSpan(
+                    text: caption,
+                    style: _style(size: 7.5, bold: true)),
+              if (flyers != null)
+                pw.TextSpan(
+                    text: '${caption == null ? '' : '   ·   '}'
+                        '${_thousands(flyers)} flyers here',
+                    style: _style(size: 7.5, color: _C.muted)),
+            ]),
+          ),
+        ],
+      ],
+    ),
+  );
+}
+
+/// The intersection map [index] of [shift] is zoomed in on: the typed-in
+/// "Where worked" line in the same place when there is typed text, else the
+/// looked-up name of the work spot at that position.
+String? _positionCaption(TEPromoterDay shift, TEReportMap map, int index,
+    Map<String, TEPlaceName> places, Map<String, String> overrides) {
+  final typed = overrides[shift.key];
+  if (typed != null) {
+    final lines = [
+      for (final l in typed.split('\n'))
+        if (l.trim().isNotEmpty) l.trim(),
+    ];
+    return index < lines.length ? lines[index] : null;
+  }
+  final position = map.position;
+  if (position == null) return null;
+  for (final spot in teWorkSpots(shift.analysis)) {
+    final c = (spot.centre.latitude, spot.centre.longitude);
+    if (teMetres(c, position.centre) > 300) continue;
+    final name = places[tePlaceKey(c.$1, c.$2)]?.intersection;
+    if (name != null) return name;
+  }
+  return null;
+}
+
+/// Beside a lone map: where the promoter worked, the map key, and the link
+/// to the interactive map.
+pw.Widget _mapSidePanel(TEPromoterDay shift, TEMapRoute route,
+    Map<String, TEPlaceName> places, Map<String, String> overrides,
+    {required String link, required bool hasStreetMap}) {
+  final typed = overrides[shift.key];
+  final where = typed != null
+      ? [
+          for (final l in typed.split('\n'))
+            if (l.trim().isNotEmpty) l.trim(),
+        ]
+      : teAutoWhere(shift.analysis, places);
+  return pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.start,
+    children: [
+      _eyebrow('Where worked'),
+      pw.SizedBox(height: 4),
+      if (where.isEmpty)
+        pw.Text('—', style: _style(size: 9))
+      else
+        for (final w in where)
+          pw.Padding(
+            padding: const pw.EdgeInsets.only(bottom: 2),
+            child: pw.Text(w, style: _style(size: 9, bold: true)),
+          ),
+      pw.SizedBox(height: 14),
+      _eyebrow('On the map'),
+      pw.SizedBox(height: 4),
+      _routeLegend(route, hasStreetMap: hasStreetMap),
+      if (link.isNotEmpty) ...[
+        pw.SizedBox(height: 14),
+        _eyebrow('See it live'),
+        pw.SizedBox(height: 4),
+        _mapLink(link),
+      ],
+    ],
+  );
+}
+
+/// "Interactive map: maps.communitylifemedia.co.za/map/x7Kp2m",
+/// clickable, and short enough to type in from a printed copy.
+pw.Widget _mapLink(String url) {
+  final shown = url.replaceFirst(RegExp(r'^https?://'), '');
+  return pw.UrlLink(
+    destination: url,
+    child: pw.RichText(
+      text: pw.TextSpan(
+        style: _style(size: 7.5, color: _C.secondaryInk),
+        children: [
+          const pw.TextSpan(text: 'Interactive map:  '),
+          pw.TextSpan(
+            text: shown,
+            style: _style(size: 7.5, bold: true, color: _C.speed).copyWith(
+              decoration: pw.TextDecoration.underline,
+              decorationColor: _C.speed,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 /// One legend for all of the day's timelines, listing only what appears.
 pw.Widget _timelineLegend(List<TETrackAnalysis> analyses) {
-  bool has(TEStopKind k) =>
-      analyses.any((a) => a.stops.any((s) => s.kind == k));
   return pw.Wrap(
     spacing: 14,
     runSpacing: 4,
@@ -774,29 +1048,76 @@ pw.Widget _legendItem(
       ],
     );
 
-pw.Widget _photos(_ReportDate d) {
+/// "Photos – 22 Oct 2026" over an orange rule, then the date's photos in
+/// rows. The heading and the first two rows travel together so the heading
+/// is never left alone at the foot of a page; later rows flow on.
+List<pw.Widget> _photos(_ReportDate d) {
   // One shared height, each photo as wide as its own aspect ratio needs, so
   // nothing the client took is cropped away. Small enough to keep the report
   // short, big enough to see what was handed out and where.
   const gutter = 6.0;
   const double h = 110;
-  final grid = pw.Wrap(
-    spacing: gutter,
-    runSpacing: gutter,
-    children: [
-      for (final photo in d.photos) _photo(pw.MemoryImage(photo.bytes), h),
-    ],
-  );
-  final column = pw.Column(
-    crossAxisAlignment: pw.CrossAxisAlignment.start,
-    children: [
-      pw.SizedBox(height: 4),
-      grid,
-    ],
-  );
-  // Two rows fit anywhere; beyond that the grid has to be allowed to flow.
-  return d.photos.length > 8 ? column : _keepTogether(column);
+  // Laid out in rows here rather than by a Wrap so the page can break
+  // between rows and the heading can be kept with the first of them.
+  final rows = <List<pw.Widget>>[];
+  var rowW = 0.0;
+  for (final photo in d.photos) {
+    final image = pw.MemoryImage(photo.bytes);
+    final w = math.min(_contentW, h * (image.width ?? 4) / (image.height ?? 3));
+    if (rows.isEmpty || rowW + gutter + w > _contentW) {
+      rows.add([]);
+      rowW = w;
+    } else {
+      rowW += gutter + w;
+    }
+    rows.last.add(_photo(image, h));
+  }
+  pw.Widget row(List<pw.Widget> photos) => pw.Padding(
+        padding: const pw.EdgeInsets.only(top: gutter),
+        child: pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            for (var i = 0; i < photos.length; i++) ...[
+              if (i > 0) pw.SizedBox(width: gutter),
+              photos[i],
+            ],
+          ],
+        ),
+      );
+  return [
+    _keepTogether(pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        _photosHeading(d),
+        pw.SizedBox(height: 2),
+        for (final r in rows.take(2)) row(r),
+      ],
+    )),
+    for (final r in rows.skip(2)) row(r),
+  ];
 }
+
+/// Styled like [_promoterHeading]: bold title, the date beside it in grey,
+/// an orange rule beneath.
+pw.Widget _photosHeading(_ReportDate d) => pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.RichText(
+          text: pw.TextSpan(
+            style: _style(size: 12.5, bold: true),
+            children: [
+              const pw.TextSpan(text: 'Photos'),
+              pw.TextSpan(
+                text: '  –  ${_shortDayFmt.format(d.date)}',
+                style: _style(size: 12.5, bold: true, color: _C.secondaryInk),
+              ),
+            ],
+          ),
+        ),
+        pw.SizedBox(height: 3),
+        pw.Container(height: 1, color: _C.flyers),
+      ],
+    );
 
 /// [image] at height [h] and its natural width — the width already accounts
 /// for EXIF rotation. A panorama too wide for the page is scaled down to the
@@ -816,10 +1137,126 @@ pw.Widget _photo(pw.MemoryImage image, double h) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ROUTE MAPS — half the page wide, zoomed in on one position each
+// ════════════════════════════════════════════════════════════════════════════
+
+pw.Widget _routeMap(TEMapRoute route, TEMapFrame frame, Uint8List? image) {
+  const w = _mapW;
+  const h = _mapH;
+  return pw.ClipRRect(
+    horizontalRadius: 3,
+    verticalRadius: 3,
+    child: pw.Container(
+      width: w,
+      height: h,
+      color: _C.band,
+      child: pw.Stack(
+        children: [
+          if (image != null)
+            pw.Image(pw.MemoryImage(image),
+                width: w, height: h, fit: pw.BoxFit.fill),
+          pw.CustomPaint(
+            size: PdfPoint(w, h),
+            painter: (canvas, size) => _paintRoute(canvas, size, route, frame),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// The route as a blue line with a white casing, so it reads on any street
+/// colour. Flyers aren't marked — the route says enough, and the maps are
+/// already zoomed in on where they went out. The `pdf` canvas has its
+/// origin bottom-left, so map pixels are flipped.
+void _paintRoute(
+  PdfGraphics canvas,
+  PdfPoint size,
+  TEMapRoute route,
+  TEMapFrame frame,
+) {
+  final k = size.x / frame.width;
+  (double, double) at((double, double) p) {
+    final (x, y) = frame.toPixel(p.$1, p.$2);
+    return (x * k, size.y - y * k);
+  }
+
+  // A map zoomed in on one position clips the rest of the day away; what
+  // lies well off it isn't written into the file at all.
+  const margin = 24.0;
+  bool onMap((double, double) q) =>
+      q.$1 > -margin &&
+      q.$1 < size.x + margin &&
+      q.$2 > -margin &&
+      q.$2 < size.y + margin;
+
+  // Each segment once, thinned to points at least half a point apart — a
+  // full shift is thousands of fixes, far more than the line can show — and
+  // broken where it runs off the map.
+  final lines = <List<(double, double)>>[];
+  for (final seg in route.segments) {
+    var line = <(double, double)>[];
+    (double, double)? prev;
+    for (final p in seg) {
+      final q = at(p);
+      final inside = onMap(q);
+      if (!inside && (prev == null || !onMap(prev))) {
+        if (line.length >= 2) lines.add(line);
+        line = [];
+        prev = q;
+        continue;
+      }
+      if (line.isEmpty && prev != null) line.add(prev);
+      prev = q;
+      if (line.isNotEmpty &&
+          (q.$1 - line.last.$1).abs() + (q.$2 - line.last.$2).abs() < 0.5) {
+        continue;
+      }
+      line.add(q);
+    }
+    if (line.length >= 2) lines.add(line);
+  }
+
+  void strokeLines(PdfColor color, double width) {
+    canvas
+      ..setStrokeColor(color)
+      ..setLineWidth(width)
+      ..setLineJoin(PdfLineJoin.round)
+      ..setLineCap(PdfLineCap.round);
+    for (final line in lines) {
+      canvas.moveTo(line.first.$1, line.first.$2);
+      for (final q in line.skip(1)) {
+        canvas.lineTo(q.$1, q.$2);
+      }
+    }
+    canvas.strokePath();
+  }
+
+  strokeLines(_C.page, 3.4);
+  strokeLines(_C.speed, 1.7);
+}
+
+pw.Widget _routeLegend(TEMapRoute route, {required bool hasStreetMap}) {
+  return pw.Wrap(
+    spacing: 14,
+    runSpacing: 4,
+    children: [
+      if (route.segments.isNotEmpty)
+        _legendItem(_C.speed, 'Route walked', line: true),
+      if (!hasStreetMap)
+        pw.Text('Street map unavailable',
+            style: _style(size: 7, color: _C.muted)),
+    ],
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // TIMELINE — handouts over speed, one clock
 // ════════════════════════════════════════════════════════════════════════════
 
-const double _timelineH = 110;
+/// Under a promoter's maps — short enough that two promoters' sections
+/// share an A4 page.
+const double _promoterTimelineH = 76;
 
 /// One plot per promoter with both lines drawn from the same zero baseline
 /// and overlapping: speed reads off the left-hand scale, flyers' running

@@ -2,6 +2,7 @@
 // Entry point for the trackEditor flavor.
 // Uses the main clmschedule Firebase project — NOT a separate Firebase app.
 
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -62,6 +63,7 @@ class _TrackEditorAppState extends riverpod.ConsumerState<TrackEditorApp> {
       title: FlavorConfig.instance.appName,
       navigatorObservers: [ref.read(mapModalObserverRiverpod)],
       debugShowCheckedModeBanner: false,
+      builder: AppToastHost.builder,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueGrey),
         useMaterial3: true,

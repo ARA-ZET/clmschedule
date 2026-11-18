@@ -5,6 +5,10 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../models/regular_client.dart';
+import '../shareable_maps/models/shareable_map.dart';
+import '../shareable_maps/services/shareable_maps_firestore_service.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 
 class RegularClientService {
   static const String collection = 'regularClients';
@@ -41,6 +45,8 @@ class RegularClientService {
   Future<String> add(RegularClient client) async {
     final ref = await _col.add({
       ...client.toMap(),
+      if (client.map != null)
+        'map': RegularClient.mapToFirestore(client.map!),
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
@@ -54,8 +60,45 @@ class RegularClientService {
     }, SetOptions(merge: true));
   }
 
+  /// Write [client]'s own map alone, leaving the plan as it is.
+  Future<void> saveMap(String id, ShareableMap map) async {
+    await _col.doc(id).set({
+      'map': RegularClient.mapToFirestore(map),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  /// A copy of gallery map [mapId] for a regular client to own. Only reads
+  /// the gallery map: it belongs to a real client and is never changed here.
+  Future<ShareableMap> copyFromGallery(String monthKey, String mapId,
+      {ShareableMapsFirestoreService? maps}) async {
+    final source = await (maps ?? ShareableMapsFirestoreService())
+        .getMap(monthKey, mapId);
+    if (source == null) {
+      throw StateError('That map is no longer in the gallery.');
+    }
+    return RegularClient.templateFrom(source);
+  }
+
+  /// [client] with its own map, copying it from the gallery map it was made
+  /// from when it predates plans owning their map. The copy keeps the
+  /// polygon ids, so the plan still matches it.
+  Future<RegularClient> ensureOwnMap(RegularClient client,
+      {ShareableMapsFirestoreService? maps}) async {
+    if (client.map != null) return client;
+    final copy =
+        await copyFromGallery(client.mapMonthKey, client.mapId, maps: maps);
+    await saveMap(client.id, copy);
+    return client.copyWith(map: copy);
+  }
+
+  /// Moves the client (with its own map copy) to the Recycle Bin.
   Future<void> delete(String id) async {
     if (id.isEmpty) return;
-    await _col.doc(id).delete();
+    await RecycleBinWriter().moveDocToBin(
+      _col.doc(id),
+      type: RecycleBinType.regularClient,
+      label: (d) => binLabel(d, 'regular client'),
+    );
   }
 }

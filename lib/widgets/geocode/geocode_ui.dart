@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/geocode_detail.dart';
@@ -402,8 +403,8 @@ void showGeocodeSnack(
 }) {
   if (!context.mounted) return;
   ScaffoldMessenger.of(context)
-    ..hideCurrentSnackBar()
-    ..showSnackBar(
+    ..hideCurrentToast()
+    ..showToast(
       SnackBar(
         content: Text(message),
         behavior: SnackBarBehavior.floating,

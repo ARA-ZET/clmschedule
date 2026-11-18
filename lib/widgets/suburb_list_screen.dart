@@ -1,3 +1,4 @@
+import 'package:clmschedule/utils/text_search.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -82,10 +83,9 @@ class _SuburbListScreenState
   }
 
   List<String> get _visibleSuburbs {
-    final query = _search.trim().toLowerCase();
-    final names = _suburbStats.keys
-        .where((s) => query.isEmpty || s.toLowerCase().contains(query))
-        .toList();
+    final search = TextSearch(_search);
+    final names =
+        _suburbStats.keys.where((s) => search.matches([s])).toList();
 
     names.sort((a, b) {
       final sa = _suburbStats[a]!;

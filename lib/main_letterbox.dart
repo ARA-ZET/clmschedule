@@ -7,6 +7,7 @@
 //
 //   flutter run -d chrome -t lib/main_letterbox.dart
 
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -51,6 +52,7 @@ class LetterboxApp extends StatelessWidget {
             .read(mapModalObserverRiverpod),
       ],
       debugShowCheckedModeBanner: false,
+      builder: AppToastHost.builder,
       theme: LetterboxTheme.light(),
       home: const AuthGate(child: LetterboxCurationPage()),
     );

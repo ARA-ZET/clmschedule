@@ -8,11 +8,16 @@ class WaypointMeta {
   final String description;
   final LatLng position;
 
+  /// The GPX file the waypoint came from — it names the distributor and the
+  /// day, which find the waypoint's photo. Empty when unknown.
+  final String sourceFile;
+
   const WaypointMeta({
     required this.id,
     required this.name,
     required this.description,
     required this.position,
+    this.sourceFile = '',
   });
 }
 

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -280,8 +281,8 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
 
   void _showMinimumPointsMessage() {
     ScaffoldMessenger.maybeOf(context)
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(
+      ?..hideCurrentToast()
+      ..showToast(const SnackBar(
         content: Text('An area needs at least 3 points'),
         duration: Duration(seconds: 2),
       ));
@@ -1218,7 +1219,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
       _updateMapView();
 
       // Show success message
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text(widget.jobId != null
               ? 'Changes saved to database!'
@@ -1228,7 +1229,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
         ),
       );
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text('Error saving changes: $e'),
           backgroundColor: Colors.red,
@@ -1574,7 +1575,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
 
                               if (jobUpdated) {
                                 // Show success message
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                ScaffoldMessenger.of(context).showToast(
                                   SnackBar(
                                     content: Text(
                                         'Area created and saved to database! (Total: ${mapViewProvider.customPolygons.length} areas)'),
@@ -1592,7 +1593,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                               mapViewProvider
                                   .markAsInitiallyPositioned(); // Mark as modified
 
-                              ScaffoldMessenger.of(context).showSnackBar(
+                              ScaffoldMessenger.of(context).showToast(
                                 SnackBar(
                                   content: Text(
                                       'Area created! (${mapViewProvider.customPolygons.length} total) - Click "Save Changes" to save to database.'),
@@ -1603,7 +1604,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
                             }
                           } catch (e) {
                             print('Error creating area: $e');
-                            ScaffoldMessenger.of(context).showSnackBar(
+                            ScaffoldMessenger.of(context).showToast(
                               SnackBar(
                                 content: Text('Error creating area: $e'),
                                 backgroundColor: Colors.red,
@@ -2154,7 +2155,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
               newTracks.addAll(gpxData.tracks);
             } catch (e) {
               if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context).showToast(
                   SnackBar(
                     content: Text('Failed to parse ${file.name}: $e'),
                     backgroundColor: Colors.red,
@@ -2172,7 +2173,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
           _updateMapView();
 
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context).showToast(
               SnackBar(
                 content:
                     Text('Imported ${newTracks.length} tracks successfully'),
@@ -2187,7 +2188,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error importing GPX files: $e'),
             backgroundColor: Colors.red,
@@ -2278,7 +2279,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
         _updateMapView();
 
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(
               content:
                   Text('Loaded ${polygons.length} polygon(s) from $fileName'),
@@ -2288,7 +2289,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
         }
       } else {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             const SnackBar(
               content: Text('No polygons found in the KML file'),
               backgroundColor: Colors.orange,
@@ -2298,7 +2299,7 @@ class _UpdatedMapViewState extends riverpod.ConsumerState<UpdatedMapView> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error processing KML: ${e.toString()}'),
             backgroundColor: Colors.red,

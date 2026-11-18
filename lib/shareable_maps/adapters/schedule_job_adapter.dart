@@ -7,11 +7,13 @@ import '../../models/job.dart';
 import '../../models/job_area_link.dart';
 import '../../models/job_linked_map.dart';
 import '../../providers/unfinished_work_areas_provider.dart';
+import '../../services/job_client_bookings.dart';
 import '../../services/job_cloud_map_data_service.dart';
 import '../models/map_layer.dart';
 import '../models/map_point.dart';
 import '../models/map_polyline.dart';
 import '../models/shareable_map.dart';
+import '../providers/shareable_map_provider.dart' show PointPinRule;
 import '../services/shareable_maps_firestore_service.dart';
 import '../utils/linked_map_polygons.dart';
 import 'map_data_adapter.dart';
@@ -111,6 +113,25 @@ class ScheduleJobAdapter extends MapDataAdapter {
     await _onLinkExistingMap?.call(mapId, monthKey, mapName);
   }
 
+  /// Draws the job's points as Print Map does — the job's picture and time
+  /// on Junk & Stuff / Happy Sun points, the drop-off sign behind them —
+  /// from its clients' Job List [bookings]. Asked of the live points, so
+  /// points added or changed in the editor follow.
+  static PointPinRule pinRule(JobClientBookings bookings) => PointPinRule(
+        layerIds: const {kJobMapsLayerId, kAllocatedAreasLayerId},
+        pinFor: (point) {
+          final p = CustomPolygon(
+            name: point.name,
+            description: point.description,
+            points: [point.position],
+            color: point.color,
+            type: MapElementType.point,
+            pointCategory: point.pointCategory,
+          );
+          return (style: bookings.styleFor(p), zIndex: bookings.layerFor(p));
+        },
+      );
+
   /// True once at least one client map is linked, so the editor can offer
   /// its polygons and tracks.
   bool get hasLinkedMap => _links.isNotEmpty;
@@ -124,18 +145,28 @@ class ScheduleJobAdapter extends MapDataAdapter {
   @override
   bool get hasReferenceTracks => _links.isNotEmpty;
 
+  /// Linked client maps read this editing session, by map id. The editor
+  /// asks for them at load, again when the tracks overlay is switched on
+  /// and again after linking a map; each map is downloaded once.
+  final Map<String, Future<ShareableMap?>> _linkedMapReads = {};
+
   Future<List<ShareableMap>> _loadLinkedMaps() async {
-    final maps = <ShareableMap>[];
-    for (final link in _links) {
-      try {
-        final map = await ShareableMapsFirestoreService()
-            .getMap(link.monthKey, link.mapId);
-        if (map != null) maps.add(map);
-      } catch (e) {
-        debugPrint('[ScheduleJobAdapter] linked map ${link.mapId}: $e');
-      }
-    }
-    return maps;
+    // Every linked map is read side by side, not one after another.
+    final maps = await Future.wait([
+      for (final link in _links)
+        _linkedMapReads.putIfAbsent(link.mapId, () async {
+          try {
+            return await ShareableMapsFirestoreService()
+                .getMap(link.monthKey, link.mapId);
+          } catch (e) {
+            debugPrint('[ScheduleJobAdapter] linked map ${link.mapId}: $e');
+            // Not kept: the next ask reads it again.
+            _linkedMapReads.remove(link.mapId);
+            return null;
+          }
+        }),
+    ]);
+    return maps.whereType<ShareableMap>().toList();
   }
 
   @override
@@ -177,19 +208,26 @@ class ScheduleJobAdapter extends MapDataAdapter {
   Future<MapLayer?> loadReferenceTracksLayer() async {
     if (_links.isEmpty) return null;
     final maps = await _loadLinkedMaps();
-    final tracks = <MapPolyline>[];
-    for (final map in maps) {
-      final folderPath = map.cloudFolderPaths.isNotEmpty
-          ? map.cloudFolderPaths.first
-          : map.storageFolderPath;
-      if (folderPath == null || folderPath.isEmpty) continue;
-      try {
-        tracks.addAll(
-            await JobCloudMapDataService().fetchCompiledTracks(folderPath));
-      } catch (e) {
-        debugPrint('[ScheduleJobAdapter] tracks for ${map.name}: $e');
-      }
-    }
+    // Each map's tracks downloaded side by side.
+    final perMap = await Future.wait([
+      for (final map in maps)
+        () async {
+          final folderPath = map.cloudFolderPaths.isNotEmpty
+              ? map.cloudFolderPaths.first
+              : map.storageFolderPath;
+          if (folderPath == null || folderPath.isEmpty) {
+            return const <MapPolyline>[];
+          }
+          try {
+            return await JobCloudMapDataService()
+                .fetchCompiledTracks(folderPath);
+          } catch (e) {
+            debugPrint('[ScheduleJobAdapter] tracks for ${map.name}: $e');
+            return const <MapPolyline>[];
+          }
+        }(),
+    ]);
+    final tracks = <MapPolyline>[for (final t in perMap) ...t];
     if (tracks.isEmpty) return null;
 
     final now = DateTime.now();
@@ -361,7 +399,21 @@ class ScheduleJobAdapter extends MapDataAdapter {
                 'not saved; edit the client map instead',
             order: 1,
             defaultColor: Colors.teal,
-            polygons: allocatedAreas,
+            polygons: allocatedAreas.where((p) => !p.isPoint).toList(),
+            points: [
+              for (final p in allocatedAreas)
+                if (p.isPoint && p.points.isNotEmpty)
+                  MapPoint(
+                    id: p.id!,
+                    name: p.name,
+                    description: p.description,
+                    position: p.points.first,
+                    color: p.color,
+                    pointCategory: p.pointCategory,
+                    createdAt: now,
+                    updatedAt: now,
+                  ),
+            ],
             createdAt: now,
             updatedAt: now,
           ),
@@ -425,6 +477,9 @@ class ScheduleJobAdapter extends MapDataAdapter {
         map.layers.where((l) => l.id == kUnfinishedAreasLayerId).toList();
 
     // --- Route unfinished polygon edits back to UnfinishedWorkAreasProvider.
+    // They are separate docs from the job, so they save alongside the job's
+    // own write below instead of each one before it.
+    final unfinishedSaves = <Future<void>>[];
     if (_unfinishedProvider != null && unfinishedLayers.isNotEmpty) {
       final polysByItemId = <String, List<CustomPolygon>>{};
       for (final layer in unfinishedLayers) {
@@ -438,11 +493,10 @@ class ScheduleJobAdapter extends MapDataAdapter {
         }
       }
       for (final entry in polysByItemId.entries) {
-        try {
-          await _unfinishedProvider.updateItemWorkMaps(entry.key, entry.value);
-        } catch (e) {
-          debugPrint('[ScheduleJobAdapter.save] Failed to sync unfinished $e');
-        }
+        unfinishedSaves.add(_unfinishedProvider
+            .updateItemWorkMaps(entry.key, entry.value)
+            .catchError((Object e) => debugPrint(
+                '[ScheduleJobAdapter.save] Failed to sync unfinished $e')));
       }
     }
 
@@ -500,6 +554,9 @@ class ScheduleJobAdapter extends MapDataAdapter {
         .toSet()
         .toList();
 
-    await _onSave(allWorkMaps, workingAreaNames);
+    await Future.wait([
+      _onSave(allWorkMaps, workingAreaNames),
+      ...unfinishedSaves,
+    ]);
   }
 }

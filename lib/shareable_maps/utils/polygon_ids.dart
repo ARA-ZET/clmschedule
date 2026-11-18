@@ -1,7 +1,8 @@
 // shareable_maps/utils/polygon_ids.dart
 //
-// Stable ids for the polygons of a stored client map, so a schedule job can
-// point at one polygon (`JobAreaLink`) instead of holding a copy of it.
+// Stable ids for the polygons — and points — of a stored client map, so a
+// schedule job can point at one (`JobAreaLink`) instead of holding a copy.
+// Points (traffic-light or handout spots) are allocated like areas.
 //
 // The editor addresses polygons by their position in the layer, which shifts
 // whenever an earlier one is deleted — useless as a reference. Every polygon
@@ -16,8 +17,11 @@
 // Only stored client maps get ids. The work-area, client-area and suburb
 // libraries treat a missing id as "new polygon", so this is never applied to
 // the maps their adapters build.
+import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
+
 import '../../models/custom_polygon.dart';
 import '../models/map_layer.dart';
+import '../models/map_point.dart';
 
 /// Prefix of every id handed out here, so a stored id can be told apart from
 /// a library id (work area / suburb doc id) that arrived with an import.
@@ -49,6 +53,14 @@ String derivedPolygonId(CustomPolygon p) {
   return '$kPolygonIdPrefix${_stableHash(key.toString())}';
 }
 
+/// Prefix of a point id derived from its position.
+const String kPointIdPrefix = 'pt_';
+
+/// The id a stored point without one is given: a hash of its position.
+String derivedPointId(LatLng position) =>
+    '$kPointIdPrefix${_stableHash('point|${position.latitude.toStringAsFixed(6)},'
+        '${position.longitude.toStringAsFixed(6)}')}';
+
 /// [layers] with every polygon carrying an id that is unique across the
 /// whole map. Missing ids are derived from the outline; a repeated id (two
 /// copies of the same outline, or a polygon duplicated with `copyWith`) is
@@ -79,9 +91,29 @@ List<MapLayer> withStablePolygonIds(List<MapLayer> layers) {
         polys[i] = p.copyWith(id: id);
       }
     }
-    if (polys != null) {
+    // Points share the id space, so a link's id never names two things.
+    List<MapPoint>? points;
+    for (var i = 0; i < layer.points.length; i++) {
+      final p = layer.points[i];
+      final current = p.id;
+      var id = current.isEmpty ? derivedPointId(p.position) : current;
+      if (!used.add(id)) {
+        final base = id;
+        var n = 2;
+        while (!used.add('${base}_$n')) {
+          n++;
+        }
+        id = '${base}_$n';
+      }
+      if (id != current) {
+        points ??= List<MapPoint>.from(layer.points);
+        points[i] = p.copyWith(id: id, updatedAt: p.updatedAt);
+      }
+    }
+    if (polys != null || points != null) {
       changed = true;
-      out.add(layer.copyWith(polygons: polys, updatedAt: layer.updatedAt));
+      out.add(layer.copyWith(
+          polygons: polys, points: points, updatedAt: layer.updatedAt));
     } else {
       out.add(layer);
     }

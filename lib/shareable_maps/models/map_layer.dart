@@ -3,6 +3,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../models/custom_polygon.dart';
 import 'map_polyline.dart';
 import 'map_point.dart';
+import '../utils/polygon_ids.dart' show derivedPointId;
 
 /// Represents a layer in the map that can contain polygons, polylines, and points
 class MapLayer {
@@ -86,7 +87,16 @@ class MapLayer {
               [],
       points: (data['points'] as List<dynamic>?)?.asMap().entries.map((e) {
             final pointData = Map<String, dynamic>.from(e.value as Map);
-            final pointId = pointData['id'] as String? ?? 'point_${e.key}';
+            final stored = pointData['id'] as String? ?? '';
+            // Points saved before ids were stored get one from their
+            // position, so every device derives the same id until it is
+            // saved (see utils/polygon_ids.dart).
+            final pointId = stored.isNotEmpty
+                ? stored
+                : derivedPointId(LatLng(
+                    (pointData['latitude'] as num?)?.toDouble() ?? 0,
+                    (pointData['longitude'] as num?)?.toDouble() ?? 0,
+                  ));
             return MapPoint.fromMap(pointId, pointData);
           }).toList() ??
           [],
@@ -245,7 +255,9 @@ class MapLayer {
   ///
   /// [pointIconOverrides] is keyed by element id and takes precedence over
   /// [pointIcons], which is keyed by category — numbered route pins differ
-  /// per stop, so they can only be supplied per element.
+  /// per stop, so they can only be supplied per element. [placedPins], also
+  /// by element id, comes between the two: a descriptive pin with its own
+  /// anchor and stacking (the schedule's work areas map).
   List<Marker> getGoogleMapsMarkers({
     String? selectedElementId,
     Function(String pointId)? onTap,
@@ -253,6 +265,7 @@ class MapLayer {
     Function(String pointId, LatLng newPosition)? onDragEnd,
     Map<PointCategory, BitmapDescriptor>? pointIcons,
     Map<String, BitmapDescriptor>? pointIconOverrides,
+    Map<String, PlacedPin>? placedPins,
     bool useAdvancedMarkers = false,
     LatLngBounds? visibleBounds,
     bool? markerVisible,
@@ -267,6 +280,10 @@ class MapLayer {
         : points;
 
     for (final point in visiblePoints) {
+      final numbered = pointIconOverrides?[point.id];
+      // A numbered route pin outranks the descriptive one.
+      PlacedPin? placed;
+      if (numbered == null && placedPins != null) placed = placedPins[point.id];
       result.add(point.toGoogleMapsMarker(
         isSelected: point.id == selectedElementId,
         onTap: onTap != null ? () => onTap(point.id) : null,
@@ -278,8 +295,11 @@ class MapLayer {
         // A per-point override wins over the category icon: that is what
         // carries a numbered route pin, which is unique to each stop and
         // so cannot come from a per-category map.
-        customIcon:
-            pointIconOverrides?[point.id] ?? pointIcons?[point.pointCategory],
+        customIcon: numbered ??
+            placed?.icon ??
+            pointIcons?[point.pointCategory],
+        anchor: placed?.anchor ?? const Offset(0.5, 1.0),
+        zIndex: placed?.zIndex ?? 0,
         visible: visible,
       ));
     }

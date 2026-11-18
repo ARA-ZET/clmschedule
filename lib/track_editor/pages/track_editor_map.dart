@@ -1,4 +1,6 @@
 // track_editor/pages/track_editor_map.dart
+import 'package:clmschedule/utils/text_search.dart';
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -1189,7 +1191,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
           distributorId, trackDate);
       if (jobs.isEmpty) {
         _addDrawnPolygonToTab(name, clients, points);
-        messenger?.showSnackBar(const SnackBar(
+        messenger?.showToast(const SnackBar(
           content: Text('No job for this distributor on this day — polygon '
               'kept on this tab only, not saved.'),
           duration: Duration(seconds: 3),
@@ -1230,14 +1232,14 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
           .read(teProcessingRiverpod)
           .refreshTab(tabIndex, tabsP, scheduleP);
       if (!mounted) return;
-      messenger?.showSnackBar(SnackBar(
+      messenger?.showToast(SnackBar(
         content: Text('Added "$name" to ${tab.title}\'s work areas'),
         duration: const Duration(seconds: 2),
       ));
     } catch (e) {
       debugPrint('❌ _saveDrawnPolygonToDistributor: $e');
       if (!mounted) return;
-      messenger?.showSnackBar(SnackBar(
+      messenger?.showToast(SnackBar(
         content: Text('Failed to add to work areas: $e'),
         duration: const Duration(seconds: 3),
       ));
@@ -1575,7 +1577,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     );
     if (!mounted) return;
 
-    messenger.showSnackBar(SnackBar(
+    messenger.showToast(SnackBar(
       content: Text(result.isEmpty
           ? '"${area.name}" is already on this tab.'
           : toSchedule
@@ -1869,8 +1871,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     if (points == null || index < 0 || index >= points.length) return;
     if (points.length <= 3) {
       ScaffoldMessenger.maybeOf(context)
-        ?..hideCurrentSnackBar()
-        ..showSnackBar(const SnackBar(
+        ?..hideCurrentToast()
+        ..showToast(const SnackBar(
           content: Text('An area needs at least 3 points'),
           duration: Duration(seconds: 2),
         ));
@@ -1931,7 +1933,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       context,
       areaName: polygon.name.isEmpty ? 'this area' : polygon.name,
       area: polygon.points,
-      waypoints: waypoints,
+      positions: TELetterboxWriteProvider.positionsOf(waypoints),
       // The work area already knows who it is for and has a stable id — both
       // travel with it into Client Maps, so a re-survey refreshes that entry
       // rather than filing a second copy of the same ground.
@@ -1942,7 +1944,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     if (!changed) return;
 
     final writer = ref.read(teLetterboxWriteRiverpod);
-    messenger.showSnackBar(SnackBar(
+    messenger.showToast(SnackBar(
       content: Text(writer.result?.summary ??
           'Letterbox index restored to how it was before the update.'),
       duration: const Duration(seconds: 6),
@@ -1961,7 +1963,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     final restored = await writer.undoLastWrite();
     if (!mounted) return;
     ref.read(teLetterboxCheckRiverpod).invalidateSuburbs(ids);
-    messenger.showSnackBar(SnackBar(
+    messenger.showToast(SnackBar(
       content: Text(restored
           ? 'Letterbox index restored'
               '${areaName == null ? '' : ' for $areaName'}.'
@@ -2437,14 +2439,13 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     final layerP = ref.read(teMapLayerRiverpod);
     final showWaypoints = layerP.waypointsVisible(currentTab);
     if (showWaypoints) {
-      final filter = layerP.waypointFilter(currentTab).toLowerCase().trim();
+      // Same rule as the visible markers below, so the box only picks
+      // waypoints the user can see.
+      final filter = TextSearch(layerP.waypointFilter(currentTab));
       for (int i = 0; i < tabData.waypoints.length; i++) {
         final wpt = tabData.waypoints[i];
         if (wpt.lat == null || wpt.lon == null) continue;
-        if (filter.isNotEmpty) {
-          final name = (wpt.name ?? '').toLowerCase();
-          if (!name.contains(filter)) continue;
-        }
+        if (!filter.matches([wpt.name ?? ''])) continue;
         final screen = _latLngToScreen(
             LatLng(wpt.lat!, wpt.lon!), _currentCamera, mapSize);
         if (!rect.contains(screen)) continue;
@@ -2515,11 +2516,8 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
     final keptWpts = ref
         .watch(teMapLayerRiverpod)
         .liveKeptWaypoints(currentTab, tabData.waypoints);
-    final waypointFilter = ref
-        .watch(teMapLayerRiverpod)
-        .waypointFilter(currentTab)
-        .toLowerCase()
-        .trim();
+    final waypointFilter =
+        TextSearch(ref.watch(teMapLayerRiverpod).waypointFilter(currentTab));
 
     final Set<Polygon> mapPolygons = !showPolygons
         ? <Polygon>{}
@@ -2667,10 +2665,7 @@ class _TEMapState extends riverpod.ConsumerState<TEMap> {
       for (var i = 0; i < tabData.waypoints.length; i++) {
         final wpt = tabData.waypoints[i];
         if (wpt.lat == null || wpt.lon == null) continue;
-        if (waypointFilter.isNotEmpty &&
-            !(wpt.name ?? '').toLowerCase().contains(waypointFilter)) {
-          continue;
-        }
+        if (!waypointFilter.matches([wpt.name ?? ''])) continue;
         candidates.add(MapEntry(i, wpt));
       }
     }
@@ -3693,9 +3688,14 @@ Widget _anchoredInfoCard({
     ),
   );
 
-  final column = Column(
-    mainAxisSize: MainAxisSize.min,
-    children: below ? [tail, card] : [card, tail],
+  // Held like every other overlay: without it a click on a card that sits
+  // over a polygon reaches the HTML map too, the polygon's tap re-opens the
+  // card, and the button under the pointer never gets the click.
+  final column = MapOverlay(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: below ? [tail, card] : [card, tail],
+    ),
   );
 
   return below

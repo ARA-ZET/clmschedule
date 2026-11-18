@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -97,7 +98,7 @@ class _AddToolDialogState extends riverpod.ConsumerState<AddToolDialog> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Error picking image: $e')),
         );
       }
@@ -143,7 +144,7 @@ class _AddToolDialogState extends riverpod.ConsumerState<AddToolDialog> {
           // Show snackbar after a brief delay to avoid widget tree issues
           Future.delayed(const Duration(milliseconds: 100), () {
             if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showToast(
                 SnackBar(
                   content: Text(quantity == 1
                       ? 'Tool added successfully'
@@ -167,7 +168,7 @@ class _AddToolDialogState extends riverpod.ConsumerState<AddToolDialog> {
 
           if (uploadedImageUrl == null) {
             if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showToast(
                 const SnackBar(content: Text('Failed to upload image')),
               );
               setState(() => _isLoading = false);
@@ -215,7 +216,7 @@ class _AddToolDialogState extends riverpod.ConsumerState<AddToolDialog> {
           Navigator.of(context).pop();
           Future.delayed(const Duration(milliseconds: 100), () {
             if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showToast(
                 SnackBar(
                   content: Text(uploadedImageUrl != null
                       ? 'Tool and image updated successfully'
@@ -229,7 +230,7 @@ class _AddToolDialogState extends riverpod.ConsumerState<AddToolDialog> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Error saving tool: $e')),
         );
       }

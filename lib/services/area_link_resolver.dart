@@ -24,7 +24,8 @@ import '../shareable_maps/utils/linked_map_polygons.dart';
 
 /// What the resolver currently knows about one client map.
 class _MapEntry {
-  /// Polygons by stable id. Null until the first snapshot arrives.
+  /// Polygons — and points, as point-type polygons — by stable id. Null
+  /// until the first snapshot arrives.
   Map<String, CustomPolygon>? polygons;
 
   /// Map name, for naming unnamed polygons.
@@ -45,35 +46,83 @@ class AreaLinkResolver {
 
   final ShareableMapsFirestoreService _maps = ShareableMapsFirestoreService();
   final Map<String, _MapEntry> _entries = {};
-  final StreamController<String> _changes = StreamController.broadcast();
+  final StreamController<Set<String>> _changes = StreamController.broadcast();
 
-  /// Fires with a map key (`monthKey/mapId`) whenever that map's polygons
-  /// change, or first arrive.
-  Stream<String> get changes => _changes.stream;
+  /// Map keys changed since the last [_changes] flush.
+  final Set<String> _changedKeys = {};
+  Timer? _flushTimer;
+
+  /// How long changes are gathered before job streams re-emit. A month with
+  /// many linked maps loads them one by one; without this each arrival
+  /// re-hydrated and re-emitted the whole month (and rebuilt the grid).
+  static const Duration _flushDelay = Duration(milliseconds: 150);
+
+  /// Fires with the map keys (`monthKey/mapId`) whose polygons changed, or
+  /// first arrived, gathered over [_flushDelay].
+  Stream<Set<String>> get changes => _changes.stream;
 
   static String mapKeyOf(JobAreaLink l) => '${l.monthKey}/${l.mapId}';
+
+  void _markChanged(String key) {
+    _changedKeys.add(key);
+    _flushTimer ??= Timer(_flushDelay, () {
+      _flushTimer = null;
+      final keys = Set<String>.of(_changedKeys);
+      _changedKeys.clear();
+      if (keys.isNotEmpty) _changes.add(keys);
+    });
+  }
+
+  /// Whether two snapshots of a map look the same to the jobs linked to it:
+  /// existence, name, and every polygon/point by id ([CustomPolygon]
+  /// compares by value). A snapshot that changes nothing they use (layer
+  /// styling, metadata, other fields) then doesn't re-hydrate every month.
+  @visibleForTesting
+  static bool sameLinkedContent(
+    ({bool exists, String name, Map<String, CustomPolygon> polygons}) a,
+    ({bool exists, String name, Map<String, CustomPolygon> polygons}) b,
+  ) =>
+      a.exists == b.exists &&
+      a.name == b.name &&
+      mapEquals(a.polygons, b.polygons);
 
   _MapEntry _watch(String monthKey, String mapId) {
     final key = '$monthKey/$mapId';
     return _entries.putIfAbsent(key, () {
       final entry = _MapEntry();
       entry.sub = _maps.streamMap(monthKey, mapId).listen((map) {
+        final bool exists;
+        final String name;
+        final Map<String, CustomPolygon> polygons;
         if (map == null) {
-          entry
-            ..exists = false
-            ..polygons = const {};
+          exists = false;
+          name = entry.name;
+          polygons = const {};
         } else {
-          entry
-            ..exists = true
-            ..name = map.name
-            ..polygons = {
-              for (final layer in map.layers)
-                for (final p in layer.polygons)
-                  if (p.id != null && p.isPolygon) p.id!: p,
-            };
+          exists = true;
+          name = map.name;
+          polygons = {
+            for (final layer in map.layers) ...{
+              for (final p in layer.polygons)
+                if (p.id != null && p.isPolygon) p.id!: p,
+              // Allocated points (traffic lights, handout spots).
+              for (final pt in layer.points)
+                if (pt.id.isNotEmpty) pt.id: mapPointAsWorkMap(pt),
+            },
+          };
         }
+        final previous = entry.polygons;
+        final unchanged = previous != null &&
+            sameLinkedContent(
+              (exists: entry.exists, name: entry.name, polygons: previous),
+              (exists: exists, name: name, polygons: polygons),
+            );
+        entry
+          ..exists = exists
+          ..name = name
+          ..polygons = polygons;
         if (!entry.ready.isCompleted) entry.ready.complete();
-        _changes.add(key);
+        if (!unchanged) _markChanged(key);
       }, onError: (Object e) {
         debugPrint('[AreaLinkResolver] watching $key failed: $e');
         if (!entry.ready.isCompleted) entry.ready.complete();
@@ -99,7 +148,9 @@ class AreaLinkResolver {
     final name = p.name.trim().isNotEmpty
         ? p.name
         : (link.name.trim().isNotEmpty ? link.name : entry.name);
-    return allocatedPolygonStyle(p).copyWith(id: link.resolvedId, name: name);
+    // A point keeps its own look (its category colour and icon).
+    return (p.isPoint ? p : allocatedPolygonStyle(p))
+        .copyWith(id: link.resolvedId, name: name);
   }
 
   /// True once the map has loaded and [link]'s polygon is not on it.
@@ -161,16 +212,16 @@ class AreaLinkResolver {
   Stream<List<Job>> hydrateStream(Stream<List<Job>> source) {
     late StreamController<List<Job>> controller;
     StreamSubscription<List<Job>>? sourceSub;
-    StreamSubscription<String>? changeSub;
+    StreamSubscription<Set<String>>? changeSub;
     List<Job>? last;
 
     controller = StreamController<List<Job>>(
       onListen: () {
-        changeSub = changes.listen((mapKey) {
+        changeSub = changes.listen((mapKeys) {
           final jobs = last;
           if (jobs == null || controller.isClosed) return;
-          final affected =
-              jobs.any((j) => j.areaLinks.any((l) => mapKeyOf(l) == mapKey));
+          final affected = jobs.any(
+              (j) => j.areaLinks.any((l) => mapKeys.contains(mapKeyOf(l))));
           if (affected) controller.add(hydrateAll(jobs));
         });
         sourceSub = source.listen(

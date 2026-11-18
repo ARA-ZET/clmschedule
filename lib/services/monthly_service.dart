@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 
 class MonthlyService {
   final FirebaseFirestore _firestore;
@@ -133,41 +136,36 @@ class MonthlyService {
     _knownScheduleMonthIds.add(monthKey);
   }
 
-  /// Ensure job list monthly document exists (creates if not present)
-  /// Uses in-memory cache to avoid redundant Firestore reads.
-  /// Tries cache first to avoid unnecessary server round-trips.
+  /// Make sure the job list month document exists (month pickers list
+  /// them), once per month per session.
+  ///
+  /// Never waits on the server. It used to read the month from the server
+  /// when the cache could not confirm it, so the first job added in a session
+  /// waited a round trip — and on a flaky connection the add failed outright
+  /// with "client is offline", the red "Error adding job" toast. The document
+  /// holds only its month name, so a merge write is safe whether or not it
+  /// exists; it is queued offline like any other write, and nothing waits.
   Future<void> ensureJobListMonthlyDocExists(DateTime date) async {
     final monthKey = getMonthlyDocumentId(date);
     if (_knownJobListMonthIds.contains(monthKey)) return;
+    _knownJobListMonthIds.add(monthKey);
 
     final doc = getJobListMonthlyDoc(date);
-
-    // Try cache first — only trust positive existence (avoids server read)
     try {
       final cached = await doc.get(const GetOptions(source: Source.cache));
-      if (cached.exists) {
-        _knownJobListMonthIds.add(monthKey);
-        return;
-      }
+      if (cached.exists) return;
     } catch (_) {
-      // Cache miss — fall through to server
+      // Not in the cache — write it below.
     }
 
-    // Cache didn't confirm existence — must verify with server
-    final docSnapshot = await doc.get();
-
-    if (!docSnapshot.exists) {
-      await doc.set({
-        'created': FieldValue.serverTimestamp(),
-        'month': monthKey,
-      });
-
-      // Invalidate months cache since a new month was created
-      _cachedJobListMonths = null;
-      _jobListMonthsCacheTime = null;
-    }
-
-    _knownJobListMonthIds.add(monthKey);
+    unawaited(doc
+        .set({'month': monthKey}, SetOptions(merge: true))
+        .catchError((Object e) {
+      _knownJobListMonthIds.remove(monthKey);
+      debugPrint('MonthlyService: job list month $monthKey not saved: $e');
+    }));
+    _cachedJobListMonths = null;
+    _jobListMonthsCacheTime = null;
   }
 
   /// Ensure collection schedule monthly document exists (creates if not present)

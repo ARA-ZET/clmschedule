@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -95,7 +96,7 @@ class _MapAddressSearchBarState
 
     if (latLng == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Could not get location for this address'),
             backgroundColor: Colors.red,
@@ -130,7 +131,7 @@ class _MapAddressSearchBarState
     widget.onClose?.call();
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Row(
             children: [

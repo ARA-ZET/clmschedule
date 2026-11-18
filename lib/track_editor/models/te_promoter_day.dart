@@ -17,21 +17,30 @@ import '../utils/te_track_analysis.dart';
 /// [bytes] is always present (needed to embed the image in the PDF without
 /// a re-download); [url] is filled in once the photo has been uploaded to
 /// Cloud Storage alongside that date's GPX files.
+///
+/// A photo found in the scanned folder carries its [storagePath], and
+/// [takenAt] when its file name or camera data says when it was taken.
 class TEProofPhoto {
   final Uint8List bytes;
   final String fileName;
   final String? url;
+  final String? storagePath;
+  final DateTime? takenAt;
 
   const TEProofPhoto({
     required this.bytes,
     required this.fileName,
     this.url,
+    this.storagePath,
+    this.takenAt,
   });
 
-  TEProofPhoto copyWith({String? url}) => TEProofPhoto(
+  TEProofPhoto copyWith({String? url, String? storagePath}) => TEProofPhoto(
         bytes: bytes,
         fileName: fileName,
         url: url ?? this.url,
+        storagePath: storagePath ?? this.storagePath,
+        takenAt: takenAt,
       );
 }
 

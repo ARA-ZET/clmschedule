@@ -241,6 +241,15 @@ class CustomJobType {
     return Company.clmId;
   }
 
+  /// Whether job-list items of this type sync onto the Dropsheet. Junk &
+  /// Stuff and Happy Sun jobs always do — they are appointments at the
+  /// client's address that a driver is allocated to — whatever
+  /// [appearsOnDropsheet] says; CLM types only when it is set.
+  bool get syncsToDropsheet =>
+      appearsOnDropsheet ||
+      resolvedCompanyId == Company.junkAndStuffId ||
+      resolvedCompanyId == Company.happySunId;
+
   /// Whether ownership is still being inferred rather than stated — lets
   /// settings flag which job types have not been assigned yet.
   bool get companyIsInferred => companyId.isEmpty;

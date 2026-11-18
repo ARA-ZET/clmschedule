@@ -233,10 +233,18 @@ class JobListItemUpdate {
         return 'Man-Days';
       case 'date':
         return 'Date';
+      case 'contactPerson':
+        return 'Contact Person';
+      case 'contactPhone':
+        return 'Contact Phone';
       case 'collectionAddress':
         return 'Collection Address';
       case 'collectionDate':
         return 'Collection Date';
+      case 'needsFlyerCollection':
+        return 'Needs Flyer Collection';
+      case 'timeSlot':
+        return 'Time Slot';
       case 'specialInstructions':
         return 'Special Instructions';
       case 'quantityDistributed':

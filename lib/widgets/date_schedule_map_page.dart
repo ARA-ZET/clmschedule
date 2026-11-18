@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../providers/schedule_provider.dart';
+import '../services/job_client_bookings.dart';
 import '../shareable_maps/adapters/date_schedule_adapter.dart';
 import '../shareable_maps/providers/shareable_map_provider.dart';
 import '../shareable_maps/widgets/shareable_map_editor.dart';
@@ -39,6 +40,14 @@ class _DateScheduleMapPageState extends riverpod
   List<Job> _liveJobs = const [];
   List<Distributor> _liveDistributors = const [];
   String _loadedSignature = '';
+
+  /// What each job's clients are booked for on the Job List, by job id, so
+  /// Junk & Stuff and Happy Sun points get their job's pin and time.
+  Map<String, JobClientBookings> _bookings = const {};
+  String? _bookingsKey;
+
+  /// The jobs of the tab on show, whose pins the map draws.
+  List<Job> _shownJobs = const [];
 
   @override
   void initState() {
@@ -142,12 +151,15 @@ class _DateScheduleMapPageState extends riverpod
           points,
         ].join('~');
       }).join('#');
+      final drop = job.dropOffPoint;
       return [
         job.id,
         job.distributorId,
         job.clients.join(','),
         job.workingAreas.join(','),
         mapKey,
+        if (drop != null)
+          '${drop.latitude.toStringAsFixed(7)},${drop.longitude.toStringAsFixed(7)}',
       ].join('|');
     }).join(';');
     return '$distributorKey::$jobKey';
@@ -183,8 +195,39 @@ class _DateScheduleMapPageState extends riverpod
       distributors: _liveDistributors,
     );
 
+    _shownJobs = jobs;
     provider.requestFitBoundsOnLoad();
-    provider.loadFromAdapter(adapter);
+    // Loading a map clears its pins, so they go on once it has loaded.
+    provider.loadFromAdapter(adapter).then((_) {
+      if (mounted && identical(_shownJobs, jobs)) _applyPins();
+    });
+    _loadBookings();
+  }
+
+  /// The Print Map pins for the tab on show.
+  void _applyPins() => ref
+      .read(shareableMapRiverpod)
+      .setPointPinRule(DateScheduleAdapter.pinRule(_shownJobs, _bookings));
+
+  /// Looks up every job's Job List bookings in one go, once per set of
+  /// jobs and clients, then redraws the pins with them.
+  Future<void> _loadBookings() async {
+    final jobs = _liveJobs;
+    final key = [
+      for (final j in jobs) '${j.id}@${j.date.toIso8601String()}:${j.clients}',
+    ].join(';');
+    if (key == _bookingsKey) return;
+    _bookingsKey = key;
+    try {
+      final bookings = await JobClientBookings.load(jobs);
+      if (!mounted || _bookingsKey != key) return;
+      _bookings = bookings;
+      _applyPins();
+    } catch (e) {
+      // Pins keep their category pictures; try again on the next refresh.
+      debugPrint('DateScheduleMapPage: Job List bookings lookup failed: $e');
+      if (_bookingsKey == key) _bookingsKey = null;
+    }
   }
 
   void _exportKml(BuildContext context) {

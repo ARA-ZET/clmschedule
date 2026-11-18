@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -2164,7 +2165,7 @@ class _HappySunJobProjectsScreenState
           );
 
           if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context).showToast(
               const SnackBar(
                 content: Text('Tools updated successfully'),
                 backgroundColor: Colors.green,
@@ -2621,7 +2622,7 @@ class _ImageViewerScreenState
         _uploadStatus = '';
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text(
               '${uploadedUrls.length} media file(s) uploaded successfully'),
@@ -2646,7 +2647,7 @@ class _ImageViewerScreenState
         _uploadProgress = 0.0;
         _uploadStatus = '';
       });
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text('Error uploading: ${e.toString()}'),
           backgroundColor: Colors.red,
@@ -2692,7 +2693,7 @@ class _ImageViewerScreenState
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Image deleted'),
           backgroundColor: Colors.orange,
@@ -2706,7 +2707,7 @@ class _ImageViewerScreenState
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text('Error deleting image: $e'),
           backgroundColor: Colors.red,

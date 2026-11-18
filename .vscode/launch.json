@@ -14,7 +14,7 @@
       "request": "launch",
       "type": "dart",
       "program": "lib/main_clm.dart",
-      "args": ["--dart-define=FLAVOR=clm"],
+      "args": ["--dart-define=FLAVOR=clm", "--web-port=8765"],
       "flutterMode": "debug"
     },
     {
@@ -38,7 +38,7 @@
       "request": "launch",
       "type": "dart",
       "program": "lib/main_clm.dart",
-      "args": ["--dart-define=FLAVOR=clm"],
+      "args": ["--dart-define=FLAVOR=clm", "--web-port=8765"],
       "flutterMode": "release"
     },
     {

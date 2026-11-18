@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -396,7 +397,7 @@ class _EditDistributorDialogState
                     } catch (e) {
                       setState(() => _uploading = false);
                       if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                        ScaffoldMessenger.of(context).showToast(
                           SnackBar(
                               content: Text('Image upload failed: $e'),
                               backgroundColor: Colors.red),
@@ -427,6 +428,10 @@ class _EditDistributorDialogState
                     homeAddress: _homeAddressController.text.trim().isEmpty
                         ? null
                         : _homeAddressController.text.trim(),
+                    clearFullName: _fullNameController.text.trim().isEmpty,
+                    clearIdNumber: _idNumberController.text.trim().isEmpty,
+                    clearHomeAddress:
+                        _homeAddressController.text.trim().isEmpty,
                   );
 
                   if (mounted) {

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,10 +11,13 @@ import '../models/shareable_map.dart';
 import '../providers/shareable_maps_gallery_provider.dart';
 import '../providers/shareable_map_provider.dart';
 import '../services/shareable_maps_firestore_service.dart';
+import '../utils/map_copy_description.dart';
 import '../services/map_link_service.dart';
 import '../adapters/firestore_adapter.dart';
 import '../utils/url_updater.dart' as url_updater;
 import 'shareable_map_editor.dart';
+import 'map_busy_dialog.dart';
+import '../../recycle_bin/recycle_bin_screen.dart';
 
 /// Gallery screen for viewing all shareable maps as tiles, grouped by month.
 /// Modelled after the Google My Maps dashboard.
@@ -78,14 +82,28 @@ class _ShareableMapsGalleryState
           if (gallery.allMaps.isEmpty && gallery.unloadedMonths.isEmpty) {
             return const _EmptyGallery();
           }
-          return _GalleryBody(
-            monthGroups: gallery.filteredMonthGroups,
-            filterTab: gallery.filterTab,
-            unloadedMonths: gallery.unloadedMonths,
-            loadingMonths: gallery.unloadedMonths
-                .where((mk) => gallery.isMonthLoading(mk))
-                .toSet(),
-            onLoadMonth: gallery.loadMonth,
+          // A search covers every month from the names-only index, so the
+          // "load month" row is only offered while browsing.
+          final unloaded = gallery.searchCoversAllMonths
+              ? const <String>[]
+              : gallery.unloadedMonths;
+          return Column(
+            children: [
+              if (gallery.isSearchIndexLoading)
+                const LinearProgressIndicator(minHeight: 2),
+              Expanded(
+                child: _GalleryBody(
+                  monthGroups: gallery.filteredMonthGroups,
+                  filterTab: gallery.filterTab,
+                  unloadedMonths: unloaded,
+                  loadingMonths: unloaded
+                      .where((mk) => gallery.isMonthLoading(mk))
+                      .toSet(),
+                  onLoadMonth: gallery.loadMonth,
+                  searchQuery: gallery.searchQuery,
+                ),
+              ),
+            ],
           );
         },
       ),
@@ -342,6 +360,7 @@ class _GalleryBody extends riverpod.ConsumerWidget {
   final List<String> unloadedMonths;
   final Set<String> loadingMonths;
   final Future<void> Function(String monthKey) onLoadMonth;
+  final String searchQuery;
 
   const _GalleryBody({
     required this.monthGroups,
@@ -349,6 +368,7 @@ class _GalleryBody extends riverpod.ConsumerWidget {
     required this.unloadedMonths,
     required this.loadingMonths,
     required this.onLoadMonth,
+    required this.searchQuery,
   });
 
   @override
@@ -370,6 +390,9 @@ class _GalleryBody extends riverpod.ConsumerWidget {
 
     // Show the next unloadable month (first in the list).
     final nextMonth = unloadedMonths.isNotEmpty ? unloadedMonths.first : null;
+    if (monthGroups.isEmpty && nextMonth == null && searchQuery.isNotEmpty) {
+      return Center(child: Text('No maps match "$searchQuery".'));
+    }
     final totalItems = monthGroups.length + (nextMonth != null ? 1 : 0);
 
     // Grouped by month + optional load-more button at the bottom.
@@ -561,28 +584,48 @@ class _MapTile extends riverpod.ConsumerWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        item.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: nameSize,
-                        ),
-                      ),
-                      Text(
-                        DateFormat('d MMM yyyy  HH:mm').format(item.updatedAt),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: dateSize,
-                          color: const Color.fromARGB(255, 63, 63, 63),
-                          fontWeight: FontWeight.bold,
-                        ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            item.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: nameSize,
+                            ),
+                          ),
+                          if (item.description.trim().isNotEmpty)
+                            Text(
+                              // One line on a tile: the month a copy leads
+                              // with, then whatever follows it.
+                              item.description.trim().replaceAll('\n', ' · '),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: dateSize,
+                                color: Colors.grey.shade700,
+                              ),
+                            ),
+                        ],
                       ),
                       Row(
                         children: [
-                          const Spacer(),
+                          Expanded(
+                            child: Text(
+                              DateFormat('d MMM yyyy  HH:mm')
+                                  .format(item.updatedAt),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: dateSize,
+                                color: const Color.fromARGB(255, 63, 63, 63),
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
                           _CopyLinkButton(item: item, iconSize: iconBtnSize),
                           _TilePopupMenu(item: item, iconSize: iconBtnSize),
                         ],
@@ -651,7 +694,7 @@ class _MapTile extends riverpod.ConsumerWidget {
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Failed to open map: $e'),
             backgroundColor: Colors.red.shade800,
@@ -894,7 +937,7 @@ class _CopyLinkButton extends StatelessWidget {
 
       await Clipboard.setData(ClipboardData(text: url));
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Row(
               children: [
@@ -909,7 +952,7 @@ class _CopyLinkButton extends StatelessWidget {
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Failed to copy link: $e')),
         );
       }
@@ -930,8 +973,9 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
   Future<void> _duplicateMap(
       BuildContext context, riverpod.WidgetRef ref) async {
     // Prompt for new map details
-    final nameController = TextEditingController(text: '${item.name} (Copy)');
-    final descController = TextEditingController(text: item.description);
+    final nameController = TextEditingController(text: item.name);
+    final descController = TextEditingController(
+        text: copyDescription(item.description, DateTime.now()));
     final result = await showDialog<Map<String, String>>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -980,58 +1024,76 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
     final newName = result['name']!.isEmpty ? 'Untitled Map' : result['name']!;
     final newDescription = result['description'] ?? '';
 
-    // Load the original map from Firestore
-    final service = ShareableMapsFirestoreService();
-    final originalMap = await service.getMap(item.monthKey, item.docId);
-    if (originalMap == null) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to load original map.')),
-        );
-      }
+    final messenger = ScaffoldMessenger.of(context);
+    final provider = ref.read(shareableMapRiverpod);
+    final bool opened;
+    try {
+      opened = await runWithMapBusyDialog(
+        context,
+        title: 'Duplicating map',
+        initialStep: 'Loading "${item.name}"…',
+        task: (step) async {
+          // Load the original map from Firestore
+          final service = ShareableMapsFirestoreService();
+          final originalMap = await service.getMap(item.monthKey, item.docId);
+          if (originalMap == null) {
+            messenger.showToast(
+              const SnackBar(content: Text('Failed to load original map.')),
+            );
+            return false;
+          }
+
+          // Copy only local layers (exclude cloud-linked layers and storageFolderPath)
+          final filteredLayers = originalMap.layers
+              .where((layer) {
+                // Exclude layers that are cloud overlays or linked to cloud folders
+                // (Assume cloud layers have a specific flag or name, adjust as needed)
+                // Here, we exclude layers with names containing 'Cloud' or 'cloud', and skip storageFolderPath
+                final lname = layer.name.toLowerCase();
+                return !lname.contains('cloud');
+              })
+              .map((layer) => layer.copyWith())
+              .toList();
+
+          final newMap = ShareableMap.createWithDefaultLayer(
+            name: newName,
+            description: newDescription,
+            defaultCenter: originalMap.defaultCenter,
+          ).copyWith(
+            layers: filteredLayers.isNotEmpty ? filteredLayers : null,
+            storageFolderPath: null,
+            clearStorageFolderPath: true,
+            cloudFolderPaths: const [],
+            cloudTrackColors: const {},
+          );
+
+          // Save the new map
+          step('Creating the copy "$newName"…');
+          final monthKey =
+              ShareableMapsFirestoreService.monthKeyFor(DateTime.now());
+          final newDocId = await service.createMap(newMap, monthKey: monthKey);
+
+          // Open the new map in the editor
+          step('Opening the copy "$newName"…');
+          await provider.loadFromAdapter(FirestoreMapAdapter.existing(
+            docId: newDocId,
+            monthKey: monthKey,
+            service: service,
+            unfinishedProvider: null,
+          ));
+          return true;
+        },
+      );
+    } catch (e) {
+      messenger.showToast(
+        SnackBar(
+          content: Text('Failed to duplicate map: $e'),
+          backgroundColor: Colors.red.shade800,
+        ),
+      );
       return;
     }
-
-    // Copy only local layers (exclude cloud-linked layers and storageFolderPath)
-    final filteredLayers = originalMap.layers
-        .where((layer) {
-          // Exclude layers that are cloud overlays or linked to cloud folders
-          // (Assume cloud layers have a specific flag or name, adjust as needed)
-          // Here, we exclude layers with names containing 'Cloud' or 'cloud', and skip storageFolderPath
-          final lname = layer.name.toLowerCase();
-          return !lname.contains('cloud');
-        })
-        .map((layer) => layer.copyWith())
-        .toList();
-
-    final newMap = ShareableMap.createWithDefaultLayer(
-      name: newName,
-      description: newDescription,
-      defaultCenter: originalMap.defaultCenter,
-    ).copyWith(
-      layers: filteredLayers.isNotEmpty ? filteredLayers : null,
-      storageFolderPath: null,
-      clearStorageFolderPath: true,
-      cloudFolderPaths: const [],
-      cloudTrackColors: const {},
-    );
-
-    // Save the new map
-    final monthKey = ShareableMapsFirestoreService.monthKeyFor(DateTime.now());
-    final newDocId = await service.createMap(newMap, monthKey: monthKey);
-
-    if (!context.mounted) return;
-
-    // Open the new map in the editor
-    final adapter = FirestoreMapAdapter.existing(
-      docId: newDocId,
-      monthKey: monthKey,
-      service: service,
-      unfinishedProvider: null,
-    );
-    final provider = ref.read(shareableMapRiverpod);
-    await provider.loadFromAdapter(adapter);
-    if (context.mounted) {
+    if (opened && context.mounted) {
       await Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => const ShareableMapEditor()),
@@ -1095,7 +1157,7 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
 
       await Clipboard.setData(ClipboardData(text: url));
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Row(
               children: [
@@ -1115,7 +1177,7 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Failed to create share link: $e')),
         );
       }
@@ -1154,7 +1216,7 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
           .updateMapFields(item.monthKey, item.docId, {'name': newName});
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Rename failed: $e')),
         );
       }
@@ -1166,7 +1228,8 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Delete Map'),
-        content: Text('Delete "${item.name}"? This cannot be undone.'),
+        content: Text('Delete "${item.name}"? It goes to the Recycle Bin, '
+            'where it can be restored for 30 days.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -1184,12 +1247,16 @@ class _TilePopupMenu extends riverpod.ConsumerWidget {
     if (confirm != true || !context.mounted) return;
 
     try {
-      await ref
+      final entryId = await ref
           .read(shareableMapsGalleryRiverpod)
           .deleteMap(item.monthKey, item.docId);
+      if (context.mounted) {
+        showMovedToBinSnackBar(context, ref,
+            what: '"${item.name}"', entryId: entryId);
+      }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Delete failed: $e')),
         );
       }

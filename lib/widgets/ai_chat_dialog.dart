@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -182,7 +183,7 @@ class _AiChatPanelState extends riverpod.ConsumerState<AiChatPanel>
                 icon: Icons.sync_rounded,
                 onPressed: () {
                   _syncDataContext();
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  ScaffoldMessenger.of(context).showToast(
                     SnackBar(
                       content: Text(
                           'Data synced for ${provider.currentMonthId ?? 'current month'}'),
@@ -366,7 +367,7 @@ class _AiChatPanelState extends riverpod.ConsumerState<AiChatPanel>
                 GestureDetector(
                   onLongPress: () {
                     Clipboard.setData(ClipboardData(text: message.content));
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    ScaffoldMessenger.of(context).showToast(
                       SnackBar(
                         content: const Text('Message copied'),
                         duration: const Duration(seconds: 1),
@@ -535,7 +536,7 @@ class _AiChatPanelState extends riverpod.ConsumerState<AiChatPanel>
                           onPressed: () {
                             Clipboard.setData(
                                 ClipboardData(text: message.content));
-                            ScaffoldMessenger.of(context).showSnackBar(
+                            ScaffoldMessenger.of(context).showToast(
                               SnackBar(
                                 content: const Text('Copied'),
                                 duration: const Duration(seconds: 1),
@@ -1347,7 +1348,7 @@ class _AiChatPanelState extends riverpod.ConsumerState<AiChatPanel>
                 );
                 if (ctx.mounted) Navigator.pop(ctx);
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  ScaffoldMessenger.of(context).showToast(
                     SnackBar(
                       content: const Text(
                           'Knowledge saved \u2014 Pelisa will remember'),

@@ -382,6 +382,187 @@
     })();
   </script>
 
+  <!-- ── Browser storage health (runs BEFORE Firebase and Flutter) ──────────
+       localStorage holds ~5M characters per site. Firebase Auth keeps the
+       sign-in token there and Firestore's multi-tab sync keeps tab, query and
+       write state there — and Firestore calls setItem with NO try/catch, so
+       once it is full every save throws and the Firestore queue can stay
+       broken until the page reloads (Nov 2026: Barrie could neither save nor
+       sign in). Nothing a user typed lives here: unsaved writes are in
+       IndexedDB, so tidying it never loses work.
+
+       What is safe to remove (verified against @firebase/firestore's
+       WebStorageSharedClientState): other tabs IGNORE removals of
+       firestore_mutations_* and firestore_targets_* keys, but removing a
+       firestore_clients_* key tells every other tab that client is gone —
+       only done for month-old entries, or in an emergency at boot.
+
+       window.clmStorageCheck(level) is called by lib/services/storage_health
+       every few minutes; window.clmStorageBoot is this page-load's report.
+  ──────────────────────────────────────────────────────────────────────── -->
+  <script>
+    (function () {
+      var LIMIT_CHARS  = 5 * 1024 * 1024; // Chrome/Edge/Firefox per-site cap
+      var PRESSURE     = 0.5;             // above this, also drop unknown keys
+      var WARN         = 0.7;             // above this, the app warns
+      var PROBE_KEY    = 'clm_storage_probe';
+      var PROBE_CHARS  = 32 * 1024;       // "can still take a sign-in token"
+      var INCIDENT_KEY = 'clm_storage_incident'; // uploaded by the app later
+      var FIX_FLAG     = 'clm_storage_fix';      // sessionStorage, "Fix now"
+      var DAY          = 864e5;
+
+      function store() { try { return window.localStorage; } catch (e) { return null; } }
+      function parse(v) { try { return JSON.parse(v); } catch (e) { return null; } }
+
+      function groupOf(k) {
+        if (k.indexOf('firebase:authUser:') === 0) return 'firebase_auth';
+        if (k.indexOf('firebase:') === 0) return 'firebase_other';
+        var m = /^firestore_(clients|mutations|targets|zombie|online_state|sequence_number|bundle_loaded)/.exec(k);
+        if (m) return 'firestore_' + m[1];
+        if (k.indexOf('clm_') === 0) return 'clm';
+        return 'other';
+      }
+
+      function keysOf(s) {
+        var out = [];
+        for (var i = 0; i < s.length; i++) { var k = s.key(i); if (k != null) out.push(k); }
+        return out;
+      }
+
+      function measure(s) {
+        var used = 0, groups = {}, keys = keysOf(s);
+        keys.forEach(function (k) {
+          var n = k.length + (s.getItem(k) || '').length;
+          used += n;
+          var g = groups[groupOf(k)] || (groups[groupOf(k)] = { keys: 0, chars: 0 });
+          g.keys++; g.chars += n;
+        });
+        return { usedChars: used, keys: keys.length, groups: groups };
+      }
+
+      function canWrite(s) {
+        try {
+          s.setItem(PROBE_KEY, new Array(PROBE_CHARS + 1).join('x'));
+          s.removeItem(PROBE_KEY);
+          return true;
+        } catch (e) {
+          try { s.removeItem(PROBE_KEY); } catch (_) {}
+          return false;
+        }
+      }
+
+      // routine   — entries nothing reads any more (safe while tabs run)
+      // pressure  — + keys this app never writes
+      // emergency — everything but the sign-in token (boot only)
+      function tidy(s, level) {
+        var now = Date.now(), removed = 0, freed = 0, keys = keysOf(s);
+        var watched = {};
+        keys.forEach(function (k) {
+          if (k.indexOf('firestore_clients_') !== 0) return;
+          var c = parse(s.getItem(k));
+          if (c && c.activeTargetIds && c.activeTargetIds.forEach) {
+            c.activeTargetIds.forEach(function (t) { watched[String(t)] = true; });
+          }
+        });
+        function drop(k) {
+          var v = s.getItem(k);
+          freed += k.length + (v ? v.length : 0); removed++;
+          s.removeItem(k);
+        }
+        keys.forEach(function (k) {
+          var v, m;
+          if (level === 'emergency') {
+            if (k.indexOf('firebase:authUser:') !== 0 && k !== INCIDENT_KEY) drop(k);
+          } else if (k.indexOf('firestore_mutations_') === 0) {
+            // Other tabs read a write's entry only as it is written. A
+            // finished one (acknowledged/rejected) should already be gone; a
+            // pending one older than 10 minutes was long since seen.
+            v = parse(s.getItem(k));
+            if (!v || v.state !== 'pending' || !(now - (v.updateTimeMs || 0) < 6e5)) drop(k);
+          } else if ((m = /^firestore_targets_.*_(\d+)$/.exec(k))) {
+            // No tab listens to it any more, or the server refused it. The
+            // SDK never removes a refused query's entry (it keeps the whole
+            // error text, ~500 chars) — the Nov 2026 leak: one per failed
+            // query, 11,469 of them on Barrie's PC.
+            v = parse(s.getItem(k));
+            if (!watched[m[1]] || !v || v.state === 'rejected') drop(k);
+          } else if (k.indexOf('firestore_clients_') === 0) {
+            v = parse(s.getItem(k));
+            if (now - ((v && v.updateTimeMs) || 0) > 30 * DAY) drop(k);
+          } else if (level === 'pressure' && groupOf(k) === 'other') {
+            drop(k);
+          }
+        });
+        return { removed: removed, freedChars: freed };
+      }
+
+      // allowEmergency: only at boot, before this tab's Firebase starts.
+      function check(level, allowEmergency, force) {
+        var s = store();
+        if (!s) return { available: false };
+        var before, result = { available: true, limitChars: LIMIT_CHARS };
+        try {
+          before = measure(s);
+          var lvl = level || 'routine';
+          if (lvl === 'routine' && before.usedChars > LIMIT_CHARS * PRESSURE) lvl = 'pressure';
+          var t = tidy(s, lvl), removed = t.removed, freed = t.freedChars;
+          var ok = canWrite(s);
+          if (!ok && lvl === 'routine') {
+            lvl = 'pressure';
+            t = tidy(s, lvl); removed += t.removed; freed += t.freedChars;
+            ok = canWrite(s);
+          }
+          if (allowEmergency && (!ok || (force && measure(s).usedChars > LIMIT_CHARS * WARN))) {
+            lvl = 'emergency';
+            t = tidy(s, lvl); removed += t.removed; freed += t.freedChars;
+            ok = canWrite(s);
+            if (!ok) { s.clear(); lvl = 'cleared'; ok = canWrite(s); }
+          }
+          var after = measure(s);
+          result.level = lvl;
+          result.removed = removed;
+          result.freedChars = freed;
+          result.beforeUsedChars = before.usedChars;
+          result.usedChars = after.usedChars;
+          result.keys = after.keys;
+          result.groups = after.groups;
+          result.canWrite = ok;
+
+          // Remember what filled it, so the app can report it once signed in.
+          if (allowEmergency && (force || lvl === 'emergency' || lvl === 'cleared' ||
+              before.usedChars > LIMIT_CHARS * PRESSURE)) {
+            try {
+              s.setItem(INCIDENT_KEY, JSON.stringify({
+                at: Date.now(), level: lvl, forced: !!force,
+                before: before, afterUsedChars: after.usedChars,
+                removed: removed, canWrite: ok,
+                userAgent: navigator.userAgent
+              }));
+            } catch (e) {}
+          }
+          if (removed) {
+            console.warn('[storage] tidied localStorage (' + lvl + '): removed ' + removed +
+              ' keys, ' + Math.round(freed / 1024) + 'K chars', before.groups);
+          }
+        } catch (e) {
+          result.canWrite = false;
+          result.error = String(e);
+        }
+        return result;
+      }
+
+      var force = false;
+      try {
+        force = sessionStorage.getItem(FIX_FLAG) === '1';
+        sessionStorage.removeItem(FIX_FLAG);
+      } catch (e) {}
+      window.clmStorageBoot = JSON.stringify(check(force ? 'pressure' : 'routine', true, force));
+      window.clmStorageCheck = function (level) {
+        return JSON.stringify(check(level, false, false));
+      };
+    })();
+  </script>
+
   <!-- ── Single-tab enforcement (per URL, maps build only) ──────────────────
        Uses a localStorage heartbeat so the SAME page isn't loaded twice (which
        would double the Firestore reads). The check is synchronous on page load
@@ -643,186 +824,6 @@
     }, 30000);
   </script>
 
-  <!-- Browser capture helpers used by PrintMapView (WASM-compatible).
-       Exposes:
-         window.clmCaptureBrowserViewportArea(left, top, w, h)
-           -> uses navigator.mediaDevices.getDisplayMedia (asks user to pick tab)
-         window.clmCaptureDomArea(left, top, w, h)
-           -> uses html-to-image (loaded on demand) — no prompt
-         window.clmIsScreenCaptureSupported()
-         window.clmIsDomCaptureSupported() -->
-  <script>
-    (function () {
-      if (window.clmCaptureBrowserViewportArea && window.clmCaptureDomArea) return;
-
-      window.clmIsScreenCaptureSupported = function () {
-        return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
-      };
-
-      window.clmIsDomCaptureSupported = function () {
-        return true; // html-to-image is loaded on demand
-      };
-
-      // ----- Screen capture (getDisplayMedia) -----
-      window.clmCaptureBrowserViewportArea = async function (left, top, width, height) {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-          throw new Error('Screen capture is not supported by this browser.');
-        }
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            displaySurface: 'browser',
-            preferCurrentTab: true,
-            selfBrowserSurface: 'include',
-            surfaceSwitching: 'exclude'
-          },
-          audio: false
-        });
-
-        const video = document.createElement('video');
-        video.autoplay = true;
-        video.muted = true;
-        video.playsInline = true;
-        video.srcObject = stream;
-        video.style.cssText =
-          'position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;opacity:0;pointer-events:none;';
-        document.body.appendChild(video);
-
-        try {
-          await new Promise(function (resolve, reject) {
-            const t = setTimeout(function () {
-              reject(new Error('Timed out waiting for browser capture.'));
-            }, 10000);
-            video.onloadedmetadata = function () { clearTimeout(t); resolve(); };
-            video.onerror = function () { clearTimeout(t); reject(new Error('Video error during capture.')); };
-          });
-          await video.play().catch(function () {});
-
-          const videoW = video.videoWidth;
-          const videoH = video.videoHeight;
-          const dpr = window.devicePixelRatio || 1;
-          const innerW = window.innerWidth;
-          const innerH = window.innerHeight;
-
-          // Map CSS-pixel rect → video-pixel rect.
-          const scaleX = videoW / (innerW * dpr) * dpr;
-          const scaleY = videoH / (innerH * dpr) * dpr;
-          const sx = Math.max(0, Math.round(left * scaleX));
-          const sy = Math.max(0, Math.round(top * scaleY));
-          const sw = Math.max(1, Math.round(width * scaleX));
-          const sh = Math.max(1, Math.round(height * scaleY));
-
-          const canvas = document.createElement('canvas');
-          canvas.width = sw;
-          canvas.height = sh;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-          return canvas.toDataURL('image/png');
-        } finally {
-          try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
-          if (video.parentNode) video.parentNode.removeChild(video);
-        }
-      };
-
-      // ----- DOM capture (html-to-image) -----
-      let htiPromise = null;
-      function ensureHtmlToImage() {
-        if (window.htmlToImage) return Promise.resolve(window.htmlToImage);
-        if (htiPromise) return htiPromise;
-        htiPromise = new Promise(function (resolve, reject) {
-          const s = document.createElement('script');
-          s.src = 'https://cdn.jsdelivr.net/npm/html-to-image@1.11.13/dist/html-to-image.min.js';
-          s.async = true;
-          s.onload = function () { resolve(window.htmlToImage); };
-          s.onerror = function () { reject(new Error('Failed to load html-to-image library.')); };
-          document.head.appendChild(s);
-        });
-        return htiPromise;
-      }
-
-      window.clmCaptureDomArea = async function (left, top, width, height) {
-        const hti = await ensureHtmlToImage();
-
-        // Force-snapshot every WebGL canvas on the page into a 2D canvas
-        // overlay so html-to-image can serialize the pixels. WebGL canvases
-        // normally come back blank because `preserveDrawingBuffer` is false.
-        const overlays = [];
-        function snapshotWebGLCanvases(doc) {
-          if (!doc) return;
-          const canvases = doc.querySelectorAll('canvas');
-          canvases.forEach(function (cnv) {
-            try {
-              const gl = cnv.getContext('webgl2', { preserveDrawingBuffer: true }) ||
-                         cnv.getContext('webgl', { preserveDrawingBuffer: true }) ||
-                         cnv.getContext('experimental-webgl', { preserveDrawingBuffer: true });
-              if (!gl) return;
-              // Copy current framebuffer to a 2D canvas placed over the original.
-              const snap = document.createElement('canvas');
-              snap.width = cnv.width;
-              snap.height = cnv.height;
-              const ctx = snap.getContext('2d');
-              try {
-                ctx.drawImage(cnv, 0, 0);
-              } catch (e) {
-                return;
-              }
-              const rect = cnv.getBoundingClientRect();
-              snap.style.cssText =
-                'position:fixed;left:' + rect.left + 'px;top:' + rect.top +
-                'px;width:' + rect.width + 'px;height:' + rect.height +
-                'px;pointer-events:none;z-index:2147483646;';
-              document.body.appendChild(snap);
-              overlays.push(snap);
-            } catch (e) {}
-          });
-          // Recurse into same-origin iframes (the Google Maps element view).
-          const frames = doc.querySelectorAll('iframe');
-          frames.forEach(function (f) {
-            try {
-              snapshotWebGLCanvases(f.contentDocument);
-            } catch (e) {}
-          });
-        }
-
-        snapshotWebGLCanvases(document);
-        // Allow the overlays to lay out.
-        await new Promise(function (r) { requestAnimationFrame(function () { r(); }); });
-
-        let fullDataUrl;
-        try {
-          fullDataUrl = await hti.toPng(document.body, {
-            cacheBust: true,
-            pixelRatio: window.devicePixelRatio || 1,
-            skipFonts: false,
-          });
-        } finally {
-          overlays.forEach(function (n) {
-            if (n.parentNode) n.parentNode.removeChild(n);
-          });
-        }
-
-        return new Promise(function (resolve, reject) {
-          const img = new Image();
-          img.onload = function () {
-            const dpr = window.devicePixelRatio || 1;
-            const sx = Math.max(0, Math.round(left * dpr));
-            const sy = Math.max(0, Math.round(top * dpr));
-            const sw = Math.max(1, Math.round(width * dpr));
-            const sh = Math.max(1, Math.round(height * dpr));
-            const canvas = document.createElement('canvas');
-            canvas.width = sw;
-            canvas.height = sh;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
-            resolve(canvas.toDataURL('image/png'));
-          };
-          img.onerror = function () {
-            reject(new Error('Failed to decode captured image.'));
-          };
-          img.src = fullDataUrl;
-        });
-      };
-    })();
-  </script>
   
 
 

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
@@ -110,7 +111,7 @@ Future<bool> _confirmVoidAndUnlink({
   required Future<void> Function() unlink,
 }) async {
   final messenger = ScaffoldMessenger.of(context);
-  void complain(String message) => messenger.showSnackBar(
+  void complain(String message) => messenger.showToast(
         SnackBar(content: Text(message), backgroundColor: Colors.red),
       );
 
@@ -167,7 +168,7 @@ Future<bool> _confirmVoidAndUnlink({
 
   try {
     await unlink();
-    messenger.showSnackBar(
+    messenger.showToast(
       SnackBar(
         content: Text('Invoice $number unlinked — the job can be invoiced '
             'again.'),

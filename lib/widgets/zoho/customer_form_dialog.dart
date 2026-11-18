@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../../models/zoho_customer.dart';
 import '../../providers/zoho_customers_provider.dart';
+import '../../services/zoho_books_service.dart';
+import '../slow_action_hint.dart';
 import 'zoho_table.dart';
 
 /// Add/edit form. Zoho requires `contact_name`; everything else is optional.
@@ -65,7 +67,12 @@ class CustomerFormDialogState
     super.dispose();
   }
 
+  /// One per dialog: a retry after a lost reply, or a second click, returns
+  /// the customer already created instead of adding a duplicate contact.
+  final String _createKey = newZohoIdempotencyKey('customer');
+
   Future<void> _save() async {
+    if (_isSaving) return;
     if (!_formKey.currentState!.validate()) return;
 
     setState(() {
@@ -96,7 +103,7 @@ class CustomerFormDialogState
       // select it immediately — like the job dialog's picker — can.
       final saved = _isEdit
           ? await provider.updateCustomer(draft)
-          : await provider.createCustomer(draft);
+          : await provider.createCustomer(draft, idempotencyKey: _createKey);
       if (mounted) Navigator.of(context).pop(saved);
     } catch (e) {
       // Never swallowed — the dialog stays open showing why Zoho refused.
@@ -219,6 +226,8 @@ class CustomerFormDialogState
                 Text(_error!,
                     style: const TextStyle(color: Colors.red, fontSize: 12)),
               ],
+              SlowActionHint(
+                  busy: _isSaving, action: 'Saving the customer in Zoho'),
             ],
           ),
         ),

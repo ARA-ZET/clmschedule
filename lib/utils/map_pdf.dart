@@ -6,49 +6,76 @@ import 'package:pdf/widgets.dart' as pw;
 
 import '../models/job.dart';
 
-/// Generates a print-ready distribution map PDF.
-///
-/// Layout:
-/// - A4 portrait or landscape, selected from the map bounds by the caller.
-/// - A black header bar with distributor, date, and map summary.
-/// - The captured Google Map image is preserved inside the center area.
-/// - Distribution details sit in a compact footer so the map stays clean.
-Future<Uint8List> generateDistributionMapPdf({
-  required Uint8List mapImageBytes,
-  required Job job,
-  required String? distributorName,
-  required bool isLandscape,
-}) async {
-  return generateDistributionMapPdfFromData(
-    distributionMapPdfPayload(
-      mapImageBytes: mapImageBytes,
-      job: job,
-      distributorName: distributorName,
-      isLandscape: isLandscape,
-    ),
-  );
+/// One map picture for the PDF: the page's image and orientation, and
+/// where it sits in an overview-plus-sections set.
+class DistributionMapPdfPage {
+  final Uint8List imageBytes;
+  final bool isLandscape;
+
+  /// 0 for a single page or the overview, otherwise 1..[sectionCount].
+  final int section;
+  final int sectionCount;
+
+  const DistributionMapPdfPage({
+    required this.imageBytes,
+    required this.isLandscape,
+    this.section = 0,
+    this.sectionCount = 0,
+  });
+
+  Map<String, Object?> toMap() => {
+        'imageBytes': imageBytes,
+        'isLandscape': isLandscape,
+        'section': section,
+        'sectionCount': sectionCount,
+      };
 }
 
+/// One pin in the printed key: its black-and-white picture and meaning.
+class DistributionMapPinLegendEntry {
+  final Uint8List pngBytes;
+  final String label;
+
+  const DistributionMapPinLegendEntry({
+    required this.pngBytes,
+    required this.label,
+  });
+
+  Map<String, Object?> toMap() => {'pngBytes': pngBytes, 'label': label};
+}
+
+/// Data for [generateDistributionMapPdfFromData], kept to plain values so
+/// it can cross an isolate.
+///
+/// Every page carries the distributor details at the top. Instructions
+/// print at the bottom of the first page only, when the job has any.
 Map<String, Object?> distributionMapPdfPayload({
-  required Uint8List mapImageBytes,
+  required List<DistributionMapPdfPage> pages,
   required Job job,
   required String? distributorName,
-  required bool isLandscape,
   Set<int> hiddenClientIndices = const {},
   bool hasCloudTracks = false,
+  List<DistributionMapPinLegendEntry> pinLegend = const [],
 }) {
+  final shownClients = job.clients
+      .asMap()
+      .entries
+      .where((e) =>
+          e.value.trim().isNotEmpty && !hiddenClientIndices.contains(e.key))
+      .toList(growable: false);
   return {
-    'mapImageBytes': mapImageBytes,
+    'pages': [for (final page in pages) page.toMap()],
     'dateIso': job.date.toIso8601String(),
     'distributorName': distributorName,
-    'isLandscape': isLandscape,
-    'clients': job.clients
-        .asMap()
-        .entries
-        .where((e) =>
-            e.value.trim().isNotEmpty && !hiddenClientIndices.contains(e.key))
-        .map((e) => e.value)
-        .toList(growable: false),
+    'clients': [for (final e in shownClients) e.value],
+    // Parallel to 'clients'; older jobs may have fewer instructions.
+    'clientInstructions': [
+      for (final e in shownClients)
+        e.key < job.clientInstructions.length
+            ? job.clientInstructions[e.key]
+            : '',
+    ],
+    'mapInstructions': job.mapInstructions,
     'workMaps': job.workMaps
         .where((map) => map.isPolygon)
         .map(
@@ -59,16 +86,18 @@ Map<String, Object?> distributionMapPdfPayload({
         )
         .toList(growable: false),
     'hasCloudTracks': hasCloudTracks,
+    'pinLegend': [for (final entry in pinLegend) entry.toMap()],
   };
 }
 
 Future<Uint8List> generateDistributionMapPdfFromData(
   Map<String, Object?> payload,
 ) async {
-  final mapImageBytes = payload['mapImageBytes'] as Uint8List;
+  final pages = ((payload['pages'] as List?) ?? const [])
+      .whereType<Map>()
+      .toList(growable: false);
   final date = DateTime.parse(payload['dateIso'] as String);
   final distributorName = payload['distributorName'] as String?;
-  final isLandscape = payload['isLandscape'] as bool? ?? false;
   final clients = ((payload['clients'] as List?) ?? const [])
       .whereType<String>()
       .toList(growable: false);
@@ -77,28 +106,54 @@ Future<Uint8List> generateDistributionMapPdfFromData(
       .map(_PdfWorkMapInfo.fromMap)
       .toList(growable: false);
   final hasCloudTracks = payload['hasCloudTracks'] as bool? ?? false;
+  final clientInstructions = ((payload['clientInstructions'] as List?) ??
+          const [])
+      .map((e) => e is String ? e : '')
+      .toList(growable: false);
+  final mapInstructions = payload['mapInstructions'] as String? ?? '';
+  final pinLegend = [
+    for (final entry in ((payload['pinLegend'] as List?) ?? const [])
+        .whereType<Map>())
+      (
+        pw.MemoryImage(entry['pngBytes'] as Uint8List),
+        entry['label'] as String? ?? '',
+      ),
+  ];
 
   final doc = pw.Document();
   final dateLabel = DateFormat('d MMMM yyyy').format(date);
-  final mapImage = pw.MemoryImage(mapImageBytes);
-  final pageFormat =
-      isLandscape ? PdfPageFormat.a4.landscape : PdfPageFormat.a4;
 
-  doc.addPage(
-    pw.Page(
-      pageFormat: pageFormat,
-      margin: const pw.EdgeInsets.all(10),
-      build: (_) => _buildDistributionMapPage(
-        mapImage: mapImage,
-        clients: clients,
-        workMaps: workMaps,
-        distributorName: distributorName,
-        dateLabel: dateLabel,
-        isLandscape: isLandscape,
-        hasCloudTracks: hasCloudTracks,
+  for (var i = 0; i < pages.length; i++) {
+    final page = pages[i];
+    final isLandscape = page['isLandscape'] as bool? ?? false;
+    final section = page['section'] as int? ?? 0;
+    final sectionCount = page['sectionCount'] as int? ?? 0;
+    final pageTitle = sectionCount == 0
+        ? null
+        : section == 0
+            ? 'Overview: $sectionCount sections'
+            : 'Section $section of $sectionCount';
+    final mapImage = pw.MemoryImage(page['imageBytes'] as Uint8List);
+    doc.addPage(
+      pw.Page(
+        pageFormat:
+            isLandscape ? PdfPageFormat.a4.landscape : PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(10),
+        build: (_) => _buildDistributionMapPage(
+          mapImage: mapImage,
+          clients: clients,
+          workMaps: workMaps,
+          distributorName: distributorName,
+          dateLabel: dateLabel,
+          pageTitle: pageTitle,
+          hasCloudTracks: hasCloudTracks,
+          pinLegend: pinLegend,
+          clientInstructions: i == 0 ? clientInstructions : const [],
+          mapInstructions: i == 0 ? mapInstructions : '',
+        ),
       ),
-    ),
-  );
+    );
+  }
 
   return doc.save();
 }
@@ -126,46 +181,62 @@ pw.Widget _buildDistributionMapPage({
   required List<_PdfWorkMapInfo> workMaps,
   required String? distributorName,
   required String dateLabel,
-  required bool isLandscape,
+  String? pageTitle,
   bool hasCloudTracks = false,
+  List<(pw.MemoryImage, String)> pinLegend = const [],
+  List<String> clientInstructions = const [],
+  String mapInstructions = '',
 }) {
+  // Header is black text on white: a filled bar wastes printer ink.
   final titleStyle = pw.TextStyle(
     fontWeight: pw.FontWeight.bold,
     fontSize: 18,
-    color: PdfColors.white,
+    color: PdfColors.black,
   );
   final headerStyle = pw.TextStyle(
     fontWeight: pw.FontWeight.bold,
-    fontSize: 11,
-    color: PdfColors.white,
+    fontSize: 12,
+    color: PdfColors.black,
   );
-  final mutedHeaderStyle = pw.TextStyle(
-    fontSize: 9,
-    color: const PdfColor(0.72, 0.72, 0.72),
-  );
+  // All text is bold, black and large enough to read on a black-and-white
+  // printout.
   final labelStyle = pw.TextStyle(
     fontWeight: pw.FontWeight.bold,
-    fontSize: 8.5,
-    color: PdfColors.grey800,
+    fontSize: 12,
+    color: PdfColors.black,
   );
   final valueStyle = pw.TextStyle(
-    fontSize: 8.5,
-    color: PdfColors.grey800,
+    fontWeight: pw.FontWeight.bold,
+    fontSize: 12,
+    color: PdfColors.black,
   );
 
   final distributorLabel = _fallback(distributorName, 'Distributor');
-  final workMapLabel = workMaps.isEmpty
-      ? '.'
-      : workMaps.length == 1
-          ? _fallback(workMaps.first.name, 'Work area')
-          : '${workMaps.length} work areas';
+  // Only a single work area is named. With several, the count adds
+  // nothing to the printout, so it is left off.
+  final String? workMapLabel = workMaps.length == 1
+      ? _fallback(workMaps.first.name, 'Work area')
+      : null;
+
+  // The job's own instructions first, then each client's, labelled with
+  // the client's name.
+  final instructions = <(String?, String)>[
+    if (mapInstructions.trim().isNotEmpty) (null, mapInstructions.trim()),
+    for (var i = 0; i < clients.length && i < clientInstructions.length; i++)
+      if (clientInstructions[i].trim().isNotEmpty)
+        (clients[i].trim(), clientInstructions[i].trim()),
+  ];
 
   return pw.Column(
     crossAxisAlignment: pw.CrossAxisAlignment.stretch,
     children: [
       pw.Container(
-        padding: const pw.EdgeInsets.fromLTRB(10, 6, 10, 6),
-        decoration: const pw.BoxDecoration(color: PdfColors.black),
+        padding: const pw.EdgeInsets.fromLTRB(4, 2, 4, 6),
+        decoration: const pw.BoxDecoration(
+          border: pw.Border(
+            bottom: pw.BorderSide(color: PdfColors.black, width: 1.5),
+          ),
+        ),
         child: pw.Row(
           crossAxisAlignment: pw.CrossAxisAlignment.start,
           children: [
@@ -174,8 +245,22 @@ pw.Widget _buildDistributionMapPage({
                 crossAxisAlignment: pw.CrossAxisAlignment.start,
                 children: [
                   pw.Text(distributorLabel, style: titleStyle),
-                  pw.SizedBox(height: 2),
-                  pw.Text('Distribution Map', style: mutedHeaderStyle),
+                  if (clients.isNotEmpty) ...[
+                    pw.SizedBox(height: 4),
+                    _clientList(clients, labelStyle, valueStyle),
+                  ],
+                  if (workMaps.length > 1) ...[
+                    pw.SizedBox(height: 4),
+                    _workAreaLegend(workMaps, labelStyle, valueStyle),
+                  ],
+                  if (hasCloudTracks) ...[
+                    pw.SizedBox(height: 4),
+                    _recordedTrackLegend(valueStyle),
+                  ],
+                  if (pinLegend.isNotEmpty) ...[
+                    pw.SizedBox(height: 4),
+                    _pinLegend(pinLegend, labelStyle, valueStyle),
+                  ],
                 ],
               ),
             ),
@@ -183,11 +268,14 @@ pw.Widget _buildDistributionMapPage({
               crossAxisAlignment: pw.CrossAxisAlignment.end,
               children: [
                 pw.Text(dateLabel, style: headerStyle),
-                pw.SizedBox(height: 2),
-                pw.Text(
-                  '${isLandscape ? 'Landscape' : 'Portrait'} A4  |  $workMapLabel',
-                  style: mutedHeaderStyle,
-                ),
+                if (pageTitle != null) ...[
+                  pw.SizedBox(height: 2),
+                  pw.Text(pageTitle, style: titleStyle),
+                ],
+                if (workMapLabel != null) ...[
+                  pw.SizedBox(height: 2),
+                  pw.Text(workMapLabel, style: headerStyle),
+                ],
               ],
             ),
           ],
@@ -207,43 +295,29 @@ pw.Widget _buildDistributionMapPage({
           ),
         ),
       ),
-      pw.SizedBox(height: 5),
-      pw.Container(
-        padding: const pw.EdgeInsets.fromLTRB(8, 6, 8, 6),
-        decoration: pw.BoxDecoration(
-          color: const PdfColor.fromInt(0xFFF7F7F7),
-          border: pw.Border.all(
-            color: const PdfColor(0.84, 0.84, 0.84),
-            width: 0.5,
+      // Instructions for the distributor, only when the job has any.
+      if (instructions.isNotEmpty) ...[
+        pw.SizedBox(height: 5),
+        pw.Container(
+          padding: const pw.EdgeInsets.fromLTRB(8, 6, 8, 6),
+          decoration: pw.BoxDecoration(
+            color: PdfColors.white,
+            border: pw.Border.all(color: PdfColors.black, width: 1),
+          ),
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Text('Instructions', style: labelStyle),
+              for (final line in instructions) ...[
+                pw.SizedBox(height: 3),
+                line.$1 == null
+                    ? pw.Text(line.$2, style: valueStyle)
+                    : _infoText(line.$1!, line.$2, labelStyle, valueStyle),
+              ],
+            ],
           ),
         ),
-        child: pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
-          children: [
-            pw.Wrap(
-              spacing: 14,
-              runSpacing: 4,
-              children: [
-                _infoText('Name', distributorLabel, labelStyle, valueStyle),
-                _infoText('Date', dateLabel, labelStyle, valueStyle),
-                _infoText('Map', workMapLabel, labelStyle, valueStyle),
-              ],
-            ),
-            if (clients.isNotEmpty) ...[
-              pw.SizedBox(height: 5),
-              _clientList(clients, labelStyle, valueStyle),
-            ],
-            if (workMaps.length > 1) ...[
-              pw.SizedBox(height: 5),
-              _workAreaLegend(workMaps, labelStyle, valueStyle),
-            ],
-            if (hasCloudTracks) ...[
-              pw.SizedBox(height: 5),
-              _recordedTrackLegend(valueStyle),
-            ],
-          ],
-        ),
-      ),
+      ],
     ],
   );
 }
@@ -312,6 +386,37 @@ pw.Widget _workAreaLegend(
           ],
         );
       }),
+    ],
+  );
+}
+
+/// What each pin on the map means, pictured as it prints.
+pw.Widget _pinLegend(
+  List<(pw.MemoryImage, String)> pins,
+  pw.TextStyle labelStyle,
+  pw.TextStyle valueStyle,
+) {
+  return pw.Wrap(
+    spacing: 10,
+    runSpacing: 3,
+    crossAxisAlignment: pw.WrapCrossAlignment.center,
+    children: [
+      pw.Text('Map pins:', style: labelStyle),
+      for (final (image, label) in pins)
+        pw.Row(
+          mainAxisSize: pw.MainAxisSize.min,
+          crossAxisAlignment: pw.CrossAxisAlignment.center,
+          children: [
+            pw.Image(
+              image,
+              height: 18,
+              // Pins with a tag are wide; keep their shape.
+              width: 18 * (image.width ?? 1) / (image.height ?? 1),
+            ),
+            pw.SizedBox(width: 3),
+            pw.Text(label, style: valueStyle),
+          ],
+        ),
     ],
   );
 }

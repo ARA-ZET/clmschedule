@@ -51,6 +51,11 @@ class ReferenceCacheService {
   /// keep re-reading the meta doc.
   static final Map<String, int> _sessionRemoteVersions = {};
 
+  /// The in-flight (or finished) read of the meta doc. Every reference
+  /// collection loads at startup at once; sharing this makes that one read
+  /// instead of one per collection.
+  static Future<Map<String, dynamic>?>? _metaFetch;
+
   static Box? _box;
   static bool _hiveTried = false;
   static bool _hiveAvailable = false;
@@ -119,13 +124,14 @@ class ReferenceCacheService {
     if (cached != null) return cached;
 
     try {
-      final snap = await _metaDoc.get();
-      final data = snap.data();
+      final data =
+          await (_metaFetch ??= _metaDoc.get().then((snap) => snap.data()));
       final v = (data != null ? data[collectionName] : null);
       final version = v is int ? v : 0;
       _sessionRemoteVersions[collectionName] = version;
       return version;
     } catch (e) {
+      _metaFetch = null;
       if (kDebugMode) {
         debugPrint('ReferenceCacheService: _getRemoteVersion($collectionName) '
             'failed: $e');
@@ -156,6 +162,7 @@ class ReferenceCacheService {
       // Invalidate our session cache so the next load picks up the new
       // version and records it.
       _sessionRemoteVersions.remove(collectionName);
+      _metaFetch = null;
     } catch (e) {
       if (kDebugMode) {
         debugPrint(
@@ -189,10 +196,17 @@ class ReferenceCacheService {
   ///   version of `0` we still serve from cache — this is what makes the
   ///   service a no-op "enhancement" for databases that have never had the
   ///   meta doc written to them.
+  ///
+  /// [onCached], when given, receives whatever Firestore's local cache holds
+  /// before the version check, so the UI can paint last session's items
+  /// straight away. The returned list is the authoritative one. On web the
+  /// stored version never survives a reload (no Hive), so without this every
+  /// cold start waited on two server round trips.
   static Future<List<T>> loadCollection<T>({
     required Query<Object?> query,
     required String collectionName,
     required T Function(QueryDocumentSnapshot<Object?> doc) fromDoc,
+    void Function(List<T> cached)? onCached,
   }) async {
     if (!_isSignedIn) {
       if (kDebugMode) {
@@ -202,31 +216,43 @@ class ReferenceCacheService {
       return const [];
     }
 
-    final remoteVersion = await _getRemoteVersion(collectionName);
-    final storedVersion = await _getStoredVersion(collectionName);
-
-    // Fast path: versions match → serve from Firestore's local cache.
-    if (storedVersion != null && storedVersion == remoteVersion) {
+    Future<QuerySnapshot<Object?>?> readCache() async {
       try {
-        final cacheSnap =
-            await query.get(const GetOptions(source: Source.cache));
-        if (cacheSnap.docs.isNotEmpty) {
-          if (kDebugMode) {
-            debugPrint('ReferenceCacheService[$collectionName]: '
-                'served ${cacheSnap.docs.length} docs from cache '
-                '(version=$remoteVersion, 0 billed reads)');
-          }
-          return cacheSnap.docs.map(fromDoc).toList();
-        }
-        // Empty cache — fall through to server fetch.
+        return await query.get(const GetOptions(source: Source.cache));
       } catch (e) {
-        // Cache miss / unavailable — fall through to server fetch.
+        // Cache miss / unavailable — callers fall through to the server.
         if (kDebugMode) {
           debugPrint(
               'ReferenceCacheService[$collectionName]: cache read failed, '
               'falling back to server: $e');
         }
+        return null;
       }
+    }
+
+    QuerySnapshot<Object?>? cacheSnap;
+    if (onCached != null) {
+      cacheSnap = await readCache();
+      if (cacheSnap != null && cacheSnap.docs.isNotEmpty) {
+        onCached(cacheSnap.docs.map(fromDoc).toList());
+      }
+    }
+
+    final remoteVersion = await _getRemoteVersion(collectionName);
+    final storedVersion = await _getStoredVersion(collectionName);
+
+    // Fast path: versions match → serve from Firestore's local cache.
+    if (storedVersion != null && storedVersion == remoteVersion) {
+      cacheSnap ??= await readCache();
+      if (cacheSnap != null && cacheSnap.docs.isNotEmpty) {
+        if (kDebugMode) {
+          debugPrint('ReferenceCacheService[$collectionName]: '
+              'served ${cacheSnap.docs.length} docs from cache '
+              '(version=$remoteVersion, 0 billed reads)');
+        }
+        return cacheSnap.docs.map(fromDoc).toList();
+      }
+      // Empty cache — fall through to server fetch.
     }
 
     // Slow path: fetch from server and remember the version.
@@ -247,6 +273,7 @@ class ReferenceCacheService {
   static Future<void> resetForTesting() async {
     _memoryVersions.clear();
     _sessionRemoteVersions.clear();
+    _metaFetch = null;
     final box = await _openBox();
     if (box != null) await box.clear();
   }

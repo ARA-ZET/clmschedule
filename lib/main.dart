@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:async';
 
 import 'package:clmschedule/letterbox/pages/letterbox_curation_page.dart';
@@ -16,9 +17,9 @@ import 'providers/job_list_provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/inventory_provider.dart';
 import 'providers/happy_sun_project_provider.dart';
-// import 'providers/job_status_provider.dart'; // Migrated to Riverpod
-// import 'providers/job_list_status_provider.dart'; // Migrated to Riverpod
-// import 'providers/invoice_status_provider.dart'; // Migrated to Riverpod
+import 'providers/job_status_provider.dart' show jobStatusRiverpod;
+import 'providers/job_list_status_provider.dart' show jobListStatusRiverpod;
+import 'providers/invoice_status_provider.dart' show invoiceStatusRiverpod;
 // import 'providers/job_list_preferences_provider.dart'; // Migrated to Riverpod
 import 'providers/auth_provider.dart';
 // import 'providers/vehicle_driver_provider.dart'; // REMOVED: unused provider
@@ -28,7 +29,7 @@ import 'providers/app_version_provider.dart';
 import 'providers/tool_settings_provider.dart';
 // import 'providers/job_type_provider.dart'; // Migrated to Riverpod
 import 'providers/job_type_provider.dart'
-    show JobTypeProvider; // static accessor only
+    show JobTypeProvider, jobTypeRiverpod;
 import 'providers/unfinished_work_areas_provider.dart';
 import 'providers/day_off_provider.dart';
 import 'shareable_maps/providers/shareable_map_provider.dart';
@@ -39,6 +40,7 @@ import 'models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
 import 'widgets/schedule_grid.dart';
 import 'widgets/collection_schedule_grid.dart';
 import 'widgets/job_list_grid.dart';
+import 'widgets/job_list_status_views.dart';
 import 'widgets/distributor_management_dialog.dart';
 import 'widgets/lazy_loading_indicator.dart';
 import 'widgets/scale_settings_dialog.dart';
@@ -57,6 +59,7 @@ import 'widgets/app_update_dialog.dart';
 import 'widgets/happy_sun_inventory_view.dart';
 import 'widgets/zoho/zoho_customers_view.dart';
 import 'widgets/zoho/zoho_invoices_view.dart';
+import 'widgets/zoho/zoho_table.dart';
 import 'models/company.dart';
 import 'utils/zoho_org.dart';
 import 'widgets/happy_sun_job_projects_screen.dart';
@@ -75,6 +78,12 @@ import 'track_editor/pages/track_editor_screen.dart';
 import 'erf_property/pages/erf_property_screen.dart';
 import 'widgets/ward_map_screen.dart';
 import 'widgets/regular_clients_screen.dart';
+import 'widgets/weather/weather_screen.dart';
+import 'widgets/fleet/fleet_screen.dart';
+import 'widgets/fleet/inspection_alerts.dart';
+import 'widgets/fleet/inspection_detail_page.dart';
+import 'providers/inspection_alerts_provider.dart';
+import 'models/vehicle_inspection.dart';
 
 // import 'services/work_area_service.dart'; // Migrated to Riverpod
 // import 'services/job_list_service.dart'; // Migrated to Riverpod
@@ -89,40 +98,40 @@ import 'widgets/payroll/payroll_tab.dart';
 import 'widgets/cloud_file_manager_screen.dart';
 import 'services/inventory_service.dart';
 import 'services/connectivity_service.dart';
+import 'services/storage_health.dart';
+import 'services/sync_status.dart';
+import 'widgets/sync_status_banner.dart';
+import 'widgets/save_check_dialog.dart';
+import 'utils/root_navigator.dart';
 import 'services/happy_sun_local_storage.dart';
 import 'services/happy_sun_sync_service.dart';
 import 'services/inventory_local_storage.dart';
 import 'services/image_cache_service.dart';
 import 'services/inventory_sync_service.dart';
-import 'models/command.dart';
 import 'firebase_options.dart';
 import 'utils/web_reload.dart'
     if (dart.library.io) 'utils/web_reload_stub.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 import 'shareable_maps/providers/map_gesture_provider.dart';
-
-// Simple test command for debugging undo functionality
-class TestCommand extends Command {
-  final String _description;
-
-  TestCommand(this._description);
-
-  @override
-  String get description => _description;
-
-  @override
-  Future<void> execute() async {
-    print('Executing: $_description');
-  }
-
-  @override
-  Future<void> undo() async {
-    print('Undoing: $_description');
-  }
-}
+import 'recycle_bin/recycle_bin_screen.dart';
+import 'undo/undo_history.dart';
+import 'undo/undo_shortcuts.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // A full browser storage surfaces as QuotaExceededError from deep inside
+  // Firebase, often in an error nobody catches — route every one past
+  // StorageHealth so the banner can say why nothing saves.
+  final previousFlutterOnError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    StorageHealth.instance.noteError(details.exception);
+    previousFlutterOnError?.call(details);
+  };
+  final previousPlatformOnError = PlatformDispatcher.instance.onError;
+  PlatformDispatcher.instance.onError = (error, stack) {
+    StorageHealth.instance.noteError(error);
+    return previousPlatformOnError?.call(error, stack) ?? false;
+  };
   usePathUrlStrategy();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
@@ -191,8 +200,8 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
   /// The update dialog is raised from outside the widget tree, so it needs a
   /// context that actually sits *below* MaterialApp — this state's own context
   /// is above it and has no Navigator.
-  final GlobalKey<NavigatorState> _rootNavigatorKey =
-      GlobalKey<NavigatorState>();
+  // Shared so toast buttons can open dialogs too (utils/root_navigator.dart).
+  final GlobalKey<NavigatorState> _rootNavigatorKey = rootNavigatorKey;
   bool _updateDialogOpen = false;
 
   // Offline services for Happy Sun flavor
@@ -211,6 +220,9 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
   @override
   void initState() {
     super.initState();
+    // Before anything loads, so a slow first load is reported too.
+    SyncStatus.instance.start();
+    StorageHealth.instance.start();
     // Initialize all providers asynchronously in parallel
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _initializeProvidersAsync();
@@ -437,6 +449,11 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
           debugPrint('❌ Happy Sun Sync Error (onDeleted): $e');
         }
       },
+      projectRef: (jobListItem) async =>
+          (JobTypeProvider.instance?.isHappySunService(jobListItem.jobTypeId) ??
+                  false)
+              ? happySunProjectProvider.findProjectRef(jobListItem.id)
+              : null,
     );
   }
 
@@ -544,26 +561,36 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
 
     _authenticatedProvidersInitializing = true;
 
+    final List<Future<void>> initializations = [];
+
+    // What the first screen shows goes first: listeners are sent to the
+    // server in the order they open, so the schedule month and its status
+    // colours no longer queue behind Happy Sun projects and inventory.
+    if (FlavorConfig.instance.isCLM) {
+      initializations.add(ref.read(scheduleRiverpod).initialize());
+      // Reading a reference provider constructs it, which starts its load.
+      // Left to the first JobCard / Job List build, the colours only began
+      // loading after the jobs had arrived — the last thing to fill in.
+      ref.read(jobStatusRiverpod);
+      ref.read(jobTypeRiverpod);
+      ref.read(jobListStatusRiverpod);
+      ref.read(invoiceStatusRiverpod);
+      initializations.add(ref.read(unfinishedWorkAreasRiverpod).initialize());
+      ref.read(dayOffRiverpod).initialize();
+    }
+
     // Set up Happy Sun sync for both flavors (both have Happy Sun features).
     // This reads HappySunProjectProvider, whose constructor opens Firestore streams.
     _setupHappySunSync();
 
-    // Build initialization list based on flavor
-    final List<Future<void>> initializations = [
-      // JobListProvider is now lazy-initialized — its Firestore stream only
-      // starts when the Job List or Collection Schedule tab is first opened.
-      // This avoids paying N reads (1 per job item) at login for users who
-      // never visit those tabs.
+    // JobListProvider is lazy-initialized — its Firestore stream only starts
+    // when the Job List or Collection Schedule tab is first opened. This
+    // avoids paying N reads (1 per job item) at login for users who never
+    // visit those tabs.
+    initializations.addAll([
       ref.read(inventoryRiverpod).initialize(),
       ref.read(toolSettingsRiverpod).loadSettings(),
-    ];
-
-    // Only initialize ScheduleProvider for CLM flavor
-    if (FlavorConfig.instance.isCLM) {
-      initializations.add(ref.read(scheduleRiverpod).initialize());
-      initializations.add(ref.read(unfinishedWorkAreasRiverpod).initialize());
-      ref.read(dayOffRiverpod).initialize();
-    }
+    ]);
 
     // Run all provider initializations in parallel for fast startup.
     // Wrap in try/catch + timeout so a hanging network call (common on first
@@ -688,6 +715,12 @@ class _MyAppState extends riverpod.ConsumerState<MyApp> {
       navigatorKey: _rootNavigatorKey,
       navigatorObservers: [ref.read(mapModalObserverRiverpod)],
       debugShowCheckedModeBanner: false,
+      // Toasts stay above the sync banner's column so they float over the
+      // whole app, banner included.
+      builder: (context, child) => AppToastHost.builder(
+        context,
+        SyncStatusBanner(child: child ?? const SizedBox.shrink()),
+      ),
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor:
@@ -972,6 +1005,26 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
 
   // ── Action button helper ───────────────────────────────────────────────────
 
+  void _openFleet() {
+    _bodyNavKey.currentState?.push(
+      MaterialPageRoute(builder: (_) => const FleetScreen()),
+    );
+  }
+
+  void _openInspection(VehicleInspection inspection) {
+    final alerts = ref.read(inspectionAlertsRiverpod);
+    _bodyNavKey.currentState?.push(
+      MaterialPageRoute(
+        builder: (_) => InspectionDetailPage(
+          inspection: inspection,
+          history: alerts.recent,
+          depot: alerts.depot,
+          service: alerts.service,
+        ),
+      ),
+    );
+  }
+
   Widget _actionBtn({
     required IconData icon,
     required String label,
@@ -1152,7 +1205,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                       }
                     } catch (e) {
                       if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                        ScaffoldMessenger.of(context).showToast(
                           SnackBar(
                             content: Text('Failed to load work areas: $e'),
                             backgroundColor: Colors.red.shade800,
@@ -1182,7 +1235,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                       }
                     } catch (e) {
                       if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                        ScaffoldMessenger.of(context).showToast(
                           SnackBar(
                             content: Text('Failed to load client maps: $e'),
                             backgroundColor: Colors.red.shade800,
@@ -1211,7 +1264,7 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                       }
                     } catch (e) {
                       if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                        ScaffoldMessenger.of(context).showToast(
                           SnackBar(
                             content: Text('Failed to load work suburbs: $e'),
                             backgroundColor: Colors.red.shade800,
@@ -1235,6 +1288,9 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                       );
                     },
                   ),
+
+                // Fleet — admins only; badged with inspections to review.
+                FleetAlertButton(onPressed: _openFleet),
 
                 // Apps menu — Pelisa, team chat, and less-frequently-used
                 // tools. Scoped in a Consumer so unread-count changes
@@ -1327,6 +1383,13 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                             MaterialPageRoute(
                                 builder: (_) => const RegularClientsScreen()),
                           );
+                        } else if (value == 'weather') {
+                          _bodyNavKey.currentState?.push(
+                            MaterialPageRoute(
+                                builder: (_) => const WeatherScreen()),
+                          );
+                        } else if (value == 'fleet') {
+                          _openFleet();
                         } else if (value == 'ward_maps') {
                           _bodyNavKey.currentState?.push(
                             MaterialPageRoute(
@@ -1336,6 +1399,11 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                           _bodyNavKey.currentState?.push(
                             MaterialPageRoute(
                                 builder: (_) => const LetterboxCurationPage()),
+                          );
+                        } else if (value == 'recycle_bin') {
+                          _bodyNavKey.currentState?.push(
+                            MaterialPageRoute(
+                                builder: (_) => const RecycleBinScreen()),
                           );
                         }
                       },
@@ -1393,6 +1461,30 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                           ),
                         const PopupMenuDivider(),
                         const PopupMenuItem<String>(
+                          value: 'weather',
+                          child: ListTile(
+                            leading: Icon(Icons.wb_sunny_outlined),
+                            title: Text('Weather'),
+                            subtitle: Text(
+                              '9-day forecast for distribution (yr.no)',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                        const PopupMenuItem<String>(
+                          value: 'fleet',
+                          child: ListTile(
+                            leading: Icon(Icons.fact_check_outlined),
+                            title: Text('Fleet'),
+                            subtitle: Text(
+                              'Daily vehicle inspections from clmgpx',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                        const PopupMenuItem<String>(
                           value: 'geocode',
                           child: ListTile(
                             leading: Icon(Icons.route_outlined),
@@ -1433,6 +1525,15 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                           child: ListTile(
                             leading: Icon(Icons.house_outlined),
                             title: Text('Letterbox Indexing'),
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                        const PopupMenuDivider(),
+                        const PopupMenuItem<String>(
+                          value: 'recycle_bin',
+                          child: ListTile(
+                            leading: Icon(Icons.delete_outline),
+                            title: Text('Recycle Bin'),
                             contentPadding: EdgeInsets.zero,
                           ),
                         ),
@@ -1488,6 +1589,8 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         context: context,
                         builder: (context) => const CompanyManagementDialog(),
                       );
+                    } else if (value == 'save_check') {
+                      showSaveCheckDialog(context);
                     } else if (value == 'map_instructions') {
                       showDialog(
                         context: context,
@@ -1597,6 +1700,20 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                         contentPadding: EdgeInsets.zero,
                       ),
                     ),
+                    // Web only: tests Chrome's Save dialog on this PC.
+                    if (kIsWeb)
+                      const PopupMenuItem<String>(
+                        value: 'save_check',
+                        child: ListTile(
+                          leading: Icon(Icons.save_alt),
+                          title: Text('Check saving files'),
+                          subtitle: Text(
+                            "Test this computer's Save dialog",
+                            style: TextStyle(fontSize: 11),
+                          ),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
                     const PopupMenuDivider(),
                     const PopupMenuItem<String>(
                       value: 'signout',
@@ -1640,6 +1757,20 @@ class _DashboardScreenState extends riverpod.ConsumerState<DashboardScreen>
                       const SafeArea(child: HappySunTab()),
                   ],
                 ),
+              ),
+            ),
+          ),
+          // Morning vehicle inspections as drivers submit them (admins).
+          Positioned(
+            top: 8,
+            right: 8,
+            width: isSmallScreen ? MediaQuery.of(context).size.width - 16 : 380,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height - 140),
+              child: InspectionAlertCards(
+                onReview: _openInspection,
+                onOpenFleet: _openFleet,
               ),
             ),
           ),
@@ -1691,28 +1822,31 @@ class _ScheduleTabState extends riverpod.ConsumerState<ScheduleTab>
     final isLoading =
         scheduleProvider.distributors.isEmpty && scheduleProvider.jobs.isEmpty;
 
-    return Stack(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: LazyLoadingIndicator(
-                isLoading: isLoading,
-                message: 'Loading Schedule...',
-                child: isLoading
-                    ? Container(
-                        color: Theme.of(context).scaffoldBackgroundColor,
-                        child: const SizedBox.expand(),
-                      )
-                    : const ScheduleGrid(),
+    return UndoShortcuts(
+      undoKey: UndoKey.schedule,
+      child: Stack(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: LazyLoadingIndicator(
+                  isLoading: isLoading,
+                  message: 'Loading Schedule...',
+                  child: isLoading
+                      ? Container(
+                          color: Theme.of(context).scaffoldBackgroundColor,
+                          child: const SizedBox.expand(),
+                        )
+                      : const ScheduleGrid(),
+                ),
               ),
-            ),
-            // Unfinished Work Areas side panel
-            if (unfinishedProvider.isPanelVisible)
-              const UnfinishedWorkAreasPanel(),
-          ],
-        ),
-      ],
+              // Unfinished Work Areas side panel
+              if (unfinishedProvider.isPanelVisible)
+                const UnfinishedWorkAreasPanel(),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1746,38 +1880,18 @@ class _JobListTabState extends riverpod.ConsumerState<JobListTab>
         jobListProvider.initialize();
       });
     }
-    // Show error state if there's an error
-    if (jobListProvider.error != null && jobListProvider.isInitialized) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(
-              Icons.error_outline,
-              size: 64,
-              color: Colors.red,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Error loading Job List',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              jobListProvider.error!,
-              style: Theme.of(context).textTheme.bodyMedium,
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () {
-                // Retry by resetting all state and re-initializing
-                jobListProvider.resetAndInitialize();
-              },
-              child: const Text('Retry'),
-            ),
-          ],
-        ),
+    // Nothing to show yet and loading failed (or is reconnecting): a full
+    // screen. With data on screen, problems go in a banner instead, so the
+    // list stays usable.
+    final hasItems = jobListProvider.allJobListItems.isNotEmpty;
+    if (jobListProvider.isInitialized &&
+        !hasItems &&
+        (jobListProvider.error != null || jobListProvider.isReconnecting)) {
+      return JobListLoadProblem(
+        reconnecting: jobListProvider.isReconnecting,
+        message: jobListProvider.error,
+        detail: jobListProvider.errorDetail,
+        onRetry: jobListProvider.resetAndInitialize,
       );
     }
 
@@ -1793,9 +1907,41 @@ class _JobListTabState extends riverpod.ConsumerState<JobListTab>
       );
     }
 
-    return const Stack(
+    return Column(
       children: [
-        JobListGrid(),
+        if (jobListProvider.isReconnecting)
+          JobListStatusBanner(
+            icon: Icons.sync,
+            color: Colors.blue.shade700,
+            busy: true,
+            message: 'Reconnecting to the Job List… You are seeing the last '
+                "loaded jobs; changes made elsewhere will appear once it's "
+                'back.',
+          )
+        else if (jobListProvider.error != null)
+          JobListStatusBanner(
+            icon: Icons.cloud_off,
+            color: Colors.orange.shade800,
+            message: '${jobListProvider.error} You are seeing the last '
+                'loaded jobs.',
+            detail: jobListProvider.errorDetail,
+            actionLabel: 'Try again',
+            onAction: jobListProvider.resetAndInitialize,
+          ),
+        if (jobListProvider.actionError != null)
+          JobListStatusBanner(
+            icon: Icons.error_outline,
+            color: Colors.red.shade700,
+            message: jobListProvider.actionError!,
+            detail: jobListProvider.actionErrorDetail,
+            onDismiss: jobListProvider.clearActionError,
+          ),
+        const Expanded(
+          child: UndoShortcuts(
+            undoKey: UndoKey.jobList,
+            child: JobListGrid(),
+          ),
+        ),
       ],
     );
   }
@@ -1924,10 +2070,14 @@ class _HappySunTabState extends State<HappySunTab>
             children: [
               const HappySunJobProjectsScreen(),
               const HappySunInventoryView(),
-              ZohoInvoicesView(
-                  orgId: ZohoOrg.forCompanyId(Company.happySunId)),
-              ZohoCustomersView(
-                  orgId: ZohoOrg.forCompanyId(Company.happySunId)),
+              ZohoPanel(
+                child: ZohoInvoicesView(
+                    orgId: ZohoOrg.forCompanyId(Company.happySunId)),
+              ),
+              ZohoPanel(
+                child: ZohoCustomersView(
+                    orgId: ZohoOrg.forCompanyId(Company.happySunId)),
+              ),
             ],
           ),
         ),

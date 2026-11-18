@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/collection_job.dart';
 import '../models/job_list_item.dart';
+import '../utils/appointment_slots.dart';
 import '../models/work_area.dart';
 import '../utils/schedule_time.dart';
 import '../services/firestore_service.dart';
@@ -16,15 +17,37 @@ final collectionScheduleRiverpod =
   ),
 );
 
+/// The one Collection Schedule sync. The Collection Schedule tab and the
+/// main Schedule grid's H/M/N van column both read their bookings from here
+/// — there is no second listener (user rule 2026-11-18).
+///
+/// It listens to the Job List month by month: the tab's own month, plus any
+/// month the Schedule grid is showing ([showOnScheduleGrid]). Each served
+/// month has exactly one listener, whichever screen asked for it, and the
+/// months' items are merged. Months stay independent of the Job List tab.
 class CollectionScheduleProvider extends ChangeNotifier {
   final FirestoreService _firestoreService;
   final JobListService _jobListService;
 
-  // Own independent stream — does not share month state with JobListProvider
+  // Every served month's Job List items, merged (see [_itemsByMonth]).
   List<JobListItem> _ownJobListItems = [];
-  StreamSubscription<List<JobListItem>>? _ownJobListSubscription;
 
+  // One Job List listener per served month, keyed year*100+month.
+  final Map<int, StreamSubscription<List<JobListItem>>> _monthSubscriptions =
+      {};
+  final Map<int, List<JobListItem>> _itemsByMonth = {};
+
+  // The months the main Schedule grid shows (its van column reads from here).
+  Set<int> _scheduleGridMonths = const {};
+
+  static int _monthKey(DateTime d) => d.year * 100 + d.month;
+  static DateTime _monthOf(int key) => DateTime(key ~/ 100, key % 100);
+
+  // Collection jobs of every served month (tab + Schedule grid).
   List<CollectionJob> _collectionJobs = [];
+  // Those whose Job List item is filed under the tab's own month — what the
+  // tab has always worked from (its date range and loading check).
+  List<CollectionJob> _ownMonthCollectionJobs = [];
   List<WorkArea> _workAreas = [];
   DateTime _currentMonth = scheduleNow();
   bool _isInitialized = false;
@@ -46,7 +69,14 @@ class CollectionScheduleProvider extends ChangeNotifier {
   final Map<String, List<CollectionJob>> _timeSlotCache = {};
 
   // Getters
-  List<CollectionJob> get collectionJobs => _collectionJobs;
+
+  /// Collection jobs filed under the tab's own month (its Job List month
+  /// document) — unchanged by what the Schedule grid is showing.
+  List<CollectionJob> get collectionJobs => _ownMonthCollectionJobs;
+
+  /// Collection jobs of every month this sync serves: the tab's month and the
+  /// Schedule grid's months. The Schedule grid's van column reads this.
+  List<CollectionJob> get allCollectionJobs => _collectionJobs;
   List<CollectionJob> get currentMonthCollectionJobs {
     final key = _currentMonth.year * 100 + _currentMonth.month;
     if (_cachedMonthJobs != null && _cachedMonthKey == key) {
@@ -70,13 +100,35 @@ class CollectionScheduleProvider extends ChangeNotifier {
   })  : _firestoreService = firestoreService ?? FirestoreService(),
         _jobListService = jobListService;
 
-  /// Called whenever the own Firestore stream delivers new job list data.
-  /// Applies a fingerprint check to skip rebuilds when nothing relevant changed.
-  void _onOwnStreamData(List<JobListItem> items) {
-    // Always clear the month-change loading flag on the first delivery for a
-    // new month, even if the fingerprint matches (e.g. empty month).
-    final wasMonthChanging = _isMonthChanging;
-    _isMonthChanging = false;
+  /// A served month's listener delivered. Stores it and re-merges.
+  void _onMonthData(int monthKey, List<JobListItem> items) {
+    // A month dropped while its delivery was in flight.
+    if (!_monthSubscriptions.containsKey(monthKey)) return;
+    _itemsByMonth[monthKey] = items;
+    // Always clear the month-change loading flag on the first delivery for
+    // the tab's new month, even if nothing changed (e.g. an empty month).
+    final wasMonthChanging =
+        _isMonthChanging && monthKey == _monthKey(_currentMonth);
+    if (wasMonthChanging) _isMonthChanging = false;
+    _applyMergedItems(notifyIfUnchanged: wasMonthChanging);
+  }
+
+  /// Every served month's items as one list (a Job List item lives in one
+  /// month document, so ids only repeat mid-move; the first copy wins).
+  List<JobListItem> _mergedItems() {
+    if (_itemsByMonth.length == 1) return _itemsByMonth.values.first;
+    final seen = <String>{};
+    return [
+      for (final month in _itemsByMonth.values)
+        for (final item in month)
+          if (seen.add(item.id)) item,
+    ];
+  }
+
+  /// Rebuilds the collection jobs from the merged items. A fingerprint check
+  /// skips the rebuild when nothing relevant changed.
+  void _applyMergedItems({bool notifyIfUnchanged = false}) {
+    final items = _mergedItems();
     final jobTypeProvider = JobTypeProvider.instance;
     int fp = items.length;
     for (final item in items) {
@@ -105,8 +157,10 @@ class CollectionScheduleProvider extends ChangeNotifier {
             Object.hashAll(item.assignedStaff);
       }
     }
+    // Which month is the tab's own matters to [collectionJobs]; fold it in.
+    fp = fp * 31 + _monthKey(_currentMonth);
     if (fp == _lastJobListFingerprint) {
-      if (wasMonthChanging) notifyListeners(); // dismiss the loading overlay
+      if (notifyIfUnchanged) notifyListeners(); // dismiss the loading overlay
       return;
     }
     _lastJobListFingerprint = fp;
@@ -118,16 +172,45 @@ class CollectionScheduleProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Cancel any existing subscription and open a new stream for [_currentMonth].
-  /// This is independent of JobListProvider — navigating months here does not
-  /// affect the Job List tab and vice versa.
-  Future<void> _setupOwnStream() async {
-    await _ownJobListSubscription?.cancel();
-    _ownJobListSubscription = _jobListService
-        .getJobListItems(_currentMonth)
-        .listen(_onOwnStreamData, onError: (e) {
-      debugPrint('CollectionScheduleProvider: Stream error: $e');
-    });
+  /// Opens one listener for every month this sync serves and closes the
+  /// rest. Served: the tab's own month (once the tab has initialised) and
+  /// the Schedule grid's months. Navigating months here does not affect the
+  /// Job List tab and vice versa.
+  void _syncMonthSubscriptions() {
+    final wanted = <int>{
+      if (_isInitialized) _monthKey(_currentMonth),
+      ..._scheduleGridMonths,
+    };
+    var dropped = false;
+    for (final key in _monthSubscriptions.keys.toList()) {
+      if (wanted.contains(key)) continue;
+      _monthSubscriptions.remove(key)!.cancel();
+      dropped = _itemsByMonth.remove(key) != null || dropped;
+    }
+    for (final key in wanted) {
+      if (_monthSubscriptions.containsKey(key)) continue;
+      _monthSubscriptions[key] = _jobListService
+          .getJobListItems(_monthOf(key))
+          .listen((items) => _onMonthData(key, items), onError: (e) {
+        debugPrint('CollectionScheduleProvider: Stream error ($key): $e');
+      });
+    }
+    if (dropped) _applyMergedItems();
+  }
+
+  /// The months with a listener open, as year*100+month (tests).
+  @visibleForTesting
+  Set<int> get servedMonths => _monthSubscriptions.keys.toSet();
+
+  /// The months the main Schedule grid is showing. Its van column reads this
+  /// sync's bookings, so those months are served here too — one sync for
+  /// both screens, never a second listener. Idempotent; call it whenever the
+  /// grid's months change (not during a build).
+  void showOnScheduleGrid(Iterable<DateTime> months) {
+    final keys = {for (final m in months) _monthKey(m)};
+    if (setEquals(keys, _scheduleGridMonths)) return;
+    _scheduleGridMonths = keys;
+    _syncMonthSubscriptions();
   }
 
   void _invalidateMonthCache() {
@@ -143,12 +226,14 @@ class CollectionScheduleProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Mark initialized before any awaits so _onOwnStreamData() is never
+      // Mark initialized before any awaits so _onMonthData() is never
       // dropped while work areas are loading.
       _isInitialized = true;
 
-      // Open own Firestore stream for the current month.
-      await _setupOwnStream();
+      // Serve the tab's month (it may already be served for the Schedule
+      // grid, in which case its data is here already).
+      _syncMonthSubscriptions();
+      _applyMergedItems();
 
       notifyListeners(); // surface whatever the cache delivers immediately
 
@@ -172,7 +257,7 @@ class CollectionScheduleProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Build collection jobs from the own stream data
+  // Build collection jobs from the served months' merged data
   void _buildCollectionJobs() {
     final jobListItems = _ownJobListItems;
     final jobTypeProvider = JobTypeProvider.instance;
@@ -182,6 +267,13 @@ class CollectionScheduleProvider extends ChangeNotifier {
             false)
         .map((job) => _jobListItemToCollectionJob(job))
         .toList();
+    final ownIds = {
+      for (final item
+          in _itemsByMonth[_monthKey(_currentMonth)] ?? const <JobListItem>[])
+        item.id,
+    };
+    _ownMonthCollectionJobs =
+        _collectionJobs.where((j) => ownIds.contains(j.id)).toList();
   }
 
   // Pre-compute which jobs occupy which time slots — synchronous, fast
@@ -230,48 +322,10 @@ class CollectionScheduleProvider extends ChangeNotifier {
     }
   }
 
-  // Convert JobListItem to CollectionJob
-  CollectionJob _jobListItemToCollectionJob(JobListItem jobListItem) {
-    // Parse vehicle/trailer from new enum field, with legacy fallback
-    final combo =
-        VehicleTrailerCombo.tryParse(jobListItem.vehicleTrailerCombo) ??
-            VehicleTrailerCombo.fromLegacyQuantity(jobListItem.quantity,
-                jobTypeId: jobListItem.jobTypeId);
-
-    // Duration, start time and staffing now have dedicated fields on
-    // JobListItem. The resolved* getters fall back to the legacy derivations
-    // (quantityDistributed / date's time component / manDays.ceil()) so
-    // records written before those fields existed still render identically.
-    final timeSlots = jobListItem.resolvedTimeSlots;
-    final timeSlot = jobListItem.resolvedTimeSlot;
-
-    // Use collectionDate if it has a meaningful time, otherwise fall back to the main date
-    final effectiveDate = (jobListItem.collectionDate.year != 2000 &&
-            jobListItem.collectionDate.month != 1 &&
-            jobListItem.collectionDate.day != 1)
-        ? jobListItem.collectionDate
-        : jobListItem.date;
-
-    return CollectionJob(
-      id: jobListItem.id,
-      location: jobListItem.collectionAddress.isNotEmpty
-          ? jobListItem.collectionAddress
-          : jobListItem.area,
-      vehicleType: combo?.vehicleType ?? VehicleType.hyundai,
-      trailerType: combo?.trailerType ?? TrailerType.noTrailer,
-      date: effectiveDate,
-      timeSlot: timeSlot,
-      timeSlots: timeSlots,
-      assignedStaff: jobListItem.assignedStaff,
-      staffCount: jobListItem.resolvedStaffCount,
-      jobType: jobListItem.jobTypeId,
-      statusId: jobListItem.jobStatusId,
-      clients: [jobListItem.client],
-      notes: jobListItem.specialInstructions,
-      jobListItemId: jobListItem.id,
-      offloadLocation: jobListItem.offloadingAddress,
-    );
-  }
+  // Convert JobListItem to CollectionJob (shared with the Schedule's
+  // booking strips — see CollectionJob.fromJobListItem).
+  CollectionJob _jobListItemToCollectionJob(JobListItem jobListItem) =>
+      CollectionJob.fromJobListItem(jobListItem);
 
   // Helper method to get jobs for a specific month
   List<CollectionJob> _getJobsForMonth(DateTime month) {
@@ -295,16 +349,17 @@ class CollectionScheduleProvider extends ChangeNotifier {
     }
 
     _currentMonth = month;
-    _isMonthChanging = true; // Show loading overlay until stream delivers data
+    // Show the loading overlay until the new month's data arrives — unless
+    // it is already here because the Schedule grid is showing that month.
+    _isMonthChanging =
+        _isInitialized && !_itemsByMonth.containsKey(_monthKey(month));
     _invalidateMonthCache();
 
-    // Reset state for the new month so stale data is not shown.
-    _lastJobListFingerprint = 0;
-    _ownJobListItems = [];
-
-    // Restart the stream for the new month. This is fully independent of
-    // JobListProvider — the Job List tab keeps its own month unchanged.
-    await _setupOwnStream();
+    // Serve the new month and drop the old one (unless the Schedule grid
+    // still shows it). Independent of JobListProvider — the Job List tab
+    // keeps its own month unchanged.
+    _syncMonthSubscriptions();
+    _applyMergedItems();
 
     _loadDataForMonth();
   }
@@ -374,7 +429,8 @@ class CollectionScheduleProvider extends ChangeNotifier {
   /// Apply the schedule-owned fields of [job] onto [base], leaving every
   /// Job List field (invoice, amount, VAT, reminders, polygons, …) untouched.
   JobListItem _applyToJobListItem(JobListItem base, CollectionJob job) {
-    final combo = VehicleTrailerCombo.fromParts(job.vehicleType, job.trailerType);
+    final combo =
+        VehicleTrailerCombo.fromParts(job.vehicleType, job.trailerType);
 
     // `timeSlot` is authoritative, but the projection still reads
     // `collectionDate` for the date, so keep its time component in sync.
@@ -389,7 +445,16 @@ class CollectionScheduleProvider extends ChangeNotifier {
       minute,
     );
 
+    // The start goes on `date` too: the dropsheet, Happy Sun and older app
+    // versions read the time from there. Its day is left alone.
+    final start = slotMinutes(job.timeSlot);
+    final date = start == null
+        ? null
+        : DateTime(base.date.year, base.date.month, base.date.day, start ~/ 60,
+            start % 60);
+
     return base.copyWith(
+      date: date,
       collectionAddress: job.location,
       offloadingAddress: job.offloadLocation,
       collectionDate: collectionDateTime,
@@ -749,7 +814,10 @@ class CollectionScheduleProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    _ownJobListSubscription?.cancel();
+    for (final sub in _monthSubscriptions.values) {
+      sub.cancel();
+    }
+    _monthSubscriptions.clear();
     super.dispose();
   }
 }

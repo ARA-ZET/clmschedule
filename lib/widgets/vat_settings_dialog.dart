@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -35,7 +36,7 @@ class _VatSettingsDialogState
   Future<void> _save() async {
     final value = double.tryParse(_controller.text.trim());
     if (value == null || value <= 0 || value > 100) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Enter a valid VAT percentage (e.g. 15)'),
           backgroundColor: Colors.red,

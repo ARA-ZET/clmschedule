@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
@@ -110,7 +111,7 @@ class _ShareSheetState extends riverpod.ConsumerState<_ShareSheet> {
     try {
       final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!ok) {
-        messenger.showSnackBar(
+        messenger.showToast(
           SnackBar(
             content: Text('Could not open $failureLabel.'),
             backgroundColor: Colors.red,
@@ -118,7 +119,7 @@ class _ShareSheetState extends riverpod.ConsumerState<_ShareSheet> {
         );
       }
     } catch (e) {
-      messenger.showSnackBar(
+      messenger.showToast(
         SnackBar(
           content: Text('Could not open $failureLabel: $e'),
           backgroundColor: Colors.red,

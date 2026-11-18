@@ -99,7 +99,8 @@ class _ZohoInvoicesViewState extends riverpod.ConsumerState<ZohoInvoicesView>
     final dateFormat = DateFormat('d MMM y');
 
     return ColoredBox(
-      color: ZohoPalette.pageBackground,
+      // White: the view sits inside a bordered ZohoPanel.
+      color: ZohoPalette.surface,
       child: Column(
         children: [
           ZohoToolbar(

@@ -7,6 +7,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
 
 import 'package:clmschedule/models/custom_polygon.dart';
 import 'package:clmschedule/models/distribution_report.dart';
+import 'package:clmschedule/models/distribution_report_draft.dart';
 import 'package:clmschedule/models/distribution_report_template.dart';
 import 'package:clmschedule/services/compiled_tracks_parser.dart';
 import 'package:clmschedule/services/distribution_report_service.dart';
@@ -430,6 +431,238 @@ void main() {
     });
   });
 
+  group('Flyers & Posters template', () {
+    const template = DistributionReportTemplate.flyersAndPosters;
+    const people = [
+      DistributionReportPerson(name: 'Francis Kabetsha', idNumber: 'MA 210093'),
+      DistributionReportPerson(name: 'Petros Muvimbi', idNumber: 'FN 186040'),
+    ];
+    DistributionReportValues values({
+      bool leaflets = true,
+      bool posters = true,
+      bool invoice = false,
+    }) =>
+        DistributionReportValues(
+          greetingName: 'Nikita',
+          heading: 'MyCiTi Phase 2A',
+          leafletName: 'Construction Update',
+          leafletQuantity: '5,000',
+          leafletDate: '21 October 2026',
+          suburb: 'Claremont',
+          leafletDistributorCount: 'two distributors',
+          posterQuantity: '41',
+          posterDate: '22 October 2026',
+          posterDistributorCount: 'two distributors',
+          mapLink: 'https://maps.communitylifemedia.co.za/map/LEAF1',
+          posterMapLink: 'https://maps.communitylifemedia.co.za/map/POST1',
+          posterPhotosLink:
+              'https://maps.communitylifemedia.co.za/photos/POST1',
+          people: people,
+          hasLeaflets: leaflets,
+          hasPosters: posters,
+          includeInvoiceLine: invoice,
+        );
+
+    test('is offered as a Flyers & Posters template; the standard is not', () {
+      expect(template.usesFlyersAndPosters, isTrue);
+      expect(DistributionReportTemplate.fallback.usesFlyersAndPosters, isFalse);
+    });
+
+    test('both jobs: one opening sentence covering both, both sections', () {
+      final body = template.render(values());
+      expect(
+          body,
+          contains('On 21 October 2026 we distributed 5,000 Construction '
+              'Update leaflets in the Claremont area and we put up 41 '
+              'posters across the same area.'));
+      expect(body, contains('Leaflets\n'));
+      expect(body, contains('Posters\n'));
+      expect(body, contains('by two distributors on 22 October 2026.'));
+      expect(body, contains('/photos/POST1'));
+      expect(body, contains('/map/POST1'));
+      expect(body, contains('Francis Kabetsha — ID / Passport: MA 210093'));
+      // The table appears once, under Leaflets.
+      expect('ID / Passport: MA 210093'.allMatches(body).length, 1);
+      expect(body, isNot(contains('[[')));
+      expect(body, isNot(contains('**')));
+      expect(body, isNot(contains('{')));
+      expect(body, isNot(contains('\n\n\n')));
+    });
+
+    test('leaflets only: no poster wording at all', () {
+      final body = template.render(values(posters: false));
+      expect(
+          body,
+          contains('we distributed 5,000 Construction Update leaflets in the '
+              'Claremont area.'));
+      expect(body, isNot(contains('poster')));
+      expect(body, isNot(contains('Posters')));
+      expect(body, contains('Francis Kabetsha'));
+    });
+
+    test('posters only: poster opening and the table under Posters', () {
+      final body = template.render(values(leaflets: false));
+      expect(body,
+          contains('On 22 October 2026 we put up 41 posters in the Claremont area.'));
+      expect(body, isNot(contains('leaflets')));
+      expect(body, isNot(contains('/map/LEAF1')));
+      expect('ID / Passport: MA 210093'.allMatches(body).length, 1);
+      expect(body.indexOf('Petros Muvimbi'),
+          greaterThan(body.indexOf('Posters\n')));
+    });
+
+    test('invoice line follows the paid state like the standard report', () {
+      expect(template.render(values(invoice: true)),
+          contains('opportunity. Your invoice is attached.'));
+      expect(template.render(values()),
+          isNot(contains('Your invoice is attached')));
+    });
+
+    test('HTML: real table, bold headings, links, escaped text', () {
+      final html = template.renderHtml(DistributionReportValues(
+        greetingName: 'Nikita <script>',
+        heading: 'A & B',
+        leafletName: 'X',
+        leafletQuantity: '1',
+        mapLink: 'https://maps.communitylifemedia.co.za/map/LEAF1',
+        people: people,
+        hasLeaflets: true,
+      ));
+      expect(html, contains('<table'));
+      expect(html, contains('<td style="border:1px solid #999;padding:4px 10px;'
+          'text-align:left">MA 210093</td>'));
+      expect(html, contains('<b>A &amp; B</b>'));
+      expect(html, contains('<b>Leaflets</b>'));
+      expect(html, contains('Nikita &lt;script&gt;'));
+      expect(
+          html,
+          contains('<a href="https://maps.communitylifemedia.co.za/map/LEAF1">'
+              'https://maps.communitylifemedia.co.za/map/LEAF1</a>'));
+      expect(html, isNot(contains('\u0000')));
+    });
+
+    test('a trailing full stop is not swallowed into a link', () {
+      const t = DistributionReportTemplate(
+          id: 't', name: 't', body: 'See {map_link}.');
+      expect(
+          t.renderHtml(const DistributionReportValues(
+              mapLink: 'https://example.com/map/a')),
+          contains('<a href="https://example.com/map/a">'
+              'https://example.com/map/a</a>.'));
+    });
+
+    test('countOf reads as words up to ten', () {
+      expect(DistributionReportFormat.countOf(1, 'distributor'),
+          'one distributor');
+      expect(DistributionReportFormat.countOf(2, 'distributor'),
+          'two distributors');
+      expect(DistributionReportFormat.countOf(12, 'distributor'),
+          '12 distributors');
+    });
+  });
+
+  group('workerNameFromFileName', () {
+    test('Track Editor GPX: the third field', () {
+      expect(
+          workerNameFromFileName(
+              'Track   22 Oct 2026   Petros   Chand   Claremont   41 fulltrack.gpx'),
+          'Petros');
+      expect(
+          workerNameFromFileName(
+              'Waypoints   21 Oct 2026   Francis Kabetsha   Chand   12 fulltrack.gpx'),
+          'Francis Kabetsha');
+    });
+
+    test('clmgpx photos: the text before the first underscore', () {
+      expect(
+          workerNameFromFileName('Petros_Poster 501_2026-10-22_12-37-26.jpg'),
+          'Petros');
+      expect(
+          workerNameFromFileName('Unknown_Posters_2026-10-22_12-37-26.jpg'),
+          isNull);
+    });
+
+    test('ignores compiled indexes and free-form names', () {
+      expect(workerNameFromFileName('_compiled_tracks.json'), isNull);
+      expect(workerNameFromFileName('IMG_2041.jpg'), isNull);
+      expect(workerNameFromFileName('claremont.gpx'), isNull);
+    });
+
+    test('de-duplicates across spellings case-insensitively', () {
+      expect(
+          workerNamesFromFileNames([
+            'Petros_Poster 1_2026-10-22_12-00-00.jpg',
+            'PETROS_Poster 2_2026-10-22_12-05-00.jpg',
+            'Track   22 Oct 2026   Francis   Chand   3 fulltrack.gpx',
+          ]),
+          ['Petros', 'Francis']);
+    });
+  });
+
+  group('DistributionReport.totalsFor — people and photos', () {
+    test('merges worker names and photo counts over selected folders only', () {
+      final report = DistributionReport(
+        jobId: 'j',
+        client: 'Chand',
+        jobDate: DateTime(2026, 10, 22),
+        folders: const [
+          DistributionReportFolder(
+              path: 'a', workerNames: ['Petros'], photoCount: 20),
+          DistributionReportFolder(
+              path: 'b', workerNames: ['petros', 'Francis'], photoCount: 21),
+          DistributionReportFolder(
+              path: 'c', workerNames: ['Someone'], photoCount: 99),
+        ],
+      );
+      final totals = report.totalsFor({'a', 'b'});
+      expect(totals.workerNames, ['Petros', 'Francis']);
+      expect(totals.photoCount, 41);
+    });
+  });
+
+  group('DistributionReportDraft', () {
+    test('round-trips everything the user decided', () {
+      const draft = DistributionReportDraft(
+        jobId: 'j1',
+        templateId: '_flyers_posters',
+        greeting: 'Nikita',
+        subject: 'Report',
+        heading: 'MyCiTi',
+        leafletName: 'Update',
+        suburb: 'Claremont',
+        suburbTouched: true,
+        clickedIsPoster: true,
+        otherJobId: 'j2',
+        unselectedFolders: ['b', 'a'],
+        otherUnselectedFolders: ['c'],
+        includeInvoiceLine: false,
+        writeBackQuantity: true,
+        pickedDistributor: {'petros': 'd1'},
+        typedIds: {'d2': 'MA 210093'},
+        removedPeople: ['name:someone'],
+        invoiceChoices: {'inv-1': false, 'inv-2': true},
+        invoicesWithPersonnel: ['inv-2'],
+      );
+      final back =
+          DistributionReportDraft.fromMap('j1', draft.toContentMap());
+      expect(back.toContentMap(), draft.toContentMap());
+      // Sorted, so the same choice made in another order is not a change.
+      expect(draft.toContentMap()['unselectedFolders'], ['a', 'b']);
+    });
+
+    test('a missing or malformed field reads as its default', () {
+      final draft = DistributionReportDraft.fromMap('j1', {
+        'greeting': 42,
+        'typedIds': {'d1': 7},
+        'unselectedFolders': 'nope',
+      });
+      expect(draft.greeting, '');
+      expect(draft.typedIds, isEmpty);
+      expect(draft.unselectedFolders, isEmpty);
+      expect(draft.includeInvoiceLine, isNull);
+    });
+  });
+
   group('buildGmailComposeUrl', () {
     test('carries recipients, subject and body', () {
       final url = buildGmailComposeUrl(
@@ -465,6 +698,49 @@ void main() {
 
       expect(url.bodyIncluded, isTrue);
       expect(url.uri.toString().length, lessThan(kGmailComposeUrlLimit));
+    });
+
+    test('the Flyers & Posters report fills the draft too', () {
+      final body = DistributionReportTemplate.flyersAndPosters.render(
+        const DistributionReportValues(
+          greetingName: 'Nikita',
+          heading: 'MyCiTi Phase 2A — Claremont construction update',
+          leafletName: 'Construction Update',
+          leafletQuantity: '5,000',
+          leafletDate: '21 October 2026',
+          suburb: 'Claremont, Newlands and Rondebosch',
+          leafletDistributorCount: 'four distributors',
+          posterQuantity: '41',
+          posterDate: '22 October 2026',
+          posterDistributorCount: 'two distributors',
+          mapLink: 'https://maps.communitylifemedia.co.za/map/x7Kp2mQ1',
+          posterMapLink: 'https://maps.communitylifemedia.co.za/map/p9Lq3nR2',
+          posterPhotosLink:
+              'https://maps.communitylifemedia.co.za/photos/p9Lq3nR2',
+          people: [
+            DistributionReportPerson(
+                name: 'Francis Kabetsha', idNumber: 'MA 210093'),
+            DistributionReportPerson(
+                name: 'Petros Muvimbi', idNumber: 'FN 186040'),
+            DistributionReportPerson(
+                name: 'Tichaona Moyo', idNumber: '8501015800087'),
+            DistributionReportPerson(name: 'Dickson Banda', idNumber: 'FN 1'),
+          ],
+          hasLeaflets: true,
+          hasPosters: true,
+          includeInvoiceLine: true,
+        ),
+      );
+
+      final url = buildGmailComposeUrl(
+        to: ['nikita@chand.co.za'],
+        subject: kDefaultReportSubject,
+        body: body,
+      );
+
+      expect(url.bodyIncluded, isTrue);
+      expect(url.uri.queryParameters['body'],
+          contains('Petros Muvimbi — ID / Passport: FN 186040'));
     });
 
     test('an over-long body is dropped rather than silently truncated', () {

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/happy_sun_project.dart';
@@ -216,14 +217,14 @@ class _HappySunChecklistDialogState
 
       if (success) {
         Navigator.of(context).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Checklist submitted successfully'),
             backgroundColor: Colors.green,
           ),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error: ${projectProvider.error ?? "Unknown error"}'),
             backgroundColor: Colors.red,

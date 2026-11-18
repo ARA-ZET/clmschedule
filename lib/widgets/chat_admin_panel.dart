@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/chat_provider.dart';
@@ -51,7 +52,7 @@ class _ChatAdminPanelState extends riverpod.ConsumerState<ChatAdminPanel> {
     chatProvider.sendSystemMessage(content);
     _systemMessageController.clear();
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       const SnackBar(content: Text('System message sent')),
     );
   }
@@ -74,7 +75,7 @@ class _ChatAdminPanelState extends riverpod.ConsumerState<ChatAdminPanel> {
               Navigator.pop(context);
               final chatProvider = ref.read(chatRiverpod);
               chatProvider.cleanupOldMessages();
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showToast(
                 const SnackBar(content: Text('Old messages cleanup initiated')),
               );
             },

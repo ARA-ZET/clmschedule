@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -88,7 +89,7 @@ class _EditableTableCellState
       final error = widget.validator!(currentValue);
       if (error != null) {
         // Show error and don't save
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text(error)),
         );
         return;
@@ -682,7 +683,7 @@ class _LinkCellState extends riverpod.ConsumerState<LinkCell> {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
       } catch (e) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(content: Text('Could not open link: $e')),
           );
         }
@@ -714,7 +715,7 @@ class _LinkCellState extends riverpod.ConsumerState<LinkCell> {
     if (widget.validator != null) {
       final error = widget.validator!(currentValue);
       if (error != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text(error)),
         );
         return;

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
 import '../models/happy_sun_project.dart';
@@ -140,7 +141,7 @@ class _HappySunCheckinScreenState extends riverpod
     // Play success sound
     SoundService().playSuccess();
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Row(
           children: [
@@ -167,7 +168,7 @@ class _HappySunCheckinScreenState extends riverpod
     // Play warning sound
     SoundService().playWarning();
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Row(
           children: [
@@ -244,7 +245,7 @@ class _HappySunCheckinScreenState extends riverpod
       SoundService().playSuccess();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Progress saved'),
             backgroundColor: Colors.green,
@@ -258,7 +259,7 @@ class _HappySunCheckinScreenState extends riverpod
       SoundService().playWarning();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error saving: $e'),
             backgroundColor: Colors.red,
@@ -330,7 +331,7 @@ class _HappySunCheckinScreenState extends riverpod
       SoundService().playSuccess();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Check-in completed successfully!'),
             backgroundColor: Colors.green,
@@ -345,7 +346,7 @@ class _HappySunCheckinScreenState extends riverpod
       SoundService().playWarning();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error completing check-in: $e'),
             backgroundColor: Colors.red,

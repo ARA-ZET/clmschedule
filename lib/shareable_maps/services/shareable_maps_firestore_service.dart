@@ -1,7 +1,12 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import '../../recycle_bin/recycle_bin_entry.dart';
+import '../../recycle_bin/recycle_bin_payload_store.dart';
+import '../../recycle_bin/recycle_bin_writer.dart';
 import '../models/shareable_map.dart';
+import 'map_name_index_service.dart';
+import 'map_thumbnail_service.dart';
 import 'map_link_service.dart';
 
 /// Firestore service for persisting shareable maps.
@@ -51,6 +56,7 @@ class ShareableMapsFirestoreService {
   /// be opened via a deep link without loading all maps.
   Future<String> createMap(ShareableMap map, {String? monthKey}) async {
     final mk = monthKey ?? monthKeyFor(map.createdAt);
+    MapNameIndexService.instance.invalidate();
     await _ensureMonthDoc(mk);
     final data = map.withStablePolygonIds().toMap();
     data['monthKey'] = mk;
@@ -104,6 +110,7 @@ class ShareableMapsFirestoreService {
     final data = map.withStablePolygonIds().toMap();
     data['monthKey'] = monthKey;
     await _mapsCollection(monthKey).doc(docId).set(data);
+    MapNameIndexService.instance.invalidate(); // name/description may change
     debugPrint('[ShareableMapsFirestore] Saved map $docId in $monthKey');
   }
 
@@ -112,6 +119,31 @@ class ShareableMapsFirestoreService {
       String monthKey, String docId, Map<String, dynamic> fields) async {
     fields['updatedAt'] = DateTime.now().millisecondsSinceEpoch;
     await _mapsCollection(monthKey).doc(docId).update(fields);
+    MapNameIndexService.instance.invalidate();
+  }
+
+  /// Clears `jobListItemId` on every map that names job-list item [jobId]
+  /// except [keepMapId] — the job's map now. A map left pointing at a job it
+  /// was unlinked from would still be handed the job's folder by the Cloud
+  /// Function and offer the job's schedule allocation. Returns how many.
+  Future<int> releaseJobListItemLink(String jobId,
+      {required String keepMapId}) async {
+    if (jobId.isEmpty) return 0;
+    final snap = await _firestore
+        .collectionGroup('maps')
+        .where('jobListItemId', isEqualTo: jobId)
+        .get();
+    final stale = snap.docs.where((d) =>
+        d.id != keepMapId && d.reference.path.startsWith('shareableMaps/'));
+    final updates = {
+      for (final d in stale)
+        d.reference: <String, dynamic>{
+          'jobListItemId': FieldValue.delete(),
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        },
+    };
+    await _commitInChunks(updates);
+    return updates.length;
   }
 
   /// Update cached cloud waypoint count on every map document that is
@@ -280,7 +312,57 @@ class ShareableMapsFirestoreService {
     }
   }
 
-  /// Delete a map document.
+  /// Moves a map to the Recycle Bin and returns the bin entry id (null if
+  /// the map was already gone).
+  ///
+  /// The map doc and its share links are deleted and copied into the entry
+  /// in one batch, so restoring brings the old share links back too. The
+  /// thumbnail stays in Storage, owned by the entry, so a restored map keeps
+  /// its picture; it is deleted when the entry is purged.
+  Future<String?> deleteMapToBin(String monthKey, String docId) async {
+    final ref = _mapsCollection(monthKey).doc(docId);
+    final snap = await ref.get();
+    if (!snap.exists) return null;
+    final data = Map<String, dynamic>.from(snap.data() as Map);
+    final links = await _firestore
+        .collection('mapLinks')
+        .where('monthKey', isEqualTo: monthKey)
+        .where('mapId', isEqualTo: docId)
+        .get();
+
+    final writer = RecycleBinWriter(_firestore);
+    final entryRef = writer.newEntryRef();
+    // A map can come close to Firestore's 1 MiB cap on its own.
+    final inline = fitsInline(data);
+    final payloadRef = inline ? null : await uploadPayload(entryRef.id, data);
+    final name = (data['name'] as String?)?.trim() ?? '';
+
+    final batch = _firestore.batch();
+    writer.addToBatch(
+      batch,
+      RecycleBinRecord(
+        type: RecycleBinType.shareableMap,
+        label: '${name.isEmpty ? 'Untitled map' : name} · $monthKey',
+        originalPath: ref.path,
+        payload: inline ? data : const {},
+        payloadRef: payloadRef,
+        related: [
+          for (final l in links.docs) RecycleBinRelated(l.reference.path, l.data()),
+        ],
+        ownedStorage: [MapThumbnailService.pathFor(monthKey, docId)],
+      ),
+      ref: entryRef,
+    );
+    for (final l in links.docs) {
+      batch.delete(l.reference);
+    }
+    batch.delete(ref);
+    await batch.commit();
+    debugPrint('[ShareableMapsFirestore] Map $docId ($monthKey) → Recycle Bin');
+    return entryRef.id;
+  }
+
+  /// Delete a map document permanently. Prefer [deleteMapToBin].
   Future<void> deleteMap(String monthKey, String docId) async {
     await _mapsCollection(monthKey).doc(docId).delete();
     debugPrint('[ShareableMapsFirestore] Deleted map $docId from $monthKey');
@@ -294,27 +376,26 @@ class ShareableMapsFirestoreService {
         doc.id, Map<String, dynamic>.from(doc.data() as Map));
   }
 
-  /// Store the stable polygon ids of a map that has polygons without one.
+  /// Map [mapId] and its month key, looked for in the months of [near] and
+  /// the month either side of each, or null when it is in none of them.
   ///
-  /// [ShareableMap.fromMap] derives missing ids on every read, but a derived
-  /// id follows the outline, so a reshape before the next save would change
-  /// it. Anything that keeps polygon ids beyond this session (a regular
-  /// client's plan) calls this first so the ids it keeps are stored ones.
-  /// Rewrites only `layers`. Returns true when it wrote.
-  Future<bool> ensureStoredPolygonIds(String monthKey, String docId) async {
-    final ref = _mapsCollection(monthKey).doc(docId);
-    final doc = await ref.get();
-    if (!doc.exists) return false;
-    final data = Map<String, dynamic>.from(doc.data() as Map);
-    final missing = (data['layers'] as List? ?? const [])
-        .whereType<Map>()
-        .expand((l) => (l['polygons'] as List? ?? const []).whereType<Map>())
-        .any((p) => (p['id'] as String? ?? '').isEmpty);
-    if (!missing) return false;
-    final map = ShareableMap.fromMap(doc.id, data).withStablePolygonIds();
-    await ref.update({'layers': map.toMap()['layers']});
-    debugPrint('[ShareableMapsFirestore] Stored polygon ids for $docId');
-    return true;
+  /// Maps live under their creation month, which a caller holding only the
+  /// id doesn't know. A collection-group query by id would need an index
+  /// (and `jobListItemId` lookups need one that is not deployed), so this
+  /// reads the few likely months directly instead.
+  Future<(String, ShareableMap)?> findMapNear(
+      String mapId, List<DateTime> near) async {
+    if (mapId.isEmpty) return null;
+    final keys = <String>{
+      for (final d in near)
+        for (final m in [-1, 0, 1])
+          monthKeyFor(DateTime(d.year, d.month + m, 1)),
+    };
+    for (final key in keys) {
+      final map = await getMap(key, mapId);
+      if (map != null) return (key, map);
+    }
+    return null;
   }
 
   /// Stream a single map document for real-time updates.

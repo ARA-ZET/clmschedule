@@ -14,10 +14,13 @@
 // the count and the houses-versus-apartments split now under it. That is the
 // point of surveying an area: the number becomes something you can quote from
 // on a map, not just a correction buried in the index.
+//
+// Also opened from a client map in the shareable map editor, with that
+// editor's own writer and cache refresh — see [writerProvider] and
+// [onIndexChanged]. The track editor passes neither.
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:gpx/gpx.dart';
 
 import '../../letterbox/services/letterbox_area_write_service.dart';
 import '../../models/custom_polygon.dart';
@@ -28,13 +31,18 @@ import '../services/point_in_polygon.dart';
 
 /// Open the update flow for one polygon. Returns true when the index was
 /// changed, so the caller can refresh anything showing expected counts.
+///
+/// [positions] are the drops to write — from GPX waypoints, convert with
+/// [TELetterboxWriteProvider.positionsOf] first.
 Future<bool> showTELetterboxUpdateDialog(
   BuildContext context, {
   required String areaName,
   required List<LatLng> area,
-  required List<Wpt> waypoints,
+  required List<LatLng> positions,
   String client = '',
   String? sourcePolygonId,
+  riverpod.ChangeNotifierProvider<TELetterboxWriteProvider>? writerProvider,
+  void Function(Iterable<String> suburbIds)? onIndexChanged,
 }) async {
   final changed = await showDialog<bool>(
     context: context,
@@ -42,9 +50,11 @@ Future<bool> showTELetterboxUpdateDialog(
     builder: (_) => TELetterboxUpdateDialog(
       areaName: areaName,
       area: area,
-      waypoints: waypoints,
+      positions: positions,
       client: client,
       sourcePolygonId: sourcePolygonId,
+      writerProvider: writerProvider ?? teLetterboxWriteRiverpod,
+      onIndexChanged: onIndexChanged,
     ),
   );
   return changed ?? false;
@@ -53,7 +63,10 @@ Future<bool> showTELetterboxUpdateDialog(
 class TELetterboxUpdateDialog extends riverpod.ConsumerStatefulWidget {
   final String areaName;
   final List<LatLng> area;
-  final List<Wpt> waypoints;
+
+  /// The drops that become the index inside [area]; anything outside it is
+  /// ignored.
+  final List<LatLng> positions;
 
   /// Who the polygon is for, from the work area's own client label. Written
   /// onto the Client Maps entry; blank is fine and leaves it unset.
@@ -63,13 +76,24 @@ class TELetterboxUpdateDialog extends riverpod.ConsumerStatefulWidget {
   /// its Client Maps entry instead of leaving a second copy behind.
   final String? sourcePolygonId;
 
+  /// Which writer runs the change. Each screen has its own so its undo record
+  /// and its count cache stay its own.
+  final riverpod.ChangeNotifierProvider<TELetterboxWriteProvider>
+      writerProvider;
+
+  /// Called with the suburbs a write or undo touched, so the caller recounts
+  /// against the new index. Defaults to the track editor's comparison panel.
+  final void Function(Iterable<String> suburbIds)? onIndexChanged;
+
   const TELetterboxUpdateDialog({
     super.key,
     required this.areaName,
     required this.area,
-    required this.waypoints,
+    required this.positions,
     this.client = '',
     this.sourcePolygonId,
+    required this.writerProvider,
+    this.onIndexChanged,
   });
 
   @override
@@ -97,9 +121,7 @@ class _TELetterboxUpdateDialogState
   @override
   void initState() {
     super.initState();
-    final positions =
-        TELetterboxWriteProvider.positionsOf(widget.waypoints);
-    _fresh = positions
+    _fresh = widget.positions
         .where((p) => isPointInPolygon(p, widget.area))
         .toList(growable: false);
     WidgetsBinding.instance.addPostFrameCallback((_) => _preview());
@@ -112,7 +134,7 @@ class _TELetterboxUpdateDialogState
   }
 
   Future<void> _apply() async {
-    final writer = ref.read(teLetterboxWriteRiverpod);
+    final writer = ref.read(widget.writerProvider);
     final plan = writer.plan;
     final wrote = await writer.apply(
       areaName: widget.areaName,
@@ -124,27 +146,34 @@ class _TELetterboxUpdateDialogState
     if (wrote) {
       // The comparison panel counts from a session cache; without this its
       // "expected" numbers would still be the ones just replaced.
-      ref.read(teLetterboxCheckRiverpod).invalidateSuburbs(
-            writer.result?.touchedSuburbIds ??
-                plan?.affected.map((s) => s.suburbId) ??
-                const <String>[],
-          );
+      _indexChanged(writer.result?.touchedSuburbIds ??
+          plan?.affected.map((s) => s.suburbId) ??
+          const <String>[]);
       setState(() => _wrote = true);
     }
   }
 
+  void _indexChanged(Iterable<String> suburbIds) {
+    final callback = widget.onIndexChanged;
+    if (callback != null) {
+      callback(suburbIds);
+    } else {
+      ref.read(teLetterboxCheckRiverpod).invalidateSuburbs(suburbIds);
+    }
+  }
+
   Future<void> _undo() async {
-    final writer = ref.read(teLetterboxWriteRiverpod);
+    final writer = ref.read(widget.writerProvider);
     final ids = writer.undoSuburbIds;
     final restored = await writer.undoLastWrite();
     if (!mounted) return;
-    ref.read(teLetterboxCheckRiverpod).invalidateSuburbs(ids);
+    _indexChanged(ids);
     if (restored) Navigator.of(context).pop(true);
   }
 
   @override
   Widget build(BuildContext context) {
-    final writer = ref.watch(teLetterboxWriteRiverpod);
+    final writer = ref.watch(widget.writerProvider);
     final plan = writer.plan;
 
     return AlertDialog(
@@ -222,7 +251,7 @@ class _TELetterboxUpdateDialogState
         onPressed: writer.isBusy
             ? null
             : () {
-                ref.read(teLetterboxWriteRiverpod).clearPlan();
+                ref.read(widget.writerProvider).clearPlan();
                 Navigator.of(context).pop(false);
               },
         child: const Text('Cancel'),

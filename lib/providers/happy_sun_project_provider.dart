@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/happy_sun_project.dart';
 import '../models/happy_sun_shared.dart'; // For CategorizedTools, ChecklistData
+import 'package:cloud_firestore/cloud_firestore.dart' show DocumentReference;
 import '../services/happy_sun_project_service.dart';
 import '../services/happy_sun_local_storage.dart';
 import '../services/happy_sun_sync_service.dart';
@@ -16,6 +17,11 @@ final happySunProjectRiverpod =
 
 class HappySunProjectProvider extends ChangeNotifier {
   final HappySunProjectService _projectService = HappySunProjectService();
+
+  /// Where a project is stored, for the Recycle Bin (see the service).
+  Future<DocumentReference<Map<String, dynamic>>?> findProjectRef(
+          String projectId) =>
+      _projectService.findProjectRef(projectId);
 
   // Offline support services (nullable for CLM flavor compatibility)
   HappySunLocalStorage? _localStorage;

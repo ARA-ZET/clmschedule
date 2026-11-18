@@ -90,6 +90,14 @@ class DropsheetMaps {
     }
   }
 
+  /// Maps link for one line of a two-stop task (loading or offloading),
+  /// or empty when that address is blank.
+  static List<DropsheetMapLink> twoStopLinks(String address) {
+    final a = address.trim();
+    if (a.isEmpty) return const [];
+    return [DropsheetMapLink(label: a, url: pinUrlFromAddress(a))];
+  }
+
   /// Short, single-line label shown in the Location cell of the row.
   /// For typed tasks this is derived from [DropsheetTask.typeData];
   /// for `custom` tasks we fall back to [DropsheetTask.location].
@@ -98,7 +106,7 @@ class DropsheetMaps {
       case DropsheetTaskType.dropOff:
       case DropsheetTaskType.pickUp:
       case DropsheetTaskType.distribute:
-        var wa = (task.typeData['workArea'] as String?)?.trim() ?? '';
+        var wa = task.shortWorkArea;
         if (DropsheetTask.isPlaceholderArea(wa)) wa = '';
         final corner = task.intersection;
         // Lead with the street corner — readable on a printed sheet, where

@@ -16,7 +16,13 @@ import '../services/firestore_service.dart';
 import '../services/payroll_schedule_sync.dart';
 import '../services/payroll_service.dart';
 import '../utils/payroll_week.dart';
+import '../utils/resilient_subscription.dart';
 import '../utils/schedule_time.dart';
+import '../utils/write_retry.dart';
+import '../services/sync_status.dart';
+import '../undo/undo_history.dart';
+import '../services/schedule_mutation_types.dart' show deepEquals;
+import 'package:intl/intl.dart' show DateFormat;
 import 'auth_provider.dart';
 import 'schedule_provider.dart';
 
@@ -51,7 +57,11 @@ class PayrollProvider extends ChangeNotifier {
   final PayrollService _service;
   final riverpod.Ref? _ref;
 
-  StreamSubscription<PayrollWeek>? _weekSub;
+  ResilientSubscription<({PayrollWeek week, bool fromServer})>? _weekSub;
+
+  /// The last week snapshot came from the server, not the local cache. False
+  /// while the connection is down or the listener is re-opening.
+  bool _weekFromServer = false;
   StreamSubscription<PayrollSettings>? _settingsSub;
   StreamSubscription<Map<String, double>>? _outstandingSub;
 
@@ -74,6 +84,18 @@ class PayrollProvider extends ChangeNotifier {
   _PayslipWrite? _inFlightWrite;
   final List<_PayslipWrite> _writeQueue = [];
 
+  /// Writes the server has accepted that the week stream hasn't shown yet.
+  /// They stay laid over every snapshot until it does: on a lagging
+  /// connection an older snapshot could otherwise arrive after the save and
+  /// put the old values back on screen — and the Ops Stats grid then saved
+  /// those old values for real (what happened on Fri 6 Nov 2026, 18:26).
+  final List<_PayslipWrite> _committedWrites = [];
+
+  /// Upper bound on how long a saved write masks the stream when the stream
+  /// never shows exactly what was written (someone changed the same payslip
+  /// straight after). Past this the connection is reported as slow anyway.
+  static const Duration _confirmTimeout = Duration(seconds: 90);
+
   Timer? _autoDeductTimer;
 
   PayrollProvider(this._service, [this._ref]) {
@@ -89,6 +111,19 @@ class PayrollProvider extends ChangeNotifier {
   PayrollSettings get settings => _settings;
   bool get isLoading => _isLoading;
   String? get error => _error;
+
+  /// What's on screen is live: the connection is healthy (no banner) and
+  /// the last week snapshot came from the server, not the local cache.
+  /// Money decisions (marking a payslip paid) need this — a screen showing
+  /// stale amounts is how distributors were paid short on 6 Nov 2026. Edits
+  /// still saving don't count against it: they're on screen, and the paid
+  /// write queues behind them and is checked against the server's amount.
+  bool get isInSync =>
+      _weekFromServer &&
+      SyncStatus.instance.problem == SyncProblem.none &&
+      // A feed that just failed is retried quietly before the banner
+      // shows — payments still wait for it.
+      !SyncStatus.instance.anyFeedDown;
 
   /// Total outstanding advance/penalty balance for [distributorId] across all
   /// their advances (0 if none) — drives the Payslips list's outstanding
@@ -164,9 +199,23 @@ class PayrollProvider extends ChangeNotifier {
     // `goToWeek()` call.
     var ensuredForThisWeek = false;
 
-    _weekSub = _service.streamWeek(activeWeekStart).listen(
-      (week) async {
+    _weekFromServer = false;
+    for (final w in _committedWrites) {
+      w.confirmTimer?.cancel();
+    }
+    _committedWrites.clear();
+    _weekSub = ResilientSubscription<({PayrollWeek week, bool fromServer})>(
+      debugLabel: 'payroll week ${weekIdFor(activeWeekStart)}',
+      userLabel: 'payroll',
+      open: () {
+        _weekFromServer = false;
+        return _service.streamWeekWithSource(activeWeekStart);
+      },
+      onData: (snapshot) async {
         if (activeWeekStart != _weekStart) return;
+        final week = snapshot.week;
+        _weekFromServer = snapshot.fromServer;
+        _retireConfirmedWrites(week);
         // A snapshot can land while later local edits are still being
         // written (it only reflects writes committed so far); showing it raw
         // would flash those cells back to their old values — and the Ops
@@ -189,12 +238,6 @@ class PayrollProvider extends ChangeNotifier {
               activeWeekStart, distributors, _settings);
         }
       },
-      onError: (e) {
-        if (activeWeekStart != _weekStart) return;
-        _error = e.toString();
-        _isLoading = false;
-        notifyListeners();
-      },
     );
   }
 
@@ -216,11 +259,16 @@ class PayrollProvider extends ChangeNotifier {
   /// [isWeekEditable] is false — the data-layer half of the "weeks older than
   /// 2 cycles are read-only" rule; the UI should already disable the controls
   /// that would call this, so this is a defense-in-depth backstop.
-  Future<void> _mutatePayslips(
+  ///
+  /// [preconditions]: see [PayrollService.mutatePayslipsTxn]. The returned
+  /// set holds the distributors whose precondition failed on the server —
+  /// their edit was not saved.
+  Future<Set<String>> _mutatePayslips(
     Map<String, PayrollPayslip Function(PayrollPayslip)> mutations, {
     bool requireEditable = true,
+    Map<String, bool Function(PayrollPayslip)> preconditions = const {},
   }) {
-    if (requireEditable && !isWeekEditable) return Future.value();
+    if (requireEditable && !isWeekEditable) return Future.value(const {});
     final payslips = Map<String, PayrollPayslip>.from(_week.payslips);
     final applied = <String, PayrollPayslip Function(PayrollPayslip)>{};
     final seeds = <String, PayrollPayslip>{};
@@ -228,10 +276,13 @@ class PayrollProvider extends ChangeNotifier {
       final current = _week.payslips[id];
       if (current == null) return;
       seeds[id] = current; // pre-mutation snapshot; the txn applies mutate once
-      payslips[id] = mutate(current);
+      final precondition = preconditions[id];
+      if (precondition == null || precondition(current)) {
+        payslips[id] = mutate(current);
+      }
       applied[id] = mutate;
     });
-    if (applied.isEmpty) return Future.value();
+    if (applied.isEmpty) return Future.value(const {});
     _week = _service.recomputeWeek(_week.copyWith(payslips: payslips),
         settings: _settings);
     notifyListeners();
@@ -250,28 +301,113 @@ class PayrollProvider extends ChangeNotifier {
       final prior = write.mutations[id];
       write.mutations[id] = prior == null ? mutate : (p) => mutate(prior(p));
       write.seeds.putIfAbsent(id, () => seeds[id]!);
+      // The first edit's check is the one that matters: it describes the
+      // value the composed edits were made on top of.
+      final precondition = preconditions[id];
+      if (precondition != null) {
+        write.preconditions.putIfAbsent(id, () => precondition);
+      }
     });
     write.updatedBy = _currentUser;
+    _reportPendingWrites();
     unawaited(_drainWrites());
     return write.done.future;
+  }
+
+  void _reportPendingWrites() {
+    SyncStatus.instance.reportPendingWrites(
+        'payroll', _writeQueue.length + (_inFlightWrite == null ? 0 : 1));
+  }
+
+  /// Saves [write], retrying network and contention failures until it goes
+  /// through — they used to drop the edit from the screen with only a
+  /// console message. Every mutation is a "set" re-applied to the freshly
+  /// read payslip, so a retry after an attempt that did land is harmless.
+  Future<Set<String>> _persistWithRetry(_PayslipWrite write) async {
+    var attempt = 0;
+    while (true) {
+      attempt++;
+      try {
+        final skipped = await _service
+            .mutatePayslipsTxn(
+              write.weekStart,
+              mutations: write.mutations,
+              seeds: write.seeds,
+              preconditions: write.preconditions,
+              settings: _settings,
+              updatedBy: write.updatedBy,
+            )
+            .timeout(const Duration(seconds: 40));
+        if (attempt > 1) {
+          SyncStatus.instance.reportWriteRetrying('payroll', false);
+        }
+        return skipped;
+      } catch (e) {
+        if (!isRetryableWriteError(e, attempt: attempt)) {
+          SyncStatus.instance.reportWriteRetrying('payroll', false);
+          rethrow;
+        }
+        SyncStatus.instance.reportWriteRetrying('payroll', true);
+        final delay = writeRetryDelay(attempt);
+        debugPrint('Payroll save attempt $attempt failed ($e); retrying in '
+            '${delay.inMilliseconds}ms');
+        await Future<void>.delayed(delay);
+      }
+    }
+  }
+
+  /// Drops saved writes that [server] now shows (or that can no longer apply
+  /// to it — their precondition fails, so the server's value stands).
+  void _retireConfirmedWrites(PayrollWeek server) {
+    _committedWrites.removeWhere((w) {
+      if (weekIdFor(w.weekStart) != weekIdFor(server.weekStart)) {
+        return false;
+      }
+      final shown = w.mutations.entries.every((e) {
+        final p = server.payslips[e.key];
+        if (p == null) return false;
+        final precondition = w.preconditions[e.key];
+        if (precondition != null && !precondition(p)) return true;
+        final next = _service.recomputePayslip(e.value(p), settings: _settings);
+        return payslipsMatchIgnoringStamp(
+            next, _service.recomputePayslip(p, settings: _settings));
+      });
+      if (shown) w.confirmTimer?.cancel();
+      return shown;
+    });
   }
 
   Future<void> _drainWrites() async {
     if (_inFlightWrite != null) return;
     while (_writeQueue.isNotEmpty) {
       final write = _inFlightWrite = _writeQueue.removeAt(0);
+      _reportPendingWrites();
       try {
-        await _service.mutatePayslipsTxn(
-          write.weekStart,
-          mutations: write.mutations,
-          seeds: write.seeds,
-          settings: _settings,
-          updatedBy: write.updatedBy,
-        );
+        final skipped = await _persistWithRetry(write);
         _inFlightWrite = null;
-        write.done.complete();
+        _reportPendingWrites();
+        // Keep showing it until the stream does (see [_committedWrites]).
+        _committedWrites.add(write);
+        write.confirmTimer = Timer(_confirmTimeout, () {
+          if (_committedWrites.remove(write)) {
+            final server = _serverWeek;
+            if (server != null && write.weekStart == _weekStart) {
+              _week = _overlay(server);
+              notifyListeners();
+            }
+          }
+        });
+        final server = _serverWeek;
+        if (server != null) _retireConfirmedWrites(server);
+        if (skipped.isNotEmpty && server != null &&
+            write.weekStart == _weekStart) {
+          _week = _overlay(server);
+          notifyListeners();
+        }
+        write.done.complete(skipped);
       } catch (e, st) {
         _inFlightWrite = null;
+        _reportPendingWrites();
         debugPrint('Payroll save failed: $e');
         // Drop the failed edit from what's shown: back to the last server
         // snapshot plus whatever is still queued.
@@ -289,6 +425,7 @@ class PayrollProvider extends ChangeNotifier {
   /// re-applied on top, oldest first.
   PayrollWeek _overlay(PayrollWeek server) {
     final writes = [
+      ..._committedWrites,
       if (_inFlightWrite != null) _inFlightWrite!,
       ..._writeQueue,
     ].where((w) => w.weekStart == _weekStart);
@@ -297,7 +434,10 @@ class PayrollProvider extends ChangeNotifier {
     for (final w in writes) {
       w.mutations.forEach((id, mutate) {
         final current = payslips[id] ?? w.seeds[id];
-        if (current != null) payslips[id] = mutate(current);
+        if (current == null) return;
+        final precondition = w.preconditions[id];
+        if (precondition != null && !precondition(current)) return;
+        payslips[id] = mutate(current);
       });
     }
     return _service.recomputeWeek(server.copyWith(payslips: payslips),
@@ -329,12 +469,89 @@ class PayrollProvider extends ChangeNotifier {
     });
   }
 
+  // ── Undo / Redo (per week) ─────────────────────────────────────────────────
+  //
+  // Only plain payslip fields are undoable: daily entries, extra earnings,
+  // payment status and notes. Advance deductions, savings, deposits, payment
+  // accounts, finalising and settings touch the ledgers and are not.
+  //
+  // A step holds each changed field's value before and after. Undo checks
+  // every field still holds what the step left (another admin, the schedule
+  // sync), and that the week is still open for editing, then writes the old
+  // values through the same transactional queue as any edit.
+
+  /// The open week's undo history key.
+  UndoKey get undoKey => UndoKey(UndoScope.payroll, weekIdFor(_weekStart));
+
+  void _recordPayrollStep(String label, List<_PayslipFieldChange> changes,
+      {bool requireEditable = true}) {
+    final ref = _ref;
+    final real = changes.where((c) => !c.isNoOp).toList();
+    if (ref == null || real.isEmpty) return;
+    if (requireEditable && !isWeekEditable) return;
+    final history = ref.read(undoHistoryRiverpod(undoKey));
+    if (history.isApplying) return;
+    final weekStart = _weekStart;
+    history.record(UndoEntry(
+      label: label,
+      undo: () => _applyPayrollStep(weekStart, real, requireEditable,
+          toBefore: true),
+      redo: () => _applyPayrollStep(weekStart, real, requireEditable,
+          toBefore: false),
+    ));
+  }
+
+  Future<void> _applyPayrollStep(DateTime weekStart,
+      List<_PayslipFieldChange> changes, bool requireEditable,
+      {required bool toBefore}) async {
+    if (weekIdFor(weekStart) != weekIdFor(_weekStart)) {
+      throw const UndoConflict('that week is no longer open');
+    }
+    if (requireEditable && (!isWeekEditable || _week.isFinalized)) {
+      throw const UndoConflict('the week is finalised or closed');
+    }
+    for (final c in changes) {
+      final p = _week.payslips[c.distributorId];
+      if (p == null || !c.holds(p, toBefore ? c.after : c.before)) {
+        throw const UndoConflict('the payslip was changed since');
+      }
+    }
+    final mutations = <String, PayrollPayslip Function(PayrollPayslip)>{};
+    for (final c in changes) {
+      final prior = mutations[c.distributorId];
+      PayrollPayslip apply(PayrollPayslip p) =>
+          c.write(p, toBefore ? c.before : c.after);
+      mutations[c.distributorId] =
+          prior == null ? apply : (p) => apply(prior(p));
+    }
+    await _mutatePayslips(mutations, requireEditable: requireEditable);
+    if (changes.any((c) => c.isDay)) _scheduleAutoDeductions();
+  }
+
+  List<_PayslipFieldChange> _dayChanges(
+      String distributorId, Map<DateTime, PayrollDailyEntry> edits) {
+    final p = _week.payslips[distributorId];
+    if (p == null) return const [];
+    return [
+      for (final e in edits.entries)
+        _PayslipFieldChange.day(distributorId, dayKeyFor(e.key),
+            p.dailyEntries[dayKeyFor(e.key)], e.value),
+    ];
+  }
+
+  String _who(String distributorId) {
+    final name = _week.payslips[distributorId]?.distributorName.trim() ?? '';
+    return name.isEmpty ? 'distributor' : name;
+  }
+
   /// Replaces one or more of a distributor's daily entries in one write.
   Future<void> updateDistributorDays(
     String distributorId,
     Map<DateTime, PayrollDailyEntry> edits,
   ) async {
     if (!_week.payslips.containsKey(distributorId)) return;
+    _recordPayrollStep('Edit days for ${_who(distributorId)}',
+        _dayChanges(distributorId, edits));
     await _mutatePayslips({
       distributorId: (p) {
         final entries = Map<String, PayrollDailyEntry>.from(p.dailyEntries);
@@ -352,11 +569,22 @@ class PayrollProvider extends ChangeNotifier {
   /// numbers are entered for every distributor at once rather than one
   /// distributor's whole week at a time. Still just one Firestore write
   /// (multiple `payslips.<id>` field paths in one `update()` call).
-  Future<void> updateDayForAllDistributors(
+  ///
+  /// [basedOn] is what each cell showed before the admin typed — the edit
+  /// is only saved if the server still holds that (or already holds the
+  /// new value). A cell showing an out-of-date value can then never
+  /// overwrite a newer one. Returns the names of distributors whose cell
+  /// was NOT saved for that reason.
+  Future<List<String>> updateDayForAllDistributors(
     DateTime date,
-    Map<String, PayrollDailyEntry> entriesByDistributorId,
-  ) async {
+    Map<String, PayrollDailyEntry> entriesByDistributorId, {
+    Map<String, PayrollDailyEntry> basedOn = const {},
+  }) async {
     final key = dayKeyFor(date);
+    _recordPayrollStep('Edit ${DateFormat('EEE d MMM').format(date)}', [
+      for (final e in entriesByDistributorId.entries)
+        ..._dayChanges(e.key, {date: e.value}),
+    ]);
     final mutations = <String, PayrollPayslip Function(PayrollPayslip)>{
       for (final e in entriesByDistributorId.entries)
         if (_week.payslips.containsKey(e.key))
@@ -367,8 +595,23 @@ class PayrollProvider extends ChangeNotifier {
             return p.copyWith(dailyEntries: entries);
           },
     };
-    await _mutatePayslips(mutations);
+    final preconditions = <String, bool Function(PayrollPayslip)>{
+      for (final e in basedOn.entries)
+        if (mutations.containsKey(e.key))
+          e.key: (p) {
+            final current =
+                p.dailyEntries[key] ?? PayrollDailyEntry.empty(date);
+            return dayEditStillApplies(
+              current: current,
+              basedOn: e.value,
+              wanted: entriesByDistributorId[e.key]!,
+            );
+          },
+    };
+    final skipped =
+        await _mutatePayslips(mutations, preconditions: preconditions);
     _scheduleAutoDeductions();
+    return [for (final id in skipped) _who(id)];
   }
 
   Future<void> updateAdvanceDeduction(
@@ -453,7 +696,15 @@ class PayrollProvider extends ChangeNotifier {
     required double amount,
     String? note,
   }) async {
-    if (!_week.payslips.containsKey(distributorId)) return;
+    final current = _week.payslips[distributorId];
+    if (current == null) return;
+    _recordPayrollStep('Extra earnings for ${_who(distributorId)}', [
+      _PayslipFieldChange.extraEarnings(
+        distributorId,
+        (current.extraEarningsAmount, current.extraEarningsNote),
+        (amount, note ?? current.extraEarningsNote),
+      ),
+    ]);
     await _mutatePayslips({
       distributorId: (p) => p.copyWith(
             extraEarningsAmount: amount,
@@ -525,15 +776,62 @@ class PayrollProvider extends ChangeNotifier {
     String distributorId,
     PaymentStatus status,
   ) async {
-    if (!_week.payslips.containsKey(distributorId)) return;
-    await _mutatePayslips({
-      distributorId: (p) => p.copyWith(paymentStatus: status),
-    }, requireEditable: false);
+    final current = _week.payslips[distributorId];
+    if (current == null) return;
+    if (status == PaymentStatus.paid && !isInSync) {
+      throw const PayrollNotInSyncException();
+    }
+    _recordPayrollStep(
+      'Payment status for ${_who(distributorId)}',
+      [
+        _PayslipFieldChange.paymentStatus(
+            distributorId, current.paymentStatus, status),
+      ],
+      requireEditable: false,
+    );
+    if (status != PaymentStatus.paid) {
+      await _mutatePayslips({
+        distributorId: (p) => p.copyWith(paymentStatus: status, clearPaid: true),
+      }, requireEditable: false);
+      return;
+    }
+    // Paid is only recorded at the amount on screen: if the server's net
+    // differs (the screen was behind), nothing is saved and the admin is
+    // told — rather than paying from a stale figure, as on 6 Nov 2026.
+    final shownNet = current.netWage;
+    final paidBy = _currentUser;
+    final paidAt = DateTime.now();
+    final skipped = await _mutatePayslips({
+      distributorId: (p) => p.copyWith(
+            paymentStatus: PaymentStatus.paid,
+            paidAmount: shownNet,
+            paidAt: p.paidAt ?? paidAt,
+            paidBy: p.paidBy ?? paidBy,
+          ),
+    }, requireEditable: false, preconditions: {
+      distributorId: (p) =>
+          (_service.recomputePayslip(p, settings: _settings).netWage -
+                      shownNet)
+                  .abs() <
+              0.005,
+    });
+    if (skipped.contains(distributorId)) {
+      throw PayrollAmountChangedException(_who(distributorId), shownNet);
+    }
   }
 
   /// Records a free-text note against this week's payment for [distributorId].
   Future<void> updatePaymentNotes(String distributorId, String notes) async {
-    if (!_week.payslips.containsKey(distributorId)) return;
+    final current = _week.payslips[distributorId];
+    if (current == null) return;
+    _recordPayrollStep(
+      'Payment notes for ${_who(distributorId)}',
+      [
+        _PayslipFieldChange.paymentNotes(
+            distributorId, current.paymentNotes, notes),
+      ],
+      requireEditable: false,
+    );
     await _mutatePayslips({
       distributorId: (p) => p.copyWith(paymentNotes: notes),
     }, requireEditable: false);
@@ -803,6 +1101,9 @@ class PayrollProvider extends ChangeNotifier {
   void dispose() {
     _autoDeductTimer?.cancel();
     _weekSub?.cancel();
+    for (final w in _committedWrites) {
+      w.confirmTimer?.cancel();
+    }
     _settingsSub?.cancel();
     _outstandingSub?.cancel();
     super.dispose();
@@ -815,8 +1116,139 @@ class _PayslipWrite {
   final DateTime weekStart;
   final Map<String, PayrollPayslip Function(PayrollPayslip)> mutations = {};
   final Map<String, PayrollPayslip> seeds = {};
-  final Completer<void> done = Completer<void>();
+  final Map<String, bool Function(PayrollPayslip)> preconditions = {};
+
+  /// Completes with the distributors whose precondition failed (not saved).
+  final Completer<Set<String>> done = Completer<Set<String>>();
+  Timer? confirmTimer;
   String? updatedBy;
 
   _PayslipWrite(this.weekStart);
+}
+
+/// One payslip field an undo step changed: its value before and after, how
+/// to compare a payslip against a value, and how to write one.
+class _PayslipFieldChange {
+  final String distributorId;
+  final Object? before;
+  final Object? after;
+  final bool isDay;
+  final Object? Function(Object? value) _norm;
+  final Object? Function(PayrollPayslip p) _read;
+  final PayrollPayslip Function(PayrollPayslip p, Object? value) write;
+
+  _PayslipFieldChange._(
+    this.distributorId,
+    this.before,
+    this.after,
+    this._read,
+    this.write, {
+    Object? Function(Object? value)? norm,
+    this.isDay = false,
+  }) : _norm = norm ?? ((v) => v);
+
+  bool get isNoOp => deepEquals(_norm(before), _norm(after));
+
+  bool holds(PayrollPayslip p, Object? value) =>
+      deepEquals(_norm(_read(p)), _norm(value));
+
+  /// A daily entry; null means "no entry for that day".
+  factory _PayslipFieldChange.day(String distributorId, String key,
+      PayrollDailyEntry? before, PayrollDailyEntry? after) {
+    return _PayslipFieldChange._(
+      distributorId,
+      before,
+      after,
+      (p) => p.dailyEntries[key],
+      (p, v) {
+        final entries = Map<String, PayrollDailyEntry>.from(p.dailyEntries);
+        if (v == null) {
+          entries.remove(key);
+        } else {
+          entries[key] = v as PayrollDailyEntry;
+        }
+        return p.copyWith(dailyEntries: entries);
+      },
+      norm: (v) => (v as PayrollDailyEntry?)?.toMap(),
+      isDay: true,
+    );
+  }
+
+  factory _PayslipFieldChange.extraEarnings(String distributorId,
+      (double, String) before, (double, String) after) {
+    return _PayslipFieldChange._(
+      distributorId,
+      before,
+      after,
+      (p) => (p.extraEarningsAmount, p.extraEarningsNote),
+      (p, v) {
+        final (amount, note) = v as (double, String);
+        return p.copyWith(extraEarningsAmount: amount, extraEarningsNote: note);
+      },
+      norm: (v) {
+        final (amount, note) = v as (double, String);
+        return [amount, note];
+      },
+    );
+  }
+
+  factory _PayslipFieldChange.paymentStatus(
+      String distributorId, PaymentStatus before, PaymentStatus after) {
+    return _PayslipFieldChange._(
+      distributorId,
+      before,
+      after,
+      (p) => p.paymentStatus,
+      (p, v) => p.copyWith(paymentStatus: v as PaymentStatus),
+    );
+  }
+
+  factory _PayslipFieldChange.paymentNotes(
+      String distributorId, String before, String after) {
+    return _PayslipFieldChange._(
+      distributorId,
+      before,
+      after,
+      (p) => p.paymentNotes,
+      (p, v) => p.copyWith(paymentNotes: v as String),
+    );
+  }
+}
+
+/// Two daily entries record the same thing (the date is the map key, so
+/// [PayrollDailyEntry.toMap] leaves it out).
+bool sameDailyEntry(PayrollDailyEntry a, PayrollDailyEntry b) =>
+    deepEquals(a.toMap(), b.toMap());
+
+/// An Ops Stats edit made on top of [basedOn] may be saved over [current]
+/// (the server's value now) only if nothing else changed it in between —
+/// or it already holds [wanted]. Otherwise the cell was showing an
+/// out-of-date value and saving would overwrite a newer one.
+bool dayEditStillApplies({
+  required PayrollDailyEntry current,
+  required PayrollDailyEntry basedOn,
+  required PayrollDailyEntry wanted,
+}) =>
+    sameDailyEntry(current, basedOn) || sameDailyEntry(current, wanted);
+
+/// Marking paid was refused because the screen isn't showing the server's
+/// current figures.
+class PayrollNotInSyncException implements Exception {
+  const PayrollNotInSyncException();
+  @override
+  String toString() => "This screen isn't up to date with the server yet "
+      '(slow connection or changes still saving), so payments can\'t be '
+      'marked. Wait until the warning at the top clears and try again.';
+}
+
+/// Marking paid was refused because the payslip's net on the server is not
+/// the amount the admin was looking at.
+class PayrollAmountChangedException implements Exception {
+  final String distributorName;
+  final double shownNet;
+  const PayrollAmountChangedException(this.distributorName, this.shownNet);
+  @override
+  String toString() => "$distributorName's pay has changed since this "
+      'screen showed R${shownNet.toStringAsFixed(2)} — not marked paid. '
+      'Check the new amount before paying.';
 }

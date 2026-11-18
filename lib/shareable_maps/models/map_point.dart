@@ -106,6 +106,10 @@ class MapPoint {
   /// Convert to Map (for Firestore/JSON)
   Map<String, dynamic> toMap() {
     return {
+      // Stored so the id survives a reload: a schedule job can link to this
+      // point (`JobAreaLink`), and a position-based id would shift whenever
+      // an earlier point is deleted.
+      'id': id,
       'name': name,
       'description': description,
       'latitude': position.latitude,
@@ -122,6 +126,7 @@ class MapPoint {
 
   /// Create a copy with updated fields
   MapPoint copyWith({
+    String? id,
     String? name,
     String? description,
     LatLng? position,
@@ -132,7 +137,7 @@ class MapPoint {
     DateTime? updatedAt,
   }) {
     return MapPoint(
-      id: id,
+      id: id ?? this.id,
       name: name ?? this.name,
       description: description ?? this.description,
       position: position ?? this.position,
@@ -147,10 +152,16 @@ class MapPoint {
 
   /// Convert to Google Maps Marker
   /// Note: BitmapDescriptor needs to be created asynchronously
+  ///
+  /// [anchor] is where the spot sits on [customIcon] (a descriptive pin's
+  /// tip is not bottom-centre: its tag runs off to the right); [zIndex]
+  /// stacks it among the other markers.
   Marker toGoogleMapsMarker({
     bool isSelected = false,
     VoidCallback? onTap,
     BitmapDescriptor? customIcon,
+    Offset anchor = const Offset(0.5, 1.0),
+    int zIndex = 0,
     bool useAdvancedMarker = false,
     bool draggable = false,
     ValueChanged<LatLng>? onDragEnd,
@@ -177,6 +188,8 @@ class MapPoint {
         position: position,
         infoWindow: InfoWindow.noText,
         icon: icon,
+        anchor: anchor,
+        zIndex: zIndex,
         alpha: isSelected ? 1.0 : 0.9,
         visible: visible,
         onTap: onTap,
@@ -190,6 +203,8 @@ class MapPoint {
       position: position,
       infoWindow: InfoWindow.noText,
       icon: icon,
+      anchor: anchor,
+      zIndexInt: zIndex,
       alpha: isSelected ? 1.0 : 0.9,
       visible: visible,
       onTap: onTap,
@@ -247,4 +262,16 @@ enum MapPointIcon {
       orElse: () => MapPointIcon.pin,
     );
   }
+}
+
+/// A descriptive pin drawn for one point in place of its category icon
+/// ([MapLayer.getGoogleMapsMarkers]): the picture, where the spot sits on
+/// it, and how it stacks among the other markers.
+@immutable
+class PlacedPin {
+  final BitmapDescriptor icon;
+  final Offset anchor;
+  final int zIndex;
+
+  const PlacedPin(this.icon, this.anchor, this.zIndex);
 }

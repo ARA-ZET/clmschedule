@@ -132,6 +132,13 @@ class MapLinkService {
     return 'https://$shareHost/map/$shareCode';
   }
 
+  /// Public photo gallery for the map's cloud folders — the poster photos in
+  /// a Flyers & Posters report. Keyed by the same code as the map, so the
+  /// two links always belong together. Served by the `photoPage` function.
+  static String buildPhotosUrl(String shareCode) {
+    return 'https://$shareHost/photos/$shareCode';
+  }
+
   /// True when [text] contains a CLM Maps share link on any known host.
   static bool containsShareUrl(String? text) =>
       extractShareCodeFromText(text) != null;

@@ -20,6 +20,7 @@ class AuthProvider extends ChangeNotifier {
   app_user.User? _appUser;
   bool _isLoading = false;
   String? _errorMessage;
+  bool _storageFullError = false;
   bool _isInitialized = false;
   Future<void>? _initializationFuture;
   StreamSubscription<User?>? _authStateSubscription;
@@ -30,6 +31,9 @@ class AuthProvider extends ChangeNotifier {
   bool get isAuthenticated => _user != null;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
+
+  /// The last error was the browser's storage being full (offer "Fix now").
+  bool get storageFullError => _storageFullError;
   bool get isInitialized => _isInitialized;
 
   /// Initialize the auth provider and set up authentication listeners
@@ -90,11 +94,25 @@ class AuthProvider extends ChangeNotifier {
     _user = user;
 
     if (user != null) {
-      try {
-        _appUser = await _authService.getCurrentUserFromDatabase();
-      } catch (e) {
-        debugPrint('Error loading app user data: $e');
-        _appUser = null;
+      // The cached profile lets the dashboard (and the schedule streams that
+      // start with it) open without waiting on a server round trip. The
+      // server copy follows and replaces it, so a changed role still lands.
+      final cached =
+          await _authService.getCurrentUserFromDatabase(fromCache: true);
+      if (cached != null) {
+        _appUser = cached;
+        unawaited(_authService.getCurrentUserFromDatabase().then((fresh) {
+          if (fresh == null || _user?.uid != user.uid) return;
+          _appUser = fresh;
+          notifyListeners();
+        }));
+      } else {
+        try {
+          _appUser = await _authService.getCurrentUserFromDatabase();
+        } catch (e) {
+          debugPrint('Error loading app user data: $e');
+          _appUser = null;
+        }
       }
     } else {
       _appUser = null;
@@ -128,6 +146,7 @@ class AuthProvider extends ChangeNotifier {
       _setError('Sign in failed. Please try again.');
       return false;
     } catch (e) {
+      _storageFullError = e is StorageFullException;
       _setError(e.toString().replaceFirst('Exception: ', ''));
       debugPrint('Sign in error in AuthProvider: $e');
       return false;
@@ -315,6 +334,7 @@ class AuthProvider extends ChangeNotifier {
   }
 
   void _clearError() {
+    _storageFullError = false;
     if (_errorMessage != null) {
       _errorMessage = null;
       notifyListeners();

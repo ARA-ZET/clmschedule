@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
@@ -73,7 +74,7 @@ class _InvoiceMessageSettingsDialogState
           .deleteTemplate(template.id);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('$e'), backgroundColor: Colors.red),
         );
       }
@@ -87,7 +88,7 @@ class _InvoiceMessageSettingsDialogState
           .setBankingDetails(_bankingController.text.trim());
       if (mounted) {
         setState(() => _bankingDirty = false);
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Banking details saved'),
             backgroundColor: Colors.green,
@@ -96,7 +97,7 @@ class _InvoiceMessageSettingsDialogState
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('$e'), backgroundColor: Colors.red),
         );
       }

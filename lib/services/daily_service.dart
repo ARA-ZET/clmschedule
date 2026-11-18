@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import '../utils/schedule_time.dart';
 
 class DailyService {
@@ -311,25 +314,76 @@ class DailyService {
 
   // PRIVATE MONTHLY INDEX MANAGEMENT
 
-  /// Ensure monthly index document exists for schedules
-  Future<void> _ensureScheduleMonthlyIndexExists(DateTime date) async {
+  /// Schedule months whose index document is known to exist this session.
+  static final Set<String> _knownScheduleMonthIndexes = {};
+
+  /// Makes sure the month index of [date]'s schedule month exists (month
+  /// pickers and the next-month probe read it), once per month per session.
+  ///
+  /// Schedule mutations call this instead of
+  /// [ensureScheduleDailyDocExists]: their transaction creates a missing day
+  /// document itself, so only the month index needs doing beforehand.
+  ///
+  /// Never waits on the server. It used to read the index from the server
+  /// when the cache could not confirm it, which cost every first schedule
+  /// save of a session a round trip and, on a flaky connection, failed with
+  /// "client is offline". The index holds only fields derived from the month,
+  /// so a merge write of them is safe whether or not it exists; it is queued
+  /// offline like any other write, and nothing waits for it.
+  Future<void> ensureScheduleMonthIndexExists(DateTime date) async {
+    final monthId = getMonthlyDocumentId(date);
+    if (_knownScheduleMonthIndexes.contains(monthId)) return;
+    _knownScheduleMonthIndexes.add(monthId);
+    final doc = getScheduleMonthlyIndexDoc(date);
+    try {
+      final cached = await doc.get(const GetOptions(source: Source.cache));
+      if (cached.exists) return;
+    } catch (_) {
+      // Not in the cache — write it below.
+    }
+    final monthRange = getMonthDateRange(monthId);
+    unawaited(doc
+        .set({
+          'month': monthId,
+          'year': date.year,
+          'monthNumber': date.month,
+          'daysInMonth': DateTime(date.year, date.month + 1, 0).day,
+          'startDate': Timestamp.fromDate(monthRange.start),
+          'endDate': Timestamp.fromDate(monthRange.end),
+        }, SetOptions(merge: true))
+        .catchError((Object e) {
+      _knownScheduleMonthIndexes.remove(monthId);
+      debugPrint('DailyService: schedule month index $monthId not saved: $e');
+    }));
+    _cachedScheduleMonths = null;
+    _scheduleMonthsCacheTime = null;
+  }
+
+  /// Ensure monthly index document exists for schedules. Returns true when
+  /// it had to be created.
+  Future<bool> _ensureScheduleMonthlyIndexExists(DateTime date) async {
     final doc = getScheduleMonthlyIndexDoc(date);
     final docSnapshot = await doc.get();
 
-    if (!docSnapshot.exists) {
-      final monthRange = getMonthDateRange(getMonthlyDocumentId(date));
-      final daysInMonth = DateTime(date.year, date.month + 1, 0).day;
-
-      await doc.set({
-        'created': FieldValue.serverTimestamp(),
-        'month': getMonthlyDocumentId(date),
-        'year': date.year,
-        'monthNumber': date.month,
-        'daysInMonth': daysInMonth,
-        'startDate': Timestamp.fromDate(monthRange.start),
-        'endDate': Timestamp.fromDate(monthRange.end),
-      });
+    if (docSnapshot.exists) {
+      _knownScheduleMonthIndexes.add(getMonthlyDocumentId(date));
+      return false;
     }
+
+    final monthRange = getMonthDateRange(getMonthlyDocumentId(date));
+    final daysInMonth = DateTime(date.year, date.month + 1, 0).day;
+
+    await doc.set({
+      'created': FieldValue.serverTimestamp(),
+      'month': getMonthlyDocumentId(date),
+      'year': date.year,
+      'monthNumber': date.month,
+      'daysInMonth': daysInMonth,
+      'startDate': Timestamp.fromDate(monthRange.start),
+      'endDate': Timestamp.fromDate(monthRange.end),
+    });
+    _knownScheduleMonthIndexes.add(getMonthlyDocumentId(date));
+    return true;
   }
 
   /// Ensure monthly index document exists for job lists

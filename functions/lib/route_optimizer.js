@@ -14,6 +14,7 @@
  *  - No main-thread jank on the device while ETAs compute.
  */
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { requireStaff } = require("./require_staff");
 const { lookupRouteSegment, GOOGLE_MAPS_API_KEY } = require("./distance_matrix_cache");
 
 function fmtHHmm(d) {
@@ -203,9 +204,7 @@ async function runOptimisation(input, apiKey) {
 const optimizeDropsheetRoute = onCall(
   { secrets: [GOOGLE_MAPS_API_KEY], timeoutSeconds: 120, memory: "512MiB" },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
     const apiKey = GOOGLE_MAPS_API_KEY.value();
     if (!apiKey) {
       throw new HttpsError("failed-precondition", "GOOGLE_MAPS_API_KEY secret not set");

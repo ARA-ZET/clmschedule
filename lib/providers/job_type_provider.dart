@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_job_type.dart';
 import '../services/reference_cache_service.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 
 const String _kCollectionName = 'customJobTypes';
 
@@ -18,6 +20,10 @@ class JobTypeProvider extends ChangeNotifier {
   /// and kept in sync across hot restarts.
   static JobTypeProvider? _instance;
   static JobTypeProvider? get instance => _instance;
+
+  /// Tests: stand in a fake for [instance] (the real one needs Firebase).
+  @visibleForTesting
+  static set debugInstance(JobTypeProvider? provider) => _instance = provider;
 
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   List<CustomJobType> _jobTypes = [];
@@ -40,15 +46,22 @@ class JobTypeProvider extends ChangeNotifier {
   /// live. Other clients pick up the change on their next session via the
   /// `/meta/referenceVersions` version bump.
   Future<void> _loadJobTypes() async {
+    // Captured before the cached paint below clears _isLoading.
+    final firstLoad = _isLoading;
     try {
       final loaded = await ReferenceCacheService.loadCollection<CustomJobType>(
         query: _firestore.collection(_kCollectionName).orderBy('order'),
         collectionName: _kCollectionName,
         fromDoc: (doc) =>
             CustomJobType.fromMap(Map<String, dynamic>.from(doc.data() as Map)),
+        onCached: (cached) {
+          _jobTypes = cached;
+          _isLoading = false;
+          notifyListeners();
+        },
       );
 
-      if (loaded.isEmpty && _isLoading) {
+      if (loaded.isEmpty && firstLoad) {
         // First-time setup: seed defaults into Firestore
         await _initializeDefaults();
       } else {
@@ -79,6 +92,15 @@ class JobTypeProvider extends ChangeNotifier {
     };
     final toBackfill = <CustomJobType>[];
     for (final jt in _jobTypes) {
+      // Junk & Stuff and Happy Sun types always sync to the Dropsheet
+      // ([CustomJobType.syncsToDropsheet]). Store the flag as well, so builds
+      // that only read the flag agree — otherwise their sync deletes the
+      // tasks this build adds, and the two rewrite the sheet in turn.
+      if (jt.syncsToDropsheet && !jt.appearsOnDropsheet) {
+        toBackfill.add(jt.copyWith(appearsOnDropsheet: true));
+        continue;
+      }
+
       final seed = seedsById[jt.id];
       if (seed == null || !jt.isDefault) continue;
 
@@ -262,7 +284,11 @@ class JobTypeProvider extends ChangeNotifier {
       throw Exception('Cannot delete default job type');
     }
 
-    await _firestore.collection(_kCollectionName).doc(id).delete();
+    await RecycleBinWriter(_firestore).moveDocToBin(
+      _firestore.collection(_kCollectionName).doc(id),
+      type: RecycleBinType.jobType,
+      label: (d) => binLabel(d, 'job type'),
+    );
     await ReferenceCacheService.bumpVersion(_kCollectionName);
     _jobTypes.removeWhere((j) => j.id == id);
     notifyListeners();
@@ -292,8 +318,9 @@ class JobTypeProvider extends ChangeNotifier {
   bool appearsOnCollectionSchedule(String id) =>
       getJobTypeById(id)?.appearsOnCollectionSchedule ?? false;
 
+  /// See [CustomJobType.syncsToDropsheet].
   bool appearsOnDropsheet(String id) =>
-      getJobTypeById(id)?.appearsOnDropsheet ?? false;
+      getJobTypeById(id)?.syncsToDropsheet ?? false;
 
   String? dropsheetTaskTypeKey(String id) =>
       getJobTypeById(id)?.dropsheetTaskTypeKey;
@@ -338,7 +365,7 @@ class JobTypeProvider extends ChangeNotifier {
 
   /// Convenience: ids of every type that auto-syncs to the Dropsheet.
   List<String> get dropsheetTypeIds => _jobTypes
-      .where((jt) => jt.appearsOnDropsheet)
+      .where((jt) => jt.syncsToDropsheet)
       .map((jt) => jt.id)
       .toList(growable: false);
 

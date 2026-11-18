@@ -70,22 +70,38 @@ class HappySunProjectService {
   }
 
   // Get project by ID (searches current month and nearby months)
+  /// Where project [projectId] is stored (searched like [getProject]), or
+  /// null — for copying it into the Recycle Bin with its job.
+  Future<DocumentReference<Map<String, dynamic>>?> findProjectRef(
+      String projectId) async {
+    final snap = await _findProjectDoc(projectId);
+    return snap?.reference as DocumentReference<Map<String, dynamic>>?;
+  }
+
+  /// The project's document from the current month and the 6 before/after,
+  /// earliest month first, or null. All 13 months are read at once: one by
+  /// one they cost up to 13 round trips (7 for this month's projects)
+  /// before every status, note, photo or delete.
+  Future<DocumentSnapshot?> _findProjectDoc(String projectId) async {
+    final now = DateTime.now();
+    final snaps = await Future.wait([
+      for (int i = -6; i <= 6; i++)
+        _getProjectsCollection(DateTime(now.year, now.month + i))
+            .doc(projectId)
+            .get(),
+    ]);
+    for (final snap in snaps) {
+      if (snap.exists && snap.data() != null) return snap;
+    }
+    return null;
+  }
+
   Future<HappySunProject?> getProject(String projectId) async {
     try {
-      // Search through monthly documents to find the project
-      final now = DateTime.now();
-      // Search current month and 6 months before/after
-      for (int i = -6; i <= 6; i++) {
-        final checkDate = DateTime(now.year, now.month + i);
-        final projectDoc =
-            await _getProjectsCollection(checkDate).doc(projectId).get();
-
-        if (projectDoc.exists && projectDoc.data() != null) {
-          return HappySunProject.fromMap(
-              projectId, Map<String, dynamic>.from(projectDoc.data() as Map));
-        }
-      }
-      return null;
+      final projectDoc = await _findProjectDoc(projectId);
+      if (projectDoc == null) return null;
+      return HappySunProject.fromMap(
+          projectId, Map<String, dynamic>.from(projectDoc.data() as Map));
     } catch (e) {
       // Error handled by provider layer
       rethrow;

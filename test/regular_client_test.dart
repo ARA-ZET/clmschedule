@@ -5,7 +5,11 @@ import 'package:clmschedule/models/regular_client.dart';
 import 'package:clmschedule/providers/schedule_provider.dart';
 import 'package:clmschedule/services/job_assignment_service.dart';
 import 'package:clmschedule/services/regular_client_matcher.dart';
+import 'package:clmschedule/services/regular_client_service.dart';
+import 'package:clmschedule/shareable_maps/adapters/regular_client_map_adapter.dart';
+import 'package:clmschedule/shareable_maps/services/shareable_maps_firestore_service.dart';
 import 'package:clmschedule/shareable_maps/models/map_layer.dart';
+import 'package:clmschedule/shareable_maps/models/map_point.dart';
 import 'package:clmschedule/shareable_maps/models/shareable_map.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,6 +29,29 @@ class _FakeSchedule extends Fake implements ScheduleProvider {
           j.date.month == date.month &&
           j.date.day == date.day)
       .toList();
+}
+
+/// The gallery: read-only. Any write to it is a Fake `noSuchMethod` and
+/// fails the test — a real client's map must never be changed.
+class _FakeMaps extends Fake implements ShareableMapsFirestoreService {
+  _FakeMaps(this.stored);
+
+  ShareableMap stored;
+
+  @override
+  Future<ShareableMap?> getMap(String monthKey, String docId) async => stored;
+}
+
+class _FakeRegularClients extends RegularClientService {
+  final savedMaps = <ShareableMap>[];
+  final savedPlans = <RegularClient>[];
+
+  @override
+  Future<void> saveMap(String id, ShareableMap map) async =>
+      savedMaps.add(map);
+
+  @override
+  Future<void> save(RegularClient client) async => savedPlans.add(client);
 }
 
 CustomPolygon _poly(String id, double o) => CustomPolygon(
@@ -242,6 +269,46 @@ void main() {
       expect(out.single.date, DateTime(2026, 10, 8));
     });
 
+    test('points are allocated like areas and go on the job as point pins',
+        () {
+      final pointMap = map.copyWith(layers: [
+        map.layers.single.copyWith(points: [
+          MapPoint(
+            id: 'tl1',
+            name: 'Traffic light Main Rd',
+            position: const LatLng(9, 9),
+            color: Colors.red,
+            createdAt: day,
+            updatedAt: day,
+          ),
+        ]),
+      ]);
+      final service = JobAssignmentService(_FakeSchedule(distributors, []));
+      final out = service.calculateRegularClientAssignments(
+        client: 'PnP',
+        plan: _plan([
+          _slot('1', [
+            ['p1', 'tl1']
+          ]),
+        ]),
+        map: pointMap,
+        startDate: day,
+      );
+      final work = out.single.workMaps;
+      expect(work.map((p) => p.id), ['p1', 'tl1']);
+      expect(work.last.type, MapElementType.point);
+      expect(work.last.points, [const LatLng(9, 9)]);
+      expect(out.single.workingArea, 'Area p1, Traffic light Main Rd');
+
+      // The editor lists the point as allocatable, found by its own id.
+      final adapter = RegularClientMapAdapter(_plan(const []),
+          service: _FakeRegularClients(), maps: _FakeMaps(pointMap));
+      final areas = adapter.areasOf(pointMap);
+      expect(areas.map((a) => (a.id, a.isPoint)),
+          [('p1', false), ('p2', false), ('p3', false), ('tl1', true)]);
+      expect(adapter.areaForElement(pointMap, 'tl1')?.isPoint, isTrue);
+    });
+
     test('areas missing from the map are skipped', () {
       final service = JobAssignmentService(_FakeSchedule(distributors, []));
       final out = service.calculateRegularClientAssignments(
@@ -272,6 +339,134 @@ void main() {
         ),
         isEmpty,
       );
+    });
+  });
+
+  group('RegularClientMapAdapter', () {
+    final day = DateTime(2026, 10, 7);
+    ShareableMap galleryMap() => ShareableMap(
+          id: 'm',
+          name: 'Gallery',
+          defaultCenter: const LatLng(0, 0),
+          createdAt: day,
+          updatedAt: day,
+          layers: [
+            MapLayer.create(name: 'L').copyWith(polygons: [
+              _poly('p1', 0).copyWith(description: 'own note'),
+              _poly('p2', 2),
+            ]),
+          ],
+        );
+
+    RegularClient planOn(ShareableMap? own) => RegularClient(
+          id: 'rc',
+          name: 'Timbuild',
+          mapId: 'm',
+          mapMonthKey: '09-2026',
+          mapName: 'Gallery',
+          map: own,
+          slots: [
+            RegularClientSlot(
+              id: '1',
+              label: 'Distributor 1',
+              colorValue: Colors.red.toARGB32(),
+              days: const [
+                RegularClientDay(polygonIds: ['p1'])
+              ],
+            ),
+          ],
+        );
+
+    test('a plan without its own map copies the gallery map once, read-only',
+        () async {
+      final service = _FakeRegularClients();
+      final adapter = RegularClientMapAdapter(planOn(null),
+          service: service, maps: _FakeMaps(galleryMap()));
+
+      await adapter.load();
+      final copy = service.savedMaps.single;
+      expect(copy.id, RegularClient.templateMapId);
+      expect(copy.jobListItemId, isNull);
+      expect(copy.layers.single.polygons.map((p) => p.id), ['p1', 'p2']);
+      expect(adapter.client.map, isNotNull);
+    });
+
+    test('templateFrom drops the job link, folders and cloud layers', () {
+      final source = galleryMap().copyWith(
+        jobListItemId: 'job-1',
+        storageFolderPath: 'Distribution/2026/09/Timbuild',
+        cloudFolderPaths: ['Distribution/2026/09/Timbuild'],
+        layers: [
+          ...galleryMap().layers,
+          MapLayer.create(name: 'Cloud tracks'),
+        ],
+      );
+      final copy = RegularClient.templateFrom(source);
+      expect(copy.jobListItemId, isNull);
+      expect(copy.storageFolderPath, isNull);
+      expect(copy.cloudFolderPaths, isEmpty);
+      expect(copy.layers.map((l) => l.name), ['L']);
+    });
+
+    test('edits save to the client\'s own map with its colours, never the '
+        'gallery', () async {
+      final service = _FakeRegularClients();
+      ShareableMap? reloaded;
+      final adapter = RegularClientMapAdapter(
+        planOn(RegularClient.templateFrom(galleryMap())),
+        service: service,
+        maps: _FakeMaps(galleryMap()),
+        onReload: (m) => reloaded = m,
+      );
+
+      final shown = await adapter.load();
+      expect(service.savedMaps, isEmpty); // already owned: no copy
+      final shownPolys = shown.layers.single.polygons;
+      expect(shownPolys[0].color.toARGB32(), Colors.red.toARGB32());
+      expect(shownPolys[1].color, RegularClientMapAdapter.unallocatedColor);
+
+      // Reshape p1 and draw a new polygon, as the editor would.
+      final layer = shown.layers.single;
+      final edited = shown.copyWith(layers: [
+        layer.copyWith(polygons: [
+          shownPolys[0].copyWith(
+              points: [LatLng(0, 0), LatLng(5, 0), LatLng(0, 5)]),
+          shownPolys[1],
+          CustomPolygon(
+            name: 'New',
+            description: '',
+            points: [LatLng(9, 9), LatLng(10, 9), LatLng(9, 10)],
+            color: Colors.green,
+          ),
+        ]),
+      ]);
+      await adapter.save(edited);
+
+      final saved = service.savedMaps.single.layers.single.polygons;
+      expect(saved[0].points[1], const LatLng(5, 0));
+      expect(saved[0].color.toARGB32(), Colors.blue.toARGB32());
+      expect(saved[0].description, 'own note');
+      expect(saved[1].color.toARGB32(), Colors.blue.toARGB32());
+      expect(saved[2].id, isNotEmpty);
+      expect(saved[2].color.toARGB32(), Colors.green.toARGB32());
+
+      // The new polygon's id reaches the editor, styled as unallocated.
+      final back = reloaded!.layers.single.polygons;
+      expect(back[2].id, saved[2].id);
+      expect(back[2].color, RegularClientMapAdapter.unallocatedColor);
+      expect(adapter.areasOf(reloaded).map((a) => a.id),
+          ['p1', 'p2', saved[2].id]);
+    });
+
+    test('a plan round-trips its own map', () {
+      final plan = planOn(RegularClient.templateFrom(galleryMap()));
+      final data = {
+        ...plan.toMap(),
+        'map': RegularClient.mapToFirestore(plan.map!),
+      };
+      expect(plan.toMap().containsKey('map'), isFalse);
+      final back = RegularClient.fromMap('rc', data);
+      expect(back.map!.layers.single.polygons.map((p) => p.id), ['p1', 'p2']);
     });
   });
 }

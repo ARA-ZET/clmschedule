@@ -10,13 +10,16 @@
 //
 // Set TE_REPORT_PDF_OUT to a file path to keep the rendered PDF for eyeballing:
 //   TE_REPORT_PDF_OUT=/tmp/report.pdf flutter test test/te_report_pdf_test.dart
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:clmschedule/models/distributor.dart';
 import 'package:clmschedule/utils/schedule_time.dart';
 import 'package:clmschedule/track_editor/models/te_promoter_day.dart';
 import 'package:clmschedule/track_editor/services/te_place_names.dart';
+import 'package:clmschedule/track_editor/services/te_report_maps.dart';
 import 'package:clmschedule/track_editor/services/te_report_pdf.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gpx/gpx.dart';
@@ -77,28 +80,135 @@ void main() {
         placeNames[tePlaceKey(
             spots[i].centre.latitude, spots[i].centre.longitude)] = TEPlaceName(
           intersection: names[i % names.length],
-          suburb: 'Bellville Central',
         );
       }
     }
 
+    // Route maps draw on a blank background unless TE_REPORT_LIVE_MAPS is
+    // set, which fetches the real street maps from Google for eyeballing.
+    final mapImages = Platform.environment['TE_REPORT_LIVE_MAPS'] != null
+        ? await fetchReportMaps(days)
+        : const <String, Uint8List>{};
+
     // Photos belong to the date, shared by both promoters who worked it.
-    final bytes =
-        await buildReportPdf(days, placeNames: placeNames, photosByDate: {
+    const link = 'https://maps.communitylifemedia.co.za/map/test42';
+    final bytes = await buildReportPdf(days,
+        placeNames: placeNames,
+        mapImages: mapImages,
+        mapLinks: {for (final d in days) d.key: link},
+        photosByDate: {
       DateTime(2026, 3, 18): [
         TEProofPhoto(bytes: photo, fileName: 'proof-1.png'),
         TEProofPhoto(bytes: photo, fileName: 'proof-2.png'),
       ],
     });
 
+    final out = Platform.environment['TE_REPORT_PDF_OUT'];
+    if (out != null) await File(out).writeAsBytes(bytes);
+
     expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
+    // Each map and its caption link to the client's interactive map.
+    expect(latin1.decode(bytes), contains('/URI($link)'));
     // The object streams are compressed, so there is nothing readable to
     // count pages by — size is the available proxy for "the summary, two
     // dates and their photos actually got drawn".
     expect(bytes.length, greaterThan(20000));
 
-    final out = Platform.environment['TE_REPORT_PDF_OUT'];
+  });
+
+  test('two promoters, map and chart, share each page', () async {
+    final date = DateTime(2026, 3, 18);
+    final days = [
+      for (final (i, name) in ['Alice', 'Bongani', 'Chloe', 'Dumisani'].indexed)
+        i.isEven
+            ? _continuousShift(distributor: _distributor('d$i', name), date: date)
+            : _motionTriggeredShift(
+                distributor: _distributor('d$i', name), date: date),
+    ];
+    final mapImages = Platform.environment['TE_REPORT_LIVE_MAPS'] != null
+        ? await fetchReportMaps(days)
+        : const <String, Uint8List>{};
+    final bytes = await buildReportPdf(days, mapImages: mapImages);
+    final out = Platform.environment['TE_REPORT_PDF_OUT_FOUR'];
     if (out != null) await File(out).writeAsBytes(bytes);
+
+    // Page 1: the day's figures and team table; then two promoters a page.
+    final pages =
+        RegExp(r'/Type\s*/Page[^s]').allMatches(latin1.decode(bytes)).length;
+    expect(pages, 3);
+  });
+
+  test('a promoter at one corner gets one map with where they worked beside it',
+      () async {
+    final start = DateTime.utc(2026, 3, 18, 6);
+    const lat = -33.9180, lon = 18.4230; // Strand St & Buitengracht St
+    final day = TEPromoterDay(
+      distributor: _distributor('d1', 'Alice Mbeki'),
+      date: DateTime(2026, 3, 18),
+      tracks: [
+        Trk(trksegs: [
+          Trkseg(trkpts: [
+            for (var i = 0; i < 300; i++)
+              Wpt(
+                  lat: lat + (i % 7) * 2 * _degPerM,
+                  lon: lon + (i % 5) * 2 * _degPerM,
+                  time: start.add(Duration(minutes: i))),
+          ]),
+        ]),
+      ],
+      waypoints: [
+        for (var i = 0; i < 120; i++)
+          Wpt(
+              lat: lat + (i % 3) * _degPerM,
+              lon: lon + (i % 4) * _degPerM,
+              time: start.add(Duration(minutes: i * 2))),
+      ],
+      sourcePaths: const [],
+    );
+    expect(teReportMaps(teMapRoute(day)), hasLength(1));
+    final mapImages = Platform.environment['TE_REPORT_LIVE_MAPS'] != null
+        ? await fetchReportMaps([day])
+        : const <String, Uint8List>{};
+    final bytes = await buildReportPdf([day],
+        mapImages: mapImages,
+        whereOverrides: {day.key: 'Strand St & Buitengracht St'},
+        mapLinks: {day.key: 'https://maps.communitylifemedia.co.za/map/one'});
+    final out = Platform.environment['TE_REPORT_PDF_OUT_ONE'];
+    if (out != null) await File(out).writeAsBytes(bytes);
+    expect(latin1.decode(bytes),
+        contains('/URI(https://maps.communitylifemedia.co.za/map/one)'));
+  });
+
+  group('where worked', () {
+    test('prints the intersection found for each work spot', () {
+      final day = _continuousShift(
+        distributor: _distributor('d1', 'Alice Mbeki'),
+        date: DateTime(2026, 3, 17),
+      );
+      final spots = teWorkSpots(day.analysis);
+      expect(spots, isNotEmpty);
+      final key =
+          tePlaceKey(spots.first.centre.latitude, spots.first.centre.longitude);
+
+      expect(teAutoWhere(day.analysis, const {}), isEmpty);
+      expect(
+          teAutoWhere(day.analysis, {
+            key: const TEPlaceName(intersection: 'Voortrekker Rd & Durban Rd'),
+          }),
+          ['Voortrekker Rd & Durban Rd']);
+    });
+
+    test('builds with hand-typed text in place of the looked-up names',
+        () async {
+      final day = _continuousShift(
+        distributor: _distributor('d1', 'Alice Mbeki'),
+        date: DateTime(2026, 3, 17),
+      );
+      final bytes = await buildReportPdf([day], whereOverrides: {
+        day.key: 'Main Rd & Church St\n\n  Durban Rd  ',
+      });
+      expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
+    });
   });
 
   group('breaks', () {

@@ -6,12 +6,17 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../models/dropsheet_day.dart';
+import '../../models/dropsheet_task.dart';
 import '../../models/job.dart';
 import '../../providers/dropsheet_provider.dart' show kUnassignedSectionId;
 
 /// Colour palette for driver sections inside the day planner. Index 0
 /// is reserved for the synthetic "Unassigned" bucket.
 const Color kUnassignedColor = Color(0xFF9E9E9E);
+
+/// The Own transport list — its own colour, outside the driver palette so
+/// adding it never shifts the drivers' colours.
+const Color kOwnTransportColor = Color(0xFF546E7A);
 
 const List<Color> _driverPalette = <Color>[
   Color(0xFF1976D2), // blue
@@ -32,8 +37,10 @@ const List<Color> _driverPalette = <Color>[
 Color colorForSection(
     String sectionId, List<DropsheetDriverSection> allSections) {
   if (sectionId == kUnassignedSectionId) return kUnassignedColor;
-  final ordered =
-      allSections.where((s) => s.id != kUnassignedSectionId).toList();
+  if (sectionId == kOwnTransportSectionId) return kOwnTransportColor;
+  final ordered = allSections
+      .where((s) => s.id != kUnassignedSectionId && !s.isOwnTransport)
+      .toList();
   final idx = ordered.indexWhere((s) => s.id == sectionId);
   if (idx < 0) return kUnassignedColor;
   return _driverPalette[idx % _driverPalette.length];
@@ -51,18 +58,11 @@ LatLng centroidOf(List<LatLng> points) {
 }
 
 /// Default drop-off location for a distributor [job]: use the explicit
-/// [Job.dropOffPoint] if present, otherwise the centroid of the first
-/// non-empty work-area polygon. Returns null if nothing geographic is
-/// available.
-LatLng? defaultDropOffFor(Job job) {
-  if (job.dropOffPoint != null) return job.dropOffPoint;
-  for (final wm in job.workMaps) {
-    if (wm.points.isEmpty) continue;
-    if (wm.isPoint) return wm.points.first;
-    return centroidOf(wm.points);
-  }
-  return null;
-}
+/// [Job.dropOffPoint] if present, otherwise the same estimate the print map
+/// and map editor fall back to, so every screen pins it at one spot.
+/// Returns null if nothing geographic is available.
+LatLng? defaultDropOffFor(Job job) =>
+    job.dropOffPoint ?? Job.estimateDropOffPointFromWorkMaps(job.workMaps);
 
 /// Default pick-up location for [job]: uses the explicit [Job.pickUpPoint] if
 /// set, otherwise falls back to [defaultDropOffFor] (same area, different stop).
@@ -70,6 +70,101 @@ LatLng? defaultPickUpFor(Job job) {
   if (job.pickUpPoint != null) return job.pickUpPoint;
   return defaultDropOffFor(job);
 }
+
+/// One map stop of a dropsheet task: where, and which role ('single',
+/// 'loading', 'offload') with an optional label suffix.
+class PlannerStopPoint {
+  final LatLng position;
+  final String role;
+  final String? suffix;
+  const PlannerStopPoint(this.position, this.role, {this.suffix});
+}
+
+/// The schedule job a drop-off / pick-up stop belongs to, from [jobById].
+Job? plannerJobFor(DropsheetTask t, Map<String, Job> jobById) {
+  final jobId = t.typeData['distributorJobId'] as String?;
+  return t.isDistributorTask && jobId != null ? jobById[jobId] : null;
+}
+
+/// The stops [t] makes on the day planner, given the day's schedule jobs.
+/// The map's pins and the panel's numbers both come from this, so they
+/// always agree. A drop-off / pick-up whose schedule job is no longer on the
+/// day makes none: the panel already hid such stops while the map still
+/// pinned (and numbered) them.
+List<PlannerStopPoint> plannerStops(DropsheetTask t, Map<String, Job> jobById) {
+  final jobId = t.typeData['distributorJobId'] as String?;
+  if (t.isDistributorTask && jobId != null && !jobById.containsKey(jobId)) {
+    return const [];
+  }
+  return _plannerStopPoints(t, plannerJobFor(t, jobById));
+}
+
+/// Returns the coordinate(s) at which a task should be pinned on the map.
+///
+/// For distributor drop-off / pick-up tasks linked to a Job, the live
+/// `dropOffPoint` (or first delivery vertex) is preferred so that
+/// markers stay in sync with edits made on the schedule grid. For all
+/// other task types we fall back to the cached `lat`/`lng` (or
+/// loading/offload variants for furniture moves) written by the editor
+/// when the address was geocoded.
+List<PlannerStopPoint> _plannerStopPoints(DropsheetTask t, Job? job) {
+  final out = <PlannerStopPoint>[];
+  if (t.isDistributorTask) {
+    // Per-area drop-offs (and pick-ups derived from them) pin their own
+    // coordinate so they render as distinct pins. The default drop-off keeps
+    // using the job's point so it tracks schedule-grid edits live.
+    final tLat = (t.typeData['lat'] as num?)?.toDouble();
+    final tLng = (t.typeData['lng'] as num?)?.toDouble();
+    if (t.typeData['workAreaPin'] == true && tLat != null && tLng != null) {
+      out.add(PlannerStopPoint(LatLng(tLat, tLng), 'single'));
+      return out;
+    }
+    final p = job != null
+        ? (t.type == DropsheetTaskType.pickUp
+            ? defaultPickUpFor(job)
+            : defaultDropOffFor(job))
+        : null;
+    if (p != null) {
+      out.add(PlannerStopPoint(p, 'single'));
+      return out;
+    }
+    if (tLat != null && tLng != null) {
+      out.add(PlannerStopPoint(LatLng(tLat, tLng), 'single'));
+    }
+    return out;
+  }
+  if (job != null) {
+    // Pick-up tasks use the job's pickUpPoint (falls back to dropOffPoint);
+    // drop-off tasks use dropOffPoint / work-area centroid.
+    final p = t.type == DropsheetTaskType.pickUp
+        ? defaultPickUpFor(job)
+        : defaultDropOffFor(job);
+    if (p != null) {
+      out.add(PlannerStopPoint(p, 'single'));
+      return out;
+    }
+  }
+  if (t.type == DropsheetTaskType.furnitureMove) {
+    final ll = (t.typeData['loadingLat'] as num?)?.toDouble();
+    final lo = (t.typeData['loadingLng'] as num?)?.toDouble();
+    if (ll != null && lo != null) {
+      out.add(PlannerStopPoint(LatLng(ll, lo), 'loading', suffix: 'load'));
+    }
+    final ol = (t.typeData['offloadLat'] as num?)?.toDouble();
+    final og = (t.typeData['offloadLng'] as num?)?.toDouble();
+    if (ol != null && og != null) {
+      out.add(PlannerStopPoint(LatLng(ol, og), 'offload', suffix: 'offload'));
+    }
+    return out;
+  }
+  final lat = (t.typeData['lat'] as num?)?.toDouble();
+  final lng = (t.typeData['lng'] as num?)?.toDouble();
+  if (lat != null && lng != null) {
+    out.add(PlannerStopPoint(LatLng(lat, lng), 'single'));
+  }
+  return out;
+}
+
 
 /// Holds the rendered bitmap and the correct anchor for a teardrop marker.
 typedef MarkerBitmap = ({BitmapDescriptor icon, Offset anchor});
@@ -87,12 +182,22 @@ class NumberedMarkerCache {
     String secondaryLabel = '',
     bool isPickUp = false,
     int? iconCodePoint,
+    List<String> lines = const [],
+    String? numberText,
   }) async {
     final key =
-        '${color.toString()}_${number}_${primaryLabel}_${secondaryLabel}_${isPickUp}_${iconCodePoint ?? ''}';
+        '${color.toString()}_${number}_${primaryLabel}_${secondaryLabel}_${isPickUp}_${iconCodePoint ?? ''}_${lines.join('\u0001')}_${numberText ?? ''}';
     final existing = _cache[key];
     if (existing != null) return existing;
-    final result = await _renderPinBytes(
+    final result = lines.isNotEmpty || numberText != null
+        ? await _renderListPinBytes(
+            color: color,
+            lines: lines,
+            footer: lines.isEmpty ? '' : secondaryLabel,
+            isPickUp: isPickUp,
+            numberText: numberText ?? '$number',
+          )
+        : await _renderPinBytes(
       color: color,
       number: number,
       primaryLabel: primaryLabel,
@@ -248,8 +353,8 @@ Future<({Uint8List bytes, Offset anchor})> _renderPinBytes({
   final double badgeR = badgeL + (hasLabel ? gap + badgeW : 0.0);
 
   // Tip position: horizontal centre of the combined [circle … badge] span
-  // for labelled markers; directly below the circle for plain pins.
-  // This places a standalone pointer between the two separate elements.
+  // for labelled markers; directly below the circle for plain pins. Shared
+  // drop points ([_renderListPinBytes]) use the same bottom-centre tip.
   final double tipX = hasLabel ? (cx - outerR + badgeR) / 2 : cx;
   // Tip triangle geometry.
   final double tipBaseY = cy + outerR; // base at circle bottom
@@ -499,6 +604,154 @@ Future<({Uint8List bytes, Offset anchor})> _renderIconPinBytes({
 
   final picture = recorder.endRecording();
   final image = await picture.toImage(w.toInt(), h.toInt());
+  final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+  return (bytes: byteData!.buffer.asUint8List(), anchor: anchor);
+}
+
+
+/// Pin for a shared drop point: [numberText] (its first stop number) in a
+/// circle that widens into a pill if the number needs it, and
+/// a badge listing [lines] one under another with an optional smaller
+/// [footer]. The badge is as wide as the longest line (up to a cap), so
+/// whole names show instead of being cut off with "…". Same tip as the
+/// single-stop pin: bottom centre of the whole marker, here below the
+/// (taller) name list.
+Future<({Uint8List bytes, Offset anchor})> _renderListPinBytes({
+  required Color color,
+  required List<String> lines,
+  required String numberText,
+  String footer = '',
+  bool isPickUp = false,
+}) async {
+  const double s = 0.6;
+  const double outerR = 26.0 * s;
+  const double fillR = 22.0 * s;
+  const double tipH = 20.0 * s;
+  const double pad = 6.0 * s;
+  const double gap = 8.0 * s;
+  const double lineFontSz = 20.0 * s;
+  const double footerFontSz = 14.0 * s;
+  const double lineGap = 2.0 * s;
+  const double labelPadH = 9.0 * s;
+  const double labelPadV = 5.0 * s;
+  const double maxTextW = 320.0 * s;
+  const double numFontSz = 26.0 * s;
+  const double tipHalfW = 10.0 * s;
+  const double textMeasureBuffer = 12.0 * s;
+
+  TextPainter painter(String text, double size, Color c, FontWeight weight) =>
+      TextPainter(
+        text: TextSpan(
+          text: text,
+          style: TextStyle(color: c, fontSize: size, fontWeight: weight),
+        ),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+        ellipsis: '…',
+      )..layout(maxWidth: maxTextW);
+
+  final painters = [
+    for (final l in lines)
+      painter(l, lineFontSz, const Color(0xFF202124), FontWeight.w600),
+    if (footer.isNotEmpty)
+      painter(footer, footerFontSz, const Color(0xFF5F6368), FontWeight.w400),
+  ];
+  final textW = painters.map((p) => p.width).fold<double>(0, math.max);
+  final textH = painters.isEmpty
+      ? 0.0
+      : painters.fold<double>(0, (h, p) => h + p.height) +
+          lineGap * (painters.length - 1);
+
+  // Stop numbers: shrink a little for long runs, widen the circle to a pill.
+  final numTp = TextPainter(
+    text: TextSpan(
+      text: numberText,
+      style: TextStyle(
+        color: Colors.white,
+        fontSize: numberText.length > 3 ? numFontSz * 0.8 : numFontSz,
+        fontWeight: FontWeight.w700,
+      ),
+    ),
+    textDirection: TextDirection.ltr,
+  )..layout();
+  final double pillHalfW =
+      math.max(outerR, numTp.width / 2 + (outerR - fillR) + 7.0 * s);
+
+  final double badgeW =
+      painters.isEmpty ? 0.0 : labelPadH * 2 + textW + textMeasureBuffer;
+  final double badgeH = painters.isEmpty ? 0.0 : textH + labelPadV * 2;
+  // Circle and badge share a top edge; whichever is taller sets the height.
+  final double top = pad;
+  final double cx = pillHalfW + pad;
+  final double cy = top + outerR;
+  final double badgeL = cx + pillHalfW + gap - 2;
+  final double badgeR = painters.isEmpty ? cx + pillHalfW : badgeL + badgeW;
+  final double w = badgeR + pad;
+  // Bottom centre, like the single-stop pin: the tip hangs from the lower
+  // of circle and name list, midway across the whole marker.
+  final double tipBaseY = math.max(cy + outerR, top + badgeH);
+  final double tipY = tipBaseY + tipH;
+  final double h = tipY;
+  final double tipX =
+      painters.isEmpty ? cx : (cx - pillHalfW + badgeR) / 2;
+  final anchor = Offset(tipX / w, 1.0);
+
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(recorder);
+
+  final shadowPaint = Paint()
+    // ignore: deprecated_member_use
+    ..color = Colors.black.withOpacity(0.28)
+    ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+  RRect pill(double halfW, double r) => RRect.fromLTRBR(
+      cx - halfW, cy - r, cx + halfW, cy + r, Radius.circular(r));
+  canvas.drawRRect(pill(pillHalfW - 1, outerR - 1).shift(const Offset(0, 2)),
+      shadowPaint);
+  canvas.drawPath(
+    Path()
+      ..moveTo(tipX - tipHalfW, tipBaseY + 2)
+      ..lineTo(tipX + tipHalfW, tipBaseY + 2)
+      ..lineTo(tipX, tipY + 3)
+      ..close(),
+    shadowPaint,
+  );
+
+  // Badge: one line per name.
+  if (painters.isNotEmpty) {
+    final badgeRect = RRect.fromLTRBR(
+        badgeL, top, badgeR, top + badgeH, const Radius.circular(6));
+    canvas.drawRRect(badgeRect.shift(const Offset(0, 1.5)), shadowPaint);
+    canvas.drawRRect(badgeRect, Paint()..color = Colors.white);
+    canvas.drawRRect(
+      badgeRect,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0,
+    );
+    var y = top + labelPadV;
+    for (final p in painters) {
+      p.paint(canvas, Offset(badgeL + labelPadH, y));
+      y += p.height + lineGap;
+    }
+  }
+
+  canvas.drawPath(
+    Path()
+      ..moveTo(tipX - tipHalfW, tipBaseY)
+      ..lineTo(tipX + tipHalfW, tipBaseY)
+      ..lineTo(tipX, tipY)
+      ..close(),
+    Paint()..color = color,
+  );
+  final ringColor = isPickUp ? const Color(0xFF43A047) : Colors.white;
+  canvas.drawRRect(pill(pillHalfW, outerR), Paint()..color = ringColor);
+  canvas.drawRRect(pill(pillHalfW - (outerR - fillR), fillR),
+      Paint()..color = color);
+  numTp.paint(canvas, Offset(cx - numTp.width / 2, cy - numTp.height / 2));
+
+  final picture = recorder.endRecording();
+  final image = await picture.toImage(w.ceil(), h.ceil());
   final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
   return (bytes: byteData!.buffer.asUint8List(), anchor: anchor);
 }

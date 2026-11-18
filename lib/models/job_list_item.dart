@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../providers/job_type_provider.dart';
+import 'company.dart';
+import '../utils/appointment_slots.dart';
 import '../utils/schedule_time.dart';
 import 'job_list_item_update.dart';
 import 'custom_polygon.dart';
@@ -82,6 +84,13 @@ class JobListItem {
   final String invoice;
   final double amount;
   final String client;
+
+  /// Who to ask for on the day and their number, for the drivers: the
+  /// dropsheet's Contact and Tel. Typed on the Add/Edit Job form beside the
+  /// client; there is no Job List column for them. Blank on older jobs, which
+  /// fall back to a number typed on the end of the client name ([siteContact]).
+  final String contactPerson;
+  final String contactPhone;
   final String jobStatusId; // Changed from JobListStatus enum to String
   final String invoiceStatusId; // Invoice status (separate from job status)
   final String jobTypeId; // Changed from JobType enum to String
@@ -91,6 +100,11 @@ class JobListItem {
   final DateTime date;
   final String collectionAddress;
   final DateTime collectionDate;
+
+  /// Community Life Media jobs: the flyers have to be collected before they
+  /// can be distributed. Ticked on the Add Job form and in the Job List's
+  /// "Flyer Col." column. Always written, so unticking reaches the server.
+  final bool needsFlyerCollection;
   final String specialInstructions;
   final int quantityDistributed;
   final String invoiceDetails;
@@ -224,6 +238,8 @@ class JobListItem {
     required this.invoice,
     required this.amount,
     required this.client,
+    this.contactPerson = '',
+    this.contactPhone = '',
     required this.jobStatusId,
     this.invoiceStatusId = 'pending', // Default to pending invoice status
     required this.jobTypeId,
@@ -233,6 +249,7 @@ class JobListItem {
     required this.date,
     required this.collectionAddress,
     required this.collectionDate,
+    this.needsFlyerCollection = false,
     required this.specialInstructions,
     required this.quantityDistributed,
     required this.invoiceDetails,
@@ -273,6 +290,54 @@ class JobListItem {
 
   /// Whether an invoice has been raised in Zoho for this job.
   bool get hasZohoInvoice => zohoInvoiceId.isNotEmpty;
+
+  /// Who the driver asks for and the number to ring — the dropsheet's
+  /// Contact and Tel. The contact person and phone when they are filled in;
+  /// otherwise the client, with a number typed on the end of the name split
+  /// off (the old way: "Mrs Smith 082 123 4567").
+  ({String contact, String tel}) get siteContact {
+    final fromClient = splitClientPhone(client);
+    final person = contactPerson.trim();
+    final phone = contactPhone.trim();
+    return (
+      contact: person.isNotEmpty ? person : fromClient.contact,
+      tel: phone.isNotEmpty ? phone : fromClient.tel,
+    );
+  }
+
+  /// What is wrong with [value] as a contact phone, or null when it is fine.
+  /// Blank is fine (the number is optional); fewer than 9 digits cannot be
+  /// dialled — a typo the driver would only find out about on the road.
+  static String? contactPhoneProblem(String? value) {
+    final digits = (value ?? '').replaceAll(RegExp(r'[^0-9]'), '');
+    if (digits.isEmpty) return null;
+    if (digits.length < 9) return 'Too short for a phone number';
+    return null;
+  }
+
+  /// [client] as a name and a South African number typed on its end:
+  /// "Mrs Smith 082 123 4567" → ("Mrs Smith", "082 123 4567"). No number
+  /// leaves the whole text as the name.
+  static ({String contact, String tel}) splitClientPhone(String client) {
+    final trimmed = client.trim();
+    if (trimmed.isEmpty) return (contact: '', tel: '');
+    final phoneMatch =
+        RegExp(r'(?:\+?27|0)[0-9\s()\-]{8,}$').firstMatch(trimmed);
+    if (phoneMatch == null) return (contact: trimmed, tel: '');
+    final tel = phoneMatch.group(0)!.trim();
+    final contact = trimmed.substring(0, phoneMatch.start).trim();
+    return (contact: contact.isEmpty ? trimmed : contact, tel: tel);
+  }
+
+  /// Whether this is a Community Life Media job — the jobs that can need
+  /// their flyers collected ([needsFlyerCollection]).
+  bool get isCommunityLifeMediaJob => isCommunityLifeMediaJobType(jobTypeId);
+
+  /// Whether job type [jobTypeId] belongs to Community Life Media. False
+  /// while the job types have not loaded.
+  static bool isCommunityLifeMediaJobType(String jobTypeId) =>
+      JobTypeProvider.instance?.getJobTypeById(jobTypeId)?.resolvedCompanyId ==
+      Company.clmId;
 
   // ── Provider-neutral reads ─────────────────────────────────────────────────
   // Always read invoice links through these. A job invoiced before the neutral
@@ -472,6 +537,8 @@ class JobListItem {
       invoice: data['invoice'] as String? ?? '',
       amount: (data['amount'] as num?)?.toDouble() ?? 0.0,
       client: data['client'] as String? ?? '',
+      contactPerson: data['contactPerson'] as String? ?? '',
+      contactPhone: data['contactPhone'] as String? ?? '',
       jobStatusId: jobStatusId,
       invoiceStatusId: invoiceStatusId,
       jobTypeId: data['jobType'] as String? ?? 'flyersPrintingOnly',
@@ -485,6 +552,7 @@ class JobListItem {
       collectionDate: data['collectionDate'] != null
           ? toScheduleCivil((data['collectionDate'] as Timestamp).toDate())
           : scheduleToday(),
+      needsFlyerCollection: data['needsFlyerCollection'] as bool? ?? false,
       specialInstructions: data['specialInstructions'] as String? ?? '',
       quantityDistributed: (data['quantityDistributed'] as num?)?.toInt() ?? 0,
       invoiceDetails: data['invoiceDetails'] as String? ?? '',
@@ -546,13 +614,30 @@ class JobListItem {
     );
   }
 
-  /// Collection start time as "HH:MM", falling back to the time component of
-  /// [date] for records written before [timeSlot] had its own field.
+  /// An appointment's start as "HH:MM" ("00:00" when none is booked): the
+  /// time on [date] when it has one, else [timeSlot].
+  ///
+  /// Every save from this version writes the two together
+  /// ([withAppointment], the Collection Schedule), so they only differ on
+  /// jobs saved before. There [date]'s time is always the newer one: older
+  /// versions of Add/Edit Job and the Job List's Date cell changed [date]
+  /// and left [timeSlot] behind. A midnight [date] means it carries no time
+  /// (jobs added on the Collection Schedule), so [timeSlot] is the booking.
+  /// The Collection Schedule, the dropsheet and Add/Edit Job all read this,
+  /// so they show the same time.
   String get resolvedTimeSlot {
+    if (date.hour != 0 || date.minute != 0) {
+      return '${date.hour.toString().padLeft(2, '0')}:'
+          '${date.minute.toString().padLeft(2, '0')}';
+    }
     if (timeSlot.isNotEmpty) return timeSlot;
-    return '${date.hour.toString().padLeft(2, '0')}:'
-        '${date.minute.toString().padLeft(2, '0')}';
+    return '00:00';
   }
+
+  /// Whether [collectionDate] is a real date: 1 Jan 2000 means "none".
+  bool get hasCollectionDate => !(collectionDate.year == 2000 &&
+      collectionDate.month == 1 &&
+      collectionDate.day == 1);
 
   /// Duration in 30-minute slots, falling back to the legacy
   /// [quantityDistributed] overload, then to a single slot.
@@ -560,6 +645,47 @@ class JobListItem {
     if (timeSlots >= 1) return timeSlots;
     if (quantityDistributed > 0) return quantityDistributed;
     return 1;
+  }
+
+  /// The booked time slot, "10:00–11:30"; empty when no time is booked
+  /// (midnight).
+  String get timeSlotRangeDisplay {
+    final start = resolvedTimeSlot;
+    if (start == '00:00') return '';
+    return slotRange(start, resolvedTimeSlots);
+  }
+
+  /// This appointment booked on [at]'s day from [at]'s time, for [slots]
+  /// half-hours (unchanged when null).
+  ///
+  /// The Collection Schedule reads the day from a real [collectionDate]
+  /// before [date], and older versions read the start from [timeSlot]
+  /// before [date], so a booking that only changed [date] would not move
+  /// there. This keeps all of them in step. [onCollectionSchedule] says whether the job shows there — only
+  /// then is [collectionDate] the booking (for other types it is the user's
+  /// own field). [moveCollectionDay] false keeps a real collectionDate's day
+  /// (the booking was moved on that schedule and only its time changed here).
+  /// A midnight [at] books no time: only the day moves.
+  JobListItem withAppointment(
+    DateTime at, {
+    int? slots,
+    required bool onCollectionSchedule,
+    bool moveCollectionDay = true,
+  }) {
+    final hasTime = at.hour != 0 || at.minute != 0;
+    var nextCollectionDate = collectionDate;
+    if (onCollectionSchedule && hasCollectionDate) {
+      final day = moveCollectionDay ? at : collectionDate;
+      final time = hasTime ? at : collectionDate;
+      nextCollectionDate =
+          DateTime(day.year, day.month, day.day, time.hour, time.minute);
+    }
+    return copyWith(
+      date: at,
+      timeSlot: hasTime ? slotTime(at.hour * 60 + at.minute) : null,
+      timeSlots: slots,
+      collectionDate: nextCollectionDate,
+    );
   }
 
   /// Staff required, falling back to the legacy `manDays.ceil()` derivation.
@@ -593,6 +719,10 @@ class JobListItem {
       'invoice': invoice,
       'amount': amount,
       'client': client,
+      // Always written, blank included: Job List edits use update(), so a
+      // cleared contact would otherwise never reach the server.
+      'contactPerson': contactPerson,
+      'contactPhone': contactPhone,
       'jobStatusId': jobStatusId, // Changed from jobStatus.name to jobStatusId
       'invoiceStatusId': invoiceStatusId,
       'jobType': jobTypeId,
@@ -603,6 +733,7 @@ class JobListItem {
       'collectionAddress': collectionAddress,
       'collectionDate':
           Timestamp.fromDate(scheduleCivilToInstant(collectionDate)),
+      'needsFlyerCollection': needsFlyerCollection,
       'specialInstructions': specialInstructions,
       'quantityDistributed': quantityDistributed,
       'invoiceDetails': invoiceDetails,
@@ -660,6 +791,8 @@ class JobListItem {
     String? invoice,
     double? amount,
     String? client,
+    String? contactPerson,
+    String? contactPhone,
     String?
         jobStatusId, // Changed from JobListStatus? jobStatus to String? jobStatusId
     String? invoiceStatusId,
@@ -670,6 +803,7 @@ class JobListItem {
     DateTime? date,
     String? collectionAddress,
     DateTime? collectionDate,
+    bool? needsFlyerCollection,
     String? specialInstructions,
     int? quantityDistributed,
     String? invoiceDetails,
@@ -711,6 +845,8 @@ class JobListItem {
       invoice: invoice ?? this.invoice,
       amount: amount ?? this.amount,
       client: client ?? this.client,
+      contactPerson: contactPerson ?? this.contactPerson,
+      contactPhone: contactPhone ?? this.contactPhone,
       jobStatusId: jobStatusId ?? this.jobStatusId,
       invoiceStatusId: invoiceStatusId ?? this.invoiceStatusId,
       jobTypeId: jobTypeId ?? this.jobTypeId,
@@ -720,6 +856,7 @@ class JobListItem {
       date: date ?? this.date,
       collectionAddress: collectionAddress ?? this.collectionAddress,
       collectionDate: collectionDate ?? this.collectionDate,
+      needsFlyerCollection: needsFlyerCollection ?? this.needsFlyerCollection,
       specialInstructions: specialInstructions ?? this.specialInstructions,
       quantityDistributed: quantityDistributed ?? this.quantityDistributed,
       invoiceDetails: invoiceDetails ?? this.invoiceDetails,
@@ -769,6 +906,8 @@ class JobListItem {
     String? invoice,
     double? amount,
     String? client,
+    String? contactPerson,
+    String? contactPhone,
     String? jobStatusId,
     String? invoiceStatusId,
     String? jobTypeId,
@@ -778,6 +917,9 @@ class JobListItem {
     DateTime? date,
     String? collectionAddress,
     DateTime? collectionDate,
+    bool? needsFlyerCollection,
+    String? timeSlot,
+    int? timeSlots,
     String? specialInstructions,
     int? quantityDistributed,
     String? invoiceDetails,
@@ -823,6 +965,28 @@ class JobListItem {
         fieldName: 'client',
         oldValue: this.client,
         newValue: client,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (contactPerson != null && contactPerson != this.contactPerson) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'contactPerson',
+        oldValue: this.contactPerson,
+        newValue: contactPerson,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+      ));
+    }
+
+    if (contactPhone != null && contactPhone != this.contactPhone) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'contactPhone',
+        oldValue: this.contactPhone,
+        newValue: contactPhone,
         timestamp: DateTime.now(),
         userDisplayName: userDisplayName,
       ));
@@ -953,6 +1117,42 @@ class JobListItem {
       ));
     }
 
+    if (needsFlyerCollection != null &&
+        needsFlyerCollection != this.needsFlyerCollection) {
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'needsFlyerCollection',
+        oldValue: this.needsFlyerCollection,
+        newValue: needsFlyerCollection,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+        oldValueDisplay: this.needsFlyerCollection ? 'Yes' : 'No',
+        newValueDisplay: needsFlyerCollection ? 'Yes' : 'No',
+      ));
+    }
+
+    // Start and length are one booking: one history line, "10:00–11:00" →
+    // "14:00–15:30".
+    if ((timeSlot != null && timeSlot != this.timeSlot) ||
+        (timeSlots != null && timeSlots != this.timeSlots)) {
+      // With the new date: its time is the start (see [resolvedTimeSlot]).
+      final next =
+          copyWith(date: date, timeSlot: timeSlot, timeSlots: timeSlots);
+      newUpdates.add(JobListItemUpdate(
+        userId: userId,
+        fieldName: 'timeSlot',
+        oldValue: timeSlotRangeDisplay,
+        newValue: next.timeSlotRangeDisplay,
+        timestamp: DateTime.now(),
+        userDisplayName: userDisplayName,
+        oldValueDisplay:
+            timeSlotRangeDisplay.isEmpty ? 'None' : timeSlotRangeDisplay,
+        newValueDisplay: next.timeSlotRangeDisplay.isEmpty
+            ? 'None'
+            : next.timeSlotRangeDisplay,
+      ));
+    }
+
     if (specialInstructions != null &&
         specialInstructions != this.specialInstructions) {
       newUpdates.add(JobListItemUpdate(
@@ -1025,6 +1225,8 @@ class JobListItem {
       invoice: invoice,
       amount: amount,
       client: client,
+      contactPerson: contactPerson,
+      contactPhone: contactPhone,
       jobStatusId: jobStatusId,
       invoiceStatusId: invoiceStatusId,
       jobTypeId: jobTypeId,
@@ -1034,6 +1236,9 @@ class JobListItem {
       date: date,
       collectionAddress: collectionAddress,
       collectionDate: collectionDate,
+      needsFlyerCollection: needsFlyerCollection,
+      timeSlot: timeSlot,
+      timeSlots: timeSlots,
       specialInstructions: specialInstructions,
       quantityDistributed: quantityDistributed,
       invoiceDetails: invoiceDetails,

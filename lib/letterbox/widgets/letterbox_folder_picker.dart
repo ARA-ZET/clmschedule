@@ -1,3 +1,4 @@
+import 'package:clmschedule/utils/text_search.dart';
 import 'package:flutter/material.dart';
 
 import '../providers/letterbox_provider.dart';
@@ -59,10 +60,9 @@ class _LetterboxFolderPickerState extends State<LetterboxFolderPicker> {
   @override
   Widget build(BuildContext context) {
     final provider = widget.provider;
-    final query = _query.trim().toLowerCase();
-    final visible = provider.folders
-        .where((f) => query.isEmpty || f.label.toLowerCase().contains(query))
-        .toList();
+    final search = TextSearch(_query);
+    final visible =
+        provider.folders.where((f) => search.matches([f.label])).toList();
 
     // Month headers, so a long list stays navigable. Paths are already ordered
     // newest-year-first by the query.

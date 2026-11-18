@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/map_instruction_provider.dart';
@@ -49,7 +50,7 @@ class _MapInstructionManagementDialogState
   Future<void> _save() async {
     final text = _textController.text.trim();
     if (text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(content: Text('Please enter an instruction')),
       );
       return;
@@ -65,7 +66,7 @@ class _MapInstructionManagementDialogState
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Error: $e')));
+            .showToast(SnackBar(content: Text('Error: $e')));
       }
     }
   }
@@ -95,7 +96,7 @@ class _MapInstructionManagementDialogState
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(content: Text('Error: $e')));
+              .showToast(SnackBar(content: Text('Error: $e')));
         }
       }
     }

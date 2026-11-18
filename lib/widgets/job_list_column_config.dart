@@ -22,6 +22,7 @@ class JobListColumnConfig {
     'area': 120,
     'quantity': 150,
     'manDays': 80,
+    'flyerCollection': 90,
     'collectionAddress': 200,
     'specialInstructions': 200,
     'collectionDate': 100,

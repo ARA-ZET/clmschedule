@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -8,6 +9,7 @@ import '../models/collection_job.dart';
 import '../providers/collection_schedule_provider.dart';
 import '../providers/scale_provider.dart';
 import '../models/company.dart';
+import '../utils/vehicle_colors.dart';
 import '../utils/zoho_org.dart';
 import 'month_navigation_widget.dart';
 import 'zoho/job_invoice_actions.dart';
@@ -599,16 +601,8 @@ class _CollectionScheduleGridState
   }
 }
 
-// Cache for vehicle colors to avoid repeated calculations
-final Map<VehicleType, Color> _globalVehicleColorCache = {
-  VehicleType.hyundai: Colors.blue.shade700,
-  VehicleType.mahindra: Colors.green.shade700,
-  VehicleType.nissan: Colors.orange.shade700,
-};
-
-Color _getVehicleColor(VehicleType vehicleType) {
-  return _globalVehicleColorCache[vehicleType]!;
-}
+// Shared with the main Schedule's booking strips (lib/utils/vehicle_colors.dart).
+Color _getVehicleColor(VehicleType vehicleType) => vehicleColor(vehicleType);
 
 Widget _buildCollectionJobCard(
     BuildContext context, CollectionJob job, Color color, bool isFullview) {
@@ -943,7 +937,7 @@ class _AddCollectionJobDialogState
             jobTypeId: 'junkCollection',
           );
       navigator.pop();
-      messenger.showSnackBar(
+      messenger.showToast(
         SnackBar(
           content: Text(
               'Added ${widget.vehicleType.displayName} collection job for $location'),
@@ -951,7 +945,7 @@ class _AddCollectionJobDialogState
         ),
       );
     } catch (e) {
-      messenger.showSnackBar(
+      messenger.showToast(
         SnackBar(
           content: Text('Could not add collection job: $e'),
           backgroundColor: Colors.red,

@@ -9,6 +9,8 @@
     <application
         android:label="clmschedule"
         android:name="${applicationName}"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher">
         <!-- Google Maps API Key -->
         <meta-data

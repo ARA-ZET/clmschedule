@@ -1,5 +1,6 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onCall, onRequest, HttpsError } = require("firebase-functions/v2/https");
+const { requireStaff, isAnonymousToken } = require("./lib/require_staff");
 const { defineSecret } = require("firebase-functions/params");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { onObjectFinalized, onObjectDeleted } = require("firebase-functions/v2/storage");
@@ -237,9 +238,7 @@ exports.onCollectionScheduleChange = onDocumentWritten(
 exports.rebuildMonthlySummary = onCall(
   {},
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
     const monthId = request.data.monthId;
     if (!monthId) {
       throw new HttpsError("invalid-argument", "monthId is required.");
@@ -2059,11 +2058,11 @@ exports.chatWithAssistant = onCall(
     memory: "512MiB",
   },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
 
-    const { message, conversationHistory, monthId, userName } = request.data;
+    const { message, conversationHistory, monthId } = request.data;
+    // Goes into the system prompt: take it from the verified token, not the body.
+    const userName = request.auth.token.name || request.auth.token.email || "User";
     if (!message || typeof message !== "string") {
       throw new HttpsError("invalid-argument", "message is required.");
     }
@@ -2146,9 +2145,7 @@ exports.confirmAddJob = onCall(
     memory: "256MiB",
   },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
 
     const { jobData, userName } = request.data;
     if (!jobData || !jobData.client || !jobData.date || !jobData.manDays) {
@@ -2248,9 +2245,7 @@ exports.confirmAddMultipleJobs = onCall(
     memory: "256MiB",
   },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
 
     const { jobsData, userName } = request.data;
     if (!jobsData || !Array.isArray(jobsData) || jobsData.length === 0) {
@@ -2365,9 +2360,7 @@ exports.confirmAddScheduleJobs = onCall(
     memory: "256MiB",
   },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
 
     const { scheduleJobsData } = request.data;
     if (!scheduleJobsData || !Array.isArray(scheduleJobsData) || scheduleJobsData.length === 0) {
@@ -2479,9 +2472,7 @@ exports.confirmUpdateJob = onCall(
     memory: "256MiB",
   },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
 
     const { updateData, userName } = request.data;
     if (!updateData || !updateData.jobId || !updateData.monthId || !updateData.changes) {
@@ -2584,8 +2575,15 @@ exports.chatWithAssistantStream = onRequest(
       res.status(401).json({ error: "Invalid or expired token" });
       return;
     }
+    if (isAnonymousToken(decodedToken)) {
+      res.status(401).json({ error: "Staff sign-in required" });
+      return;
+    }
 
-    const { message, conversationHistory, monthId, userName } = req.body;
+    const { message, conversationHistory, monthId } = req.body;
+    // The name goes into the system prompt, so take it from the verified
+    // token rather than the request body.
+    const userName = decodedToken.name || decodedToken.email || "User";
     if (!message || typeof message !== "string") {
       res.status(400).json({ error: "message is required" });
       return;
@@ -2839,6 +2837,54 @@ async function listGpxFolder(bucket, folderPath) {
   return { gpxFiles, stamp };
 }
 
+// Written by the month/year archive (functions/lib/cloud_archive.js) before
+// it deletes anything: every file that went into the archive ZIP, by name.
+const ARCHIVE_MANIFEST_FILE = "_archive.json";
+
+/** Parsed JSON at [path], or null when the object does not exist. Any other
+ *  failure throws, so a compile never mistakes a blip for "no data" and
+ *  writes over archived tracks. */
+async function readStorageJson(bucket, path) {
+  try {
+    const [buf] = await bucket.file(path).download();
+    return JSON.parse(buf.toString("utf-8"));
+  } catch (e) {
+    if (e && e.code === 404) return null;
+    throw e;
+  }
+}
+
+/** Tracks and waypoints of the folder's archived GPX files (those listed in
+ *  the archive manifest and no longer in Storage), lifted from the current
+ *  compiled files. Must run AFTER the folder's GPX listing: the archive
+ *  writes the manifest before deleting, so any GPX missing from that listing
+ *  is already in the manifest by the time it is read here. */
+async function carriedArchivedEntries(bucket, folderPath, liveNames) {
+  const none = { tracks: [], waypoints: [], carriedFiles: 0, archivedGpx: 0 };
+  const manifest = await readStorageJson(bucket, `${folderPath}/${ARCHIVE_MANIFEST_FILE}`);
+  const archived = Object.keys((manifest && manifest.files) || {})
+    .filter((n) => n.toLowerCase().endsWith(".gpx"));
+  if (archived.length === 0) return none;
+
+  const carry = new Set(archived.filter((n) => !liveNames.has(n)));
+  if (carry.size === 0) return { ...none, archivedGpx: archived.length };
+
+  const [tracksDoc, waypointsDoc] = await Promise.all([
+    readStorageJson(bucket, `${folderPath}/${COMPILED_TRACKS_FILE}`),
+    readStorageJson(bucket, `${folderPath}/${COMPILED_WAYPOINTS_FILE}`),
+  ]);
+  const tracks = ((tracksDoc && tracksDoc.tracks) || []).filter((t) => carry.has(t.file));
+  const names = (waypointsDoc && waypointsDoc.sourceFiles) || [];
+  const waypoints = [];
+  for (const w of (waypointsDoc && waypointsDoc.waypoints) || []) {
+    const file = typeof w.fi === "number" ? names[w.fi] : w.file;
+    if (!file || !carry.has(file)) continue;
+    const { fi: _fi, ...rest } = w;
+    waypoints.push({ ...rest, file });
+  }
+  return { tracks, waypoints, carriedFiles: carry.size, archivedGpx: archived.length };
+}
+
 // Several compiles of one folder routinely overlap — a rename rewrites N files
 // and deletes some, and every upload/delete fires its own trigger. Each compile
 // snapshots the folder when it starts, so one that started before the last
@@ -2872,8 +2918,20 @@ async function compileGpxFolderOnce(bucket, folderPath, gpxFiles, stillCurrent) 
 
   console.log(`[compileGpx] Found ${gpxFiles.length} GPX files in ${Date.now() - sw}ms`);
 
+  // GPX files moved into an archive ZIP are gone from Storage, but their
+  // tracks and waypoints must stay in the compiled JSON or every map built
+  // on this folder goes blank. They are carried over from the current
+  // compiled files rather than re-parsed.
+  const liveNames = new Set(gpxFiles.map((f) => f.name.split("/").pop()));
+  const carried = await carriedArchivedEntries(bucket, folderPath, liveNames);
+
   if (gpxFiles.length === 0) {
     if (!(await stillCurrent())) return false;
+    if (carried.archivedGpx > 0) {
+      // Everything here is archived — the compiled files ARE the data now.
+      console.log(`[compileGpx] All ${carried.archivedGpx} GPX archived — kept compiled files`);
+      return true;
+    }
     // Clean up compiled files if no GPX files remain
     try { await bucket.file(`${folderPath}/${COMPILED_TRACKS_FILE}`).delete(); } catch (_) {}
     try { await bucket.file(`${folderPath}/${COMPILED_WAYPOINTS_FILE}`).delete(); } catch (_) {}
@@ -2882,8 +2940,8 @@ async function compileGpxFolderOnce(bucket, folderPath, gpxFiles, stillCurrent) 
   }
 
   // Download and parse all GPX files in parallel
-  const allTracks = [];
-  const allWaypoints = [];
+  const allTracks = [...carried.tracks];
+  const allWaypoints = [...carried.waypoints];
   let totalBytes = 0;
 
   const parseResults = await Promise.allSettled(
@@ -2898,7 +2956,9 @@ async function compileGpxFolderOnce(bucket, folderPath, gpxFiles, stillCurrent) 
   for (const r of parseResults) {
     if (r.status === "fulfilled") {
       allTracks.push(...r.value.tracks);
-      allWaypoints.push(...r.value.waypoints);
+      for (const w of r.value.waypoints) {
+        allWaypoints.push({ ...w, file: r.value.fileName });
+      }
     } else {
       console.warn(`[compileGpx] Failed to parse file: ${r.reason}`);
     }
@@ -2908,11 +2968,29 @@ async function compileGpxFolderOnce(bucket, folderPath, gpxFiles, stillCurrent) 
 
   if (!(await stillCurrent())) return false;
 
+  const fileCount = gpxFiles.length + carried.carriedFiles;
+
+  // Waypoints name their source GPX by index into `sourceFiles` (a file name
+  // on each of 10k+ waypoints would add most of a megabyte). Archiving needs
+  // it to know which waypoints belong to a GPX that is no longer in Storage.
+  const sourceFiles = [];
+  const sourceIndex = new Map();
+  const compactWaypoints = allWaypoints.map(({ file, ...w }) => {
+    if (!file) return w;
+    let fi = sourceIndex.get(file);
+    if (fi === undefined) {
+      fi = sourceFiles.length;
+      sourceFiles.push(file);
+      sourceIndex.set(file, fi);
+    }
+    return { ...w, fi };
+  });
+
   // Write compiled tracks JSON
   const tracksJson = JSON.stringify({
     version: 1,
     compiledAt: new Date().toISOString(),
-    fileCount: gpxFiles.length,
+    fileCount,
     trackCount: allTracks.length,
     waypointCount: allWaypoints.length,
     tracks: allTracks,
@@ -2927,9 +3005,10 @@ async function compileGpxFolderOnce(bucket, folderPath, gpxFiles, stillCurrent) 
   const waypointsJson = JSON.stringify({
     version: 1,
     compiledAt: new Date().toISOString(),
-    fileCount: gpxFiles.length,
-    waypointCount: allWaypoints.length,
-    waypoints: allWaypoints,
+    fileCount,
+    waypointCount: compactWaypoints.length,
+    sourceFiles,
+    waypoints: compactWaypoints,
   });
 
   await bucket.file(`${folderPath}/${COMPILED_WAYPOINTS_FILE}`).save(waypointsJson, {
@@ -2960,6 +3039,8 @@ exports.compileGpxOnUpload = onObjectFinalized(
     const filePath = event.data.name;
     if (!filePath.toLowerCase().endsWith(".gpx")) return;
     if (filePath.includes("_compiled_")) return; // skip our own output
+    // Deleted Cloud Files waiting in the Recycle Bin are never compiled.
+    if (filePath.startsWith("recycleBin/")) return;
 
     const folder = getParentFolder(filePath);
     console.log(`[compileGpxOnUpload] Triggered by: ${filePath}`);
@@ -2974,8 +3055,15 @@ exports.compileGpxOnDelete = onObjectDeleted(
     const filePath = event.data.name;
     if (!filePath.toLowerCase().endsWith(".gpx")) return;
     if (filePath.includes("_compiled_")) return;
+    if (filePath.startsWith("recycleBin/")) return;
 
     const folder = getParentFolder(filePath);
+    // Removed by an archive: the manifest (written before the delete) lists
+    // it and the compiled files already hold its tracks — a recompile would
+    // only carry them over unchanged, once per deleted GPX.
+    const manifest = await readStorageJson(getBucket(), `${folder}/${ARCHIVE_MANIFEST_FILE}`)
+      .catch(() => null);
+    if (manifest && manifest.files && manifest.files[filePath.split("/").pop()]) return;
     console.log(`[compileGpxOnDelete] Triggered by deletion of: ${filePath}`);
     await compileGpxFolder(folder);
   }
@@ -2985,9 +3073,17 @@ exports.compileGpxOnDelete = onObjectDeleted(
 exports.compileGpxFolder = onCall(
   { region: "us-central1" },
   async (request) => {
+    requireStaff(request.auth);
     const folderPath = request.data.folderPath;
     if (!folderPath || typeof folderPath !== "string") {
       throw new HttpsError("invalid-argument", "folderPath is required");
+    }
+    // Compilation reads and rewrites files under the folder, so keep it to
+    // the Cloud Files tree rather than anywhere in the bucket.
+    const inCloudFiles =
+      folderPath === "Distribution" || folderPath.startsWith("Distribution/");
+    if (!inCloudFiles || folderPath.split("/").includes("..")) {
+      throw new HttpsError("invalid-argument", "folderPath must be under Distribution/");
     }
     await compileGpxFolder(folderPath);
     return { success: true };
@@ -3024,7 +3120,7 @@ exports.compileGpxFolder = onCall(
 // write. Concurrent uploads to the same folder touch different keys, so no
 // transaction is needed even under parallel bulk uploads.
 const FILE_FOLDERS_COLLECTION = "fileFolders";
-const FILE_SEARCH_SKIP_PREFIXES = ["_compiled_"];
+const FILE_SEARCH_SKIP_PREFIXES = ["_compiled_", ARCHIVE_MANIFEST_FILE];
 
 /** Deterministic doc id for a folder path (paths can't be used directly — they contain '/'). */
 function fileFolderDocId(folderPath) {
@@ -3119,9 +3215,7 @@ exports.indexFileOnDelete = onObjectDeleted(
 exports.backfillFileFolders = onCall(
   { region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
 
     const bucket = getBucket();
     const [files] = await bucket.getFiles({ prefix: "Distribution/" });
@@ -3172,15 +3266,15 @@ exports.backfillFileFolders = onCall(
 // When a job-list item is created/updated for a job type that has
 // `createsCloudFolder: true`, this trigger:
 //   1. Creates a Cloud Storage folder at
-//      `Distribution/{year}/{MMM yyyy}/{client}` (sanitised).
-//   2. If the target client folder already exists when an item moves into
-//      it (cross-month or cross-client move), allocates the next free
-//      `Round N` sub-folder inside that existing client folder.
-//   3. Stores the resolved path on the item as `storageFolderPath`.
-//   4. Mirrors that path onto the linked ShareableMap (if the item has
+//      `Distribution/{year}/{MMM yyyy}/{client}` (sanitised). Jobs never get
+//      `Round N` sub-folders: a job whose client folder already exists uses
+//      it, and a move into an existing folder merges into it (moveFolder).
+//      (User decision 2026-10-19: no round folders.)
+//   2. Stores the resolved path on the item as `storageFolderPath`.
+//   3. Mirrors that path onto the linked ShareableMap (if the item has
 //      `shareableMapId`) so the map's cloud-files view loads from the
 //      right folder.
-//   5. On subsequent updates, when the client name or distribution month
+//   4. On subsequent updates, when the client name or distribution month
 //      changes, moves all files from the old folder to a new one and
 //      re-points both the item and the linked map.
 //
@@ -3240,45 +3334,11 @@ function expectedClientFolder(item) {
   return `Distribution/${year}/${monthLabel}/${sanitiseClientName(item.client)}`;
 }
 
-/** True when `path` is `clientFolder` itself or one of its `Round N` folders. */
+/** True when `path` is `clientFolder` itself or a folder inside it — such as
+ *  a legacy `Round N` folder, which stays where it is rather than being
+ *  moved up into the client folder. */
 function isUnderClientFolder(path, clientFolder) {
-  return path === clientFolder || path.startsWith(`${clientFolder}/Round `);
-}
-
-/** Returns true if the storage folder has any files (excluding our own marker). */
-async function folderHasContent(folderPath) {
-  const bucket = getBucket();
-  const [files] = await bucket.getFiles({ prefix: `${folderPath}/`, maxResults: 5 });
-  // Treat an existing `.keep` marker as "empty" so that the canonical folder
-  // can be reused once it has been pre-created.
-  const realFiles = files.filter((f) => !f.name.endsWith("/.keep"));
-  console.log(
-    `[jobListFolders] folderHasContent("${folderPath}") → ${realFiles.length} real file(s) ` +
-      `(${files.length} total incl. markers)`
-  );
-  return realFiles.length > 0;
-}
-
-/** Pick the next free "Round N" sub-folder under `clientFolder`. */
-async function nextRoundFolder(clientFolder) {
-  const bucket = getBucket();
-  const [files] = await bucket.getFiles({ prefix: `${clientFolder}/Round ` });
-  const escaped = clientFolder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const roundRe = new RegExp(`^${escaped}/Round (\\d+)/`);
-  let max = 0;
-  for (const f of files) {
-    const m = f.name.match(roundRe);
-    if (m) {
-      const n = parseInt(m[1], 10);
-      if (!isNaN(n) && n > max) max = n;
-    }
-  }
-  // We always produce *at least* Round 2 — Round 1 is implied by the
-  // existing flat content in `clientFolder`.
-  const next = Math.max(max + 1, 2);
-  const folder = `${clientFolder}/Round ${next}`;
-  console.log(`[jobListFolders] nextRoundFolder("${clientFolder}") → "${folder}"`);
-  return folder;
+  return path === clientFolder || path.startsWith(`${clientFolder}/`);
 }
 
 /** Write a hidden placeholder so an empty folder shows up in Storage views. */
@@ -3299,6 +3359,59 @@ async function ensureFolderMarker(folderPath) {
 }
 
 /** Copy every object under `from/` to `to/` and delete the originals. */
+/** `dir/name (2).ext` — the first variant of [path] not in [taken]. */
+function freeObjectName(path, taken) {
+  const slash = path.lastIndexOf("/");
+  const dir = path.slice(0, slash + 1);
+  const name = path.slice(slash + 1);
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let n = 2; ; n++) {
+    const candidate = `${dir}${stem} (${n})${ext}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Two compiled files of one kind as one: tracks/waypoints concatenated,
+ *  waypoint `fi` re-indexed into a shared `sourceFiles`. The compile that
+ *  follows re-parses live GPX and keeps only archived entries from this. */
+function mergeCompiledJson(a, b) {
+  const out = { ...a };
+  if (Array.isArray(a.tracks) || Array.isArray(b.tracks)) {
+    out.tracks = [...(a.tracks || []), ...(b.tracks || [])];
+    out.trackCount = out.tracks.length;
+  }
+  if (Array.isArray(a.waypoints) || Array.isArray(b.waypoints)) {
+    const sourceFiles = [];
+    const index = new Map();
+    const reindex = (doc) => (doc.waypoints || []).map((w) => {
+      const file = typeof w.fi === "number" ? (doc.sourceFiles || [])[w.fi] : w.file;
+      const { fi: _fi, file: _file, ...rest } = w;
+      if (!file) return rest;
+      if (!index.has(file)) {
+        index.set(file, sourceFiles.length);
+        sourceFiles.push(file);
+      }
+      return { ...rest, fi: index.get(file) };
+    });
+    out.waypoints = [...reindex(a), ...reindex(b)];
+    out.sourceFiles = sourceFiles;
+  }
+  out.waypointCount = (a.waypointCount || 0) + (b.waypointCount || 0);
+  out.fileCount = (a.fileCount || 0) + (b.fileCount || 0);
+  return out;
+}
+
+/**
+ * Move every object under [from] to [to]. When [to] already holds files
+ * (another job for the same client and month — jobs share the client
+ * folder, there are no `Round N` folders), the two are merged:
+ *   - the archive manifests and compiled JSON are merged FIRST, so every
+ *     compile the copies trigger already sees both folders' archived tracks;
+ *   - any other name that already exists gets " (2)", never overwritten;
+ *   - the destination is recompiled at the end.
+ */
 async function moveFolder(from, to) {
   if (!from || !to || from === to) return;
   const bucket = getBucket();
@@ -3309,17 +3422,56 @@ async function moveFolder(from, to) {
     await ensureFolderMarker(to);
     return;
   }
-  let moved = 0;
+  const [destFiles] = await bucket.getFiles({ prefix: `${to}/` });
+  const taken = new Set(destFiles.map((f) => f.name));
+  const merging = destFiles.some((f) => !/\/(\.keep|\.folder)$/.test(f.name));
+
   let pending = files;
+  if (merging) {
+    const special = [ARCHIVE_MANIFEST_FILE, COMPILED_TRACKS_FILE, COMPILED_WAYPOINTS_FILE];
+    const merged = [];
+    for (const f of files) {
+      const rel = f.name.substring(from.length + 1);
+      const dest = `${to}/${rel}`;
+      if (!special.includes(rel) || !taken.has(dest)) continue;
+      const [src, dst] = await Promise.all([
+        readStorageJson(bucket, f.name),
+        readStorageJson(bucket, dest),
+      ]);
+      const value = rel === ARCHIVE_MANIFEST_FILE
+        ? { ...(dst || {}), files: { ...((src && src.files) || {}), ...((dst && dst.files) || {}) } }
+        : mergeCompiledJson(dst || {}, src || {});
+      await bucket.file(dest).save(JSON.stringify(value), {
+        contentType: "application/json",
+        resumable: false,
+        metadata: { cacheControl: "no-cache" },
+      });
+      await f.delete();
+      merged.push(f.name);
+    }
+    pending = files.filter((f) => !merged.includes(f.name));
+    console.log(`[jobListFolders] moveFolder: merging into existing "${to}" (${merged.length} metadata file(s) merged)`);
+  }
+
+  let moved = files.length - pending.length;
   // A transient Storage error must not strand files in the old folder once
   // the job (and its maps) are re-pointed at the new one.
   for (let attempt = 1; attempt <= 3 && pending.length > 0; attempt++) {
     const failed = [];
     for (const f of pending) {
       const rel = f.name.substring(from.length + 1); // strip "from/"
-      const dest = `${to}/${rel}`;
+      let dest = `${to}/${rel}`;
       try {
+        if (taken.has(dest)) {
+          if (/(^|\/)(\.keep|\.folder)$/.test(rel)) {
+            await f.delete(); // the destination already has its marker
+            moved++;
+            continue;
+          }
+          dest = freeObjectName(dest, taken);
+        }
         await f.copy(bucket.file(dest));
+        taken.add(dest);
         await f.delete();
         moved++;
       } catch (err) {
@@ -3338,6 +3490,18 @@ async function moveFolder(from, to) {
     );
   }
   console.log(`[jobListFolders] moveFolder done: ${moved}/${files.length} object(s) moved`);
+  if (merging) {
+    // Compiled files are per folder; rebuild every destination folder that
+    // received GPX so it reflects both jobs.
+    const folders = new Set(
+      files.filter((f) => f.name.toLowerCase().endsWith(".gpx"))
+        .map((f) => `${to}/${f.name.substring(from.length + 1)}`.split("/").slice(0, -1).join("/"))
+    );
+    for (const folder of folders) {
+      await compileGpxFolder(folder).catch((err) =>
+        console.warn(`[jobListFolders] recompile ${folder} after merge failed: ${err.message}`));
+    }
+  }
 }
 
 /** `MM-YYYY` key of the shareableMaps month a job's date falls in (SAST). */
@@ -3346,6 +3510,28 @@ function mapMonthKeyFor(value) {
   if (!d) return null;
   const sast = new Date(d.getTime() + SAST_OFFSET_MS);
   return `${String(sast.getUTCMonth() + 1).padStart(2, "0")}-${sast.getUTCFullYear()}`;
+}
+
+const MONTH_NAMES_LONG = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/**
+ * A copied map's description: the month it is filed in ("October 2026", from
+ * an `MM-YYYY` map month key) on the first line, then the source's own text.
+ * A source that already leads with a month line has it replaced, not stacked.
+ * Mirrors `copyDescription` in lib/shareable_maps/utils/map_copy_description.dart.
+ */
+function copyDescription(source, monthKey) {
+  const [mm, yyyy] = String(monthKey || "").split("-");
+  const name = MONTH_NAMES_LONG[Number(mm) - 1];
+  const label = name && yyyy ? `${name} ${yyyy}` : "";
+  const lines = String(source || "").trim().split("\n");
+  if (lines.length && /^[A-Z][a-z]+ \d{4}$/.test(lines[0].trim())) lines.shift();
+  const rest = lines.join("\n").trim();
+  if (!label) return rest;
+  return rest ? `${label}\n${rest}` : label;
 }
 
 /** `oldPath` itself or anything under it, rewritten onto `newPath`; else null. */
@@ -3492,8 +3678,7 @@ async function syncMapFolderForJobItem(jobItemId, item, folderPath, oldPath = nu
  *
  * Two quick edits fire two trigger runs in parallel. Without this, both read
  * the same `storageFolderPath`, both move the folder, and the files end up
- * split between two destinations — or the second sees the first's half-moved
- * folder as "in use" and invents a `Round N`. The lease expires on its own,
+ * split between two destinations. The lease expires on its own,
  * so a crashed run cannot wedge the item.
  */
 const FOLDER_LOCKS_COLLECTION = "jobListFolderLocks";
@@ -3578,19 +3763,15 @@ async function reconcileJobItemFolder(itemRef, { allowRelocate, syncMaps = true 
   let resolved = current;
 
   if (!current) {
-    // No folder yet → the canonical folder, or the next `Round N` inside it
-    // when a sibling job for the same client and month already uses it.
-    let target = expected;
-    if (await folderHasContent(expected)) target = await nextRoundFolder(expected);
-    await ensureFolderMarker(target);
-    resolved = target;
-    console.log(`[jobListFolders] ✓ Created folder "${target}" for item ${itemId}`);
+    // No folder yet → the client folder, shared with any other job for the
+    // same client and month (no `Round N` folders).
+    await ensureFolderMarker(expected);
+    resolved = expected;
+    console.log(`[jobListFolders] ✓ Using folder "${expected}" for item ${itemId}`);
   } else if (allowRelocate && !isUnderClientFolder(current, expected)) {
-    let target = expected;
-    if (await folderHasContent(expected)) target = await nextRoundFolder(expected);
-    await moveFolder(current, target);
-    resolved = target;
-    console.log(`[jobListFolders] ✓ Moved folder "${current}" → "${target}" for item ${itemId}`);
+    await moveFolder(current, expected);
+    resolved = expected;
+    console.log(`[jobListFolders] ✓ Moved folder "${current}" → "${expected}" for item ${itemId}`);
   }
 
   if (resolved !== current) {
@@ -3601,6 +3782,87 @@ async function reconcileJobItemFolder(itemRef, { allowRelocate, syncMaps = true 
     await syncMapFolderForJobItem(itemId, item, resolved, current && current !== resolved ? current : null);
   }
   return resolved;
+}
+
+/** `d MMM yyyy` of a job date in SAST — how a job's map is named. */
+function mapDateLabel(value) {
+  const d = coerceDate(value);
+  if (!d) return null;
+  const sast = new Date(d.getTime() + SAST_OFFSET_MS);
+  return `${sast.getUTCDate()} ${MONTH_LABELS_SHORT[sast.getUTCMonth()]} ${sast.getUTCFullYear()}`;
+}
+
+/** [name] with every case-insensitive occurrence of [from] replaced. */
+function replaceLabel(name, from, to) {
+  if (!from || !to || from === to) return name;
+  const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return name.replace(new RegExp(escaped, "gi"), to);
+}
+
+/**
+ * Keep the names and month lines of a job's maps in step with the job.
+ *
+ * A job's map is named after its client, with the job's month ("October
+ * 2026") on the first line of its description (see `copyDescription`).
+ * Renaming the client rewrites the client in the name; moving the job into
+ * another month rewrites that month line. Older maps were named
+ * `{client} {d MMM yyyy}`, so a date in the name is still followed too.
+ * Only the parts that name the old client, date or month are rewritten — a
+ * map the user renamed or re-described keeps what they wrote. Links never
+ * depend on the name: everything joins on ids.
+ */
+async function syncMapNamesForJobItem(itemId, before, after) {
+  const oldClient = ((before && before.client) || "").trim();
+  const newClient = ((after && after.client) || "").trim();
+  const oldDate = mapDateLabel(before && before.date);
+  const newDate = mapDateLabel(after && after.date);
+  const oldMonth = mapMonthKeyFor(before && before.date);
+  const newMonth = mapMonthKeyFor(after && after.date);
+  const oldMonthLabel = copyDescription("", oldMonth);
+  const clientChanged = oldClient && newClient && oldClient !== newClient;
+  const dateChanged = oldDate && newDate && oldDate !== newDate;
+  const monthChanged = oldMonth && newMonth && oldMonth !== newMonth;
+  if (!clientChanged && !dateChanged) return;
+
+  const docs = new Map();
+  const snap = await db.collectionGroup("maps").where("jobListItemId", "==", itemId).get();
+  snap.docs.forEach((d) => docs.set(d.ref.path, d));
+  const mapId = ((after && after.shareableMapId) || "").trim();
+  const monthKey = mapMonthKeyFor(after && after.date);
+  if (mapId && monthKey && ![...docs.values()].some((d) => d.id === mapId)) {
+    const s = await db.collection("shareableMaps").doc(monthKey)
+      .collection("maps").doc(mapId).get();
+    // Only a map that is this job's, not one it merely points at.
+    if (s.exists && (s.data().jobListItemId || itemId) === itemId) docs.set(s.ref.path, s);
+  }
+
+  const batch = db.batch();
+  let renamed = 0;
+  for (const doc of docs.values()) {
+    const data = doc.data();
+    const name = typeof data.name === "string" ? data.name : "";
+    let next = name;
+    if (clientChanged) next = replaceLabel(next, oldClient, newClient);
+    if (dateChanged) next = replaceLabel(next, oldDate, newDate);
+    const update = {};
+    if (next && next !== name) update.name = next;
+
+    const description = typeof data.description === "string" ? data.description : "";
+    if (monthChanged && oldMonthLabel &&
+        description.trim().split("\n")[0].trim() === oldMonthLabel) {
+      update.description = copyDescription(description, newMonth);
+    }
+
+    if (Object.keys(update).length === 0) continue;
+    batch.update(doc.ref, { ...update, updatedAt: Date.now() });
+    renamed++;
+    console.log(
+      `[jobListMaps] ${itemId}: map ${doc.id} ` +
+        (update.name ? `"${name}" → "${update.name}" ` : "") +
+        (update.description ? `month ${oldMonth} → ${newMonth}` : "")
+    );
+  }
+  if (renamed > 0) await batch.commit();
 }
 
 /** True when a doc-write event reflects only our own write-back fields. */
@@ -3687,6 +3949,18 @@ exports.onJobListItemWritten = onDocumentWritten(
     } catch (err) {
       console.error(`[jobListFolders] ${itemId}: reconcile failed: ${err.message}`);
     }
+
+    // A cross-month move is a create; the client stamps what it moved from.
+    const previous = before || (after.movedFrom && typeof after.movedFrom === "object"
+      ? after.movedFrom
+      : null);
+    if (previous) {
+      try {
+        await syncMapNamesForJobItem(itemId, previous, after);
+      } catch (err) {
+        console.error(`[jobListMaps] ${itemId}: map rename failed: ${err.message}`);
+      }
+    }
   }
 );
 
@@ -3704,9 +3978,7 @@ exports.onJobListItemWritten = onDocumentWritten(
 exports.resyncJobListFolderLinks = onCall(
   { region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
     const dryRun = request.data && request.data.dryRun === true;
 
     const jobTypes = await db.collection("customJobTypes").get();
@@ -3813,9 +4085,7 @@ exports.resyncJobListFolderLinks = onCall(
 exports.duplicateMapForJobCopy = onCall(
   { region: "us-central1" },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
     const {
       sourceJobMonthId,
       sourceJobItemId,
@@ -3940,8 +4210,8 @@ exports.duplicateMapForJobCopy = onCall(
     //    both carry it on their first write. This goes through the same
     //    locked reconcile as the `onJobListItemWritten` trigger, which is
     //    running for the same new item right now: two independent creators
-    //    raced, each picking its own `Round N`, and the job ended up on one
-    //    while an empty duplicate was left behind.
+    //    racing used to leave the job on one folder and an empty duplicate
+    //    behind.
     let resolvedFolder = null;
     try {
       const newJobRef = db
@@ -3959,15 +4229,35 @@ exports.duplicateMapForJobCopy = onCall(
       );
     }
 
-    // 5. Build the new map document. New maps live in the current month.
+    // 5. Build the new map document in the NEW job's month, not today's:
+    //    every lookup by `shareableMapId` (rename sync, folder sync, the
+    //    distribution report) looks in `mapMonthKeyFor(job.date)`, so a copy
+    //    dated into another month would otherwise get a map nothing finds.
+    //    Falls back to the current month only when the job has no date.
     const now = Date.now();
-    const newMapMonthKey = mapMonthKeyFor(now);
+    let newJobDate = null;
+    try {
+      const newJobSnap = await db
+        .collection("jobLists")
+        .doc(newJobMonthId)
+        .collection("items")
+        .doc(newJobItemId)
+        .get();
+      newJobDate = newJobSnap.exists ? newJobSnap.data().date : null;
+    } catch (err) {
+      console.warn(`[duplicateMapForJobCopy] new job date lookup failed: ${err.message}`);
+    }
+    const newMapMonthKey = mapMonthKeyFor(newJobDate) || mapMonthKeyFor(now);
+    console.log(
+      `[duplicateMapForJobCopy] new map month = ${newMapMonthKey} ` +
+        `(${newJobDate ? "from the new job's date" : "no job date — current month"})`
+    );
 
     const newMapData = {
       name: (newName && typeof newName === "string" && newName.trim().length > 0)
         ? newName.trim()
-        : `${source.name || "Map"} (Copy)`,
-      description: source.description || "",
+        : (source.name || "Map"),
+      description: copyDescription(source.description, newMapMonthKey),
       layers: filteredLayers,
       defaultCenterLat: source.defaultCenterLat ?? -33.925,
       defaultCenterLng: source.defaultCenterLng ?? 18.425,
@@ -4055,6 +4345,10 @@ const routeOptimizer = require("./lib/route_optimizer");
 exports.getRouteSegment = distanceMatrixCache.getRouteSegment;
 exports.optimizeDropsheetRoute = routeOptimizer.optimizeDropsheetRoute;
 
+// Dropsheet version history from Firestore PITR (7 days) — read-only; the app
+// restores a chosen version itself. See functions/lib/dropsheet_history.js.
+exports.dropsheetHistory = require("./lib/dropsheet_history").dropsheetHistory;
+
 // Zoho Books API v3 proxy — holds the OAuth client secret and refresh token as
 // Firebase secrets so they never ship in the web bundle. See functions/lib/zoho_books.js.
 const zohoBooks = require("./lib/zoho_books");
@@ -4076,6 +4370,10 @@ exports.xeroTokenHeartbeat = xeroAccounting.xeroTokenHeartbeat;
 const csgProxy = require("./lib/csg_proxy");
 exports.csgQuery = csgProxy.csgQuery;
 
+// Weather — MET Norway Locationforecast (yr.no's data), cached per ~1 km cell
+// in the unlisted `weatherCache` collection. See functions/lib/weather_proxy.js.
+exports.weatherForecast = require("./lib/weather_proxy").weatherForecast;
+
 // Cape Town Letterbox Index — seeds per-suburb candidate letterbox positions
 // from the compiled GPX waypoints, and repairs count drift.
 const letterboxIndex = require("./lib/letterbox_index");
@@ -4086,6 +4384,32 @@ exports.refreshLetterboxCount = letterboxIndex.refreshLetterboxCount;
 // Flutter shell so mail link-scanners don't see a blank page. Hosting
 // rewrites /map/** here. See functions/lib/map_page.js.
 exports.mapPage = require("./lib/map_page").mapPage;
+exports.photoPage = require("./lib/photo_page").photoPage;
+
+// Cloud Files month/year archive (raw files go into a ZIP the user saves to
+// their own Google Drive; compiled JSON stays so maps still load) and
+// server-side ZIP downloads. See functions/lib/cloud_archive.js and
+// functions/lib/storage_zip.js.
+const cloudArchive = require("./lib/cloud_archive");
+cloudArchive.init({ compileGpxFolder, getBucket });
+exports.cloudArchive = cloudArchive.cloudArchive;
+exports.processCloudArchive = cloudArchive.processCloudArchive;
+exports.sweepCloudArchives = cloudArchive.sweepCloudArchives;
+
+// Recycle Bin: admin-only purge callable and the daily 30-day sweep. See
+// functions/lib/recycle_bin.js.
+const recycleBin = require("./lib/recycle_bin");
+exports.recycleBin = recycleBin.recycleBin;
+exports.sweepRecycleBin = recycleBin.sweepRecycleBin;
+
+const storageZip = require("./lib/storage_zip");
+storageZip.init({ getBucket });
+exports.cloudFilesZip = storageZip.cloudFilesZip;
+
+// Distributor payslips on clmworking.web.app/payslips.html. Distributors
+// sign up there and the office approves them in CLM Schedule; see the
+// module header for why these are not Firebase Auth accounts.
+exports.payslipPortal = require("./lib/payslip_portal").payslipPortal;
 
 // ============================================================
 // PUBLIC WORKING ROSTER — backs the standalone clmworking.web.app
@@ -4117,12 +4441,50 @@ async function getActiveDistributorsOrdered() {
     .sort((a, b) => a.index - b.index);
 }
 
+/** Case/spacing/punctuation-insensitive key for matching typed names. */
+function normalizePersonName(name) {
+  return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/**
+ * Splits the day's clmgpx track-upload pings (trackUploads/{dayId}/uploads)
+ * into the active distributors they belong to and the names that match
+ * nobody. A ping matches by distributorId first, then by name, so a renamed
+ * distributor still matches by id and a ping without an id still matches by
+ * name.
+ */
+function matchTrackUploads(uploadDocs, distributors) {
+  const ids = new Set(distributors.map((d) => d.id));
+  const byName = new Map(distributors.map((d) => [normalizePersonName(d.name), d.id]));
+
+  const uploadedIds = new Set();
+  const unmatched = new Map(); // normalised name -> display name
+  for (const doc of uploadDocs) {
+    const u = doc.data();
+    const key = normalizePersonName(u.distributorName);
+    const id = ids.has(u.distributorId) ? u.distributorId : byName.get(key);
+    if (id) {
+      uploadedIds.add(id);
+    } else if (key && !unmatched.has(key)) {
+      unmatched.set(key, String(u.distributorName).trim());
+    }
+  }
+
+  return {
+    uploadedIds,
+    unmatchedUploads: [...unmatched.values()].sort((a, b) => a.localeCompare(b)),
+  };
+}
+
 async function buildRosterForOffset(offsetDays, distributors) {
   const { year, month, day } = sastDateParts(offsetDays);
   const monthId = `${MONTH_NAMES_SHORT[month]} ${year}`;
   const dayId = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 
-  const daySnap = await db.collection("schedules").doc(monthId).collection("days").doc(dayId).get();
+  const [daySnap, uploadsSnap] = await Promise.all([
+    db.collection("schedules").doc(monthId).collection("days").doc(dayId).get(),
+    db.collection("trackUploads").doc(dayId).collection("uploads").get(),
+  ]);
   const data = daySnap.exists ? daySnap.data() : {};
   const jobs = data.jobs || [];
 
@@ -4131,7 +4493,13 @@ async function buildRosterForOffset(offsetDays, distributors) {
     if (job.distributorId) workingIds.add(job.distributorId);
   }
 
-  const roster = distributors.map((d) => ({ name: d.name, working: workingIds.has(d.id) }));
+  const { uploadedIds, unmatchedUploads } = matchTrackUploads(uploadsSnap.docs, distributors);
+
+  const roster = distributors.map((d) => ({
+    name: d.name,
+    working: workingIds.has(d.id),
+    uploaded: uploadedIds.has(d.id),
+  }));
   const confirmedAt = data.confirmedAt && typeof data.confirmedAt.toDate === "function"
     ? data.confirmedAt.toDate().toISOString()
     : null;
@@ -4139,6 +4507,7 @@ async function buildRosterForOffset(offsetDays, distributors) {
   return {
     date: dayId,
     roster,
+    unmatchedUploads,
     confirmationStatus: data.confirmationStatus || "notConfirmed",
     confirmedAt,
   };
@@ -4165,11 +4534,11 @@ exports.getWorkingRoster = onRequest(
 // OFFICE-ADMIN CONFIRMATION — lets the clmworking page set a day's
 // confirmation status when the office cannot reach CLM Schedule itself.
 //
-// The passcode is verified HERE, not in the browser. The page's existing
-// gate compares a SHA-256 hash embedded in the served HTML, which protects
-// nothing for a write: the hash is public and a 4-digit PIN is 10,000
-// combinations. Anything that writes must check the passcode server-side or
-// it may as well be open.
+// The passcode is verified HERE, not in the browser. The page carries no
+// copy of it: a hash in the served HTML of a short PIN is recoverable in
+// under a second. The page unlocks admin mode with a `verifyOnly` POST, and
+// every write re-checks. Keep the secret long and random (12+ characters) —
+// this endpoint is public, so its strength is all that stops guessing.
 //
 // Set the secret once:
 //   firebase functions:secrets:set CLMWORKING_ADMIN_PASSCODE
@@ -4190,7 +4559,7 @@ exports.setWorkingDayConfirmation = onRequest(
     }
 
     const body = req.body || {};
-    const { passcode, offset, status } = body;
+    const { passcode, offset, status, verifyOnly } = body;
 
     // Length check first so a wrong-length guess cannot be timed against the
     // comparison below.
@@ -4204,6 +4573,12 @@ exports.setWorkingDayConfirmation = onRequest(
       // Deliberately vague, and slow enough to make bulk guessing tedious.
       await new Promise((r) => setTimeout(r, 750));
       return res.status(403).json({ error: "Not authorised." });
+    }
+
+    // The page's admin unlock: it holds no copy of the admin passcode (not
+    // even a hash), so this check is the only one.
+    if (verifyOnly === true) {
+      return res.status(200).json({ success: true });
     }
 
     // Today or tomorrow only — the page shows no other days, so accepting

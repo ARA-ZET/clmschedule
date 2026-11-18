@@ -4,12 +4,14 @@
 // lists: recursively finds every GPX file under it, pairs Track/Waypoints
 // files, resolves each pair's distributor + date (te_gpx_matching.dart —
 // the exact same logic Processing mode uses), and merges pairs that share
-// a distributor and a date into one TEPromoterDay each.
+// a distributor and a date into one TEPromoterDay each. Photos found on the
+// way are listed too (te_folder_photos.dart loads and dates them).
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:gpx/gpx.dart';
 
 import '../../models/distributor.dart';
+import '../../services/distribution_report_service.dart' show isPhotoFileName;
 import '../models/te_gpx_file_entry.dart';
 import '../models/te_promoter_day.dart';
 import 'te_gpx_matching.dart';
@@ -36,12 +38,21 @@ class TEReportScanResult {
   final List<TEPromoterDay> promoterDays;
   final List<TEUnresolvedReportFile> unresolved;
 
+  /// Storage paths of every photo under the scanned folders — the
+  /// traffic-light photos dropped in beside the tracks, and the `proof/`
+  /// photos added by hand to an earlier report.
+  final List<String> photoPaths;
+
   const TEReportScanResult({
     required this.promoterDays,
     required this.unresolved,
+    this.photoPaths = const [],
   });
 
   static const empty = TEReportScanResult(promoterDays: [], unresolved: []);
+
+  TEReportScanResult withPhotos(List<String> paths) => TEReportScanResult(
+      promoterDays: promoterDays, unresolved: unresolved, photoPaths: paths);
 }
 
 /// Recursively scans [folderPath] for every promoter day it contains.
@@ -56,28 +67,54 @@ Future<TEReportScanResult> scanFolderForPromoterDays(
   String folderPath, {
   required List<Distributor> distributors,
   void Function(int done, int total)? onProgress,
+}) =>
+    scanFoldersForPromoterDays([folderPath],
+        distributors: distributors, onProgress: onProgress);
+
+/// [scanFolderForPromoterDays] over several folders at once — a Job List
+/// job's own folder plus its map's. A file under two of them (one folder
+/// inside another) counts once.
+Future<TEReportScanResult> scanFoldersForPromoterDays(
+  List<String> folderPaths, {
+  required List<Distributor> distributors,
+  void Function(int done, int total)? onProgress,
 }) async {
   final storage = FirebaseStorage.instance;
 
-  // ── 1. Recursively collect every .gpx file ref under folderPath ─────────
+  // ── 1. Recursively collect every .gpx file ref under the folders ────────
   final refs = <Reference>[];
+  final photoPaths = <String>[];
+  final seen = <String>{};
+  final walked = <String>{};
   Future<void> walk(String path) async {
+    if (!walked.add(path)) return;
     final result = await storage.ref(path).listAll();
     for (final item in result.items) {
-      if (item.name.toLowerCase().endsWith('.gpx')) refs.add(item);
+      if (!seen.add(item.fullPath)) continue;
+      if (item.name.toLowerCase().endsWith('.gpx')) {
+        refs.add(item);
+      } else if (isPhotoFileName(item.name)) {
+        photoPaths.add(item.fullPath);
+      }
     }
     for (final prefix in result.prefixes) {
       await walk(prefix.fullPath);
     }
   }
 
-  try {
-    await walk(folderPath);
-  } catch (e) {
-    debugPrint('scanFolderForPromoterDays: failed to list $folderPath: $e');
+  var listed = 0;
+  for (final path in folderPaths) {
+    try {
+      await walk(path);
+      listed++;
+    } catch (e) {
+      debugPrint('scanFoldersForPromoterDays: failed to list $path: $e');
+    }
+  }
+  if (listed == 0 || (refs.isEmpty && photoPaths.isEmpty)) {
     return TEReportScanResult.empty;
   }
-  if (refs.isEmpty) return TEReportScanResult.empty;
+  if (refs.isEmpty) return TEReportScanResult.empty.withPhotos(photoPaths);
 
   // ── 2. Download bytes, bounded to 6 concurrent (same cap downloadFolder-
   //      AsZip uses) so a big folder doesn't open 100 sockets at once ──────
@@ -117,7 +154,8 @@ Future<TEReportScanResult> scanFolderForPromoterDays(
   // Pairing, distributor/date resolution and grouping are all pure — kept in
   // their own function so they can run against synthetic entries in a test
   // with no Storage/Firebase involved at all.
-  return groupIntoPromoterDays(entries, distributors, pathByName: pathByName);
+  return groupIntoPromoterDays(entries, distributors, pathByName: pathByName)
+      .withPhotos(photoPaths);
 }
 
 /// Pairs, resolves and groups already-downloaded GPX entries into promoter

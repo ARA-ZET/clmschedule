@@ -31,9 +31,11 @@ class UserService {
   }
 
   /// Get user by ID
-  Future<User?> getUserById(String userId) async {
+  Future<User?> getUserById(String userId,
+      {Source source = Source.serverAndCache}) async {
     try {
-      final doc = await _usersCollection.doc(userId).get();
+      final doc =
+          await _usersCollection.doc(userId).get(GetOptions(source: source));
       if (doc.exists) {
         return User.fromFirestore(doc);
       }

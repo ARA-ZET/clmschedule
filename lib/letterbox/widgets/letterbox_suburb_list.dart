@@ -1,3 +1,4 @@
+import 'package:clmschedule/utils/text_search.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/work_suburb.dart';
@@ -158,11 +159,10 @@ class _LetterboxSuburbListState extends State<LetterboxSuburbList> {
       );
     }
 
-    final query = _query.trim().toLowerCase();
+    final query = _query.trim();
+    final search = TextSearch(query);
     final visible = provider.suburbs.where((s) {
-      if (query.isNotEmpty && !s.name.toLowerCase().contains(query)) {
-        return false;
-      }
+      if (!search.matches([s.name])) return false;
       if (_filter != null && provider.statusOf(s.id) != _filter) return false;
       return true;
     }).toList();

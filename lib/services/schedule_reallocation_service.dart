@@ -4,6 +4,7 @@ import '../models/distributor.dart';
 import 'package:flutter/foundation.dart';
 import '../providers/day_off_provider.dart';
 import '../providers/schedule_provider.dart';
+import '../utils/distribution_lag.dart';
 
 /// Choice for how to treat jobs when a job-list date changes and there are
 /// schedule jobs grouped with other clients on the same distributor/date.
@@ -17,10 +18,17 @@ class ScheduleReallocationResult {
   final int removed;
   final int added;
 
+  /// The schedule jobs taken off and put on, exactly as written — so a Job
+  /// List undo can reverse the shift without asking again.
+  final List<Job> removedJobs;
+  final List<Job> addedJobs;
+
   const ScheduleReallocationResult({
     required this.changed,
     required this.removed,
     required this.added,
+    this.removedJobs = const [],
+    this.addedJobs = const [],
   });
 }
 
@@ -159,7 +167,7 @@ class ScheduleReallocationService {
       }
     }
 
-    await scheduleProvider.reallocateJobsAtomically(
+    final added = await scheduleProvider.reallocateJobsAtomically(
       removeJobs: toMove,
       addJobs: addJobs,
       debugTag: debugTag,
@@ -174,12 +182,26 @@ class ScheduleReallocationService {
       changed: toMove.isNotEmpty || planned.isNotEmpty,
       removed: toMove.length,
       added: planned.length,
+      removedJobs: toMove,
+      addedJobs: added,
     );
   }
 
+  /// Renames [originalItem]'s client on the schedule jobs that belong to it,
+  /// so the schedule, its client-map allocation and track filing keep
+  /// finding the item by name.
+  ///
+  /// Which jobs belong to it is [pairJobsWithJobListItems]'s call: the jobs
+  /// holding areas from its client map, then the days nearest its date. Past
+  /// days are included — their tracks may still be waiting to be filed.
+  /// [clientItems] are the client's other Job List items around that date;
+  /// they keep their own days, so another round keeps its name.
+  /// [onRenamed] receives the jobs renamed and the names, for Undo.
   Future<int> renameClientInAllocatedJobs({
     required JobListItem originalItem,
     required JobListItem updatedItem,
+    List<JobListItem> clientItems = const [],
+    void Function(List<Job> jobs, String from, String to)? onRenamed,
   }) async {
     const debugTag = 'job-client-rename';
     final sw = Stopwatch()..start();
@@ -189,58 +211,42 @@ class ScheduleReallocationService {
     if (oldClient.isEmpty || newClient.isEmpty) return 0;
     if (_normalize(oldClient) == _normalize(newClient)) return 0;
 
-    final requiredSlots = updatedItem.manDays.ceil();
-    if (requiredSlots <= 0) return 0;
-
-    final startDate = DateTime(
-      originalItem.date.year,
-      originalItem.date.month,
-      originalItem.date.day,
+    final d = originalItem.date;
+    final jobs = await scheduleProvider.fetchJobsForMonths([
+      DateTime(d.year, d.month - 1),
+      d,
+      DateTime(d.year, d.month + 1),
+    ]);
+    final oldKey = jobListClientKey(oldClient);
+    final pairing = pairJobsWithJobListItems(
+      jobs: jobs.where((j) => j.clients.any((c) => _normalize(c) == oldKey)),
+      items: [
+        for (final i in clientItems)
+          if (i.id != originalItem.id) i,
+        originalItem,
+      ],
     );
-
-    final sortedMatches = scheduleProvider.jobs
-        .where((j) =>
-            !_isBeforeToday(j.date) &&
-            !DateTime(j.date.year, j.date.month, j.date.day)
-                .isBefore(startDate) &&
-            j.clients.any((c) => _normalize(c) == _normalize(oldClient)))
-        .toList()
-      ..sort((a, b) {
-        final byDate = a.date.compareTo(b.date);
-        if (byDate != 0) return byDate;
-        return a.id.compareTo(b.id);
-      });
-
-    final target = sortedMatches.take(requiredSlots).toList();
+    final target = [
+      for (final job in jobs)
+        if (pairing[job.id]?[oldKey]?.id == originalItem.id) job,
+    ];
     if (target.isEmpty) {
       debugPrint('[$debugTag] skip: no schedule jobs matched for rename');
       return 0;
     }
 
-    final updated = <Job>[];
-    for (final job in target) {
-      final renamed = _renameClientOnly(
-        source: job,
-        oldClient: oldClient,
-        newClient: newClient,
-      );
-      if (renamed == null) continue;
-      updated.add(renamed);
-    }
-
-    if (updated.isEmpty) return 0;
-
-    await scheduleProvider.reallocateJobsAtomically(
-      removeJobs: target,
-      addJobs: updated,
-      debugTag: debugTag,
+    final updated = await scheduleProvider.renameClientOnJobs(
+      target,
+      from: oldClient,
+      to: newClient,
     );
+    if (updated > 0) onRenamed?.call(target, oldClient, newClient);
 
     sw.stop();
     debugPrint(
-      '[$debugTag] complete in ${sw.elapsedMilliseconds}ms updated=${updated.length}',
+      '[$debugTag] complete in ${sw.elapsedMilliseconds}ms updated=$updated',
     );
-    return updated.length;
+    return updated;
   }
 
   Job? _removeClientFromJob(Job job, String clientToRemove) {
@@ -437,30 +443,6 @@ class ScheduleReallocationService {
       resolvedAreaNames: source.resolvedAreaNames,
       missingAreaLinkKeys: source.missingAreaLinkKeys,
     );
-  }
-
-  /// Returns a full clone of [source] where only the matching client label(s)
-  /// are changed. All non-client schedule fields remain identical.
-  Job? _renameClientOnly({
-    required Job source,
-    required String oldClient,
-    required String newClient,
-  }) {
-    final normalizedOld = _normalize(oldClient);
-    final current = List<String>.from(source.clients);
-    bool changed = false;
-
-    for (int i = 0; i < current.length; i++) {
-      if (_normalize(current[i]) == normalizedOld) {
-        current[i] = newClient;
-        changed = true;
-      }
-    }
-
-    if (!changed) return null;
-
-    final cloned = _cloneJobWithId(source, source.id);
-    return cloned.copyWith(clients: current);
   }
 
   List<_PlannedAssignment> _allocateAssignments({

@@ -64,8 +64,8 @@ class XeroAccountingScreen extends StatelessWidget {
         ),
         body: const TabBarView(
           children: [
-            XeroInvoicesView(),
-            XeroCustomersView(),
+            ZohoPanel(child: XeroInvoicesView()),
+            ZohoPanel(child: XeroCustomersView()),
           ],
         ),
       ),

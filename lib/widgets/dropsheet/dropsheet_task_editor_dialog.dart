@@ -51,7 +51,6 @@ class _DropsheetTaskEditorDialogState
   // matches). Putting them all here keeps state tidy.
   final TextEditingController _loadingAddress = TextEditingController();
   final TextEditingController _offloadAddress = TextEditingController();
-  final TextEditingController _notes = TextEditingController();
   final TextEditingController _collectionAddress = TextEditingController();
   final TextEditingController _serviceTime = TextEditingController();
 
@@ -80,12 +79,20 @@ class _DropsheetTaskEditorDialogState
               ? dynDef!.label
               : cfg.effectiveLabel),
     );
+    // A furniture move's Notes box is its Details. Older moves kept the
+    // notes typed here only in typeData['notes'] — shown nowhere — so they
+    // are picked up from there when Details is empty.
+    final legacyMoveNotes = t.type == DropsheetTaskType.furnitureMove
+        ? ((t.typeData['notes'] as String?)?.trim() ?? '')
+        : '';
     _details = TextEditingController(
       text: t.notes.isNotEmpty
           ? t.notes
-          : (dynDef?.defaultDetails.isNotEmpty == true
-              ? dynDef!.defaultDetails
-              : cfg.defaultDetails),
+          : legacyMoveNotes.isNotEmpty
+              ? legacyMoveNotes
+              : (dynDef?.defaultDetails.isNotEmpty == true
+                  ? dynDef!.defaultDetails
+                  : cfg.defaultDetails),
     );
     _startTime = TextEditingController(
       text: t.startTime.isNotEmpty
@@ -113,7 +120,6 @@ class _DropsheetTaskEditorDialogState
 
     _loadingAddress.text = (_typeData['loadingAddress'] as String?) ?? '';
     _offloadAddress.text = (_typeData['offloadAddress'] as String?) ?? '';
-    _notes.text = (_typeData['notes'] as String?) ?? '';
     _collectionAddress.text = (_typeData['address'] as String?) ?? '';
     _serviceTime.text =
         t.serviceTimeMinutes == null ? '' : '${t.serviceTimeMinutes}';
@@ -147,7 +153,6 @@ class _DropsheetTaskEditorDialogState
     _tel.dispose();
     _loadingAddress.dispose();
     _offloadAddress.dispose();
-    _notes.dispose();
     _collectionAddress.dispose();
     _serviceTime.dispose();
     super.dispose();
@@ -475,8 +480,10 @@ class _DropsheetTaskEditorDialogState
         label: 'Offload address',
       ),
       const SizedBox(height: 8),
+      // The Details column — this box used to save to a field nothing showed.
       TextField(
-        controller: _notes,
+        controller: _details,
+        minLines: 1,
         maxLines: 3,
         decoration: const InputDecoration(labelText: 'Notes'),
       ),
@@ -837,7 +844,8 @@ class _DropsheetTaskEditorDialogState
     final address = _addressForJobListItem(selected);
     final location =
         selected.area.trim().isNotEmpty ? selected.area.trim() : address;
-    final contactTel = _contactTelFromClient(selected.client);
+    // The job's contact person and phone; else the client's name.
+    final contactTel = selected.siteContact;
     final jobTypeLabel = jobTypeProvider.getJobTypeLabel(selected.jobTypeId);
     final dynamicTypeId = _typeData['dynamicTypeId'] as String? ??
         widget.initial.typeData['dynamicTypeId'] as String?;
@@ -907,6 +915,8 @@ class _DropsheetTaskEditorDialogState
                 DropsheetTaskType.furnitureMove => 'Furniture move',
                 _ => jobTypeLabel,
               };
+        // Plain label; a booked time and address are shown with it on
+        // the sheet (DropsheetTask.displayJob).
         _job.text = clientName.isEmpty ? typeLabel : '$typeLabel: $clientName';
       }
 
@@ -917,8 +927,20 @@ class _DropsheetTaskEditorDialogState
         _details.text = selected.specialInstructions;
       }
 
+      // The booked start, read as the Collection Schedule reads it: the
+      // time on the job's date, else its slot ("00:00" = none booked).
+      final booked = jobTypeProvider.needsTimeSlot(selected.jobTypeId)
+          ? selected.resolvedTimeSlot
+          : '00:00';
       if (jobTypeProvider.needsTimeSlot(selected.jobTypeId)) {
-        _startTime.text = _formatTime(selected.date);
+        _startTime.text = booked == '00:00' ? '' : booked;
+      }
+      // The booked slot, shown first in Details and never overwritten by
+      // route timing (unlike Start).
+      if (booked != '00:00') {
+        _typeData[DropsheetTask.kAppointmentTimeKey] = booked;
+      } else {
+        _typeData.remove(DropsheetTask.kAppointmentTimeKey);
       }
 
       // Location comes from the JobList area field.
@@ -935,22 +957,6 @@ class _DropsheetTaskEditorDialogState
     if (collectionAddress.isNotEmpty) return collectionAddress;
     return area;
   }
-
-  _ContactTel _contactTelFromClient(String client) {
-    final trimmed = client.trim();
-    if (trimmed.isEmpty) return const _ContactTel('', '');
-
-    final phoneMatch =
-        RegExp(r'(?:\+?27|0)[0-9\s()\-]{8,}$').firstMatch(trimmed);
-    if (phoneMatch == null) return _ContactTel(trimmed, '');
-
-    final tel = phoneMatch.group(0)!.trim();
-    final contact = trimmed.substring(0, phoneMatch.start).trim();
-    return _ContactTel(contact.isEmpty ? trimmed : contact, tel);
-  }
-
-  String _formatTime(DateTime date) =>
-      '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
 
   bool _isMapLinkOrUrl(String text) {
     final value = text.trim().toLowerCase();
@@ -1009,6 +1015,12 @@ class _DropsheetTaskEditorDialogState
         final addr = _collectionAddress.text.trim();
         newTypeData['address'] = addr;
         sourceJobListItemId = newTypeData['jobListItemId'] as String?;
+        // The Location field is hidden here; keep it the address the user
+        // typed so every view of the task names the same place.
+        if (addr.isNotEmpty &&
+            addr != ((t.typeData['address'] as String?)?.trim() ?? '')) {
+          location = addr;
+        }
         if (_addressChanged(
             previous: (t.typeData['address'] as String?) ?? '',
             current: addr,
@@ -1024,7 +1036,8 @@ class _DropsheetTaskEditorDialogState
         final offload = _offloadAddress.text.trim();
         newTypeData['loadingAddress'] = loading;
         newTypeData['offloadAddress'] = offload;
-        newTypeData['notes'] = _notes.text.trim();
+        // Notes are the Details column; the copy here is for older builds.
+        newTypeData['notes'] = _details.text.trim();
         if (_addressChanged(
             previous: (t.typeData['loadingAddress'] as String?) ?? '',
             current: loading,
@@ -1069,6 +1082,13 @@ class _DropsheetTaskEditorDialogState
           // Generic task — geocode the location field so the route planner
           // (custom type) and future consumers can use the coordinates.
           final loc = _location.text.trim();
+          // A Junk & Stuff / Happy Sun job from the Job List keeps its
+          // address in typeData too — the Maps link is built from it.
+          if (t.typeData.containsKey('address') &&
+              loc.isNotEmpty &&
+              loc != t.location.trim()) {
+            newTypeData['address'] = loc;
+          }
           if (_addressChanged(
               previous: t.location,
               current: loc,
@@ -1126,37 +1146,52 @@ class _DropsheetTaskEditorDialogState
       if (!t.typeData.containsKey(DropsheetTask.kJobListFingerprintKey)) {
         newTypeData[DropsheetTask.kJobListManualKey] = true;
       }
-      // Mark tasks the user has actually reworded, so the sync stops
-      // regenerating those fields from the source item and silently reverting
-      // the edit on its next pass. Only set it when something really changed —
-      // opening and closing the dialog must not detach a task from the sync.
+      // Mark the fields the user actually reworded, so the sync stops
+      // regenerating those (and only those) from the source item and
+      // silently reverting the edit on its next pass; the rest keep following
+      // the Job List job. Nothing is marked when nothing changed — opening
+      // and closing the dialog must not detach a task from the sync.
       String td(Map<String, dynamic> m, String key) =>
           (m[key] as String?)?.trim() ?? '';
-      final touchedFields = _job.text.trim() != t.job ||
-          _details.text.trim() != t.details ||
-          location != t.location ||
-          _contact.text.trim() != t.contact ||
-          _tel.text.trim() != t.tel ||
-          // Address fields live in typeData, not on the task, but the sync
-          // regenerates them from the source item just the same.
-          td(newTypeData, 'address') != td(t.typeData, 'address') ||
-          td(newTypeData, 'loadingAddress') !=
-              td(t.typeData, 'loadingAddress') ||
-          td(newTypeData, 'offloadAddress') != td(t.typeData, 'offloadAddress');
-      if (touchedFields) {
-        newTypeData[DropsheetTask.kUserEditedKey] = true;
+      final touched = <String>{
+        if (_job.text.trim() != t.job) 'job',
+        if (_details.text.trim() != t.details) 'details',
+        if (location != t.location) 'location',
+        if (_contact.text.trim() != t.contact) 'contact',
+        if (_tel.text.trim() != t.tel) 'tel',
+        // Address fields live in typeData, not on the task, but the sync
+        // regenerates them from the source item just the same.
+        for (final key in const ['address', 'loadingAddress', 'offloadAddress'])
+          if (td(newTypeData, key) != td(t.typeData, key)) key,
+      };
+      final marked = DropsheetTask.markUserEdited(newTypeData, touched,
+          wasEdited: t.hasUserEdits);
+      if (marked != null) {
+        newTypeData
+          ..clear()
+          ..addAll(marked);
       }
     } else if (t.isDistributorTask &&
         (newTypeData['distributorJobId'] as String?)?.isNotEmpty == true &&
         // Same job as before — picking a (new) distributor is not a rewording.
-        newTypeData['distributorJobId'] == t.typeData['distributorJobId'] &&
-        (_job.text.trim() != t.job ||
-            location != t.location ||
-            _contact.text.trim() != t.contact ||
-            _tel.text.trim() != t.tel)) {
+        newTypeData['distributorJobId'] == t.typeData['distributorJobId']) {
       // The schedule sync regenerates these fields for distributor tasks;
-      // mark the task so it keeps the user's wording (see _computeSyncedDay).
-      newTypeData[DropsheetTask.kUserEditedKey] = true;
+      // mark the ones the user reworded so they keep the user's wording
+      // (see _computeSyncedDay).
+      final marked = DropsheetTask.markUserEdited(
+          newTypeData,
+          {
+            if (_job.text.trim() != t.job) 'job',
+            if (location != t.location) 'location',
+            if (_contact.text.trim() != t.contact) 'contact',
+            if (_tel.text.trim() != t.tel) 'tel',
+          },
+          wasEdited: t.hasUserEdits);
+      if (marked != null) {
+        newTypeData
+          ..clear()
+          ..addAll(marked);
+      }
     }
 
     final updated = t.copyWith(
@@ -1409,9 +1444,3 @@ class _GeoAddressFieldState extends State<_GeoAddressField> {
   }
 }
 
-class _ContactTel {
-  final String contact;
-  final String tel;
-
-  const _ContactTel(this.contact, this.tel);
-}

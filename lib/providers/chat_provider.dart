@@ -458,6 +458,8 @@ class ChatProvider extends ChangeNotifier {
 
   // Refresh messages
   Future<void> refreshMessages() async {
+    // Re-listening without cancelling left the old listener running.
+    await _messagesSubscription?.cancel();
     _startListeningToMessages();
   }
 

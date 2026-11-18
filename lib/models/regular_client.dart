@@ -2,9 +2,12 @@
 //
 // A regular client's reusable allocation plan: `regularClients/{id}`.
 //
-// The plan points at a map in the gallery (by id, never a copy, so polygon
-// edits there flow through) and divides its polygons between numbered
-// distributor slots. Each slot has one bucket per man day, and each bucket
+// The plan owns its map ([RegularClient.map]): a copy of the polygons and
+// their data taken from a client map in the gallery when the regular client
+// was added. The gallery map is only ever read — it is a real client's map,
+// shared in their reports and kept for their review — so redrawing areas
+// here changes this copy alone. The plan divides the copy's polygons between
+// numbered distributor slots. Each slot has one bucket per man day, and each bucket
 // holds the polygon ids that slot works that day. Real distributors are only
 // chosen when a Job List job is created from the plan.
 //
@@ -12,6 +15,9 @@
 // normal — so nothing here enforces exclusivity.
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+
+import '../shareable_maps/models/map_layer.dart';
+import '../shareable_maps/models/shareable_map.dart';
 
 /// Colours handed to new slots in order. Stored on the slot once chosen, so a
 /// slot keeps its colour when an earlier one is removed.
@@ -113,9 +119,18 @@ class RegularClient {
   final String id;
   final String name;
   final List<String> aliases;
+
+  /// The gallery map [map] was copied from — provenance only; nothing reads
+  /// or writes that map after the copy is taken.
   final String mapId;
   final String mapMonthKey;
   final String mapName;
+
+  /// This client's own map, whose polygon ids the slots refer to. Null only
+  /// for a plan saved before plans owned their map; it is copied from
+  /// [mapId] the first time it is needed (see RegularClientService).
+  final ShareableMap? map;
+
   final List<RegularClientSlot> slots;
   final DateTime? createdAt;
   final DateTime? updatedAt;
@@ -127,10 +142,42 @@ class RegularClient {
     required this.mapId,
     required this.mapMonthKey,
     this.mapName = '',
+    this.map,
     this.slots = const [],
     this.createdAt,
     this.updatedAt,
   });
+
+  /// Id [map] is stored and loaded under. It never names a gallery document.
+  static const String templateMapId = 'regular_client_map';
+
+  /// A copy of client map [source] for a regular client to own: its layers
+  /// (polygons keep their ids, so a plan copied alongside still matches) and
+  /// view, without anything tying it to the source's job, folder or tracks.
+  static ShareableMap templateFrom(ShareableMap source) {
+    final now = DateTime.now();
+    return ShareableMap(
+      id: templateMapId,
+      name: source.name,
+      description: source.description,
+      layers: [
+        for (final l in source.withStablePolygonIds().layers)
+          if (!l.name.toLowerCase().contains('cloud')) l,
+      ],
+      defaultCenter: source.defaultCenter,
+      defaultZoom: source.defaultZoom,
+      createdAt: now,
+      updatedAt: now,
+    );
+  }
+
+  /// [map] in the shape it is stored under the `map` field.
+  static Map<String, dynamic> mapToFirestore(ShareableMap map) =>
+      map.withStablePolygonIds().toMap();
+
+  /// [layers] as this client's map, keeping everything else about it.
+  RegularClient withLayers(List<MapLayer> layers) =>
+      copyWith(map: map?.copyWith(layers: layers));
 
   int get totalManDays => slots.fold(0, (total, s) => total + s.manDays);
 
@@ -245,6 +292,10 @@ class RegularClient {
       mapId: map['mapId'] as String? ?? '',
       mapMonthKey: map['mapMonthKey'] as String? ?? '',
       mapName: map['mapName'] as String? ?? '',
+      map: map['map'] is Map
+          ? ShareableMap.fromMap(
+              templateMapId, Map<String, dynamic>.from(map['map'] as Map))
+          : null,
       slots: List<RegularClientSlot>.unmodifiable(
         (map['slots'] as List? ?? const []).whereType<Map>().map(
             (s) => RegularClientSlot.fromMap(Map<String, dynamic>.from(s))),
@@ -254,7 +305,9 @@ class RegularClient {
     );
   }
 
-  /// Timestamps are set by the service, not here.
+  /// The plan's fields. Timestamps are set by the service, and [map] is
+  /// written separately (RegularClientService.saveMap) so saving the plan
+  /// never overwrites a map edit, nor the reverse.
   Map<String, dynamic> toMap() => {
         'name': name,
         'aliases': aliases,
@@ -270,6 +323,7 @@ class RegularClient {
     String? mapId,
     String? mapMonthKey,
     String? mapName,
+    ShareableMap? map,
     List<RegularClientSlot>? slots,
   }) =>
       RegularClient(
@@ -279,6 +333,7 @@ class RegularClient {
         mapId: mapId ?? this.mapId,
         mapMonthKey: mapMonthKey ?? this.mapMonthKey,
         mapName: mapName ?? this.mapName,
+        map: map ?? this.map,
         slots: slots ?? this.slots,
         createdAt: createdAt,
         updatedAt: updatedAt,

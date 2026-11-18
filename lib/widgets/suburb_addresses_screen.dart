@@ -1,3 +1,4 @@
+import 'package:clmschedule/utils/text_search.dart';
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -225,7 +226,7 @@ class _SuburbAddressesScreenState extends riverpod
 
   List<Address> get _visibleAddresses {
     final ordered = _plan?.orderedAddresses ?? _addresses;
-    final query = _search.trim().toLowerCase();
+    final search = TextSearch(_search);
 
     return ordered.where((a) {
       final matchesFilter = switch (_filter) {
@@ -236,9 +237,7 @@ class _SuburbAddressesScreenState extends riverpod
         _AddressFilter.failed => !a.isGeocoded && a.geocodingError != null,
       };
       if (!matchesFilter) return false;
-      if (query.isEmpty) return true;
-      return a.fullAddress.toLowerCase().contains(query) ||
-          (a.notes?.toLowerCase().contains(query) ?? false);
+      return search.matches([a.fullAddress, a.notes]);
     }).toList();
   }
 

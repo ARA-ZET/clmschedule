@@ -79,8 +79,8 @@ class ZohoBooksScreen extends StatelessWidget {
         ),
         body: TabBarView(
           children: [
-            ZohoInvoicesView(orgId: orgId),
-            ZohoCustomersView(orgId: orgId),
+            ZohoPanel(child: ZohoInvoicesView(orgId: orgId)),
+            ZohoPanel(child: ZohoCustomersView(orgId: orgId)),
           ],
         ),
       ),

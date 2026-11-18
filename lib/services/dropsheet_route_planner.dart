@@ -6,6 +6,7 @@ import '../models/dropsheet_day.dart';
 import '../models/dropsheet_task.dart';
 import '../models/dropsheet_task_type_config.dart';
 import '../providers/dropsheet_task_config_provider.dart';
+import 'appointment_timing.dart';
 import 'day_planner_cloud_functions.dart';
 import 'distance_matrix_service.dart';
 
@@ -24,6 +25,10 @@ class RouteStop {
   final double lng;
   final int serviceMinutes;
 
+  /// The booked time (minutes after midnight) work here must start at —
+  /// a time-slot job-list job's appointment. Null for most stops.
+  final int? appointmentMinutes;
+
   RouteStop({
     required this.taskId,
     required this.taskType,
@@ -32,6 +37,7 @@ class RouteStop {
     required this.lat,
     required this.lng,
     required this.serviceMinutes,
+    this.appointmentMinutes,
   });
 
   String get stopKey => '${taskId}__${role.name}';
@@ -87,6 +93,10 @@ class OptimizedRoute {
   final List<String> skippedTaskIds; // tasks without coordinates
   final DateTime computedAt;
 
+  /// stopKey → minutes waited for a booked time / minutes late for it.
+  final Map<String, int> waitMinutes;
+  final Map<String, int> lateMinutes;
+
   OptimizedRoute({
     required this.sectionId,
     required this.taskOrder,
@@ -97,6 +107,8 @@ class OptimizedRoute {
     required this.totalDurationSeconds,
     required this.skippedTaskIds,
     required this.computedAt,
+    this.waitMinutes = const {},
+    this.lateMinutes = const {},
   });
 }
 
@@ -236,7 +248,11 @@ class DropsheetRoutePlanner {
     // user is never left without a result.
     // Cloud path is bypassed when a separator is present (two-leg routing
     // is handled locally).
-    if (useCloud && !hasSeparator) {
+    // Booked stops need time-aware ordering, which the cloud optimiser
+    // doesn't do.
+    final hasBookings = [...stops, ...afternoonStops]
+        .any((s) => s.appointmentMinutes != null);
+    if (useCloud && !hasSeparator && !hasBookings) {
       final cloudResult = await _runOnCloud(
         section: section,
         depot: depot,
@@ -276,6 +292,8 @@ class DropsheetRoutePlanner {
     final legs = <RouteLeg>[];
     final arrivalTimes = <String, String>{};
     final legBeforeStopMap = <String, RouteLeg>{};
+    final waits = <String, int>{};
+    final lates = <String, int>{};
 
     String? currentId; // null at depot
     double currentLat = depot.lat!;
@@ -320,10 +338,6 @@ class DropsheetRoutePlanner {
       // against an infinite loop.
       if (eligible.isEmpty) break;
 
-      RouteStop? best;
-      RouteLeg? bestLeg;
-      var bestDuration = 1 << 30;
-
       // Query Directions for every eligible candidate in parallel rather
       // than sequentially. With N candidates this collapses N×latency
       // into one round-trip's worth of wall time. Cached results in
@@ -348,29 +362,40 @@ class DropsheetRoutePlanner {
         );
       }));
 
+      // Nearest stop, but never at the cost of a booking: see
+      // [chooseNextStop].
+      final reachable = <int>[
+        for (var i = 0; i < eligible.length; i++)
+          if (segments[i] != null) i,
+      ];
       for (var i = 0; i < eligible.length; i++) {
-        final cand = eligible[i];
-        final seg = segments[i];
-        if (seg == null) {
-          debugPrint(
-              '[DropsheetRoute] no segment ${fromAddr.id} -> ${cand.stopKey}');
-          continue;
-        }
-        // Prefer traffic-aware seconds when available so the optimiser
-        // routes around predicted congestion at this time of day.
-        final candDuration = seg.durationInTrafficSeconds;
-        if (candDuration < bestDuration) {
-          bestDuration = candDuration;
-          best = cand;
-          bestLeg = RouteLeg(
-            fromStopKey: currentId,
-            toStopKey: cand.stopKey,
-            distanceMeters: seg.distanceMeters,
-            durationSeconds: candDuration,
-            polyline: seg.polylinePoints,
-          );
+        if (segments[i] == null) {
+          debugPrint('[DropsheetRoute] no segment ${fromAddr.id} -> '
+              '${eligible[i].stopKey}');
         }
       }
+      final pick = chooseNextStop([
+        for (final i in reachable)
+          (
+            // Traffic-aware seconds so the optimiser routes around
+            // predicted congestion at this time of day.
+            travelSeconds: segments[i]!.durationInTrafficSeconds,
+            serviceMinutes: eligible[i].serviceMinutes,
+            appointmentMinutes: eligible[i].appointmentMinutes,
+            position: eligible[i].latLng,
+          ),
+      ], clock);
+      final RouteStop? best = pick == null ? null : eligible[reachable[pick]];
+      final bestSeg = pick == null ? null : segments[reachable[pick]]!;
+      final RouteLeg? bestLeg = best == null
+          ? null
+          : RouteLeg(
+              fromStopKey: currentId,
+              toStopKey: best.stopKey,
+              distanceMeters: bestSeg!.distanceMeters,
+              durationSeconds: bestSeg.durationInTrafficSeconds,
+              polyline: bestSeg.polylinePoints,
+            );
 
       if (best == null || bestLeg == null) {
         debugPrint(
@@ -381,12 +406,13 @@ class DropsheetRoutePlanner {
       ordered.add(best);
       legs.add(bestLeg);
       legBeforeStopMap[best.stopKey] = bestLeg;
-      // Advance the clock by this leg's travel + service time.
-      clock = clock.add(Duration(seconds: bestLeg.durationSeconds));
-      arrivalTimes[best.stopKey] = _fmtHHmm(clock);
+      // Advance the clock by this leg's travel (and any wait for a booked
+      // time) + service time.
+      clock = _arrive(best, clock.add(Duration(seconds: bestLeg.durationSeconds)),
+          arrivalTimes, waits, lates);
       clock = clock.add(Duration(minutes: best.serviceMinutes));
 
-      remaining.removeWhere((s) => s.stopKey == best!.stopKey);
+      remaining.removeWhere((s) => s.stopKey == best.stopKey);
       currentId = best.stopKey;
       currentLat = best.lat;
       currentLng = best.lng;
@@ -460,6 +486,7 @@ class DropsheetRoutePlanner {
       var afLat = ordered.isNotEmpty ? currentLat : depot.lat!;
       var afLng = ordered.isNotEmpty ? currentLng : depot.lng!;
       String? afCurrentId = ordered.isNotEmpty ? currentId : null;
+      final afRouted = <RouteStop>[];
 
       for (final stop in afternoonStops) {
         final fromAddr = afCurrentId == null
@@ -486,6 +513,7 @@ class DropsheetRoutePlanner {
         );
         legs.add(afLeg);
         legBeforeStopMap[stop.stopKey] = afLeg;
+        afRouted.add(stop);
         afClock = afClock.add(Duration(seconds: seg.durationInTrafficSeconds));
         arrivalTimes[stop.stopKey] = _fmtHHmm(afClock);
         afClock = afClock.add(Duration(minutes: stop.serviceMinutes));
@@ -516,11 +544,15 @@ class DropsheetRoutePlanner {
         }
       }
 
-      // Re-anchor: shift afternoon ETAs so depot arrival == target arrive time.
-      _anchorAfternoonToArrive(
-        arrivalTimes: arrivalTimes,
-        afternoonStops: afternoonStops,
+      // Re-anchor so the driver is back at the target arrive time (later
+      // only when a booking makes him wait).
+      _timeAfternoon(
+        routed: afRouted,
+        legs: legBeforeStopMap,
         targetArrive: targetArrive,
+        arrivalTimes: arrivalTimes,
+        waits: waits,
+        lates: lates,
       );
 
       debugPrint('[DropsheetRoute] afternoon leg: ${afternoonStops.length} '
@@ -575,6 +607,8 @@ class DropsheetRoutePlanner {
       totalDurationSeconds: totalDuration,
       skippedTaskIds: skipped,
       computedAt: DateTime.now(),
+      waitMinutes: waits,
+      lateMinutes: lates,
     );
   }
 
@@ -724,6 +758,8 @@ class DropsheetRoutePlanner {
             // Loading is conceptually part of the same job; charge half
             // of the type-default service minutes here, half at offload.
             serviceMinutes: serviceDefault ~/ 2,
+            // A booked move starts with the loading.
+            appointmentMinutes: hhmmToMinutes(task.appointmentTime),
           ));
         }
         if (offLat != null && offLng != null) {
@@ -766,6 +802,7 @@ class DropsheetRoutePlanner {
         lat: lat,
         lng: lng,
         serviceMinutes: serviceDefault,
+        appointmentMinutes: hhmmToMinutes(task.appointmentTime),
       ),
     ];
   }
@@ -848,6 +885,8 @@ class DropsheetRoutePlanner {
     final arrivalTimes = <String, String>{};
     final skipped = <String>[];
     final taskOrder = <String>[];
+    final waits = <String, int>{};
+    final lates = <String, int>{};
 
     String? currentId;
     double currentLat = depot.lat!;
@@ -890,8 +929,8 @@ class DropsheetRoutePlanner {
         allOrdered.add(stop);
         allLegs.add(leg);
         legBeforeStopMap[stop.stopKey] = leg;
-        clock = clock.add(Duration(seconds: legDuration));
-        arrivalTimes[stop.stopKey] = _fmtHHmm(clock);
+        clock = _arrive(stop, clock.add(Duration(seconds: legDuration)),
+            arrivalTimes, waits, lates);
         clock = clock.add(Duration(minutes: stop.serviceMinutes));
         currentId = stop.stopKey;
         currentLat = stop.lat;
@@ -1018,11 +1057,15 @@ class DropsheetRoutePlanner {
           }
         }
 
-        // Re-anchor afternoon ETAs so depot arrival == target arrive time.
-        _anchorAfternoonToArrive(
-          arrivalTimes: arrivalTimes,
-          afternoonStops: afOrdered,
+        // Re-anchor so the driver is back at the target arrive time (later
+        // only when a booking makes him wait).
+        _timeAfternoon(
+          routed: afOrdered,
+          legs: legBeforeStopMap,
           targetArrive: targetArrive,
+          arrivalTimes: arrivalTimes,
+          waits: waits,
+          lates: lates,
         );
 
         debugPrint('[DropsheetRoute] afternoon in-place: ${afOrdered.length} '
@@ -1059,6 +1102,8 @@ class DropsheetRoutePlanner {
       totalDurationSeconds: totalDuration,
       skippedTaskIds: skipped,
       computedAt: DateTime.now(),
+      waitMinutes: waits,
+      lateMinutes: lates,
     );
   }
 
@@ -1110,33 +1155,63 @@ class DropsheetRoutePlanner {
     return p.hour * 60 + p.minute;
   }
 
-  String _shiftHHmm(String hhmm, int deltaMinutes) {
-    final total = (_minutesOfHHmm(hhmm) + deltaMinutes).clamp(0, 23 * 60 + 59);
-    return '${(total ~/ 60).toString().padLeft(2, '0')}:'
-        '${(total % 60).toString().padLeft(2, '0')}';
+
+  /// Reaching [stop] at [arrival]: work starts then, or at its booked time
+  /// if that is later. Records the start in [arrivalTimes] and any wait /
+  /// lateness; returns the start.
+  DateTime _arrive(
+    RouteStop stop,
+    DateTime arrival,
+    Map<String, String> arrivalTimes,
+    Map<String, int> waits,
+    Map<String, int> lates,
+  ) {
+    final met = meetAppointment(arrival, stop.appointmentMinutes);
+    arrivalTimes[stop.stopKey] = _fmtHHmm(met.start);
+    if (met.waitMinutes > 0) waits[stop.stopKey] = met.waitMinutes;
+    if (met.lateMinutes > 0) lates[stop.stopKey] = met.lateMinutes;
+    return met.start;
   }
 
-  /// Re-anchors the afternoon (post-separator) leg so the final depot arrival
-  /// equals [targetArrive]. The afternoon leg is routed forward to obtain the
-  /// real leg durations and relative spacing; this shifts every afternoon stop
-  /// ETA by the same delta so the driver arrives at the office on time, then
-  /// pins the depot arrival to the target. Mutates [arrivalTimes] in place.
-  void _anchorAfternoonToArrive({
-    required Map<String, String> arrivalTimes,
-    required Iterable<RouteStop> afternoonStops,
+  /// Times the afternoon (post-separator) run [routed] — legs in [legs] —
+  /// so the final depot arrival equals [targetArrive]. The run is routed
+  /// forward first only to get real leg durations; this works the times
+  /// back from the target, starts earlier if that would miss a booking, and
+  /// lets an unavoidable wait for a booking bring the driver back later
+  /// (see [timeRunToArrive]). Mutates [arrivalTimes], [waits], [lates].
+  void _timeAfternoon({
+    required List<RouteStop> routed,
+    required Map<String, RouteLeg> legs,
     required String targetArrive,
+    required Map<String, String> arrivalTimes,
+    required Map<String, int> waits,
+    required Map<String, int> lates,
   }) {
-    final computedDepot = arrivalTimes['__depot'];
-    if (computedDepot != null) {
-      final delta =
-          _minutesOfHHmm(targetArrive) - _minutesOfHHmm(computedDepot);
-      if (delta != 0) {
-        for (final stop in afternoonStops) {
-          final eta = arrivalTimes[stop.stopKey];
-          if (eta != null) arrivalTimes[stop.stopKey] = _shiftHHmm(eta, delta);
-        }
-      }
+    final target = _minutesOfHHmm(targetArrive) * 60;
+    if (routed.isEmpty) {
+      arrivalTimes['__depot'] = targetArrive;
+      return;
     }
-    arrivalTimes['__depot'] = targetArrive;
+    final returnLeg = legs['__depot'];
+    final times = timeRunToArrive(
+      [
+        for (final s in routed)
+          (
+            legSeconds: legs[s.stopKey]?.durationSeconds ?? 0,
+            serviceMinutes: s.serviceMinutes,
+            appointment: s.appointmentMinutes,
+          ),
+      ],
+      target,
+      returnLeg?.durationSeconds ?? 0,
+    );
+    for (var i = 0; i < routed.length; i++) {
+      final key = routed[i].stopKey;
+      arrivalTimes[key] = secondsToHHmm(times.startSeconds[i]);
+      if (times.waitMinutes[i] > 0) waits[key] = times.waitMinutes[i];
+      if (times.lateMinutes[i] > 0) lates[key] = times.lateMinutes[i];
+    }
+    arrivalTimes['__depot'] =
+        returnLeg == null ? targetArrive : secondsToHHmm(times.endSeconds);
   }
 }

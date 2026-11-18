@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:intl/intl.dart' show DateFormat;
 import '../models/distributor.dart';
 import 'area_link_resolver.dart';
 import '../models/job_area_link.dart';
@@ -10,15 +11,26 @@ import '../models/work_area.dart';
 import '../models/work_suburb.dart';
 import '../models/collection_job.dart';
 import '../models/schedule_confirmation_status.dart';
+import '../models/custom_polygon.dart';
+import '../shareable_maps/utils/linked_map_polygons.dart'
+    show polygonGeometryKey;
 import '../utils/schedule_time.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
+import 'schedule_restore.dart';
 import 'daily_service.dart';
 import 'schedule_mutation_types.dart';
 
 class FirestoreService {
   final DailyService _dailyService;
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final FirebaseFirestore _firestore;
 
-  FirestoreService() : _dailyService = DailyService(FirebaseFirestore.instance);
+  /// [firestore] is only passed by tests, which hand in an in-memory
+  /// instance; the app always uses the real one.
+  FirestoreService({FirebaseFirestore? firestore})
+      : _firestore = firestore ?? FirebaseFirestore.instance,
+        _dailyService =
+            DailyService(firestore ?? FirebaseFirestore.instance);
 
   /// Resolves the identity recorded on schedule audit logs. Set by
   /// ScheduleProvider (which knows the app user's display name); other
@@ -67,6 +79,7 @@ class FirestoreService {
     required List<DateTime> dates,
     required T Function(ScheduleTxContext ctx) mutate,
     List<String> affectedJobIds = const [],
+    void Function(Transaction tx, ScheduleTxContext ctx)? extraWrites,
   }) async {
     final datesByKey = <String, DateTime>{};
     for (final d in dates) {
@@ -83,10 +96,15 @@ class FirestoreService {
       );
     }
 
-    // Kept for the monthly meta/index side effect (month pickers depend on
-    // it); the transaction itself tolerates missing day docs.
+    // The month index (month pickers and the next-month probe read it). The
+    // transaction creates a missing day doc itself, so the per-day existence
+    // check that used to run here — a server read and a write before the
+    // transaction, for every empty day — isn't needed.
+    final monthsByKey = <String, DateTime>{
+      for (final d in datesByKey.values) _dailyService.getMonthlyDocumentId(d): d,
+    };
     await Future.wait(
-      datesByKey.values.map(_dailyService.ensureScheduleDailyDocExists),
+      monthsByKey.values.map(_dailyService.ensureScheduleMonthIndexExists),
     );
 
     final user = _resolveLogUser();
@@ -100,9 +118,27 @@ class FirestoreService {
       final jobsByKey = <String, List<Map<String, dynamic>>>{};
 
       for (final entry in datesByKey.entries) {
-        final ref = _dailyService.getScheduleDailyDoc(entry.value);
-        refsByKey[entry.key] = ref;
-        final snap = await tx.get(ref);
+        refsByKey[entry.key] = _dailyService.getScheduleDailyDoc(entry.value);
+      }
+      // On web the day reads go out together: a 19-day allocation used to
+      // pay 19 round trips one after another before it could commit. Native
+      // platforms keep one read at a time, as before.
+      final snapsByKey = <String, DocumentSnapshot>{};
+      if (kIsWeb && refsByKey.length > 1) {
+        final keys = refsByKey.keys.toList();
+        final snaps =
+            await Future.wait([for (final k in keys) tx.get(refsByKey[k]!)]);
+        for (var i = 0; i < keys.length; i++) {
+          snapsByKey[keys[i]] = snaps[i];
+        }
+      } else {
+        for (final entry in refsByKey.entries) {
+          snapsByKey[entry.key] = await tx.get(entry.value);
+        }
+      }
+
+      for (final entry in datesByKey.entries) {
+        final snap = snapsByKey[entry.key]!;
         final data = snap.exists && snap.data() != null
             ? deepCopyMap(snap.data() as Map)
             : null;
@@ -169,8 +205,10 @@ class FirestoreService {
             .doc(monthId)
             .collection('logs')
             .doc();
+        // v2: only what changed (see scheduleDayLogDiff). v1 logs held the
+        // whole day doc before and after.
         tx.set(logRef, {
-          'schemaVersion': 1,
+          'schemaVersion': 2,
           'opId': opId,
           'action': action,
           'timestamp': FieldValue.serverTimestamp(),
@@ -181,13 +219,116 @@ class FirestoreService {
           'dateKey': key,
           'affectedDates': allDateKeys,
           'affectedJobIds': affectedJobIds,
-          'before': {'exists': before != null, 'data': before},
-          'after': {'data': after},
+          'dayExisted': before != null,
+          ...scheduleDayLogDiff(beforeDoc: before, afterDoc: after),
         });
       }
 
+      // Writes that must commit with the schedule change, e.g. the Recycle
+      // Bin copy of a deleted job.
+      extraWrites?.call(tx, ctx);
+
       return result;
     });
+  }
+
+  /// Adds brand-new jobs WITHOUT reading their days: each job is appended to
+  /// its day's `jobs` array with `arrayUnion`, and the day's audit log is
+  /// written alongside, in ONE batched write — one round trip, and only the
+  /// new jobs go over the wire. [addJobs] reads every affected day doc (all
+  /// its jobs and polygons), then uploads it whole again.
+  ///
+  /// For jobs whose ids were just minted on this device ([newJobId]) only.
+  /// Such an id can't be on any day yet, and each job's `date` is stamped
+  /// to its day as [_runScheduleMutation]'s integrity pass would, so the
+  /// schedule invariants hold without the read. A job that may already be
+  /// stored must go through [addJob] / [addJobs], which replace it.
+  ///
+  /// Call it ONCE per add and, on a timeout, wait on the same future: the
+  /// Firestore SDK keeps the write queued (offline too) until the server
+  /// takes it. Sending a second append could land after a later edit of
+  /// the job and put the old copy back beside it.
+  ///
+  /// Unlike a transaction, the write shows in the local cache at once, so
+  /// the schedule streams carry the new jobs before the server confirms.
+  Future<void> appendNewJobs(List<Job> jobs) async {
+    if (jobs.isEmpty) return;
+    if (jobs.any((j) => j.id.isEmpty)) {
+      throw ArgumentError('appendNewJobs needs every job to carry its id');
+    }
+
+    // day key → (day, job id → stored map). Last copy of an id wins, as in
+    // the integrity pass.
+    final byKey = <String, (DateTime, Map<String, Map<String, dynamic>>)>{};
+    for (final job in jobs) {
+      final day = DateTime(job.date.year, job.date.month, job.date.day);
+      final key = _dailyService.getDailyDocumentId(day);
+      final map = job.toMap();
+      _stampJobDate(map, day);
+      (byKey[key] ??= (day, <String, Map<String, dynamic>>{})).$2[job.id] =
+          map;
+    }
+    if (byKey.length > _maxMutationDates) {
+      throw ArgumentError(
+        'Adding jobs on ${byKey.length} days; '
+        'maximum is $_maxMutationDates per operation',
+      );
+    }
+
+    final monthsByKey = <String, DateTime>{
+      for (final e in byKey.values) _dailyService.getMonthlyDocumentId(e.$1): e.$1,
+    };
+    await Future.wait(
+      monthsByKey.values.map(_dailyService.ensureScheduleMonthIndexExists),
+    );
+
+    final user = _resolveLogUser();
+    final opId = _newJobId();
+    final action = jobs.length == 1 ? 'addJob' : 'addJobs';
+    final allDateKeys = byKey.keys.toList()..sort();
+    final allIds = [for (final e in byKey.values) ...e.$2.keys];
+
+    final batch = _firestore.batch();
+    for (final entry in byKey.entries) {
+      final key = entry.key;
+      final (day, maps) = entry.value;
+      final added = maps.values.toList();
+      // Merge: an existing day keeps its other jobs and fields; a missing
+      // day is created. `date` / `timestamp` are what every day doc holds.
+      batch.set(
+        _dailyService.getScheduleDailyDoc(day),
+        {
+          'date': key,
+          'timestamp': Timestamp.fromDate(scheduleCivilToInstant(day)),
+          'jobs': FieldValue.arrayUnion(added),
+        },
+        SetOptions(merge: true),
+      );
+      final monthId = _dailyService.getMonthlyDocumentId(day);
+      batch.set(
+        _firestore.collection('schedules').doc(monthId).collection('logs').doc(),
+        {
+          'schemaVersion': 2,
+          'opId': opId,
+          'action': action,
+          'timestamp': FieldValue.serverTimestamp(),
+          'userId': user.uid,
+          'userEmail': user.email,
+          'userName': user.name,
+          'month': monthId,
+          'dateKey': key,
+          'affectedDates': allDateKeys,
+          'affectedJobIds': allIds,
+          // The day was not read, so whether it existed is not known.
+          'writeMode': 'append',
+          'added': added,
+          'removed': const [],
+          'changed': const [],
+          'fieldChanges': const {},
+        },
+      );
+    }
+    await batch.commit();
   }
 
   /// Post-mutation integrity pass — see the call site and rationale in
@@ -377,13 +518,19 @@ class FirestoreService {
     }).toList();
   }
 
+  /// A document id for a distributor that hasn't been written yet.
+  ///
+  /// Minted locally so a staff member being added in the management screen
+  /// has a stable id before the save — their photo upload needs one, and the
+  /// create then goes out in the same batch as every other edit.
+  String newDistributorId() => _distributors.doc().id;
+
   // Add a new distributor (to root collection)
   Future<String> addDistributor(String name, [DateTime? date]) async {
     // Date parameter is ignored for distributors since they're in root collection
 
-    // Get current count to determine the next index
-    final snapshot = await _distributors.get();
-    final nextIndex = snapshot.docs.length;
+    // Next index = how many there are. A count, not a download of them all.
+    final nextIndex = (await _distributors.count().get()).count ?? 0;
 
     final docRef = await _distributors.add({
       'name': name,
@@ -465,17 +612,48 @@ class FirestoreService {
   Future<void> batchSaveDistributors({
     required List<Distributor> toUpdate,
     required Set<String> toDelete,
+    List<Distributor> toCreate = const [],
   }) async {
-    if (toUpdate.isEmpty && toDelete.isEmpty) return;
+    if (toUpdate.isEmpty && toDelete.isEmpty && toCreate.isEmpty) return;
 
     final batch = _firestore.batch();
 
-    for (final id in toDelete) {
-      batch.delete(_distributors.doc(id));
+    // Deleted distributors go to the Recycle Bin in the same batch. Their
+    // payroll, advances, savings and days off are keyed by the same id and
+    // were never deleted, so restoring reconnects them all. Their docs are
+    // read side by side, not one after another.
+    final bin = RecycleBinWriter(_firestore);
+    final deleteIds = toDelete.toList();
+    final deleteSnaps = await Future.wait([
+      for (final id in deleteIds)
+        _firestore.collection('distributors').doc(id).get(),
+    ]);
+    for (var i = 0; i < deleteIds.length; i++) {
+      final ref = _firestore.collection('distributors').doc(deleteIds[i]);
+      final data = deleteSnaps[i].data();
+      if (data != null) {
+        bin.addToBatch(
+          batch,
+          RecycleBinRecord(
+            type: RecycleBinType.distributor,
+            label: binLabel(data, 'distributor'),
+            originalPath: ref.path,
+            payload: data,
+          ),
+        );
+      }
+      batch.delete(ref);
     }
 
     for (final distributor in toUpdate) {
       batch.update(_distributors.doc(distributor.id), distributor.toMap());
+    }
+
+    // Staff added in the management screen carry ids minted on this device
+    // ([newDistributorId]), so a create is an ordinary set in the same batch:
+    // the whole screenful of edits still commits (or fails) as one write.
+    for (final distributor in toCreate) {
+      batch.set(_distributors.doc(distributor.id), distributor.toMap());
     }
 
     await batch.commit();
@@ -690,6 +868,12 @@ class FirestoreService {
 
   String _newJobId() => _firestore.collection('dummy').doc().id;
 
+  /// A fresh job id, made on the device (no network). Lets the provider show
+  /// a new job before it is saved, and makes the save safe to retry: a
+  /// second copy with the same id is folded into the first by the integrity
+  /// pass in [_runScheduleMutation].
+  String newJobId() => _newJobId();
+
   Job _jobWithId(Job job, String id) {
     return Job(
       id: id,
@@ -712,18 +896,28 @@ class FirestoreService {
     );
   }
 
-  // Stream of all jobs for a specific date
-  Stream<List<Job>> streamJobsForDate(DateTime date) {
-    // Ensure daily document exists when streaming
-    _dailyService.ensureScheduleDailyDocExists(date);
-    return watchJobsForDate(date);
-  }
+  // Stream of all jobs for a specific date. Read-only: it used to create a
+  // missing day doc first (a cache read, then a server read and a write per
+  // empty day), but a missing day already reads as no jobs and the first
+  // schedule write creates it.
+  Stream<List<Job>> streamJobsForDate(DateTime date,
+          {bool serverOnly = false}) =>
+      watchJobsForDate(date, serverOnly: serverOnly);
 
   /// Live jobs for one day, read-only: unlike [streamJobsForDate] it never
   /// creates the day document, so watching a day can't write to the schedule.
-  Stream<List<Job>> watchJobsForDate(DateTime date) {
-    return AreaLinkResolver.instance.hydrateStream(
-        _dailyService.getScheduleDailyDoc(date).snapshots().map((snapshot) {
+  ///
+  /// [serverOnly] drops snapshots served from the offline cache, which can
+  /// be days old on a device that hasn't opened the day recently. Callers
+  /// that derive and save other documents from the job list (the dropsheet
+  /// sync) need this; a stale list makes them delete tasks for jobs it
+  /// doesn't contain yet.
+  Stream<List<Job>> watchJobsForDate(DateTime date, {bool serverOnly = false}) {
+    return AreaLinkResolver.instance.hydrateStream(_dailyService
+        .getScheduleDailyDoc(date)
+        .snapshots(includeMetadataChanges: serverOnly)
+        .where((snapshot) => !serverOnly || !snapshot.metadata.isFromCache)
+        .map((snapshot) {
       if (!snapshot.exists || snapshot.data() == null) {
         return <Job>[];
       }
@@ -869,12 +1063,15 @@ class FirestoreService {
     return controller.stream;
   }
 
-  // Fetch jobs for a specific date (one-time, not streaming)
-  Future<List<Job>> fetchJobsForDate(DateTime date) async {
+  // Fetch jobs for a specific date (one-time, not streaming). Read-only — a
+  // missing day is simply no jobs; it no longer creates the day doc first.
+  //
+  // Errors are logged and read as no jobs, unless [rethrowErrors]: callers
+  // that save something derived from the list (the dropsheet sync) must
+  // not mistake "could not read" for "the day is empty".
+  Future<List<Job>> fetchJobsForDate(DateTime date,
+      {bool rethrowErrors = false}) async {
     try {
-      // Ensure daily document exists
-      await _dailyService.ensureScheduleDailyDocExists(date);
-
       final snapshot = await _dailyService.getScheduleDailyDoc(date).get();
 
       if (!snapshot.exists || snapshot.data() == null) {
@@ -894,26 +1091,26 @@ class FirestoreService {
       }).toList();
       return await AreaLinkResolver.instance.hydrateAllLoaded(jobs);
     } catch (e) {
-      print('Error fetching jobs for date ${date.toIso8601String()}: $e');
+      if (rethrowErrors) rethrow;
+      debugPrint('Error fetching jobs for date ${date.toIso8601String()}: $e');
       return <Job>[];
     }
   }
 
-  // Fetch jobs for a specific month (one-time, not streaming)
+  // Fetch jobs for a specific month (one-time, not streaming). One query of
+  // the month's day docs — it used to read the days one after another, 28
+  // to 31 round trips.
   Future<List<Job>> fetchJobsForMonth(DateTime month) async {
     try {
-      final monthStart = DateTime(month.year, month.month, 1);
-      final monthEnd = DateTime(month.year, month.month + 1, 0);
-
-      final allJobs = <Job>[];
-      final dates = _dailyService.getDateRange(monthStart, monthEnd);
-
-      for (final date in dates) {
-        final jobs = await fetchJobsForDate(date);
-        allJobs.addAll(jobs);
-      }
-
-      return allJobs;
+      final snap =
+          await _dailyService.getScheduleMonthlyCollection(month).get();
+      final allJobs = <Job>[
+        for (final doc in snap.docs)
+          for (final jobData
+              in ((doc.data() as Map?)?['jobs'] as List?) ?? const [])
+            Job.fromArrayElement(Map<String, dynamic>.from(jobData as Map)),
+      ];
+      return await AreaLinkResolver.instance.hydrateAllLoaded(allJobs);
     } catch (e) {
       print('Error fetching jobs for month ${month.year}-${month.month}: $e');
       return <Job>[];
@@ -940,6 +1137,28 @@ class FirestoreService {
     return jobId;
   }
 
+  /// [addJob] for several jobs in ONE transaction — a whole schedule
+  /// allocation. Each job goes onto its own day; every day is read once and
+  /// written once, instead of one transaction per job one after another.
+  /// Jobs must carry their ids. A job already on its day (a retry after a
+  /// lost reply) is replaced, not doubled, by the integrity pass.
+  Future<void> addJobs(List<Job> jobs) async {
+    if (jobs.isEmpty) return;
+    if (jobs.any((j) => j.id.isEmpty)) {
+      throw ArgumentError('addJobs needs every job to carry its id');
+    }
+    await _runScheduleMutation<void>(
+      action: 'addJobs',
+      dates: [for (final j in jobs) j.date],
+      affectedJobIds: [for (final j in jobs) j.id],
+      mutate: (ctx) {
+        for (final job in jobs) {
+          ctx.jobsByDateKey[ctx.dateKeyFor(job.date)]!.add(job.toMap());
+        }
+      },
+    );
+  }
+
   // Update a job. Throws [JobNotFoundException] when the job no longer
   // exists on the target day (deleted or moved by another user).
   Future<void> updateJob(Job job, [DateTime? date]) async {
@@ -959,11 +1178,35 @@ class FirestoreService {
     );
   }
 
+  /// [updateJob] for several jobs in ONE transaction — e.g. distributors
+  /// combined onto one drop point on the day planner. One read of the day
+  /// docs instead of one per job. Throws [JobNotFoundException] when any job
+  /// is no longer on its day; then none of them is saved.
+  Future<void> updateJobs(List<Job> jobs) async {
+    if (jobs.isEmpty) return;
+    await _runScheduleMutation<void>(
+      action: 'updateJobs',
+      dates: [for (final j in jobs) j.date],
+      affectedJobIds: [for (final j in jobs) j.id],
+      mutate: (ctx) {
+        for (final job in jobs) {
+          final key = ctx.dateKeyFor(job.date);
+          final dayJobs = ctx.jobsByDateKey[key]!;
+          final idx = dayJobs.indexWhere((j) => j['id'] == job.id);
+          if (idx == -1) throw JobNotFoundException(job.id, key);
+          dayJobs[idx] = job.toMap();
+        }
+      },
+    );
+  }
+
   /// Adds and removes client-map area links on several schedule jobs in ONE
   /// transaction, so a move between distributors can never leave an area
   /// on both jobs or on neither. Only each job's `areaLinks` field is
-  /// rewritten; everything else on the job is left exactly as stored, so a
-  /// concurrent edit to the job's other fields is never overwritten.
+  /// rewritten — plus, when a change converts a COPIED client-map area into
+  /// a link, that copy in `workMaps` and its name in `workingAreas`.
+  /// Everything else on the job is left exactly as stored, so a concurrent
+  /// edit to the job's other fields is never overwritten.
   /// Throws [JobNotFoundException] when a job is no longer on its day.
   Future<void> applyAreaLinkChanges(
     List<AreaLinkChange> changes, {
@@ -991,9 +1234,101 @@ class FirestoreService {
           } else {
             raw['areaLinks'] = next.map((l) => l.toMap()).toList();
           }
+          if (change.removesCopies) _removeCopiedAreas(raw, change);
         }
       },
     );
+  }
+
+  /// Renames client [from] to [to] on each job in [jobs] (id → its date),
+  /// in one schedule transaction. Only the client fields are rewritten, from
+  /// the stored job — nothing else on it can be put back to an older copy.
+  /// A job already carrying [to] just loses [from], with its instruction.
+  /// Returns how many jobs changed.
+  Future<int> renameClientOnJobs(
+    Map<String, DateTime> jobs, {
+    required String from,
+    required String to,
+  }) async {
+    final fromKey = from.trim().toLowerCase();
+    final toName = to.trim();
+    if (jobs.isEmpty || fromKey.isEmpty || toName.isEmpty) return 0;
+    if (fromKey == toName.toLowerCase()) return 0;
+    var changed = 0;
+    await _runScheduleMutation<void>(
+      action: 'renameClient',
+      dates: jobs.values.toList(),
+      affectedJobIds: jobs.keys.toList(),
+      mutate: (ctx) {
+        changed = 0;
+        for (final entry in jobs.entries) {
+          final list = ctx.jobsByDateKey[ctx.dateKeyFor(entry.value)]!;
+          final idx = list.indexWhere((j) => j['id'] == entry.key);
+          // Moved or deleted since it was read — nothing of ours to rename.
+          if (idx == -1) continue;
+          final raw = list[idx];
+          final clients = [
+            for (final c in raw['clients'] as List? ?? const []) '$c',
+          ];
+          final instructions = [
+            for (final c in raw['clientInstructions'] as List? ?? const [])
+              '$c',
+          ];
+          final parallel = instructions.length == clients.length;
+          final hasTo =
+              clients.any((c) => c.trim().toLowerCase() == toName.toLowerCase());
+          var touched = false;
+          for (var i = clients.length - 1; i >= 0; i--) {
+            if (clients[i].trim().toLowerCase() != fromKey) continue;
+            touched = true;
+            if (hasTo) {
+              clients.removeAt(i);
+              if (parallel) instructions.removeAt(i);
+            } else {
+              clients[i] = toName;
+            }
+          }
+          if (!touched) continue;
+          raw['clients'] = clients;
+          if (parallel) raw['clientInstructions'] = instructions;
+          // Legacy single-client field.
+          raw['client'] = clients.isEmpty ? '' : clients.first;
+          changed++;
+        }
+      },
+    );
+    return changed;
+  }
+
+  /// Takes the copies [change] names out of stored job [raw]'s `workMaps`,
+  /// and their names out of `workingAreas` unless another work map that
+  /// stays still carries the same name.
+  static void _removeCopiedAreas(
+      Map<String, dynamic> raw, AreaLinkChange change) {
+    final rawMaps = raw['workMaps'] as List? ?? const [];
+    final kept = <dynamic>[];
+    final removedNames = <String>{};
+    final keptNames = <String>{};
+    for (final entry in rawMaps) {
+      final polygon =
+          CustomPolygon.fromMap(Map<String, dynamic>.from(entry as Map));
+      if (change.removesCopy(polygon, polygonGeometryKey)) {
+        removedNames.add(polygon.name.trim().toLowerCase());
+      } else {
+        kept.add(entry);
+        keptNames.add(polygon.name.trim().toLowerCase());
+      }
+    }
+    if (kept.length == rawMaps.length) return;
+    raw['workMaps'] = kept;
+    final gone = removedNames.difference(keptNames)..remove('');
+    final areas = raw['workingAreas'];
+    if (gone.isNotEmpty && areas is List) {
+      raw['workingAreas'] = [
+        for (final a in areas)
+          if (!gone.contains('$a'.trim().toLowerCase())) a,
+      ];
+    }
   }
 
   /// Sets (or clears) the admin confirmation status for a schedule day.
@@ -1193,20 +1528,190 @@ class FirestoreService {
     );
   }
 
-  // Delete a job. Deleting a job that is already gone is a no-op
-  // (no write, no log entry).
-  Future<void> deleteJob(String jobId, [DateTime? date]) async {
+  // Delete a job into the Recycle Bin and return the bin entry id. Deleting
+  // a job that is already gone is a no-op (no write, no log entry, null).
+  Future<String?> deleteJob(String jobId, [DateTime? date]) async {
     final targetDate = date ?? DateTime.now();
+    final bin = RecycleBinWriter(_firestore);
+    final binRef = bin.newEntryRef();
+    Map<String, dynamic>? removed;
 
     await _runScheduleMutation<void>(
       action: 'deleteJob',
       dates: [targetDate],
       affectedJobIds: [jobId],
       mutate: (ctx) {
-        ctx.jobsByDateKey[ctx.dateKeyFor(targetDate)]!
+        removed = null;
+        final list = ctx.jobsByDateKey[ctx.dateKeyFor(targetDate)]!;
+        final i = list.indexWhere((j) => j['id'] == jobId);
+        if (i < 0) return;
+        removed = list[i];
+        list.removeWhere((j) => j['id'] == jobId);
+      },
+      extraWrites: (tx, ctx) {
+        final job = removed;
+        if (job == null) return;
+        bin.addToTxn(tx, _scheduleJobBinRecord(job, targetDate), ref: binRef);
+      },
+    );
+    return removed == null ? null : binRef.id;
+  }
+
+  /// [deleteJob] for several jobs (id → its date) in ONE transaction: each
+  /// leaves its day and gets its own Recycle Bin entry, all or nothing.
+  /// Jobs already gone are skipped. Returns job id → bin entry id for the
+  /// jobs it deleted.
+  Future<Map<String, String>> deleteJobs(Map<String, DateTime> jobs) async {
+    if (jobs.isEmpty) return const {};
+    final dayKeys = {for (final d in jobs.values) _dailyService.getDailyDocumentId(d)};
+    // A transaction holds 500 writes: a day doc + a log per day, a bin
+    // entry per job.
+    if (dayKeys.length * 2 + jobs.length > 500) {
+      throw ArgumentError(
+          'Deleting ${jobs.length} jobs over ${dayKeys.length} days is too '
+          'many for one save — delete fewer at a time');
+    }
+    final bin = RecycleBinWriter(_firestore);
+    // Made once, so a retried transaction writes the same entries.
+    final binRefs = {for (final id in jobs.keys) id: bin.newEntryRef()};
+    final removed = <String, (Map<String, dynamic>, DateTime)>{};
+
+    await _runScheduleMutation<void>(
+      action: jobs.length == 1 ? 'deleteJob' : 'deleteJobs',
+      dates: jobs.values.toList(),
+      affectedJobIds: jobs.keys.toList(),
+      mutate: (ctx) {
+        removed.clear();
+        jobs.forEach((id, date) {
+          final list = ctx.jobsByDateKey[ctx.dateKeyFor(date)]!;
+          final i = list.indexWhere((j) => j['id'] == id);
+          if (i < 0) return;
+          removed[id] = (list[i], date);
+          list.removeWhere((j) => j['id'] == id);
+        });
+      },
+      extraWrites: (tx, ctx) {
+        removed.forEach((id, r) => bin.addToTxn(
+            tx, _scheduleJobBinRecord(r.$1, r.$2),
+            ref: binRefs[id]));
+      },
+    );
+    return {for (final id in removed.keys) id: binRefs[id]!.id};
+  }
+
+  /// Takes a job off the schedule that lives on elsewhere (dragged to the
+  /// unfinished-work-areas panel) — no Recycle Bin copy.
+  Future<void> removeJobMovedElsewhere(
+      String jobId, DateTime date, String action) async {
+    await _runScheduleMutation<void>(
+      action: action,
+      dates: [date],
+      affectedJobIds: [jobId],
+      mutate: (ctx) {
+        ctx.jobsByDateKey[ctx.dateKeyFor(date)]!
             .removeWhere((j) => j['id'] == jobId);
       },
     );
+  }
+
+  RecycleBinRecord _scheduleJobBinRecord(
+      Map<String, dynamic> job, DateTime date) {
+    final clients = (job['clients'] as List?)?.cast<String>() ?? const [];
+    final areas = (job['workingAreas'] as List?)?.cast<String>() ?? const [];
+    final parts = [
+      clients.where((c) => c.trim().isNotEmpty).join(', '),
+      if (areas.isNotEmpty) areas.first,
+      DateFormat('EEE d MMM yyyy').format(date),
+    ].where((p) => p.isNotEmpty);
+    return RecycleBinRecord(
+      type: RecycleBinType.scheduleJob,
+      label: parts.join(' · '),
+      originalPath: _dailyService.getScheduleDailyDoc(date).path,
+      payload: {
+        'job': job,
+        'dateKey': _dailyService.getDailyDocumentId(date),
+      },
+    );
+  }
+
+  /// Puts a schedule job deleted into the Recycle Bin back on its day, and
+  /// marks [entryRef] restored in the same transaction. Throws
+  /// [RestoreConflict] if a job with its id is on that day again.
+  Future<DateTime> restoreScheduleJobFromBin(
+    Map<String, dynamic> payload,
+    DocumentReference<Map<String, dynamic>> entryRef,
+    Map<String, dynamic> restoredFields,
+  ) async {
+    final job = Map<String, dynamic>.from(payload['job'] as Map);
+    final date = DateTime.parse(payload['dateKey'] as String);
+    final id = job['id'] as String;
+    await _runScheduleMutation<void>(
+      action: 'restoreJob',
+      dates: [date],
+      affectedJobIds: [id],
+      mutate: (ctx) {
+        final list = ctx.jobsByDateKey[ctx.dateKeyFor(date)]!;
+        if (list.any((j) => j['id'] == id)) {
+          throw const RestoreConflict('the job is already on the schedule');
+        }
+        list.add(deepCopyMap(job));
+      },
+      extraWrites: (tx, ctx) => tx.update(entryRef, restoredFields),
+    );
+    return date;
+  }
+
+  /// Undo / redo of a schedule step: replaces exactly [expected] (the jobs as
+  /// the step left them) with [replacement], in one logged transaction.
+  ///
+  /// Throws [UndoConflict] — changing nothing — when any expected job is no
+  /// longer as recorded (another user, a Job List cascade), or a job to put
+  /// back is already there. A retry of a write that did commit finds
+  /// [replacement] already in place and returns without writing.
+  ///
+  /// Jobs removed without a replacement go to the Recycle Bin when
+  /// [binRemovals] (redoing a delete); their new entry ids are returned.
+  /// [restoredBinIds] are marked restored (undoing a delete).
+  Future<Map<String, String>> restoreScheduleJobs({
+    required List<Job> expected,
+    required List<Job> replacement,
+    required String action,
+    bool binRemovals = false,
+    List<String> restoredBinIds = const [],
+  }) async {
+    final bin = RecycleBinWriter(_firestore);
+    final binRefs = <String, DocumentReference<Map<String, dynamic>>>{};
+    var result = const ScheduleRestoreResult();
+
+    await _runScheduleMutation<void>(
+      action: action,
+      dates: [for (final j in [...expected, ...replacement]) j.date],
+      affectedJobIds:
+          {for (final j in [...expected, ...replacement]) j.id}.toList(),
+      mutate: (ctx) => result = applyScheduleRestore(ctx,
+          expected: expected, replacement: replacement),
+      extraWrites: (tx, ctx) {
+        binRefs.clear();
+        if (result.alreadyApplied) return;
+        if (binRemovals) {
+          result.removed.forEach((id, removed) {
+            binRefs[id] = bin.addToTxn(
+                tx, _scheduleJobBinRecord(removed.$1, removed.$2));
+          });
+        }
+        final user = FirebaseAuth.instance.currentUser;
+        for (final id in restoredBinIds) {
+          tx.update(_firestore.collection(kRecycleBinCollection).doc(id), {
+            'restoredAt': FieldValue.serverTimestamp(),
+            'restoredBy': {
+              'uid': user?.uid ?? '',
+              'name': user?.displayName ?? user?.email ?? '',
+            },
+          });
+        }
+      },
+    );
+    return {for (final e in binRefs.entries) e.key: e.value.id};
   }
 
   // Stream jobs for a specific distributor
@@ -1272,10 +1777,14 @@ class FirestoreService {
     return docRef.id;
   }
 
-  // Delete a work area (from root collection)
-  Future<void> deleteWorkArea(String workAreaId, [DateTime? date]) {
+  // Move a work area (from root collection) to the Recycle Bin
+  Future<void> deleteWorkArea(String workAreaId, [DateTime? date]) async {
     // Date parameter is ignored for work areas since they're in root collection
-    return _workAreas.doc(workAreaId).delete();
+    await RecycleBinWriter(_firestore).moveDocToBin(
+      _firestore.collection('workAreas').doc(workAreaId),
+      type: RecycleBinType.workArea,
+      label: (d) => '${(d['name'] as String?)?.trim().isNotEmpty == true ? (d['name'] as String).trim() : 'Unnamed'} (work area)',
+    );
   }
 
   // ── Work Suburbs (single-document pattern) ──────────────────────────

@@ -5,6 +5,10 @@
 //   1. Save As-Is — upload full tracks + waypoints to the client folder.
 //   2. Trim & Save — select polygons, trim tracks/waypoints to polygon
 //      boundaries, then upload trimmed data to the client folder.
+import 'package:clmschedule/utils/text_search.dart';
+import 'package:clmschedule/widgets/app_toast.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../../utils/schedule_time.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -15,6 +19,8 @@ import '../../providers/cloud_file_manager_provider.dart';
 import '../../providers/job_list_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../services/gpx_storage_service.dart';
+import '../../services/job_list_service.dart';
+import '../../utils/distribution_lag.dart';
 import '../../utils/payroll_week.dart';
 import '../../models/custom_job_type.dart';
 import '../../models/job.dart';
@@ -74,7 +80,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     final distributors = ref.read(scheduleRiverpod).distributors;
     if (distributors.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(content: Text('No distributors loaded yet.')),
         );
       }
@@ -103,8 +109,11 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
 
     if (!hasTracks && !hasWaypoints) return const SizedBox.shrink();
 
-    // Kick off client resolution the first time this tab is shown.
-    if (!saveState.isResolved(tab) && !saveState.isLoading(tab)) {
+    // Kick off client resolution the first time this tab is shown. Not after
+    // an error: that waits for Retry, or it would re-resolve every frame.
+    if (!saveState.isResolved(tab) &&
+        !saveState.isLoading(tab) &&
+        saveState.errorFor(tab) == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _resolveClients(tab);
       });
@@ -113,6 +122,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     final clients = saveState.clientsFor(tab);
     final loading = saveState.isLoading(tab);
     final error = saveState.errorFor(tab);
+    final stage = saveState.stageFor(tab);
 
     return Container(
       width: 420,
@@ -167,19 +177,24 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
             TEWageStatsBox(
                 tab: tab, suggestedDate: _extractDate() ?? scheduleNow()),
           if (loading)
-            const Center(
+            Center(
               child: Padding(
-                padding: EdgeInsets.all(12),
+                padding: const EdgeInsets.all(12),
                 child: Column(
                   spacing: 8,
                   children: [
-                    SizedBox(
+                    const SizedBox(
                       width: 20,
                       height: 20,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
-                    Text('Resolving clients...',
+                    const Text('Resolving clients...',
                         style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    if (stage != null)
+                      Text(stage,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey.shade600)),
                   ],
                 ),
               ),
@@ -214,6 +229,9 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
               )
             else
               ...clients.map((entry) => _ClientTile(
+                    // Keyed so a client's tile is never handed to another
+                    // client when the list changes (e.g. switching tabs).
+                    key: ValueKey(entry.clientName),
                     entry: entry,
                     tab: tab,
                     tracks: tab.tracks,
@@ -273,7 +291,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
       if (listed.folderPath != picked) {
         saveState.setFolder(listed, picked, exists: true);
       }
-      messenger.showSnackBar(SnackBar(
+      messenger.showToast(SnackBar(
         content: Text('$clientName already in list'),
         backgroundColor: Colors.orange,
       ));
@@ -298,7 +316,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
 
     final distributorName = existing.isNotEmpty
         ? existing.first.distributorName
-        : _matchDistributor(schedule)?.name ?? '';
+        : _matchDistributor(schedule, tab)?.name ?? '';
     // Shown straight away, and carries the picked folder through the
     // re-resolve below. Marked manual so it survives even if the schedule
     // never lists it (no job, or a client type that records no waypoints).
@@ -314,7 +332,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
 
     if (jobs.isEmpty) {
       saveState.addClient(tab, entry);
-      messenger.showSnackBar(const SnackBar(
+      messenger.showToast(const SnackBar(
         content: Text('No schedule job for this distributor on this day — '
             'client added for saving only, with no trim areas.'),
         duration: Duration(seconds: 4),
@@ -337,7 +355,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
         await schedule.updateJob(updated);
       } catch (e) {
         debugPrint('[TECloudSave] add client: schedule update failed: $e');
-        messenger.showSnackBar(SnackBar(
+        messenger.showToast(SnackBar(
           content: Text('Could not add $clientName to the schedule: $e'),
           backgroundColor: Colors.red,
         ));
@@ -349,7 +367,7 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
     }
     if (!mounted) return;
     await _resolveClients(tab, freshJobs: updatedJobs);
-    messenger.showSnackBar(SnackBar(
+    messenger.showToast(SnackBar(
       content: Text('Added $clientName to the schedule'),
       duration: const Duration(seconds: 2),
     ));
@@ -384,9 +402,10 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
 
   /// Extract the linked schedule date, falling back to the first timestamped
   /// track point for older tabs that do not carry processing metadata.
-  DateTime? _extractDate() {
-    if (_tab.trackDate != null) return _tab.trackDate!.toLocal();
-    for (final trk in _tab.tracks) {
+  DateTime? _extractDate([TETabItem? forTab]) {
+    final tab = forTab ?? _tab;
+    if (tab.trackDate != null) return tab.trackDate!.toLocal();
+    for (final trk in tab.tracks) {
       for (final seg in trk.trksegs) {
         for (final pt in seg.trkpts) {
           if (pt.time != null) return pt.time!.toLocal();
@@ -423,9 +442,10 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
 
   /// Resolve the linked distributor, falling back to filename/title matching.
   /// Returns (id, name) or null.
-  ({String id, String name})? _matchDistributor(ScheduleProvider schedule) {
+  ({String id, String name})? _matchDistributor(
+      ScheduleProvider schedule, TETabItem tab) {
     if (schedule.distributors.isEmpty) return null;
-    final linkedDistributorId = _tab.distributorId;
+    final linkedDistributorId = tab.distributorId;
     if (linkedDistributorId != null && linkedDistributorId.isNotEmpty) {
       final linked = schedule.distributors
           .where((d) => d.id == linkedDistributorId)
@@ -433,9 +453,9 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
       if (linked != null) return (id: linked.id, name: linked.name);
     }
 
-    final keySource = _tab.matchKey?.isNotEmpty == true
-        ? _tab.matchKey!
-        : _tab.title
+    final keySource = tab.matchKey?.isNotEmpty == true
+        ? tab.matchKey!
+        : tab.title
             .replaceAll(RegExp(r'\.(gpx|kml|kmz)$', caseSensitive: false), '');
     final keyTokens = keySource
         .toLowerCase()
@@ -464,137 +484,230 @@ class _TECloudSavePanelState extends riverpod.ConsumerState<TECloudSavePanel> {
   }
 
   /// Job types, waiting for the first load if it has not finished yet.
-  Future<List<CustomJobType>> _loadedJobTypes() async {
-    final types = ref.read(jobTypeRiverpod);
+  static Future<List<CustomJobType>> _loadedJobTypes(
+      JobTypeProvider types) async {
     for (var i = 0; types.isLoading && i < 50; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     return types.jobTypes;
   }
 
+  /// How long one resolve attempt may take before it is retried — on a bad
+  /// connection a Firestore or Storage read can wait forever.
+  static const _resolveTimeout = Duration(seconds: 20);
+  static const _resolveAttempts = 2;
+
   /// [freshJobs], when given, are the tab's jobs as just written — used
   /// instead of any cached copy that may not have caught up yet.
+  ///
+  /// A slow attempt is retried once, then ends in an error with Retry rather
+  /// than leaving the spinner up indefinitely.
   Future<void> _resolveClients(TETabItem tab, {List<Job>? freshJobs}) async {
     final saveState = ref.read(teCloudSaveRiverpod);
-    saveState.beginResolve(tab);
-
-    try {
-      final schedule = ref.read(scheduleRiverpod);
-      final date = _extractDate();
-      final match = _matchDistributor(schedule);
-
-      if (date == null || match == null) {
-        saveState.finishResolveError(
-          tab,
-          date == null
-              ? 'No timestamp found in tracks'
-              : 'Could not match distributor',
-        );
-        return;
-      }
-
-      // Prefer the live copy the schedule sync keeps for this tab's day;
-      // then the main app's in-memory months; fetch only when neither has
-      // it (e.g. the standalone editor).
-      final streamed = tab.distributorId == match.id
-          ? ref.read(teScheduleSyncRiverpod).latestJobsFor(tab)
-          : null;
-      final inMemory = schedule.getJobsForDistributorAndDate(match.id, date);
-      final jobs = freshJobs ??
-          streamed ??
-          (inMemory.isNotEmpty
-              ? inMemory
-              : await schedule.fetchJobsForDistributorAndDate(match.id, date));
-      if (jobs.isEmpty) {
-        saveState.finishResolveError(
-            tab, 'No jobs found for this date & distributor');
-        return;
-      }
-
-      // Collection, window cleaning and similar work records no waypoints,
-      // so there is nothing to file for those clients — leave them out.
-      // Matched against the Job List already in memory — no extra reads.
-      // Best effort: if it cannot be read, show every client rather than none.
-      var hidden = const <String>{};
+    TECloudSaveResolveTicket? ticket = saveState.beginResolve(tab);
+    for (var attempt = 1; ticket != null; attempt++) {
+      final current = ticket;
       try {
-        hidden = findClientsWithoutTracks(
-          clients: jobs.expand((j) => j.clients),
-          jobListItems: await loadedJobListItems(ref.read(jobListRiverpod)),
-          jobTypes: await _loadedJobTypes(),
-        );
-      } catch (e) {
-        debugPrint('[TECloudSave] job-type lookup failed, showing all: $e');
-      }
-
-      final gpxStorage = GpxStorageService();
-      final seen = <String>{...hidden};
-      final entries = <TECloudSaveClientEntry>[];
-
-      final year = date.year.toString();
-      final monthLabel = DateFormat('MMM yyyy').format(date);
-      final monthPath = 'Distribution/$year/$monthLabel';
-
-      final clients = [
-        for (final job in jobs)
-          for (final client in job.clients)
-            if (client.isNotEmpty && seen.add(client)) client,
-      ];
-      // One Storage listing per month answers every client, and the checks
-      // run together rather than one round trip after another.
-      final folderExists = await Future.wait(
-          clients.map((c) => gpxStorage.clientFolderExists(date, c)));
-
-      for (var ci = 0; ci < clients.length; ci++) {
-        final client = clients[ci];
-        final clientFolderExists = folderExists[ci];
-        final folderPath = clientFolderExists
-            ? gpxStorage.clientFolderPath(date, client)
-            : monthPath;
-
-        final polys = <TEStyledPolygon>[];
-        for (final j in jobs) {
-          if (j.clients.contains(client)) {
-            // Areas only: point names would otherwise end up in the
-            // saved file name.
-            for (final wm in j.workMaps.where((wm) => wm.isPolygon)) {
-              polys.add(TEStyledPolygon(
-                id: 'wm_${wm.name.hashCode}_${wm.points.hashCode}',
-                name: wm.name,
-                points: wm.points,
-                style: TEKmlStyle(
-                  strokeColor: wm.color,
-                  strokeWidth: wm.strokeWidth.toDouble(),
-                  fillColor: wm.color.withAlpha((wm.fillOpacity * 255).round()),
-                  fill: true,
-                  outline: true,
-                ),
-              ));
-            }
-          }
+        final entries = await _resolveOnce(
+          tab,
+          freshJobs: freshJobs,
+          setStage: (stage) => saveState.setResolveStage(current, stage),
+        ).timeout(_resolveTimeout);
+        saveState.finishResolveSuccess(current, entries);
+        return;
+      } on _ResolveFailure catch (e) {
+        saveState.finishResolveError(current, e.message);
+        return;
+      } on TimeoutException {
+        final stalled = saveState.stageFor(tab);
+        debugPrint('[TECloudSave] resolve attempt $attempt timed out'
+            '${stalled == null ? '' : ' ($stalled)'}');
+        if (attempt >= _resolveAttempts) {
+          saveState.finishResolveError(
+              current,
+              'Timed out resolving clients'
+              '${stalled == null ? '' : ' while ${_lowerFirst(stalled)}'}'
+              ' — check your connection and press Retry.');
+          return;
         }
-
-        entries.add(TECloudSaveClientEntry(
-          clientName: client,
-          distributorName: match.name,
-          date: date,
-          polygons: polys,
-          folderPath: folderPath,
-          folderExists: clientFolderExists,
-        ));
-      }
-
-      if (entries.isEmpty) {
-        saveState.finishResolveError(
-            tab,
-            'No distribution clients for this date & distributor — '
-            'only work that records no waypoints (${hidden.join(', ')})');
+        ticket = saveState.retryResolve(current,
+            'Taking longer than usual — retrying ($attempt of ${_resolveAttempts - 1})…');
+      } catch (e) {
+        debugPrint('[TECloudSave] resolve failed: $e');
+        saveState.finishResolveError(current, 'Error: $e');
         return;
       }
-      saveState.finishResolveSuccess(tab, entries);
-    } catch (e) {
-      saveState.finishResolveError(tab, 'Error: $e');
     }
   }
+
+  static String _lowerFirst(String s) => s.isEmpty
+      ? s
+      : '${s[0].toLowerCase()}${s.substring(1)}'.replaceAll('…', '');
+
+  /// One resolve attempt. Throws [_ResolveFailure] with a message for the
+  /// user when there is nothing to show. Everything read through `ref` is
+  /// read before the first await, so the panel closing mid-way is harmless.
+  Future<List<TECloudSaveClientEntry>> _resolveOnce(
+    TETabItem tab, {
+    List<Job>? freshJobs,
+    required void Function(String stage) setStage,
+  }) async {
+    final schedule = ref.read(scheduleRiverpod);
+    final jobList = ref.read(jobListRiverpod);
+    final jobListService = ref.read(jobListServiceRiverpod);
+    final jobTypes = ref.read(jobTypeRiverpod);
+    final scheduleSync = ref.read(teScheduleSyncRiverpod);
+
+    final date = _extractDate(tab);
+    if (date == null) {
+      throw const _ResolveFailure('No timestamp found in tracks');
+    }
+
+    // Distributors load with the schedule; on a cold start give them a moment.
+    if (schedule.distributors.isEmpty) {
+      setStage('Loading distributors…');
+      for (var i = 0; schedule.distributors.isEmpty && i < 50; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    }
+    final match = _matchDistributor(schedule, tab);
+    if (match == null) {
+      throw _ResolveFailure(schedule.distributors.isEmpty
+          ? 'Distributors have not loaded — check your connection and retry'
+          : 'Could not match distributor');
+    }
+
+    // Prefer the live copy the schedule sync keeps for this tab's day;
+    // then the main app's in-memory months; fetch only when neither has
+    // it (e.g. the standalone editor).
+    final streamed =
+        tab.distributorId == match.id ? scheduleSync.latestJobsFor(tab) : null;
+    final inMemory = schedule.getJobsForDistributorAndDate(match.id, date);
+    List<Job> jobs;
+    if (freshJobs != null || streamed != null || inMemory.isNotEmpty) {
+      jobs = freshJobs ?? streamed ?? inMemory;
+    } else {
+      setStage('Loading the schedule…');
+      jobs = await schedule.fetchJobsForDistributorAndDate(match.id, date);
+    }
+    if (jobs.isEmpty) {
+      throw const _ResolveFailure('No jobs found for this date & distributor');
+    }
+
+    // The day's clients' Job List items: they say what the work was, and
+    // which folder its tracks belong in.
+    setStage('Looking up the Job List…');
+    final jobListItems = await jobListItemsNear(
+      provider: jobList,
+      service: jobListService,
+      clients: jobs.expand((j) => j.clients),
+      date: date,
+    );
+
+    // Collection, window cleaning and similar work records no waypoints,
+    // so there is nothing to file for those clients — leave them out.
+    // Best effort: if it cannot be read, show every client rather than none.
+    var hidden = const <String>{};
+    try {
+      setStage('Loading job types…');
+      hidden = findClientsWithoutTracks(
+        clients: jobs.expand((j) => j.clients),
+        jobListItems: jobListItems,
+        jobTypes: await _loadedJobTypes(jobTypes),
+      );
+    } catch (e) {
+      debugPrint('[TECloudSave] job-type lookup failed, showing all: $e');
+    }
+
+    final itemByClient = jobListItemsForDayJobs(
+      dayJobs: jobs,
+      otherJobs: schedule.jobs,
+      items: jobListItems,
+    );
+
+    final gpxStorage = GpxStorageService();
+    final seen = <String>{...hidden};
+    final entries = <TECloudSaveClientEntry>[];
+
+    final year = date.year.toString();
+    final monthLabel = DateFormat('MMM yyyy').format(date);
+    final monthPath = 'Distribution/$year/$monthLabel';
+
+    final clients = [
+      for (final job in jobs)
+        for (final client in job.clients)
+          if (client.isNotEmpty && seen.add(client)) client,
+    ];
+    // The Job List item's own folder first — see [jobListTrackFolder].
+    // Only a client with no item (or no folder yet) falls back to the
+    // folder named after it in the track's month. One Storage listing per
+    // month answers every such client, and the checks run together.
+    final linkedFolders = [
+      for (final c in clients)
+        jobListTrackFolder(itemByClient[jobListClientKey(c)]),
+    ];
+    setStage('Checking cloud folders…');
+    final folderExists = await Future.wait([
+      for (var ci = 0; ci < clients.length; ci++)
+        linkedFolders[ci] != null
+            ? Future.value(true)
+            : gpxStorage.clientFolderExists(date, clients[ci]),
+    ]);
+
+    for (var ci = 0; ci < clients.length; ci++) {
+      final client = clients[ci];
+      final clientFolderExists = folderExists[ci];
+      final folderPath = linkedFolders[ci] ??
+          (clientFolderExists
+              ? gpxStorage.clientFolderPath(date, client)
+              : monthPath);
+
+      final polys = <TEStyledPolygon>[];
+      for (final j in jobs) {
+        if (j.clients.contains(client)) {
+          // Areas only: point names would otherwise end up in the
+          // saved file name.
+          for (final wm in j.workMaps.where((wm) => wm.isPolygon)) {
+            polys.add(TEStyledPolygon(
+              id: 'wm_${wm.name.hashCode}_${wm.points.hashCode}',
+              name: wm.name,
+              points: wm.points,
+              style: TEKmlStyle(
+                strokeColor: wm.color,
+                strokeWidth: wm.strokeWidth.toDouble(),
+                fillColor: wm.color.withAlpha((wm.fillOpacity * 255).round()),
+                fill: true,
+                outline: true,
+              ),
+            ));
+          }
+        }
+      }
+
+      entries.add(TECloudSaveClientEntry(
+        clientName: client,
+        distributorName: match.name,
+        date: date,
+        polygons: polys,
+        folderPath: folderPath,
+        folderExists: clientFolderExists,
+      ));
+    }
+
+    if (entries.isEmpty) {
+      throw _ResolveFailure(
+          'No distribution clients for this date & distributor — '
+          'only work that records no waypoints (${hidden.join(', ')})');
+    }
+    return entries;
+  }
+}
+
+/// A resolve that finished with nothing to show; [message] is for the user.
+class _ResolveFailure implements Exception {
+  final String message;
+
+  const _ResolveFailure(this.message);
 }
 
 /// Shown in place of the wage-stats box when a track has no distributor yet
@@ -685,6 +798,7 @@ class _ClientTile extends riverpod.ConsumerStatefulWidget {
   final List<String> Function()? clientSuggestionsBuilder;
 
   const _ClientTile({
+    super.key,
     required this.entry,
     required this.tab,
     required this.tracks,
@@ -697,11 +811,12 @@ class _ClientTile extends riverpod.ConsumerStatefulWidget {
 }
 
 class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
-  bool _saving = false;
-  bool _trimming = false;
-  // All save-state (savedAsIs, trimmedSaved, expanded, selectedPolyIndices,
-  // folderPath, folderExists) is held in TECloudSaveStateProvider so it
-  // persists when the user switches tabs and returns.
+  // All save-state (savedAsIs, trimmedSaved, uploading, expanded,
+  // selectedPolyIndices, folderPath, folderExists) is held in
+  // TECloudSaveStateProvider so it persists when the user switches tabs and
+  // returns — and an upload still finishing then lands on the right client.
+  bool get _saving => widget.entry.uploadingAsIs;
+  bool get _trimming => widget.entry.uploadingTrimmed;
 
   String get _dateStr => DateFormat('dd MMM yyyy').format(widget.entry.date);
   String get _folderPath => widget.entry.folderPath;
@@ -750,67 +865,72 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
   }
 
   // ── Save As-Is ──────────────────────────────────────────────────────────
+  //
+  // Both saves read everything they need from the widget before their first
+  // await and report through the provider and a messenger captured up
+  // front: this tile can be handed another client (the user switched tabs)
+  // or rebuilt (a re-resolve) while the file uploads, and the result must
+  // still land on the client it was for.
 
   Future<void> _saveAsIs() async {
-    if (!await _ensureFolderPicked()) return;
-    setState(() => _saving = true);
+    if (!await _ensureFolderPicked() || !mounted) return;
+    if (widget.tracks.isEmpty && widget.waypoints.isEmpty) return;
+    final saveState = ref.read(teCloudSaveRiverpod);
+    final messenger = ScaffoldMessenger.of(context);
+    final clientName = widget.entry.clientName;
+    final folder = _folderPath;
+    final tracks = widget.tracks;
+    final waypoints = widget.waypoints;
+    // Prefer selected-polygon names if the user has highlighted any;
+    // otherwise fall back to all entry polygon names.
+    final areaOverride =
+        _selectedPolyNames.isNotEmpty ? _selectedPolyNames : null;
+    final gpxFile =
+        _fileName(waypoints.length, polyNamesOverride: areaOverride);
+
+    final upload = saveState.beginUpload(widget.entry, trimmed: false);
+    if (upload == null) return;
+    var saved = false;
     try {
-      final gpxStorage = GpxStorageService();
-      final fm = TEFileManager();
-      final wptCount = widget.waypoints.length;
-
-      final existing = await gpxStorage.listFolderContents(_folderPath);
-      final existingNames = existing.files.map((f) => f.name).toSet();
-
-      int uploaded = 0;
-      int skipped = 0;
-
-      if (widget.tracks.isNotEmpty || widget.waypoints.isNotEmpty) {
-        // Prefer selected-polygon names if the user has highlighted any;
-        // otherwise fall back to all entry polygon names.
-        final areaOverride =
-            _selectedPolyNames.isNotEmpty ? _selectedPolyNames : null;
-        final gpxFile = _fileName(wptCount, polyNamesOverride: areaOverride);
-        if (existingNames.contains(gpxFile)) {
-          skipped++;
-        } else {
-          final gpxContent =
-              await fm.toGpxCombinedString(widget.tracks, widget.waypoints);
-          await gpxStorage.uploadGpxFile(_folderPath, gpxFile, gpxContent);
-          uploaded++;
-        }
-      }
-
-      if (mounted) {
-        final msg = skipped > 0 && uploaded == 0
-            ? 'Already saved to ${widget.entry.clientName}'
-            : '$uploaded uploaded, $skipped already existed';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(msg),
-            backgroundColor:
-                skipped > 0 && uploaded == 0 ? Colors.orange : Colors.green,
-          ),
-        );
-        ref.read(teCloudSaveRiverpod).markSavedAsIs(widget.entry, true);
-      }
+      final uploaded = await GpxStorageService().uploadGpxUnlessPresent(
+        folder,
+        gpxFile,
+        () => TEFileManager()
+            .toGpxCombinedString(tracks, waypoints, pretty: false),
+      );
+      saved = true;
+      messenger.showToast(
+        SnackBar(
+          content: Text(uploaded
+              ? 'Saved to $clientName'
+              : 'Already saved to $clientName'),
+          backgroundColor: uploaded ? Colors.green : Colors.orange,
+        ),
+      );
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Upload failed: $e'), backgroundColor: Colors.red),
-        );
-      }
+      messenger.showToast(
+        SnackBar(
+            content: Text('Upload to $clientName failed: $e'),
+            backgroundColor: Colors.red),
+      );
+    } finally {
+      saveState.finishUpload(upload, saved: saved);
     }
-    if (mounted) setState(() => _saving = false);
   }
 
   // ── Trim & Save ─────────────────────────────────────────────────────────
 
   Future<void> _trimAndSave() async {
     if (widget.entry.selectedPolyIndices.isEmpty) return;
-    if (!await _ensureFolderPicked()) return;
-    setState(() => _trimming = true);
+    if (!await _ensureFolderPicked() || !mounted) return;
+    final saveState = ref.read(teCloudSaveRiverpod);
+    final messenger = ScaffoldMessenger.of(context);
+    final clientName = widget.entry.clientName;
+    final folder = _folderPath;
+
+    final upload = saveState.beginUpload(widget.entry, trimmed: true);
+    if (upload == null) return;
+    var saved = false;
     try {
       // Build a name→points lookup from the current tab polygons so that
       // any vertex edits the user made are used for trimming rather than
@@ -832,65 +952,42 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
           filterWaypointsByPolygons(widget.waypoints, selectedPolys);
 
       if (trimmedTracks.isEmpty && trimmedWpts.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No data inside selected polygons'),
-              backgroundColor: Colors.orange,
-            ),
-          );
-        }
-        if (mounted) setState(() => _trimming = false);
+        messenger.showToast(
+          const SnackBar(
+            content: Text('No data inside selected polygons'),
+            backgroundColor: Colors.orange,
+          ),
+        );
         return;
       }
 
-      final gpxStorage = GpxStorageService();
-      final fm = TEFileManager();
       final trimmedWptCount = trimmedWpts.length;
-
-      // Check existing files to avoid duplicates.
-      final existing = await gpxStorage.listFolderContents(_folderPath);
-      final existingNames = existing.files.map((f) => f.name).toSet();
-
-      int uploaded = 0;
-      int skipped = 0;
-
-      if (trimmedTracks.isNotEmpty || trimmedWpts.isNotEmpty) {
-        final gpxFile = _fileName(trimmedWptCount,
-            type: 'Track Trimmed', polyNamesOverride: _selectedPolyNames);
-        if (existingNames.contains(gpxFile)) {
-          skipped++;
-        } else {
-          final gpxContent =
-              await fm.toGpxCombinedString(trimmedTracks, trimmedWpts);
-          await gpxStorage.uploadGpxFile(_folderPath, gpxFile, gpxContent);
-          uploaded++;
-        }
-      }
-
-      if (mounted) {
-        final msg = skipped > 0 && uploaded == 0
-            ? 'Already saved to ${widget.entry.clientName}'
-            : 'Trimmed: $trimmedWptCount wpts → $uploaded uploaded, $skipped already existed';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(msg),
-            backgroundColor: skipped > 0 && uploaded == 0
-                ? Colors.orange
-                : Colors.deepOrange,
-          ),
-        );
-        ref.read(teCloudSaveRiverpod).markTrimmedSaved(widget.entry, true);
-      }
+      final gpxFile = _fileName(trimmedWptCount,
+          type: 'Track Trimmed', polyNamesOverride: _selectedPolyNames);
+      final uploaded = await GpxStorageService().uploadGpxUnlessPresent(
+        folder,
+        gpxFile,
+        () => TEFileManager()
+            .toGpxCombinedString(trimmedTracks, trimmedWpts, pretty: false),
+      );
+      saved = true;
+      messenger.showToast(
+        SnackBar(
+          content: Text(uploaded
+              ? 'Trimmed: $trimmedWptCount wpts saved to $clientName'
+              : 'Already saved to $clientName'),
+          backgroundColor: uploaded ? Colors.deepOrange : Colors.orange,
+        ),
+      );
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Trim failed: $e'), backgroundColor: Colors.red),
-        );
-      }
+      messenger.showToast(
+        SnackBar(
+            content: Text('Trim for $clientName failed: $e'),
+            backgroundColor: Colors.red),
+      );
+    } finally {
+      saveState.finishUpload(upload, saved: saved);
     }
-    if (mounted) setState(() => _trimming = false);
   }
 
   // ── Change Folder ───────────────────────────────────────────────────────
@@ -917,7 +1014,7 @@ class _ClientTileState extends riverpod.ConsumerState<_ClientTile> {
   Future<bool> _ensureFolderPicked() async {
     if (_folderExists) return true;
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text(
               'Choose a cloud folder for "${widget.entry.clientName}" first'),
@@ -1345,75 +1442,73 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
               ? <String>[]
               : query.isEmpty
                   ? suggestions
-                  : suggestions
-                      .where((s) => s.toLowerCase().contains(query))
-                      .toList();
+                  : TextSearch(query).rank(suggestions, (s) => [s]);
 
           return AlertDialog(
-              title: Text('New $levelLabel Folder',
-                  style: const TextStyle(fontSize: 15)),
-              content: ConstrainedBox(
-                constraints: const BoxConstraints(
-                  minWidth: 360,
-                  maxWidth: 360,
-                  minHeight: 120,
-                  maxHeight: 400,
-                ),
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      TextField(
-                        controller: ctrl,
-                        autofocus: true,
-                        decoration: InputDecoration(
-                          labelText: '$levelLabel name',
-                          isDense: true,
-                          border: const OutlineInputBorder(),
-                        ),
-                        onChanged: (_) => setDialogState(() {}),
-                        onSubmitted: (v) {
-                          if (v.trim().isNotEmpty) Navigator.pop(ctx, v.trim());
-                        },
+            title: Text('New $levelLabel Folder',
+                style: const TextStyle(fontSize: 15)),
+            content: ConstrainedBox(
+              constraints: const BoxConstraints(
+                minWidth: 360,
+                maxWidth: 360,
+                minHeight: 120,
+                maxHeight: 400,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      controller: ctrl,
+                      autofocus: true,
+                      decoration: InputDecoration(
+                        labelText: '$levelLabel name',
+                        isDense: true,
+                        border: const OutlineInputBorder(),
                       ),
-                      if (filtered.isNotEmpty) ...[
-                        const SizedBox(height: 10),
-                        Text('Suggestions:',
-                            style: TextStyle(
-                                fontSize: 11, color: Colors.grey.shade600)),
-                        const SizedBox(height: 4),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 4,
-                          children: filtered.map((s) {
-                            return ActionChip(
-                              label:
-                                  Text(s, style: const TextStyle(fontSize: 11)),
-                              visualDensity: VisualDensity.compact,
-                              onPressed: () => Navigator.pop(ctx, s),
-                            );
-                          }).toList(),
-                        ),
-                      ],
+                      onChanged: (_) => setDialogState(() {}),
+                      onSubmitted: (v) {
+                        if (v.trim().isNotEmpty) Navigator.pop(ctx, v.trim());
+                      },
+                    ),
+                    if (filtered.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Text('Suggestions:',
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey.shade600)),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: filtered.map((s) {
+                          return ActionChip(
+                            label:
+                                Text(s, style: const TextStyle(fontSize: 11)),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => Navigator.pop(ctx, s),
+                          );
+                        }).toList(),
+                      ),
                     ],
-                  ),
+                  ],
                 ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: () {
-                    final name = ctrl.text.trim();
-                    if (name.isNotEmpty) Navigator.pop(ctx, name);
-                  },
-                  child: const Text('Create'),
-                ),
-              ],
-            );
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final name = ctrl.text.trim();
+                  if (name.isNotEmpty) Navigator.pop(ctx, name);
+                },
+                child: const Text('Create'),
+              ),
+            ],
+          );
         },
       ),
     );

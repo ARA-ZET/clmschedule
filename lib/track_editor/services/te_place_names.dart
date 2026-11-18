@@ -1,17 +1,14 @@
 // track_editor/services/te_place_names.dart
 //
 // Names the places a distributor worked, for the client report: the two
-// roads crossing at the intersection ("Voortrekker Rd & Durban Rd") and the
-// suburb it sits in ("Bellville Central").
+// roads crossing at the intersection ("Voortrekker Rd & Durban Rd").
 //
-//   * Intersections come from OpenStreetMap through the Overpass API — Google
-//     reverse geocoding answers with the nearest street address and has no
-//     reliable "intersection" result. Every point in a report goes into one
-//     query per batch rather than one request each: the public Overpass
-//     servers are shared and rate-limited, and regularly answer 504 under
-//     load, so the query falls through a list of mirrors.
-//   * Suburbs come from Google reverse geocoding (GeocodingService.suburbAt),
-//     which knows Cape Town's suburbs far better than OSM does.
+// Intersections come from OpenStreetMap through the Overpass API — Google
+// reverse geocoding answers with the nearest street address and has no
+// reliable "intersection" result. Points go into one query per batch rather
+// than one request each: the public Overpass servers are shared and
+// rate-limited, and regularly answer 504 under load, so the query falls
+// through a list of mirrors.
 //
 // Every lookup is best-effort. A name that can't be found is left null and
 // the report prints what it has; a report is never blocked on a map server.
@@ -22,15 +19,35 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
-import '../../services/geocoding_service.dart';
-
 class TEPlaceName {
   /// "Voortrekker Rd & Durban Rd", or a single road name when the spot isn't
   /// near a junction.
   final String? intersection;
-  final String? suburb;
 
-  const TEPlaceName({this.intersection, this.suburb});
+  const TEPlaceName({this.intersection});
+}
+
+/// How far a [resolvePlaceNames] run has got, for a progress display.
+class TEPlaceProgress {
+  /// Points finished so far (named or not) out of [total] needing a lookup.
+  final int done;
+  final int total;
+
+  /// [tePlaceKey]s of the points being looked up right now; empty once the
+  /// run is over.
+  final List<String> current;
+
+  /// 1, or 2 when no server answered the first ask and it is asking again.
+  final int round;
+
+  const TEPlaceProgress({
+    required this.done,
+    required this.total,
+    this.current = const [],
+    this.round = 1,
+  });
+
+  bool get finished => current.isEmpty && done >= total;
 }
 
 /// Map key for a coordinate: 4 decimals is about 11 m, well inside one
@@ -72,50 +89,53 @@ const Duration _intersectionRetryAfter = Duration(minutes: 5);
       : (false, null);
 }
 
-final Map<String, String?> _suburbMemo = {};
-
-/// Names for [points] (lat, lon), keyed by [tePlaceKey]. Already-resolved
-/// points come from memory, so regenerating a report costs nothing.
+/// Intersection names for [points] (lat, lon), keyed by [tePlaceKey].
+/// Already-resolved points come from memory, so regenerating a report costs
+/// nothing. [batchSize] points go into each query — 1 gives a progress
+/// update per point. [onProgress] hears before and after each batch;
+/// [isCancelled] is checked between batches to stop early.
 Future<Map<String, TEPlaceName>> resolvePlaceNames(
   Iterable<(double, double)> points, {
-  GeocodingService? geocoding,
+  int batchSize = _batchSize,
+  void Function(TEPlaceProgress progress)? onProgress,
+  bool Function()? isCancelled,
 }) async {
   final unique = <String, (double, double)>{};
   for (final p in points) {
     unique[tePlaceKey(p.$1, p.$2)] = p;
   }
 
-  // Intersections: one Overpass query per batch of unresolved points.
   final pending = unique.entries
       .where((e) => !_intersectionMemo.containsKey(e.key))
       .toList();
-  for (var i = 0; i < pending.length; i += _batchSize) {
-    final batch = pending.sublist(i, math.min(i + _batchSize, pending.length));
-    final json = await _overpass(_queryFor([for (final e in batch) e.value]));
-    if (json == null) continue; // left unmemoed: the next report retries
-    for (final e in batch) {
-      _intersectionMemo[e.key] = intersectionNear(json, e.value.$1, e.value.$2);
+  var done = 0;
+  for (var i = 0; i < pending.length; i += batchSize) {
+    if (isCancelled?.call() ?? false) break;
+    final batch = pending.sublist(i, math.min(i + batchSize, pending.length));
+    final keys = [for (final e in batch) e.key];
+    onProgress?.call(TEPlaceProgress(
+        done: done, total: pending.length, current: keys));
+    final json = await _overpass(
+      _queryFor([for (final e in batch) e.value]),
+      onRound: (round) => onProgress?.call(TEPlaceProgress(
+          done: done, total: pending.length, current: keys, round: round)),
+    );
+    // A batch no server answered is left unmemoed: the next run retries it.
+    if (json != null) {
+      for (final e in batch) {
+        _intersectionMemo[e.key] =
+            intersectionNear(json, e.value.$1, e.value.$2);
+      }
     }
+    done += batch.length;
   }
-
-  // Suburbs: a few Google lookups at a time.
-  final geo = geocoding ?? GeocodingService();
-  final suburbs =
-      unique.entries.where((e) => !_suburbMemo.containsKey(e.key)).toList();
-  for (var i = 0; i < suburbs.length; i += 4) {
-    await Future.wait([
-      for (final e in suburbs.sublist(i, math.min(i + 4, suburbs.length)))
-        geo.suburbAt(e.value.$1, e.value.$2).then((s) {
-          _suburbMemo[e.key] = s;
-        }).catchError((Object _) {}),
-    ]);
-  }
+  onProgress?.call(TEPlaceProgress(done: done, total: pending.length));
 
   return cachedPlaceNames(unique.values);
 }
 
-/// Just the road intersection for each of [points] (lat, lon) — no suburb
-/// lookup, so no Google calls. Keyed by [tePlaceKey]; a value of null means
+/// The road intersection for each of [points] (lat, lon), for the dropsheet
+/// and schedule. Keyed by [tePlaceKey]; a value of null means
 /// "looked up, no named road nearby". Points whose batch failed on every
 /// Overpass mirror are left out so the caller can retry later.
 Future<Map<String, String?>> resolveIntersections(
@@ -154,6 +174,19 @@ Future<Map<String, String?>> resolveIntersections(
   };
 }
 
+/// Forgets the lookups for [points] that came back with no name, so the
+/// next [resolvePlaceNames] asks the map servers again instead of answering
+/// from memory. Names that did come back are kept.
+void forgetUnnamedPlaces(Iterable<(double, double)> points) {
+  for (final p in points) {
+    final key = tePlaceKey(p.$1, p.$2);
+    if (_intersectionMemo.containsKey(key) && _intersectionMemo[key] == null) {
+      _intersectionMemo.remove(key);
+    }
+    _intersectionFailedAt.remove(key);
+  }
+}
+
 /// Whatever names are already known for [points] — used when a lookup ran
 /// out of time, so the report still gets the ones that did come back.
 Map<String, TEPlaceName> cachedPlaceNames(Iterable<(double, double)> points) {
@@ -161,10 +194,7 @@ Map<String, TEPlaceName> cachedPlaceNames(Iterable<(double, double)> points) {
   for (final p in points) {
     final key = tePlaceKey(p.$1, p.$2);
     final i = _intersectionMemo[key];
-    final s = _suburbMemo[key];
-    if (i != null || s != null) {
-      out[key] = TEPlaceName(intersection: i, suburb: s);
-    }
+    if (i != null) out[key] = TEPlaceName(intersection: i);
   }
   return out;
 }
@@ -177,12 +207,14 @@ String _queryFor(List<(double, double)> points) {
   return '[out:json][timeout:25];($clauses);out body;>;out skel qt;';
 }
 
-Future<Map<String, dynamic>?> _overpass(String query) async {
+Future<Map<String, dynamic>?> _overpass(String query,
+    {void Function(int round)? onRound}) async {
   // All mirrors are asked at once and the first good answer wins. Asked one
   // after another, a couple of overloaded mirrors (each slow to time out)
   // used up the report's whole time limit before a healthy one was tried.
   // Two rounds: a 504 or 429 is usually momentary.
   for (var round = 0; round < 2; round++) {
+    if (round > 0) onRound?.call(round + 1);
     final answer = await _firstAnswer([
       for (final endpoint in _overpassEndpoints) _askMirror(endpoint, query),
     ]);
@@ -230,6 +262,14 @@ Future<Map<String, dynamic>?> _askMirror(String endpoint, String query) async {
     }
     final decoded = json.decode(res.body);
     if (decoded is Map<String, dynamic> && decoded['elements'] is List) {
+      // A server that runs out of time still answers 200, with whatever it
+      // had so far and a "runtime error" remark. Taken as good, every point
+      // in the batch would be remembered as having no roads nearby.
+      final remark = decoded['remark'];
+      if (remark is String && remark.contains('error')) {
+        debugPrint('Overpass $endpoint: $remark');
+        return null;
+      }
       return decoded;
     }
     debugPrint('Overpass $endpoint: unexpected answer');

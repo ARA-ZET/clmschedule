@@ -1,7 +1,9 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../models/job.dart';
+import '../utils/grid_drag_auto_scroll.dart';
 import '../providers/unfinished_work_areas_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/scale_provider.dart';
@@ -95,13 +97,13 @@ class _UnfinishedWorkAreasPanelState
 
       try {
         // Step 2: Remove from source only after destination write succeeded
-        await scheduleProvider.deleteJobWithUndo(job, job.date);
+        await scheduleProvider.moveJobToUnfinished(job);
       } catch (deleteError) {
         // Add succeeded but delete failed — job exists in both places (recoverable duplicate)
         debugPrint(
             'Warning: Job ${job.id} added to unfinished but failed to remove from schedule: $deleteError');
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(
               content: const Text(
                   'Job moved but may still appear on schedule. Please remove it manually if so.'),
@@ -117,7 +119,7 @@ class _UnfinishedWorkAreasPanelState
       // Add failed — don't remove from schedule (no data loss)
       debugPrint('Failed to add job to unfinished pool: $addError');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Failed to move job: $addError'),
             backgroundColor: Colors.red,
@@ -130,7 +132,7 @@ class _UnfinishedWorkAreasPanelState
     }
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: const Row(
             children: [
@@ -406,6 +408,10 @@ class _UnfinishedItemCard extends StatelessWidget {
           opacity: 0.3,
           child: _buildCardContent(context, clientText, areaText),
         ),
+        onDragStarted: GridDragAutoScroll.start,
+        onDragUpdate: (details) =>
+            GridDragAutoScroll.update(details.globalPosition),
+        onDragEnd: (_) => GridDragAutoScroll.end(),
         child: _buildCardContent(context, clientText, areaText),
       ),
     );

@@ -1,3 +1,4 @@
+import 'package:clmschedule/utils/text_search.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../../models/work_area.dart';
@@ -44,21 +45,15 @@ class _WorkAreaPickerPanelState
         ? <WorkArea>[]
         : _searchQuery.isEmpty
             ? workAreas
-            : workAreas.where((wa) {
-                final q = _searchQuery.toLowerCase();
-                return wa.name.toLowerCase().contains(q) ||
-                    wa.description.toLowerCase().contains(q);
-              }).toList();
+            : TextSearch(_searchQuery)
+                .rank(workAreas, (wa) => [wa.name, wa.description]);
 
     final filteredSuburbs = !showSuburbs
         ? <WorkSuburb>[]
         : _searchQuery.isEmpty
             ? suburbs
-            : suburbs.where((s) {
-                final q = _searchQuery.toLowerCase();
-                return s.name.toLowerCase().contains(q) ||
-                    s.description.toLowerCase().contains(q);
-              }).toList();
+            : TextSearch(_searchQuery)
+                .rank(suburbs, (s) => [s.name, s.description]);
 
     // Count imported from each visible layer
     final importedWorkAreaCount = showWorkAreas

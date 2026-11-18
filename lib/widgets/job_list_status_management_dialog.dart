@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/job_list_status_provider.dart';
@@ -57,7 +58,7 @@ class _JobListStatusManagementDialogState
 
   Future<void> _saveStatus() async {
     if (_labelController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(content: Text('Please enter a label')),
       );
       return;
@@ -84,7 +85,7 @@ class _JobListStatusManagementDialogState
       _cancelEdit();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Error saving status: $e')),
         );
       }
@@ -116,7 +117,7 @@ class _JobListStatusManagementDialogState
         await provider.deleteStatus(id);
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(content: Text('Error deleting status: $e')),
           );
         }

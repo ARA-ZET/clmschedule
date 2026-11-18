@@ -264,3 +264,37 @@ bool shouldOfferVoidOnCancel({
   if (before.jobStatusId == cancelledStatusId) return false;
   return true;
 }
+
+/// Whether "Needs flyer collection" starts ticked when the Add/Edit Job
+/// dialog opens. A new job, or a copy (a copy is a brand-new order), starts
+/// ticked: most Community Life Media jobs need their flyers collected (user
+/// rule, 2026-11-10). An existing job shows what it has.
+bool initialNeedsFlyerCollection(JobListItem? job, {required bool isCopy}) =>
+    job == null || isCopy || job.needsFlyerCollection;
+
+/// Why [picked] can't be the Date or Collection Date of a job being added
+/// or copied, or null when it can.
+///
+/// A date before [today] is refused. A job copied from May with its date left
+/// alone used to land back in May (2026-11-10). Editing an existing job is
+/// never checked ([isNewOrCopy] false), so an old job can still be edited and
+/// re-dated freely (user rule, 2026-11-10).
+String? pastJobDateProblem(
+  DateTime? picked, {
+  required bool isNewOrCopy,
+  required DateTime today,
+}) {
+  if (!isNewOrCopy || picked == null) return null;
+  final day = DateTime(picked.year, picked.month, picked.day);
+  if (!day.isBefore(DateTime(today.year, today.month, today.day))) return null;
+  return 'This date has passed. Pick today or a later date';
+}
+
+/// The earliest day the date picker offers. For a job being added or
+/// copied this is [today]. When editing an existing job, any day back to
+/// 2020 can be picked, as before.
+DateTime earliestPickableJobDate({
+  required bool isNewOrCopy,
+  required DateTime today,
+}) =>
+    isNewOrCopy ? DateTime(today.year, today.month, today.day) : DateTime(2020);

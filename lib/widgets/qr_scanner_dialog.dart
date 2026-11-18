@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -46,7 +47,7 @@ class _QrScannerDialogState extends riverpod.ConsumerState<QrScannerDialog> {
           builder: (context) => ToolDetailsDialog(tool: tool),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Tool not found for QR code: $code'),
             backgroundColor: Colors.red,
@@ -56,7 +57,7 @@ class _QrScannerDialogState extends riverpod.ConsumerState<QrScannerDialog> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error scanning QR code: $e'),
             backgroundColor: Colors.red,

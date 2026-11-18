@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
@@ -13,7 +14,9 @@ import '../models/payroll_week.dart';
 import '../utils/payroll_schedule_rules.dart';
 import '../utils/payroll_week.dart';
 import '../utils/schedule_time.dart';
+import '../utils/resilient_subscription.dart';
 import 'payroll_service.dart';
+import 'sync_status.dart';
 
 /// Keeps payroll in step with the schedule, live, for every pay week that
 /// isn't frozen yet (the current week and the two before it — see
@@ -45,32 +48,43 @@ class PayrollScheduleSync {
   ];
   static String _monthId(DateTime d) => '${_monthNames[d.month - 1]} ${d.year}';
 
-  final List<StreamSubscription> _subs = [];
+  final List<ResilientSubscription> _subs = [];
   Timer? _debounce;
   Timer? _windowCheck;
+  Timer? _errorRetry;
   bool _running = false;
   bool _dirtyWhileRunning = false;
+  bool _listeningToSyncStatus = false;
 
   DateTime? _liveWeekStart;
   List<DateTime> _weekStarts = const [];
 
-  // Latest state of every source. A source missing from its "server" set
-  // hasn't been confirmed by the server yet, and nothing is written until
-  // all are — an empty cached schedule must never wipe payroll.
+  // Latest state of every source.
   final Map<String, Set<String>> _allocatedByDay = {};
   final Map<String, DropsheetDay> _dropsheetByDay = {};
-  final Set<String> _scheduleMonthsConfirmed = {};
-  final Set<String> _dropsheetMonthsConfirmed = {};
   final Map<DateTime, PayrollWeek> _weeks = {};
-  final Set<DateTime> _weeksConfirmed = {};
   Map<String, Set<String>> _daysOff = {};
-  bool _daysOffConfirmed = false;
   Map<String, Distributor> _distributors = {};
-  bool _distributorsConfirmed = false;
   PayrollSettings? _settings;
+
+  /// Whether each source's LATEST snapshot came from the server. Nothing is
+  /// written unless every one is true right now. These used to be sticky
+  /// ("has ever been confirmed"), so after a connection drop or a dead
+  /// listener the sync kept reconciling payroll against a frozen copy of the
+  /// schedule — on 4–5 Nov 2026 Barrie's PC applied no schedule change to
+  /// payroll for ~46 h. An empty or stale schedule must never wipe payroll.
+  final Map<String, bool> _fresh = {};
+
+  /// Day ids each schedule/dropsheet listener has delivered, so a re-opened
+  /// listener can drop days that were deleted while it was down.
+  final Map<String, Set<String>> _daysBySource = {};
 
   void start() {
     _subscribe();
+    if (!_listeningToSyncStatus) {
+      _listeningToSyncStatus = true;
+      SyncStatus.instance.addListener(_onSyncStatus);
+    }
     // Rolls the window forward when a new pay week starts.
     _windowCheck = Timer.periodic(const Duration(minutes: 15), (_) {
       if (weekStartFor(scheduleNow()) != _liveWeekStart) _subscribe();
@@ -80,8 +94,29 @@ class PayrollScheduleSync {
   void stop() {
     _windowCheck?.cancel();
     _debounce?.cancel();
+    _errorRetry?.cancel();
+    if (_listeningToSyncStatus) {
+      _listeningToSyncStatus = false;
+      SyncStatus.instance.removeListener(_onSyncStatus);
+    }
     _cancelSubs();
   }
+
+  SyncProblem? _lastProblem;
+
+  /// Catch up as soon as the connection is healthy again.
+  void _onSyncStatus() {
+    final problem = SyncStatus.instance.problem;
+    if (problem == _lastProblem) return;
+    _lastProblem = problem;
+    if (!_connectionBlocksWrites) _changed();
+  }
+
+  static bool get _connectionBlocksWrites => const {
+        SyncProblem.offline,
+        SyncProblem.slowConnection,
+        SyncProblem.liveUpdatesStopped,
+      }.contains(SyncStatus.instance.problem);
 
   void _cancelSubs() {
     for (final s in _subs) {
@@ -90,16 +125,60 @@ class PayrollScheduleSync {
     _subs.clear();
   }
 
+  /// Listens to [query] with metadata changes, so `isFromCache` is reported
+  /// when the connection drops. Re-opened automatically after an error.
+  void _listen<T>(String source, Stream<T> Function() open,
+      void Function(T snap) onData, bool Function(T snap) fromServer) {
+    _fresh[source] = false;
+    _subs.add(ResilientSubscription<T>(
+      debugLabel: 'payroll sync $source',
+      userLabel: 'the payroll sync',
+      open: () {
+        _fresh[source] = false;
+        return open();
+      },
+      onData: (snap) {
+        onData(snap);
+        _fresh[source] = fromServer(snap);
+        _changed();
+      },
+    ));
+  }
+
+  /// Applies a day-collection snapshot to [target], forgetting days the
+  /// listener no longer reports after a re-open.
+  void _applyDays<V>(String source, QuerySnapshot<Map<String, dynamic>> snap,
+      Map<String, V> target, V? Function(String id, Map<String, dynamic>? data) parse) {
+    final seen = _daysBySource.putIfAbsent(source, () => <String>{});
+    if (snap.docChanges.length == snap.docs.length &&
+        snap.docChanges.every((c) => c.type == DocumentChangeType.added)) {
+      // A first snapshot (initial or after a re-open) lists every day.
+      for (final id in seen) {
+        target.remove(id);
+      }
+      seen.clear();
+    }
+    for (final change in snap.docChanges) {
+      final doc = change.doc;
+      if (change.type == DocumentChangeType.removed) {
+        target.remove(doc.id);
+        seen.remove(doc.id);
+        continue;
+      }
+      final value = parse(doc.id, doc.data());
+      if (value == null) continue;
+      target[doc.id] = value;
+      seen.add(doc.id);
+    }
+  }
+
   void _subscribe() {
     _cancelSubs();
     _allocatedByDay.clear();
     _dropsheetByDay.clear();
-    _scheduleMonthsConfirmed.clear();
-    _dropsheetMonthsConfirmed.clear();
     _weeks.clear();
-    _weeksConfirmed.clear();
-    _daysOffConfirmed = false;
-    _distributorsConfirmed = false;
+    _fresh.clear();
+    _daysBySource.clear();
 
     final live = weekStartFor(scheduleNow());
     _liveWeekStart = live;
@@ -117,114 +196,139 @@ class PayrollScheduleSync {
       months[_monthId(m)] = m;
     }
 
+    bool fromServer(QuerySnapshot<Map<String, dynamic>> s) =>
+        !s.metadata.isFromCache;
+
     for (final e in months.entries) {
-      _subs.add(_firestore
-          .collection('schedules')
-          .doc(e.key)
-          .collection('days')
-          .snapshots()
-          .listen((snap) {
-        for (final doc in snap.docs) {
-          final jobs = doc.data()['jobs'] as List? ?? const [];
-          _allocatedByDay[doc.id] = {
+      final schedSource = 'schedule ${e.key}';
+      _listen<QuerySnapshot<Map<String, dynamic>>>(
+        schedSource,
+        () => _firestore
+            .collection('schedules')
+            .doc(e.key)
+            .collection('days')
+            .snapshots(includeMetadataChanges: true),
+        // Only the days that changed — re-reading every day on every event
+        // was most of this listener's cost.
+        (snap) => _applyDays<Set<String>>(schedSource, snap, _allocatedByDay,
+            (id, data) {
+          final jobs = data?['jobs'] as List? ?? const [];
+          return {
             for (final j in jobs)
               if (j is Map && j['distributorId'] is String)
                 j['distributorId'] as String,
           };
-        }
-        for (final change in snap.docChanges) {
-          if (change.type == DocumentChangeType.removed) {
-            _allocatedByDay.remove(change.doc.id);
-          }
-        }
-        if (!snap.metadata.isFromCache) _scheduleMonthsConfirmed.add(e.key);
-        _changed();
-      }, onError: _onError));
+        }),
+        fromServer,
+      );
 
-      _subs.add(_firestore
-          .collection('dropsheet')
-          .doc(e.value.year.toString().padLeft(4, '0'))
-          .collection(e.key)
-          .snapshots()
-          .listen((snap) {
-        for (final doc in snap.docs) {
-          _dropsheetByDay[doc.id] = DropsheetDay.fromMap(doc.id, doc.data());
-        }
-        for (final change in snap.docChanges) {
-          if (change.type == DocumentChangeType.removed) {
-            _dropsheetByDay.remove(change.doc.id);
-          }
-        }
-        if (!snap.metadata.isFromCache) _dropsheetMonthsConfirmed.add(e.key);
-        _changed();
-      }, onError: _onError));
+      final dropSource = 'dropsheet ${e.key}';
+      _listen<QuerySnapshot<Map<String, dynamic>>>(
+        dropSource,
+        () => _firestore
+            .collection('dropsheet')
+            .doc(e.value.year.toString().padLeft(4, '0'))
+            .collection(e.key)
+            .snapshots(includeMetadataChanges: true),
+        (snap) => _applyDays<DropsheetDay>(dropSource, snap, _dropsheetByDay,
+            (id, data) => data == null ? null : DropsheetDay.fromMap(id, data)),
+        fromServer,
+      );
     }
 
-    _subs.add(
-        _firestore.collection('distributorDaysOff').snapshots().listen((snap) {
-      _daysOff = {
+    _listen<QuerySnapshot<Map<String, dynamic>>>(
+      'daysOff',
+      () => _firestore
+          .collection('distributorDaysOff')
+          .snapshots(includeMetadataChanges: true),
+      (snap) => _daysOff = {
         for (final doc in snap.docs)
           doc.id: ((doc.data()['dates'] as List?)?.cast<String>() ?? const [])
               .toSet(),
-      };
-      if (!snap.metadata.isFromCache) _daysOffConfirmed = true;
-      _changed();
-    }, onError: _onError));
+      },
+      fromServer,
+    );
 
-    _subs.add(_firestore.collection('distributors').snapshots().listen((snap) {
-      _distributors = {
+    _listen<QuerySnapshot<Map<String, dynamic>>>(
+      'distributors',
+      () => _firestore
+          .collection('distributors')
+          .snapshots(includeMetadataChanges: true),
+      (snap) => _distributors = {
         for (final doc in snap.docs)
           doc.id: Distributor.fromMap(doc.id, doc.data()),
-      };
-      if (!snap.metadata.isFromCache) _distributorsConfirmed = true;
-      _changed();
-    }, onError: _onError));
+      },
+      fromServer,
+    );
 
-    _subs.add(_payroll.streamSettings().listen((s) {
-      _settings = s;
-      _changed();
-    }, onError: _onError));
+    _listen<PayrollSettings>(
+      'settings',
+      _payroll.streamSettings,
+      (s) => _settings = s,
+      (_) => true,
+    );
 
     for (final weekStart in _weekStarts) {
-      _subs.add(_payroll.streamWeekWithSource(weekStart).listen((r) {
-        _weeks[weekStart] = r.week;
-        if (r.fromServer) _weeksConfirmed.add(weekStart);
-        _changed();
-      }, onError: _onError));
+      _listen<({PayrollWeek week, bool fromServer})>(
+        'week ${weekIdFor(weekStart)}',
+        () => _payroll.streamWeekWithSource(weekStart),
+        (r) => _weeks[weekStart] = r.week,
+        (r) => r.fromServer,
+      );
     }
   }
 
   void _onError(Object e) => debugPrint('PayrollScheduleSync: $e');
 
+  final Random _random = Random();
+
+  /// Every admin's app sees the same change at the same moment. A random
+  /// extra wait lets one of them save first; the others then receive that
+  /// save before running and find nothing left to do, instead of all
+  /// colliding on the same week document.
+  static const int _maxJitterMs = 2500;
+
   void _changed() {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 1500), _run);
+    _debounce = Timer(
+      Duration(milliseconds: 1500 + _random.nextInt(_maxJitterMs)),
+      _run,
+    );
   }
 
-  bool get _ready {
-    final months = {for (final w in _weekStarts) ...daysInWeek(w).map(_monthId)};
-    return _settings != null &&
-        _daysOffConfirmed &&
-        _distributorsConfirmed &&
-        _weeksConfirmed.length == _weekStarts.length &&
-        months.every(_scheduleMonthsConfirmed.contains) &&
-        months.every(_dropsheetMonthsConfirmed.contains);
-  }
+  bool get _ready =>
+      _settings != null &&
+      _fresh.isNotEmpty &&
+      _fresh.values.every((fresh) => fresh) &&
+      !_connectionBlocksWrites;
 
   Future<void> _run() async {
     if (_running) {
       _dirtyWhileRunning = true;
       return;
     }
-    if (!_ready) return;
+    if (!_ready) {
+      final stale = [
+        for (final e in _fresh.entries)
+          if (!e.value) e.key
+      ];
+      debugPrint('PayrollScheduleSync: waiting for live data before '
+          'updating payroll (not live: ${stale.isEmpty ? SyncStatus.instance.problem.name : stale.join(', ')})');
+      return;
+    }
     _running = true;
     try {
       for (final weekStart in List.of(_weekStarts)) {
         if (!isPayrollWeekEditable(weekStart)) continue;
-        await _syncWeek(weekStart);
+        // A hung write must not leave [_running] set for good — that would
+        // stop the sync for the rest of the session.
+        await _syncWeek(weekStart).timeout(const Duration(seconds: 90));
       }
     } catch (e) {
       _onError(e);
+      // Try again later rather than straight away, in case it keeps failing.
+      _errorRetry?.cancel();
+      _errorRetry = Timer(const Duration(seconds: 30), _changed);
     } finally {
       _running = false;
       if (_dirtyWhileRunning) {

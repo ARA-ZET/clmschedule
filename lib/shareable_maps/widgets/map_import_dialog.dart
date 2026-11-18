@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -455,10 +456,10 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
     }
 
     final updatedMap = provider.currentMap!.updateLayer(layer.id, updatedLayer);
-    provider.loadMap(updatedMap);
+    provider.replaceMapContent(updatedMap);
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text('Imported ${selected.length} element(s) from CLM Maps'),
           backgroundColor: Colors.green,
@@ -590,7 +591,7 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
                 final folderName = _cloudProvider.breadcrumbs.last.name;
                 provider.linkCloudFolder(_cloudProvider.currentPath);
                 Navigator.of(context).pop();
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context).showToast(
                   SnackBar(
                     content: Text('Folder linked: $folderName'),
                     backgroundColor: Colors.green,
@@ -801,7 +802,7 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
 
         final updatedMap =
             provider.currentMap!.updateLayer(layer.id, updatedLayer);
-        provider.loadMap(updatedMap);
+        provider.replaceMapContent(updatedMap);
 
         final parts = [
           if (result.polygons.isNotEmpty)
@@ -811,7 +812,7 @@ class _MapImportDialogState extends riverpod.ConsumerState<MapImportDialog> {
           if (result.points.isNotEmpty) '${result.points.length} point(s)',
         ];
 
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Imported ${parts.join(', ')} from $fileName'),
             backgroundColor: Colors.green,

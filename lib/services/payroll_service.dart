@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 
 import '../models/advance.dart';
 import '../models/advance_repayment.dart';
@@ -13,6 +16,21 @@ import '../models/savings_withdrawal.dart';
 import '../utils/payroll_calculator.dart' as calc;
 import '../utils/payroll_week.dart';
 import '../utils/schedule_time.dart';
+import 'schedule_mutation_types.dart' show deepEquals;
+import 'sync_status.dart';
+
+/// Whether [a] and [b] would save the same payslip, apart from the
+/// `updatedAt`/`updatedBy` stamp (`toMap` stamps `updatedAt` with the current
+/// time, so a plain comparison never matches).
+bool payslipsMatchIgnoringStamp(PayrollPayslip a, PayrollPayslip b) {
+  final am = a.toMap()
+    ..remove('updatedAt')
+    ..remove('updatedBy');
+  final bm = b.toMap()
+    ..remove('updatedAt')
+    ..remove('updatedBy');
+  return deepEquals(am, bm);
+}
 
 /// CRUD + business logic for payroll, mirroring `DropsheetService`'s narrow,
 /// single-responsibility style rather than the monolithic `FirestoreService`.
@@ -91,7 +109,11 @@ class PayrollService {
   Stream<({PayrollWeek week, bool fromServer})> streamWeekWithSource(
       DateTime weekStart) {
     final id = weekIdFor(weekStart);
-    return _weekDoc(weekStart).snapshots().map((snap) => (
+    // Metadata changes too, so a dropped connection is reported (fromServer
+    // turns false) instead of the last server snapshot passing as current.
+    return _weekDoc(weekStart)
+        .snapshots(includeMetadataChanges: true)
+        .map((snap) => (
           week: snap.exists && snap.data() != null
               ? PayrollWeek.fromMap(id, snap.data()!)
               : PayrollWeek.empty(weekStart),
@@ -130,16 +152,24 @@ class PayrollService {
   /// from when the fresh read has no payslip for that distributor yet (e.g.
   /// the week doc was only just created); the mutation is applied to the seed
   /// exactly once. [updatedBy] is stamped for audit.
-  Future<void> mutatePayslipsTxn(
+  ///
+  /// [preconditions] guard against a stale screen: a distributor whose
+  /// freshly-read payslip fails its check is left untouched, and its id is
+  /// returned — e.g. an Ops Stats cell only overwrites the server value it
+  /// was based on, and "paid" is only recorded at the amount the admin saw.
+  Future<Set<String>> mutatePayslipsTxn(
     DateTime weekStart, {
     required Map<String, PayrollPayslip Function(PayrollPayslip)> mutations,
     Map<String, PayrollPayslip> seeds = const {},
+    Map<String, bool Function(PayrollPayslip current)> preconditions =
+        const {},
     required PayrollSettings settings,
     String? updatedBy,
   }) async {
-    if (mutations.isEmpty) return;
+    if (mutations.isEmpty) return const {};
     final weekId = weekIdFor(weekStart);
     final doc = _weekDoc(weekStart);
+    var skipped = <String>{};
     await _firestore.runTransaction((txn) async {
       final snap = await txn.get(doc);
       final week = (snap.exists && snap.data() != null)
@@ -147,12 +177,25 @@ class PayrollService {
           : PayrollWeek.empty(weekStart);
 
       final resolved = <String, PayrollPayslip>{};
+      final skippedThisTry = <String>{};
       mutations.forEach((id, mutate) {
-        final current = week.payslips[id] ?? seeds[id];
+        final stored = week.payslips[id];
+        final current = stored ?? seeds[id];
         if (current == null) return;
-        resolved[id] = recomputePayslip(mutate(current), settings: settings)
+        final precondition = preconditions[id];
+        if (precondition != null && !precondition(current)) {
+          skippedThisTry.add(id);
+          return;
+        }
+        final next = recomputePayslip(mutate(current), settings: settings)
             .copyWith(updatedBy: updatedBy);
+        // Already saved exactly like this (typically by another admin's
+        // PayrollScheduleSync a moment earlier): writing it again would only
+        // bump updatedAt and wake every listener on the week.
+        if (stored != null && payslipsMatchIgnoringStamp(stored, next)) return;
+        resolved[id] = next;
       });
+      skipped = skippedThisTry;
       if (resolved.isEmpty) return;
 
       if (snap.exists) {
@@ -168,6 +211,7 @@ class PayrollService {
             SetOptions(merge: false));
       }
     });
+    return skipped;
   }
 
   /// Updates only the week-level finalize fields, leaving every payslip
@@ -287,14 +331,20 @@ class PayrollService {
   }
 
   /// Atomically writes [entry] as [distributor]'s day for [date], within
-  /// whichever payroll week that date falls in — a single Firestore
-  /// transaction (one read, one write) rather than the separate
-  /// ensure-initialized / fetch / recompute / save round trips a caller
-  /// would otherwise need to string together by hand. Initializes the
+  /// whichever payroll week that date falls in — one Firestore transaction
+  /// (one read, one write) through [mutatePayslipsTxn]. Initializes the
   /// week/payslip on the fly if this is the first entry recorded for this
   /// distributor that week, and never clobbers a concurrent edit (e.g. from
   /// the Ops Stats grid) since the read and write happen inside the same
   /// transaction.
+  ///
+  /// Only this distributor's `payslips.<id>` is written, not the whole week
+  /// document (every distributor's payslip) as this used to — a much smaller
+  /// upload, and a save identical to what is stored writes nothing at all.
+  ///
+  /// Completes once the stats are committed. The live week's automatic
+  /// advance deduction is reconciled after that, without the caller waiting
+  /// on it — see [_reconcileDeductionInBackground].
   Future<void> saveDailyEntryForDistributor({
     required Distributor distributor,
     required DateTime date,
@@ -302,58 +352,74 @@ class PayrollService {
     required PayrollSettings settings,
   }) async {
     final weekStart = weekStartFor(date);
-    final weekId = weekIdFor(weekStart);
-    final doc = _weekDoc(weekStart);
     final dayKey = dayKeyFor(date);
 
-    await _firestore.runTransaction((txn) async {
-      final snap = await txn.get(doc);
-      final week = (snap.exists && snap.data() != null)
-          ? PayrollWeek.fromMap(weekId, snap.data()!)
-          : PayrollWeek.empty(weekStart);
-
-      final payslip = week.payslips[distributor.id] ??
-          PayrollPayslip.blank(
-            distributorId: distributor.id,
-            distributorName: distributor.name,
-            weekStart: weekStart,
-            settings: settings,
-            profile: distributor.payroll ?? const DistributorPayrollProfile(),
-          );
-
-      final updatedEntries =
-          Map<String, PayrollDailyEntry>.from(payslip.dailyEntries)
-            ..[dayKey] = entry;
-      final updatedPayslip = payslip.copyWith(dailyEntries: updatedEntries);
-      final updatedWeek = week.copyWith(payslips: {
-        ...week.payslips,
-        distributor.id: updatedPayslip,
-      });
-      final recomputed = recomputeWeek(updatedWeek, settings: settings);
-      txn.set(doc, recomputed.toMap(), SetOptions(merge: false));
-    });
+    await mutatePayslipsTxn(
+      weekStart,
+      mutations: {
+        distributor.id: (p) =>
+            p.copyWith(dailyEntries: {...p.dailyEntries, dayKey: entry}),
+      },
+      seeds: {
+        distributor.id: PayrollPayslip.blank(
+          distributorId: distributor.id,
+          distributorName: distributor.name,
+          weekStart: weekStart,
+          settings: settings,
+          profile: distributor.payroll ?? const DistributorPayrollProfile(),
+        ),
+      },
+      settings: settings,
+    );
 
     // The Track Editor writes wage stats through this method (bypassing the
     // PayrollProvider), so it doesn't get the provider's post-stats
     // auto-deduction pass. Run it here too — but only for the live pay week,
     // matching the provider's rule that earlier weeks are handled manually.
-    //
-    // Best-effort: the wage stats above are ALREADY committed by the
-    // transaction. A failure to auto-reconcile the advance deduction must not
-    // propagate — otherwise the caller would report the whole save as failed
-    // (and leave its "unsaved" indicator on) even though the stats reached
-    // payroll fine.
     if (weekStart == weekStartFor(scheduleNow())) {
-      try {
-        await autoApplyDefaultAdvanceDeduction(
-          weekStart: weekStart,
-          distributorId: distributor.id,
-          settings: settings,
-        );
-      } catch (_) {
-        // Ignored on purpose — see the note above.
-      }
+      _reconcileDeductionInBackground(
+        weekStart: weekStart,
+        distributorId: distributor.id,
+        settings: settings,
+      );
     }
+  }
+
+  /// Deduction passes started by [_reconcileDeductionInBackground] that have
+  /// not finished — shared by every [PayrollService] instance, as they all
+  /// report under the one [SyncStatus] source.
+  static int _backgroundDeductions = 0;
+
+  /// [autoApplyDefaultAdvanceDeduction] without holding up the save that
+  /// triggered it: it is its own transaction plus two ledger queries, which
+  /// the person saving used to sit through after their stats had already
+  /// reached payroll. Same reasoning as the Payroll screen, which also runs
+  /// its pass after the save rather than inside it.
+  ///
+  /// Counted as a pending write while it runs, so the web "leave page?"
+  /// warning covers it. Best-effort: the stats are already committed, and
+  /// the Payroll screen and [PayrollScheduleSync] reconcile deductions on
+  /// the live week too, so a failure here is caught up there.
+  void _reconcileDeductionInBackground({
+    required DateTime weekStart,
+    required String distributorId,
+    required PayrollSettings settings,
+  }) {
+    void report() => SyncStatus.instance
+        .reportPendingWrites('payrollDeductions', _backgroundDeductions);
+    _backgroundDeductions++;
+    report();
+    unawaited(autoApplyDefaultAdvanceDeduction(
+      weekStart: weekStart,
+      distributorId: distributorId,
+      settings: settings,
+    ).catchError((Object e) {
+      debugPrint('PayrollService: background advance deduction for '
+          '$distributorId failed: $e');
+    }).whenComplete(() {
+      _backgroundDeductions--;
+      report();
+    }));
   }
 
   // ── Settings ───────────────────────────────────────────────────────────
@@ -602,8 +668,15 @@ class PayrollService {
       final current = week.payslips[distributorId];
       if (current == null || current.advanceDeductionOverridden) return;
 
-      final advances = await _advancesOldestFirst(distributorId);
-      final linkedDocs = await _linkedRepaymentDocs(distributorId, weekId);
+      // Two independent ledger reads, side by side rather than one after
+      // the other — every attempt of this transaction pays for them.
+      final ledger = await Future.wait<Object>([
+        _advancesOldestFirst(distributorId),
+        _linkedRepaymentDocs(distributorId, weekId),
+      ]);
+      final advances = ledger[0] as List<Advance>;
+      final linkedDocs =
+          ledger[1] as List<QueryDocumentSnapshot<Map<String, dynamic>>>;
       final base = _advancesBeforeThisWeek(advances, linkedDocs);
       final outstanding = base.where((a) => a.balance > 0.005).toList();
       final totalOutstanding =

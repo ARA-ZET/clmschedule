@@ -6,6 +6,7 @@
 import 'package:flutter/material.dart';
 
 import '../../models/custom_polygon.dart';
+import '../models/map_point.dart';
 import '../models/shareable_map.dart';
 
 /// One layer's worth of pickable polygons.
@@ -59,3 +60,15 @@ CustomPolygon allocatedPolygonStyle(CustomPolygon p) {
     strokeWidth: p.strokeWidth < 4 ? 4 : p.strokeWidth,
   );
 }
+
+/// A client-map point in the form a schedule job keeps work maps in: a
+/// point-type [CustomPolygon] carrying the point's id.
+CustomPolygon mapPointAsWorkMap(MapPoint p) => CustomPolygon(
+      id: p.id,
+      name: p.name,
+      description: p.description,
+      points: [p.position],
+      color: p.color,
+      type: MapElementType.point,
+      pointCategory: p.pointCategory,
+    );

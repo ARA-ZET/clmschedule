@@ -24,6 +24,7 @@
  */
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { requireStaff } = require("./require_staff");
 const admin = require("firebase-admin");
 const zlib = require("zlib");
 const { promisify } = require("util");
@@ -362,9 +363,7 @@ async function runSeed({ folderPaths, dryRun }) {
 exports.seedLetterboxIndex = onCall(
   { region: "us-central1", timeoutSeconds: 540, memory: "2GiB" },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
     const { folderPaths, dryRun } = request.data || {};
     return runSeed({ folderPaths, dryRun: !!dryRun });
   }
@@ -377,9 +376,7 @@ exports.seedLetterboxIndex = onCall(
 exports.refreshLetterboxCount = onCall(
   { region: "us-central1", timeoutSeconds: 120 },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
     const { suburbId } = request.data || {};
     if (!suburbId || typeof suburbId !== "string") {
       throw new HttpsError("invalid-argument", "suburbId is required.");

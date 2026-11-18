@@ -1,8 +1,11 @@
 // widgets/regular_clients_screen.dart
 //
-// The regular-clients library: one row per client, each pointing at a gallery
-// map and carrying a reusable distributor-slot plan. Opening a row shows the
-// map coloured by that plan (RegularClientMapAdapter).
+// The regular-clients library: one row per client, each with its own map
+// (copied from a client map in the gallery, which is never changed) and a
+// reusable distributor-slot plan. Opening a row shows that map coloured by
+// the plan (RegularClientMapAdapter).
+import 'package:clmschedule/utils/text_search.dart';
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
@@ -10,7 +13,6 @@ import '../models/regular_client.dart';
 import '../providers/regular_clients_provider.dart';
 import '../shareable_maps/adapters/regular_client_map_adapter.dart';
 import '../shareable_maps/providers/shareable_map_provider.dart';
-import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 import '../shareable_maps/widgets/shareable_map_editor.dart';
 import 'map_picker_dialog.dart';
 
@@ -29,7 +31,7 @@ class _RegularClientsScreenState
 
   void _snack(String message, {bool error = false}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    ScaffoldMessenger.of(context).showToast(SnackBar(
       content: Text(message),
       backgroundColor: error ? Colors.red.shade800 : null,
     ));
@@ -50,10 +52,10 @@ class _RegularClientsScreenState
 
     setState(() => _busy = true);
     try {
-      // The plan keeps polygon ids, so they must be stored ones.
-      await ShareableMapsFirestoreService()
-          .ensureStoredPolygonIds(picked.monthKey, picked.mapId);
       final service = ref.read(regularClientServiceRiverpod);
+      // A copy: the picked map is a real client's, shared in their reports.
+      final copy =
+          await service.copyFromGallery(picked.monthKey, picked.mapId);
       final draft = RegularClient(
         id: '',
         name: details.$1,
@@ -61,6 +63,7 @@ class _RegularClientsScreenState
         mapId: picked.mapId,
         mapMonthKey: picked.monthKey,
         mapName: picked.mapName,
+        map: copy,
       );
       final id = await service.add(draft);
       final created = await service.get(id);
@@ -78,7 +81,11 @@ class _RegularClientsScreenState
       // Fetch fresh so a plan edited elsewhere since the list loaded is used.
       final fresh =
           await ref.read(regularClientServiceRiverpod).get(client.id) ?? client;
-      await provider.loadFromAdapter(RegularClientMapAdapter(fresh));
+      await provider.loadFromAdapter(RegularClientMapAdapter(
+        fresh,
+        onReload: provider.applyAdapterMap,
+        isBusyEditing: () => provider.isDrawing || provider.isEditingVertices,
+      ));
       if (!mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => const ShareableMapEditor()),
@@ -104,6 +111,9 @@ class _RegularClientsScreenState
     }
   }
 
+  /// Replace the client's map with a fresh copy of another gallery map. Areas
+  /// the new copy shares with the old (same polygon ids — e.g. a later round
+  /// of the same client map) keep their allocation.
   Future<void> _changeMap(RegularClient client) async {
     final picked = await showDialog<MapPickerResult>(
       context: context,
@@ -111,14 +121,17 @@ class _RegularClientsScreenState
     );
     if (picked == null) return;
     try {
-      await ShareableMapsFirestoreService()
-          .ensureStoredPolygonIds(picked.monthKey, picked.mapId);
-      await ref.read(regularClientServiceRiverpod).save(client.copyWith(
-            mapId: picked.mapId,
-            mapMonthKey: picked.monthKey,
-            mapName: picked.mapName,
-          ));
-      _snack('Map changed. Areas not on the new map show as missing.');
+      final service = ref.read(regularClientServiceRiverpod);
+      final copy =
+          await service.copyFromGallery(picked.monthKey, picked.mapId);
+      await service.save(client.copyWith(
+        mapId: picked.mapId,
+        mapMonthKey: picked.monthKey,
+        mapName: picked.mapName,
+      ));
+      await service.saveMap(client.id, copy);
+      _snack('Map replaced with a copy of ${picked.mapName}. Areas not on '
+          'it show as missing.');
     } catch (e) {
       _snack('Could not change the map: $e', error: true);
     }
@@ -129,8 +142,8 @@ class _RegularClientsScreenState
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text('Delete ${client.name}?'),
-        content: const Text(
-            'The allocation plan is deleted. The gallery map is not touched.'),
+        content: const Text('The allocation plan and its own map are '
+            'deleted. Client maps in the gallery are not touched.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),
@@ -243,15 +256,8 @@ class _RegularClientsScreenState
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Could not load: $e')),
         data: (all) {
-          final q = _query.trim().toLowerCase();
-          final list = q.isEmpty
-              ? all
-              : all
-                  .where((c) =>
-                      c.name.toLowerCase().contains(q) ||
-                      c.mapName.toLowerCase().contains(q) ||
-                      c.aliases.any((a) => a.toLowerCase().contains(q)))
-                  .toList();
+          final list = TextSearch(_query)
+              .rank(all, (c) => [c.name, c.mapName, ...c.aliases]);
           return Column(
             children: [
               Padding(
@@ -307,7 +313,7 @@ class _RegularClientsScreenState
       ),
       title: Text(c.name),
       subtitle: Text(
-        '${c.mapName.isEmpty ? 'Map' : c.mapName} · '
+        '${c.mapName.isEmpty ? 'Own map' : 'Copied from ${c.mapName}'} · '
         '${c.slots.length} distributor${c.slots.length == 1 ? '' : 's'} · '
         '${c.totalManDays} man days'
         '${c.aliases.isEmpty ? '' : ' · also "${c.aliases.join('", "')}"'}',
@@ -329,7 +335,8 @@ class _RegularClientsScreenState
         itemBuilder: (_) => const [
           PopupMenuItem(value: 'open', child: Text('Open map')),
           PopupMenuItem(value: 'edit', child: Text('Rename / other names')),
-          PopupMenuItem(value: 'map', child: Text('Change map')),
+          PopupMenuItem(
+              value: 'map', child: Text('Replace map with a copy of…')),
           PopupMenuItem(value: 'delete', child: Text('Delete')),
         ],
       ),

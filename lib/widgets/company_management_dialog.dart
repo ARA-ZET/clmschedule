@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
@@ -77,7 +78,7 @@ class _CompanyManagementDialogState
   Future<void> _save() async {
     final name = _nameController.text.trim();
     if (name.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(content: Text('Please enter a company name')),
       );
       return;
@@ -108,7 +109,7 @@ class _CompanyManagementDialogState
       if (mounted) _cancelEdit();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('$e'), backgroundColor: Colors.red),
         );
       }

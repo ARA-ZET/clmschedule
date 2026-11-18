@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/job_list_preferences_provider.dart';
@@ -22,6 +23,7 @@ class _JobListColumnsDialogState
     'area': 'Area',
     'quantity': 'Qty / Vehicle',
     'manDays': 'Man-Days',
+    'flyerCollection': 'Needs Flyer Collection',
     'collectionAddress': 'Collection Address',
     'specialInstructions': 'Special Instructions',
     'collectionDate': 'Collection Date',
@@ -112,7 +114,7 @@ class _JobListColumnsDialogState
                         : () async {
                             await prefsProvider.resetToDefaults();
                             if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
+                              ScaffoldMessenger.of(context).showToast(
                                 const SnackBar(
                                   content: Text('Reset to default columns'),
                                   duration: Duration(seconds: 2),

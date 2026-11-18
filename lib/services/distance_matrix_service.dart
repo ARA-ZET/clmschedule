@@ -63,6 +63,20 @@ class DistanceMatrixService {
       return null;
     }
 
+    // Shared drop point: several distributors dropped at one spot. The leg
+    // between them is zero — no Directions call needed.
+    if ((from.latitude! - to.latitude!).abs() < 1e-6 &&
+        (from.longitude! - to.longitude!).abs() < 1e-6) {
+      final at = LatLng(from.latitude!, from.longitude!);
+      return RouteSegmentData(
+        fromAddressId: from.id,
+        toAddressId: to.id,
+        distanceMeters: 0,
+        durationSeconds: 0,
+        polylinePoints: [at, at],
+      );
+    }
+
     // LRU cache check — same origin/destination/time bucket reuses the
     // last result rather than spending another Directions API call.
     final cacheKey = _cacheKeyFor(from, to, departureTime);

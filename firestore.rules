@@ -75,19 +75,125 @@ service cloud.firestore {
           && request.resource.data.taskId is string;
     }
 
+    // Shape check for the "I've uploaded my track" ping clmgpx sends after a
+    // Drive upload. distributorId is optional so a name that is not in the
+    // distributors list can still be reported (it shows as "No match" on the
+    // clmworking roster). uploadedAt must be a server timestamp.
+    function validTrackUpload(day) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['distributorId', 'distributorName', 'date', 'uploadedAt'])
+          && d.keys().hasAll(['distributorName', 'date', 'uploadedAt'])
+          && d.distributorName is string
+          && d.distributorName.size() > 0
+          && d.distributorName.size() <= 80
+          && (!('distributorId' in d)
+              || (d.distributorId is string && d.distributorId.size() <= 64))
+          && d.date == day
+          && d.uploadedAt == request.time;
+    }
+
+    // Shape check for a vehicle inspection clmgpx submits (start or end of
+    // shift). Create-only: the phone can never edit or delete one, and it
+    // must arrive unreviewed with a server timestamp, so a driver cannot
+    // approve or back-date their own inspection. Photos are checked by
+    // storage.rules (vehicleInspections/...). Contract shared with clmgpx —
+    // see lib/models/vehicle_inspection.dart.
+    function validVehicleInspection(inspectionId) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['date', 'kind', 'vehicleKey', 'vehicleLabel',
+               'plateNumber', 'trailer', 'driverId', 'driverName',
+               'distributorId', 'dropsheetTaskId', 'checklistVersion',
+               'startedAt', 'completedAt', 'submittedAt', 'odometerKm',
+               'fuelLevel', 'location', 'items', 'photos', 'spotCheck',
+               'defects', 'result', 'review', 'appVersion'])
+          && d.keys().hasAll(['date', 'kind', 'vehicleKey', 'driverName',
+               'startedAt', 'completedAt', 'submittedAt', 'items', 'photos',
+               'result', 'review'])
+          && d.date is string
+          && d.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && d.kind in ['start', 'end']
+          && d.vehicleKey is string
+          && d.vehicleKey.matches('^[A-Za-z0-9-]{1,32}$')
+          && inspectionId == d.date + '_' + d.vehicleKey + '_' + d.kind
+          && d.driverName is string
+          && d.driverName.size() > 0
+          && d.driverName.size() <= 80
+          && d.startedAt is timestamp
+          && d.completedAt is timestamp
+          && d.submittedAt == request.time
+          && d.items is map
+          && d.photos is map
+          && d.photos.size() <= 40
+          && d.result in ['pass', 'passWithDefects', 'fail']
+          && d.review == {'status': 'pending'};
+    }
+
+    // Issues drivers report from the clmgpx dropsheet that are not on the
+    // inspection checklist ({date}_{12-char token}). Create-only for the
+    // phone, arriving open with a server timestamp. Contract shared with
+    // clmgpx — see lib/features/issues/models/driver_issue.dart.
+    function validDriverIssue(issueId) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['date', 'category', 'description', 'urgent',
+               'driverId', 'driverName', 'distributorId', 'vehicleKey',
+               'vehicleLabel', 'createdAt', 'submittedAt', 'location',
+               'photos', 'status'])
+          && d.keys().hasAll(['date', 'category', 'description', 'urgent',
+               'driverName', 'createdAt', 'submittedAt', 'photos', 'status'])
+          && d.date is string
+          && d.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && issueId.matches('^' + d.date + '_[a-z0-9]{12}$')
+          && d.category in ['breakdown', 'accident', 'load', 'customer',
+               'route', 'safety', 'other']
+          && d.description is string
+          && d.description.size() > 0
+          && d.description.size() <= 2000
+          && d.urgent is bool
+          && d.driverName is string
+          && d.driverName.size() > 0
+          && d.driverName.size() <= 80
+          && d.createdAt is timestamp
+          && d.submittedAt == request.time
+          && d.photos is list
+          && d.photos.size() <= 3
+          && d.status == {'state': 'open'};
+    }
+
+    // Admin = `users/{uid}.role == "admin"` — the same test the recycleBin
+    // callable makes. Costs one document read, so only reached when the
+    // cheaper self-write checks fail.
+    function isAdminUser() {
+      return signedIn()
+          && get(/databases/$(database)/documents/users/$(request.auth.uid))
+               .data.get('role', '') == 'admin';
+    }
+    // Roles a user may hold on a doc they write themselves.
+    function selfAssignableRole() {
+      return request.resource.data.get('role', 'user') in ['user', 'viewer'];
+    }
+    function roleUnchanged() {
+      return request.resource.data.get('role', null)
+          == resource.data.get('role', null);
+    }
+
     // ── Public read: unauthenticated map share links (/map/{code})
     //    and the public maps viewer's suburb layers ──
+    //
+    // `get` only, never `list`: the viewer always holds the share code (or
+    // map id), so it never needs to query. A public `read` would let anyone
+    // list every mapLinks doc and harvest every share code — and with them
+    // every /photos/{code} gallery.
     match /mapLinks/{code} {
-      allow read: if true;
-      allow write: if signedIn();
+      allow get: if true;
+      allow list, write: if signedIn();
     }
     match /shareableMaps/{document=**} {
-      allow read: if true;
-      allow write: if signedIn();
+      allow get: if true;
+      allow list, write: if signedIn();
     }
     match /maps/{document=**} {
-      allow read: if true;
-      allow write: if signedIn();
+      allow get: if true;
+      allow list, write: if signedIn();
     }
     // Collection-group queries are matched only by a {path=**} rule — the
     // per-path rules above and jobLists below never apply to them. These keep
@@ -100,6 +206,11 @@ service cloud.firestore {
       allow read: if signedIn();
     }
     match /{path=**}/items/{itemId} {
+      allow read: if signedIn();
+    }
+    // The schedule grid reads a month of clmgpx track-upload pings
+    // (trackUploads/{day}/uploads) in one collection-group query.
+    match /{path=**}/uploads/{uploadId} {
       allow read: if signedIn();
     }
     match /workSuburbs/{document=**} {
@@ -149,7 +260,22 @@ service cloud.firestore {
     // Regular clients: reusable distributor-slot allocation plans pointing at
     // a gallery map. Admin app only.
     match /regularClients/{document=**}        { allow read, write: if signedIn(); }
-    match /users/{document=**}                 { allow read, write: if signedIn(); }
+    // User profiles. `role` gates the admin features in the app and the
+    // recycleBin callable's purge, so nobody may raise their own: a user
+    // writes only their own doc and only ever with a non-elevated role; an
+    // admin may write anyone's, role included.
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+          && ((request.auth.uid == userId && selfAssignableRole())
+              || isAdminUser());
+      allow update: if signedIn()
+          && ((request.auth.uid == userId
+               && (roleUnchanged()
+                   || (!('role' in resource.data) && selfAssignableRole())))
+              || isAdminUser());
+      allow delete: if isAdminUser();
+    }
     match /userPreferences/{document=**}       { allow read, write: if signedIn(); }
     match /user_status/{document=**}           { allow read, write: if signedIn(); }
     match /jobLists/{document=**}              { allow read, write: if signedIn(); }
@@ -170,6 +296,45 @@ service cloud.firestore {
       allow create, update: if signedIn()
           || ((fieldApp() || legacyFieldApp()) && validTaskCompletion());
       allow delete: if signedIn();
+    }
+    // Track-upload pings from clmgpx, one doc per distributor per day, read
+    // back by getWorkingRoster (Admin SDK) to turn names blue on clmworking.
+    // The field app may create/overwrite its own ping but never read the list
+    // or delete. No legacyFieldApp(): only the authenticated build sends these.
+    match /trackUploads/{day}/uploads/{uploadId} {
+      allow read, delete: if signedIn();
+      allow create, update: if signedIn()
+          || (fieldApp()
+              && day.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+              && validTrackUpload(day));
+    }
+    // Daily vehicle inspections from clmgpx, one doc per vehicle per shift
+    // ({date}_{vehicleKey}_{start|end}). The field app may create one and
+    // `get` it back (to confirm a retried submit landed), never list,
+    // update or delete — only staff review (update `review`) or delete a
+    // rejected one so the driver can redo it.
+    match /vehicleInspections/{inspectionId} {
+      allow list: if signedIn();
+      allow get: if signedIn() || fieldApp();
+      allow create: if signedIn()
+          || (fieldApp() && validVehicleInspection(inspectionId));
+      allow update, delete: if signedIn();
+    }
+    // Driver issue reports from clmgpx. Same shape of access as
+    // inspections: the phone creates one and may `get` it back; staff list,
+    // resolve (update `status`) and delete.
+    match /driverIssues/{issueId} {
+      allow list: if signedIn();
+      allow get: if signedIn() || fieldApp();
+      allow create: if signedIn()
+          || (fieldApp() && validDriverIssue(issueId));
+      allow update, delete: if signedIn();
+    }
+    // Fleet details per dropsheet vehicle (plate). clmgpx reads the plate
+    // to stamp it onto inspection photos.
+    match /fleetVehicles/{vehicleKey} {
+      allow read: if signedIn() || fieldApp();
+      allow write: if signedIn();
     }
     // Task-type config, custom task types and the office/depot location
     // (including its cached geocoded coordinates). NOT covered by the
@@ -206,6 +371,31 @@ service cloud.firestore {
     }
 
     match /payrollSettings/{document=**}       { allow read, write: if signedIn(); }
+
+    // Distributor payslip sign-ups from clmworking.web.app/payslips.html.
+    // Only the payslipPortal function creates them (Admin SDK). In CLM
+    // Schedule an ADMIN approves one by linking it to a distributor, rejects
+    // it, or removes access. The linked distributorId is the ONLY thing that
+    // decides whose payslips a phone sees, so nobody else may touch it and
+    // the function's own fields (phone, name, signupCode) are never editable.
+    //
+    // Their passwords (payslipLogins) and sessions (payslipSessions) are
+    // unlisted ON PURPOSE, like secureTokens below: fail-closed denies every
+    // client and the function reaches them through the Admin SDK.
+    match /payslipAccounts/{accountId} {
+      allow read: if isAdminUser();
+      allow update: if isAdminUser()
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['status', 'distributorId', 'distributorName',
+                         'reviewedAt', 'reviewedBy'])
+          // 'pending' only so a mistaken Reject can be undone.
+          && request.resource.data.status
+               in ['pending', 'approved', 'rejected', 'removed']
+          && (request.resource.data.status != 'approved'
+              || (request.resource.data.get('distributorId', null) is string
+                  && request.resource.data.distributorId.size() > 0));
+      allow create, delete: if false;
+    }
 
     // Enables the Payslips list's collection-group query over every
     // distributor's advances (total outstanding balance per distributor).
@@ -269,6 +459,9 @@ service cloud.firestore {
     // fail-closed default would leave the picker silently empty and the app
     // would quietly fall back to its built-in wording.
     match /distributionReportTemplates/{document=**} { allow read, write: if signedIn(); }
+    // Saved progress on a report, one doc per Job List job. Unlisted, every
+    // autosave would be denied and the page would lose its work on leaving.
+    match /distributionReportDrafts/{document=**} { allow read, write: if signedIn(); }
     // Per-item invoice line templates, keyed by Zoho's item_id. Unlisted here
     // would mean the fail-closed default denies every read — the collection
     // would look permanently empty rather than erroring visibly.
@@ -291,12 +484,60 @@ service cloud.firestore {
     // indexFileOnUpload trigger via the Admin SDK.
     match /fileFolders/{document=**}           { allow read, write: if signedIn(); }
 
+    // Cloud Files month/year archives. Staff create one (a year or month
+    // folder, status queued); processCloudArchive and the cloudArchive
+    // callable (Admin SDK) own every field after that — the ZIP link, the
+    // confirm that removes originals — so a client can never mark files as
+    // archived itself.
+    match /cloudArchives/{archiveId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+          && request.resource.data.keys().hasOnly(
+               ['folderPath', 'requestedBy', 'requestedByName', 'batchId',
+                'status', 'createdAt'])
+          && request.resource.data.folderPath is string
+          && request.resource.data.folderPath.matches('^Distribution/[0-9]{4}(/[^/]+)?$')
+          && request.resource.data.requestedBy == request.auth.uid
+          && request.resource.data.batchId == archiveId
+          && request.resource.data.status == 'queued'
+          && request.resource.data.createdAt == request.time;
+    }
+
     // Letterbox index: per-suburb counts, curation status and bounds (no
     // geometry — the positions live in Storage). Sign-in required both ways;
     // these numbers price client work and are used to review distributor
     // performance, so they are not public the way a shared map is.
     match /letterboxSuburbs/{document=**}      { allow read, write: if signedIn(); }
     match /letterboxConfig/{document=**}       { allow read, write: if signedIn(); }
+
+    // Recycle Bin: a copy of every deleted item, written in the same batch /
+    // transaction as the delete. Anyone signed in can list and restore;
+    // restoring may only stamp restoredAt/restoredBy. Nobody deletes from the
+    // client — the admin-only `recycleBin` callable and the daily
+    // `sweepRecycleBin` function purge through the Admin SDK.
+    match /recycleBin/{entryId} {
+      allow read, create: if signedIn();
+      allow update: if signedIn()
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['restoredAt', 'restoredBy']);
+      allow delete: if false;
+    }
+
+    // Browser-storage incidents (lib/services/storage_health.dart): when a
+    // page load had to clear a full localStorage, the web app reports what
+    // filled it — key groups and sizes, never values — once signed in.
+    // Diagnostics only; staff read and delete them.
+    match /storageIncidents/{incidentId} {
+      allow create: if signedIn()
+          && request.resource.data.uid == request.auth.uid;
+      allow read, delete: if signedIn();
+      allow update: if false;
+    }
+
+    // ── DO NOT ADD `payslipLogins` OR `payslipSessions` HERE ────────────────
+    // Distributor password hashes and sign-in sessions for the payslip
+    // portal. Same reasoning as secureTokens below: only the payslipPortal
+    // function may reach them.
 
     // ── DO NOT ADD `secureTokens` HERE ──────────────────────────────────────
     // secureTokens/xero holds Community Life Media's rotating Xero OAuth

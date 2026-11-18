@@ -1,3 +1,5 @@
+import 'package:clmschedule/utils/text_search.dart';
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
 import '../models/inventory_tool.dart';
@@ -58,7 +60,7 @@ class _ManageAccessoriesDialogState extends riverpod.ConsumerState<ManageAccesso
 
       if (mounted) {
         Navigator.of(context).pop(true);
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Accessories updated successfully'),
             backgroundColor: Colors.green,
@@ -67,7 +69,7 @@ class _ManageAccessoriesDialogState extends riverpod.ConsumerState<ManageAccesso
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error updating accessories: $e'),
             backgroundColor: Colors.red,
@@ -205,11 +207,13 @@ class _ManageAccessoriesDialogState extends riverpod.ConsumerState<ManageAccesso
                   // Apply search filter
                   var baseNames = groupedTools.keys.toList();
                   if (_searchQuery != null && _searchQuery!.isNotEmpty) {
+                    final search = TextSearch(_searchQuery!);
                     baseNames = baseNames
-                        .where((baseName) =>
-                            baseName.toLowerCase().contains(_searchQuery!) ||
-                            groupedTools[baseName]!.any((t) =>
-                                t.toolId.toLowerCase().contains(_searchQuery!)))
+                        .where((baseName) => search.matches([
+                              baseName,
+                              for (final t in groupedTools[baseName]!)
+                                t.toolId,
+                            ]))
                         .toList();
                   }
 

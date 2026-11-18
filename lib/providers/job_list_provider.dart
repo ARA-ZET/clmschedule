@@ -5,6 +5,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:clmschedule/utils/schedule_time.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/job_list_item.dart';
+import '../utils/distribution_lag.dart';
+import '../utils/friendly_error.dart';
+import '../utils/job_list_search.dart';
 import '../models/job_list_item_update.dart';
 import '../models/job_reminder.dart';
 import '../services/job_list_service.dart';
@@ -12,7 +15,10 @@ import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 import '../shareable_maps/services/map_link_service.dart';
 import '../config/flavor_config.dart';
 import 'auth_provider.dart';
+import 'invoice_status_provider.dart';
+import 'job_list_status_provider.dart';
 import 'job_type_provider.dart';
+import '../services/sync_status.dart';
 
 final jobListRiverpod = riverpod.ChangeNotifierProvider<JobListProvider>(
   (ref) => JobListProvider(
@@ -28,7 +34,43 @@ class JobListProvider extends ChangeNotifier {
   Set<String> _knownJobIds = {}; // Track known job IDs to detect new additions
   bool _isLoading = false;
   bool _isInitialized = false;
+
+  /// Why the Job List could not be loaded, in plain words (see
+  /// [friendlyFirebaseError]); [errorDetail] keeps the raw error.
   String? _error;
+  String? _errorDetail;
+
+  /// A save, add, delete or status change that failed. Kept apart from
+  /// [_error] so one failed write does not hide the whole list behind
+  /// "Error loading Job List".
+  String? _actionError;
+  String? _actionErrorDetail;
+
+  /// The live listener dropped and is being re-opened (see [_onStreamError]).
+  bool _isReconnecting = false;
+  int _streamFailures = 0;
+  Timer? _reconnectTimer;
+
+  /// Clears [_streamFailures] once a re-opened listener has stayed up for
+  /// [_healthyAfter]. Not on its first snapshot: with offline persistence
+  /// every re-listen first replays the cache, so resetting there let a
+  /// listener the server keeps rejecting retry every 2 s forever.
+  Timer? _healthyTimer;
+  static const _healthyAfter = Duration(seconds: 60);
+
+  /// Clears the app-wide "live updates paused" banner once a re-opened
+  /// listener has delivered and not failed again for a few seconds.
+  Timer? _syncUpTimer;
+  bool _disposed = false;
+
+  /// Waits before each re-open of a failed listener. Past the last one the
+  /// error is shown with a Retry button.
+  static const _reconnectDelays = [
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+  ];
   String _searchQuery = '';
   Set<String> _statusFilters = {};
   final Set<String> _invoiceStatusFilters = {};
@@ -50,13 +92,29 @@ class JobListProvider extends ChangeNotifier {
   Timer? _debounceTimer;
   final Map<String, JobListItem> _pendingUpdates = {};
   final Map<String, DateTime> _updateTimestamps = {};
+
+  /// Edits not yet confirmed saved: queued plus the ones being written right
+  /// now (the queue itself empties the moment a save pass starts). Drives
+  /// the "Saving…" chip.
+  final ValueNotifier<int> unsavedCount = ValueNotifier<int>(0);
+  int _inFlightSaves = 0;
+
+  void _syncUnsavedCount() {
+    if (_disposed) return;
+    unsavedCount.value = _pendingUpdates.length + _inFlightSaves + _pendingAdds;
+    // The connection banner and the web leave-page warning cover the Job
+    // List too, alongside the schedule and payroll.
+    SyncStatus.instance.reportPendingWrites('jobList', unsavedCount.value);
+  }
   static const Duration _debounceDelay = Duration(milliseconds: 500);
 
   // Search debouncing
   Timer? _searchDebounceTimer;
   String _pendingSearchQuery = '';
   final ValueNotifier<bool> _isSearchingNotifier = ValueNotifier<bool>(false);
-  static const Duration _searchDebounceDelay = Duration(seconds: 2);
+  // Items are already in memory, so this only waits for a pause in typing
+  // before the (heavy) grid rebuild — not for any fetch.
+  static const Duration _searchDebounceDelay = Duration(milliseconds: 400);
 
   // Filter/search UI feedback — when true the grid shows a spinner
   // instead of the table so the heavy rebuild doesn't block the spinner.
@@ -85,11 +143,19 @@ class JobListProvider extends ChangeNotifier {
     Function(JobListItem)? onAdded,
     Function(JobListItem oldItem, JobListItem newItem)? onUpdated,
     Function(JobListItem)? onDeleted,
+    Future<DocumentReference<Map<String, dynamic>>?> Function(JobListItem)?
+        projectRef,
   }) {
     _onJobListItemAdded = onAdded;
     _onJobListItemUpdated = onUpdated;
     _onJobListItemDeleted = onDeleted;
+    _happySunProjectRef = projectRef;
   }
+
+  /// Where a job's Happy Sun project is stored, so deleting the job copies
+  /// it into the Recycle Bin too.
+  Future<DocumentReference<Map<String, dynamic>>?> Function(JobListItem)?
+      _happySunProjectRef;
 
   // Async initialization method - call explicitly for concurrent loading
   Future<void> initialize() async {
@@ -107,9 +173,17 @@ class JobListProvider extends ChangeNotifier {
   Future<void> resetAndInitialize() async {
     _jobListSubscription?.cancel();
     _jobListSubscription = null;
+    _reconnectTimer?.cancel();
+    _healthyTimer?.cancel();
+    _syncUpTimer?.cancel();
+    _syncUpTimer = null;
+    SyncStatus.instance.reportListenerUp('jobList');
+    _streamFailures = 0;
+    _isReconnecting = false;
     _hasInitialLoad = false;
     _isInitialized = false;
     _error = null;
+    _errorDetail = null;
     _jobListItems = [];
     _knownJobIds = {};
     _lastCheckedTimeLoaded = false;
@@ -125,6 +199,10 @@ class JobListProvider extends ChangeNotifier {
   bool get isInitialized => _isInitialized;
   bool get isApplyingFilter => _isApplyingFilter;
   String? get error => _error;
+  String? get errorDetail => _errorDetail;
+  String? get actionError => _actionError;
+  String? get actionErrorDetail => _actionErrorDetail;
+  bool get isReconnecting => _isReconnecting;
   String get searchQuery => _searchQuery;
   Set<String> get statusFilters => _statusFilters;
   Set<String> get invoiceStatusFilters => _invoiceStatusFilters;
@@ -206,7 +284,9 @@ class JobListProvider extends ChangeNotifier {
     // Pre-compute filter predicates outside the loop
     final bool isHappySun = FlavorConfig.instance.isHappySun;
     final bool hasSearch = _searchQuery.isNotEmpty;
-    final String? queryLower = hasSearch ? _searchQuery.toLowerCase() : null;
+    final JobListSearch? search = hasSearch
+        ? JobListSearch(_searchQuery, labels: _searchLabels)
+        : null;
     final bool hasStatusFilter = _statusFilters.isNotEmpty;
     final bool hasInvoiceFilter = _invoiceStatusFilters.isNotEmpty;
     final bool hasDateFilter = _dateFilter != 'all' && _startDate != null;
@@ -228,10 +308,7 @@ class JobListProvider extends ChangeNotifier {
       }
 
       // Search filter
-      if (hasSearch &&
-          !item.client.toLowerCase().contains(queryLower!) &&
-          !item.invoice.toLowerCase().contains(queryLower) &&
-          !item.area.toLowerCase().contains(queryLower)) {
+      if (hasSearch && !search!.matches(item)) {
         return false;
       }
 
@@ -318,7 +395,8 @@ class JobListProvider extends ChangeNotifier {
       // The listener will handle loading state based on data availability
       await _setupCurrentMonthListener();
     } catch (error) {
-      _error = 'Failed to initialize data: $error';
+      _error = friendlyFirebaseError(error, action: 'load the Job List');
+      _errorDetail = error.toString();
       debugPrint('JobListProvider: Initialization error: $error');
       notifyListeners();
     }
@@ -336,6 +414,7 @@ class JobListProvider extends ChangeNotifier {
   Future<void> _setupCurrentMonthListener() async {
     // Cancel existing subscription
     _jobListSubscription?.cancel();
+    _reconnectTimer?.cancel();
 
     // For Happy Sun flavor, only listen to Happy Sun-flagged job types.
     List<String>? jobTypesFilter;
@@ -379,17 +458,107 @@ class JobListProvider extends ChangeNotifier {
         _jobListItems = jobListItems;
         _isLoading = false;
         _error = null;
+        _errorDetail = null;
+        _isReconnecting = false;
+        if (_streamFailures > 0) {
+          _syncUpTimer ??= Timer(const Duration(seconds: 5), () {
+            _syncUpTimer = null;
+            SyncStatus.instance.reportListenerUp('jobList');
+          });
+        }
+        if (_streamFailures > 0 && _healthyTimer == null) {
+          _healthyTimer = Timer(_healthyAfter, () {
+            _healthyTimer = null;
+            _streamFailures = 0;
+          });
+        }
         // Invalidate all caches when new data arrives
         _invalidateItemCaches();
         notifyListeners();
       },
-      onError: (error) {
-        debugPrint('JobListProvider: Snapshot error: $error');
-        _error = error.toString();
-        _isLoading = false;
-        notifyListeners();
-      },
+      onError: _onStreamError,
     );
+  }
+
+  /// Firestore closes a listener for good after any error, so before this a
+  /// single hiccup — a sign-in token being refreshed after the computer
+  /// slept, a dropped connection, a rules deploy rolling out — left the Job
+  /// List on "permission-denied" until the user pressed Retry. Now the last
+  /// good data stays on screen and the listener is re-opened with a fresh
+  /// token a few times before the error is shown.
+  void _onStreamError(Object error) {
+    _healthyTimer?.cancel();
+    _healthyTimer = null;
+    _syncUpTimer?.cancel();
+    _syncUpTimer = null;
+    _streamFailures++;
+    if (_authProvider.user != null) {
+      SyncStatus.instance.reportListenerDown('jobList', 'the Job List');
+    }
+    _isLoading = false;
+    unawaited(_logStreamFailure(error, _streamFailures));
+
+    final user = _authProvider.user;
+    final retriesLeft = _streamFailures <= _reconnectDelays.length;
+    if (user == null || !isTransientFirebaseError(error) || !retriesLeft) {
+      _isReconnecting = false;
+      _error = user == null
+          ? "You've been signed out. Sign in again to see the Job List."
+          : friendlyFirebaseError(error, action: 'load the Job List');
+      _errorDetail = error.toString();
+      notifyListeners();
+      return;
+    }
+
+    _isReconnecting = true;
+    notifyListeners();
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(_reconnectDelays[_streamFailures - 1], () async {
+      final code = firebaseErrorCode(error);
+      if (code == 'permission-denied' || code == 'unauthenticated') {
+        // The rules only ask for a signed-in user, so a denial for one means
+        // the request went without a valid token. Fetch a fresh one first.
+        try {
+          await _authProvider.user?.getIdToken(true);
+        } catch (e) {
+          debugPrint('JobListProvider: token refresh failed: $e');
+        }
+      }
+      if (_disposed) return;
+      await _setupCurrentMonthListener();
+    });
+  }
+
+  /// Logs what the server will have seen of the sign-in, so the cause of a
+  /// denial can be told apart (no user, anonymous, expired token, …).
+  Future<void> _logStreamFailure(Object error, int attempt) async {
+    final user = _authProvider.user;
+    var auth = 'no signed-in user';
+    if (user != null) {
+      try {
+        final token = await user.getIdTokenResult();
+        auth = 'uid=${user.uid} provider=${token.signInProvider} '
+            'tokenExpires=${token.expirationTime?.toLocal()}';
+      } catch (e) {
+        auth = 'uid=${user.uid} (token unreadable: $e)';
+      }
+    }
+    debugPrint('JobListProvider: listener failed (#$attempt) on '
+        '${_jobListService.getMonthlyDocumentId(_currentMonth)}: $error — $auth');
+  }
+
+  /// Records a failed write for the banner above the list. The caller still
+  /// gets the error (the write sites rethrow).
+  void _setActionError(Object error, String action) {
+    _actionError = friendlyFirebaseError(error, action: action);
+    _actionErrorDetail = error.toString();
+  }
+
+  void clearActionError() {
+    if (_actionError == null) return;
+    _actionError = null;
+    _actionErrorDetail = null;
+    notifyListeners();
   }
 
   // Change current month (optimized)
@@ -404,6 +573,12 @@ class JobListProvider extends ChangeNotifier {
 
     // Clear current data and known IDs when changing months
     _knownJobIds.clear();
+    _healthyTimer?.cancel();
+    _healthyTimer = null;
+    _syncUpTimer?.cancel();
+    _syncUpTimer = null;
+    SyncStatus.instance.reportListenerUp('jobList');
+    _streamFailures = 0;
     _isLoading = true;
     notifyListeners();
 
@@ -415,8 +590,9 @@ class JobListProvider extends ChangeNotifier {
     } catch (error) {
       // Revert on error
       _currentMonth = oldMonth;
-      _error =
-          'Failed to load data for ${_jobListService.getMonthlyDocumentId(month)}: $error';
+      _error = friendlyFirebaseError(error,
+          action: 'load ${_jobListService.getMonthlyDocumentId(month)}');
+      _errorDetail = error.toString();
       debugPrint('JobListProvider: Error changing month: $error');
     } finally {
       _isLoading = false;
@@ -510,6 +686,7 @@ class JobListProvider extends ChangeNotifier {
     // Store the update locally
     _pendingUpdates[jobListItem.id] = jobListItem;
     _updateTimestamps[jobListItem.id] = DateTime.now();
+    _syncUnsavedCount();
 
     // Invalidate caches since merged data changed
     _invalidateItemCaches();
@@ -565,6 +742,11 @@ class JobListProvider extends ChangeNotifier {
         item1.priceIsInclVat == item2.priceIsInclVat &&
         item1.amountExclVat == item2.amountExclVat &&
         item1.amountInclVat == item2.amountInclVat &&
+        item1.needsFlyerCollection == item2.needsFlyerCollection &&
+        item1.contactPerson == item2.contactPerson &&
+        item1.contactPhone == item2.contactPhone &&
+        item1.timeSlot == item2.timeSlot &&
+        item1.timeSlots == item2.timeSlots &&
         _areRemindersEqual(item1.reminders, item2.reminders);
   }
 
@@ -619,17 +801,69 @@ class JobListProvider extends ChangeNotifier {
     return provider.needsTimeSlot(jobTypeId);
   }
 
+  /// The save pass in progress, so a debounce or retry timer firing mid-pass
+  /// waits for it instead of saving the same jobs twice at once.
+  Future<void>? _processingRun;
+
+  /// One shared retry for failed saves (see [_scheduleRetry]).
+  Timer? _retryTimer;
+  int _retryAttempt = 0;
+  static const _retryDelays = [
+    Duration(seconds: 10),
+    Duration(seconds: 20),
+    Duration(seconds: 40),
+    Duration(seconds: 60),
+  ];
+
   // Process all pending updates as batch to database
   Future<void> _processPendingUpdates() async {
-    if (_pendingUpdates.isEmpty) return;
+    while (_processingRun != null) {
+      await _processingRun;
+    }
+    if (_disposed || _pendingUpdates.isEmpty) return;
+    final run = _runPendingUpdates();
+    _processingRun = run;
+    try {
+      await run;
+    } finally {
+      _processingRun = null;
+    }
+  }
 
-    // Create a copy to work with
+  /// Retries failed saves after a backoff (10 s → 60 s), one timer for all
+  /// of them — each failure used to start its own timer that re-ran the
+  /// whole queue.
+  void _scheduleRetry() {
+    if (_disposed) return;
+    final delay =
+        _retryDelays[_retryAttempt.clamp(0, _retryDelays.length - 1)];
+    _retryAttempt++;
+    _retryTimer?.cancel();
+    _retryTimer = Timer(delay, () {
+      _retryTimer = null;
+      if (_pendingUpdates.isNotEmpty) _processPendingUpdates();
+    });
+  }
+
+  void _replaceLocalItem(String id, JobListItem item) {
+    final index = _jobListItems.indexWhere((j) => j.id == id);
+    if (index >= 0) _jobListItems[index] = item;
+  }
+
+  Future<void> _runPendingUpdates() async {
+    // Create a copy to work with. Anything added to [_pendingUpdates] while
+    // this pass runs is a newer edit and must survive it.
     final updatesToProcess = Map<String, JobListItem>.from(_pendingUpdates);
     _pendingUpdates.clear();
     _updateTimestamps.clear();
+    _inFlightSaves = updatesToProcess.length;
+    _syncUnsavedCount();
+
+    var anyFailed = false;
 
     // Process each update
     for (final entry in updatesToProcess.entries) {
+      if (_disposed) return;
       try {
         final updatedJob = entry.value;
 
@@ -656,26 +890,20 @@ class JobListProvider extends ChangeNotifier {
             await _jobListService.moveJobListItemToMonth(
                 updatedJob, originalJob.date, updatedJob.date);
 
-            // Remove from current month's local cache if it's being moved away
+            // Remove from current month's local cache if it's being moved
+            // away. Looked up again by id: a snapshot may have replaced the
+            // list while the move was saving.
             if (originalMonth ==
-                    _jobListService.getMonthlyDocumentId(_currentMonth) &&
-                originalIndex >= 0 &&
-                originalIndex < _jobListItems.length) {
-              _jobListItems.removeAt(originalIndex);
+                _jobListService.getMonthlyDocumentId(_currentMonth)) {
+              _jobListItems.removeWhere((j) => j.id == entry.key);
             }
-
-            // Clear any pending updates for this job since it's been successfully moved
-            _pendingUpdates.remove(entry.key);
-            _updateTimestamps.remove(entry.key);
           } else {
             // Regular update within the same month
             await _jobListService.updateJobListItem(
                 updatedJob, updatedJob.date);
 
             // Update local cache
-            if (originalIndex >= 0 && originalIndex < _jobListItems.length) {
-              _jobListItems[originalIndex] = updatedJob;
-            }
+            _replaceLocalItem(entry.key, updatedJob);
           }
         } else {
           // Fallback: treat as regular update if original job not found
@@ -685,122 +913,125 @@ class JobListProvider extends ChangeNotifier {
         debugPrint(
             'JobListProvider: Error processing update for ${entry.value.client}: $error');
 
-        // Only retry if it's not a RangeError or if the job hasn't been moved
-        // RangeErrors often indicate the job is no longer in the expected location
-        if (!error.toString().contains('RangeError')) {
-          // Re-add failed update to pending updates for retry
-          _pendingUpdates[entry.key] = entry.value;
-          _updateTimestamps[entry.key] = DateTime.now();
+        if (firebaseErrorCode(error) == 'not-found') {
+          // Someone else deleted (or moved) the job — the save can never
+          // succeed, so stop retrying it and say so.
+          _pendingUpdates.remove(entry.key);
+          _updateTimestamps.remove(entry.key);
+          _invalidateItemCaches();
+          _actionError = "'${entry.value.client}' was deleted or moved by "
+              "someone else, so your last changes to it weren't saved.";
+          _actionErrorDetail = error.toString();
+        } else if (!error.toString().contains('RangeError')) {
+          // Retry it — unless the user edited the job again meanwhile, in
+          // which case their newer edit is already queued and wins.
+          if (!_pendingUpdates.containsKey(entry.key)) {
+            _pendingUpdates[entry.key] = entry.value;
+            _updateTimestamps[entry.key] = DateTime.now();
+          }
+          anyFailed = true;
 
-          _error = 'Failed to update ${entry.value.client}: $error';
-
-          // Schedule retry after a short delay
-          Timer(const Duration(seconds: 10), () {
-            if (_pendingUpdates.containsKey(entry.key)) {
-              _processPendingUpdates();
-            }
-          });
+          _setActionError(
+              error,
+              'save your changes to ${entry.value.client} '
+              "(we'll keep trying)");
         } else {
           // For RangeErrors, just log and continue - likely the job was moved
           debugPrint(
               'JobListProvider: RangeError for ${entry.value.client}, possibly job was moved to different month');
-          _error =
-              null; // Clear the error since this is expected for moved jobs
+          // Expected for moved jobs — not worth a banner.
         }
+      } finally {
+        _inFlightSaves--;
+        _syncUnsavedCount();
       }
     }
 
-    if (_error == null) {
-      // Notify listeners of successful batch update
-      notifyListeners();
+    if (anyFailed) {
+      _scheduleRetry();
     } else {
-      notifyListeners();
+      _retryAttempt = 0;
     }
+
+    if (!_disposed) notifyListeners();
   }
 
-  // Add job list item
-  Future<void> addJobListItem(JobListItem jobListItem) async {
-    try {
-      final generatedId =
-          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+  /// New jobs saved on this device whose save the server has not yet
+  /// confirmed (see [addJobListItemLocal]).
+  int _pendingAdds = 0;
 
-      // Best-effort: if the area field carries a CLM Maps share URL, link
-      // the matching map to this job automatically.
-      unawaited(_autoLinkMapFromArea(
-        jobId: generatedId,
-        area: jobListItem.area,
-        date: jobListItem.date,
-      ));
+  /// Saves a new job **without waiting for the server**, and returns it with
+  /// its id straight away.
+  ///
+  /// The id is made on this device and the Job List shows the job at once
+  /// from the local write. Adding a job used to wait for the server to
+  /// confirm the save — and, before that, for a read of the month document
+  /// that failed outright on a flaky connection ("client is offline").
+  /// Firestore keeps the write queued through dropped connections, so
+  /// [saved] (the server's confirmation) only fails for a refusal, which is
+  /// reported through [actionError]. Until then the job counts in
+  /// [unsavedCount], which drives the "Saving…" chip, the connection banner
+  /// and the leave-page warning.
+  ({JobListItem job, Future<void> saved}) addJobListItemLocal(
+      JobListItem jobListItem) {
+    final id = _jobListService.newJobListItemId(jobListItem.date);
+    final job = jobListItem.copyWith(id: id);
 
-      // NOTE: Do NOT trigger Happy Sun sync here because we don't have the generated ID yet.
-      // The Firestore listener will pick up the new job, and if needed, callers should use
-      // addJobListItemAndReturn() to get the saved job with its ID for immediate sync.
-    } catch (error) {
-      _error = error.toString();
-      notifyListeners();
-      rethrow;
-    }
-  }
+    // Before the write: the listener sees the local write at once, and must
+    // not start a second Happy Sun sync for it.
+    _locallyAddedJobIds.add(id);
+    _pendingAdds++;
+    _syncUnsavedCount();
 
-  // Add job list item and return the saved job with generated ID
-  Future<JobListItem> addJobListItemAndReturn(JobListItem jobListItem) async {
-    try {
-      final generatedId =
-          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
-
-      final savedJob = jobListItem.copyWith(id: generatedId);
-
-      // Track this job as locally added to prevent duplicate sync from listener
-      _locallyAddedJobIds.add(savedJob.id);
-
-      // Best-effort: auto-link a CLM Maps share URL pasted into the area
-      // field to the matching shareable map.
-      unawaited(_autoLinkMapFromArea(
-        jobId: savedJob.id,
-        area: savedJob.area,
-        date: savedJob.date,
-      ));
-
-      // Trigger Happy Sun sync if job is a Happy Sun-flagged type
-      if (_onJobListItemAdded != null &&
-          (JobTypeProvider.instance?.isHappySunService(savedJob.jobTypeId) ??
-              false)) {
-        debugPrint(
-            '🔄 JobListProvider: Triggering Happy Sun sync for ${savedJob.id}');
-        await _onJobListItemAdded!(savedJob);
-        debugPrint(
-            '✅ JobListProvider: Happy Sun sync completed for ${savedJob.id}');
+    final saved = () async {
+      try {
+        await _jobListService.setNewJobListItem(id, job);
+      } catch (error) {
+        _setActionError(error, 'save the new job "${job.client}"');
+        if (!_disposed) notifyListeners();
+        rethrow;
+      } finally {
+        _pendingAdds--;
+        _syncUnsavedCount();
       }
+    }();
+    // Callers may not listen; the failure is already reported above.
+    unawaited(saved.then((_) {}, onError: (_) {}));
 
-      return savedJob;
-    } catch (error) {
-      _error = error.toString();
-      notifyListeners();
-      rethrow;
+    // Best-effort: auto-link a CLM Maps share URL pasted into the area field
+    // to the matching shareable map.
+    unawaited(_autoLinkMapFromArea(jobId: id, area: job.area, date: job.date));
+
+    // A Happy Sun-flagged type gets its project. Not waited for: it needs
+    // nothing back, and the user should not sit through it.
+    final onAdded = _onJobListItemAdded;
+    if (onAdded != null &&
+        (JobTypeProvider.instance?.isHappySunService(job.jobTypeId) ??
+            false)) {
+      debugPrint('🔄 JobListProvider: Triggering Happy Sun sync for $id');
+      unawaited(Future.sync(() => onAdded(job)).then((_) {
+        debugPrint('✅ JobListProvider: Happy Sun sync completed for $id');
+      }, onError: (Object e) {
+        debugPrint('⚠️ JobListProvider: Happy Sun sync for $id failed: $e');
+      }));
     }
+
+    return (job: job, saved: saved);
   }
 
-  // Add job list item without allocation (skip schedule assignment)
-  Future<void> addJobListItemWithoutAllocation(JobListItem jobListItem) async {
-    try {
-      final generatedId =
-          await _jobListService.addJobListItem(jobListItem, jobListItem.date);
+  /// Adds a job; see [addJobListItemLocal]. Returns once it is on the Job
+  /// List, or — with [waitForServer] — once the server has it (the invoice
+  /// saga needs that: its link transaction reads the job from the server).
+  Future<JobListItem> addJobListItemAndReturn(JobListItem jobListItem,
+      {bool waitForServer = false}) async {
+    final added = addJobListItemLocal(jobListItem);
+    if (waitForServer) await added.saved;
+    return added.job;
+  }
 
-      // Best-effort: auto-link a CLM Maps share URL pasted into the area
-      // field to the matching shareable map.
-      unawaited(_autoLinkMapFromArea(
-        jobId: generatedId,
-        area: jobListItem.area,
-        date: jobListItem.date,
-      ));
-
-      // NOTE: Happy Sun sync will be triggered by the Firestore listener when it detects the new job
-      // This prevents issues with missing/temporary IDs
-    } catch (error) {
-      _error = error.toString();
-      notifyListeners();
-      rethrow;
-    }
+  /// Adds a job; see [addJobListItemLocal].
+  Future<void> addJobListItem(JobListItem jobListItem) async {
+    addJobListItemLocal(jobListItem);
   }
 
   /// Links an existing shareable map to a job list item.
@@ -851,6 +1082,7 @@ class JobListProvider extends ChangeNotifier {
           mapId,
           {'jobListItemId': jobId},
         );
+        await mapService.releaseJobListItemLink(jobId, keepMapId: mapId);
       } catch (e) {
         debugPrint('⚠️ Failed to update map jobListItemId: $e');
       }
@@ -939,6 +1171,8 @@ class JobListProvider extends ChangeNotifier {
           resolved.mapId,
           {'jobListItemId': jobId},
         );
+        await mapService.releaseJobListItemLink(jobId,
+            keepMapId: resolved.mapId);
       } catch (e) {
         debugPrint('🔗 [AutoLink] Failed to set jobListItemId on map: $e');
       }
@@ -992,13 +1226,13 @@ class JobListProvider extends ChangeNotifier {
 
       // Don't rethrow RangeErrors for moved jobs
       if (!error.toString().contains('RangeError')) {
-        _error = error.toString();
+        _setActionError(error, 'save your changes');
         notifyListeners();
         rethrow;
       } else {
         debugPrint(
             'JobListProvider: RangeError in immediate update, possibly job was moved');
-        _error = null; // Clear the error since this is expected for moved jobs
+        // Expected for moved jobs — nothing to report.
         notifyListeners();
       }
     }
@@ -1026,89 +1260,115 @@ class JobListProvider extends ChangeNotifier {
 
     // Create item with tracked changes, then overlay the VAT fields which
     // copyWithTrackedChange doesn't know about.
-    final trackedItem = originalItem.copyWithTrackedChange(
-      userId: currentUser.uid,
-      userDisplayName:
-          currentAppUser?.displayName ?? currentUser.email ?? 'Unknown User',
-      invoice: updatedItem.invoice != originalItem.invoice
-          ? updatedItem.invoice
-          : null,
-      amount:
-          updatedItem.amount != originalItem.amount ? updatedItem.amount : null,
-      client:
-          updatedItem.client != originalItem.client ? updatedItem.client : null,
-      jobStatusId: updatedItem.jobStatusId != originalItem.jobStatusId
-          ? updatedItem.jobStatusId
-          : null,
-      invoiceStatusId:
-          updatedItem.invoiceStatusId != originalItem.invoiceStatusId
-              ? updatedItem.invoiceStatusId
+    final trackedItem = originalItem
+        .copyWithTrackedChange(
+          userId: currentUser.uid,
+          userDisplayName: currentAppUser?.displayName ??
+              currentUser.email ??
+              'Unknown User',
+          invoice: updatedItem.invoice != originalItem.invoice
+              ? updatedItem.invoice
               : null,
-      jobTypeId: updatedItem.jobTypeId != originalItem.jobTypeId
-          ? updatedItem.jobTypeId
-          : null,
-      area: updatedItem.area != originalItem.area ? updatedItem.area : null,
-      quantity: updatedItem.quantity != originalItem.quantity
-          ? updatedItem.quantity
-          : null,
-      manDays: updatedItem.manDays != originalItem.manDays
-          ? updatedItem.manDays
-          : null,
-      date: !_areDatesEqual(
-              updatedItem.date, originalItem.date, updatedItem.jobTypeId)
-          ? updatedItem.date
-          : null,
-      collectionAddress:
-          updatedItem.collectionAddress != originalItem.collectionAddress
-              ? updatedItem.collectionAddress
+          amount: updatedItem.amount != originalItem.amount
+              ? updatedItem.amount
               : null,
-      collectionDate: !_areDatesEqual(updatedItem.collectionDate,
-              originalItem.collectionDate, updatedItem.jobTypeId)
-          ? updatedItem.collectionDate
-          : null,
-      specialInstructions:
-          updatedItem.specialInstructions != originalItem.specialInstructions
+          client: updatedItem.client != originalItem.client
+              ? updatedItem.client
+              : null,
+          contactPerson:
+              updatedItem.contactPerson != originalItem.contactPerson
+                  ? updatedItem.contactPerson
+                  : null,
+          contactPhone: updatedItem.contactPhone != originalItem.contactPhone
+              ? updatedItem.contactPhone
+              : null,
+          jobStatusId: updatedItem.jobStatusId != originalItem.jobStatusId
+              ? updatedItem.jobStatusId
+              : null,
+          invoiceStatusId:
+              updatedItem.invoiceStatusId != originalItem.invoiceStatusId
+                  ? updatedItem.invoiceStatusId
+                  : null,
+          jobTypeId: updatedItem.jobTypeId != originalItem.jobTypeId
+              ? updatedItem.jobTypeId
+              : null,
+          area: updatedItem.area != originalItem.area ? updatedItem.area : null,
+          quantity: updatedItem.quantity != originalItem.quantity
+              ? updatedItem.quantity
+              : null,
+          manDays: updatedItem.manDays != originalItem.manDays
+              ? updatedItem.manDays
+              : null,
+          date: !_areDatesEqual(
+                  updatedItem.date, originalItem.date, updatedItem.jobTypeId)
+              ? updatedItem.date
+              : null,
+          collectionAddress:
+              updatedItem.collectionAddress != originalItem.collectionAddress
+                  ? updatedItem.collectionAddress
+                  : null,
+          collectionDate: !_areDatesEqual(updatedItem.collectionDate,
+                  originalItem.collectionDate, updatedItem.jobTypeId)
+              ? updatedItem.collectionDate
+              : null,
+          needsFlyerCollection: updatedItem.needsFlyerCollection !=
+                  originalItem.needsFlyerCollection
+              ? updatedItem.needsFlyerCollection
+              : null,
+          // The appointment's booked slot (Add/Edit Job, the Date cell).
+          // Without these an edited time would revert here, and the
+          // Collection Schedule, which reads timeSlot first, never moves.
+          timeSlot: updatedItem.timeSlot != originalItem.timeSlot
+              ? updatedItem.timeSlot
+              : null,
+          timeSlots: updatedItem.timeSlots != originalItem.timeSlots
+              ? updatedItem.timeSlots
+              : null,
+          specialInstructions: updatedItem.specialInstructions !=
+                  originalItem.specialInstructions
               ? updatedItem.specialInstructions
               : null,
-      quantityDistributed:
-          updatedItem.quantityDistributed != originalItem.quantityDistributed
+          quantityDistributed: updatedItem.quantityDistributed !=
+                  originalItem.quantityDistributed
               ? updatedItem.quantityDistributed
               : null,
-      invoiceDetails: updatedItem.invoiceDetails != originalItem.invoiceDetails
-          ? updatedItem.invoiceDetails
-          : null,
-      reportAddresses:
-          updatedItem.reportAddresses != originalItem.reportAddresses
-              ? updatedItem.reportAddresses
+          invoiceDetails:
+              updatedItem.invoiceDetails != originalItem.invoiceDetails
+                  ? updatedItem.invoiceDetails
+                  : null,
+          reportAddresses:
+              updatedItem.reportAddresses != originalItem.reportAddresses
+                  ? updatedItem.reportAddresses
+                  : null,
+          whoToInvoice: updatedItem.whoToInvoice != originalItem.whoToInvoice
+              ? updatedItem.whoToInvoice
               : null,
-      whoToInvoice: updatedItem.whoToInvoice != originalItem.whoToInvoice
-          ? updatedItem.whoToInvoice
-          : null,
-      vehicleTrailerCombo:
-          updatedItem.vehicleTrailerCombo != originalItem.vehicleTrailerCombo
+          vehicleTrailerCombo: updatedItem.vehicleTrailerCombo !=
+                  originalItem.vehicleTrailerCombo
               ? updatedItem.vehicleTrailerCombo
               : null,
-      collectionJobId:
-          updatedItem.collectionJobId != originalItem.collectionJobId
-              ? updatedItem.collectionJobId
-              : null,
-      reminders:
-          !_areRemindersEqual(updatedItem.reminders, originalItem.reminders)
-              ? updatedItem.reminders
-              : null,
-      resolveJobStatusLabel: resolveJobStatusLabel,
-      resolveInvoiceStatusLabel: resolveInvoiceStatusLabel,
-      resolveQuantityLabel: resolveQuantityLabel,
-    ).copyWith(
-      // These fields are not tracked for change history but must always reflect
-      // the dialog's edit. copyWithTrackedChange doesn't carry them, so without
-      // this overlay they would silently revert to the original values.
-      amountExclVat: updatedItem.amountExclVat,
-      amountInclVat: updatedItem.amountInclVat,
-      priceIsInclVat: updatedItem.priceIsInclVat,
-      offloadingAddress: updatedItem.offloadingAddress,
-      toolsNeeded: updatedItem.toolsNeeded,
-    );
+          collectionJobId:
+              updatedItem.collectionJobId != originalItem.collectionJobId
+                  ? updatedItem.collectionJobId
+                  : null,
+          reminders:
+              !_areRemindersEqual(updatedItem.reminders, originalItem.reminders)
+                  ? updatedItem.reminders
+                  : null,
+          resolveJobStatusLabel: resolveJobStatusLabel,
+          resolveInvoiceStatusLabel: resolveInvoiceStatusLabel,
+          resolveQuantityLabel: resolveQuantityLabel,
+        )
+        .copyWith(
+          // These fields are not tracked for change history but must always reflect
+          // the dialog's edit. copyWithTrackedChange doesn't carry them, so without
+          // this overlay they would silently revert to the original values.
+          amountExclVat: updatedItem.amountExclVat,
+          amountInclVat: updatedItem.amountInclVat,
+          priceIsInclVat: updatedItem.priceIsInclVat,
+          offloadingAddress: updatedItem.offloadingAddress,
+          toolsNeeded: updatedItem.toolsNeeded,
+        );
 
     // Update locally first, then save
     updateJobListItemLocal(trackedItem);
@@ -1122,21 +1382,31 @@ class JobListProvider extends ChangeNotifier {
     }
   }
 
-  // Delete job list item
-  Future<void> deleteJobListItem(String id) async {
+  /// Deletes the job into the Recycle Bin — with its invoice indexes and its
+  /// Happy Sun project — and returns the bin entry id.
+  Future<String?> deleteJobListItem(String id) async {
     try {
-      // Find the item to get its date for proper monthly context
       final item = getJobListItemById(id);
-      final itemDate = item?.date ?? _currentMonth;
-
-      // Trigger callback before deletion (while item still exists)
-      if (item != null && _onJobListItemDeleted != null) {
-        await _onJobListItemDeleted!(item);
+      if (item == null) {
+        // Not loaded, so nothing to copy from; the month is a best guess.
+        await _jobListService.deleteJobListItem(id, _currentMonth);
+        return null;
       }
 
-      await _jobListService.deleteJobListItem(id, itemDate);
+      final projectRef = await _happySunProjectRef?.call(item);
+      final entryId = await _jobListService.deleteJobListItemToBin(
+        item,
+        extraRelated: [if (projectRef != null) projectRef],
+      );
+
+      // Happy Sun's own clean-up (offline queue, local list), now that the
+      // copy is safe in the bin.
+      if (_onJobListItemDeleted != null) {
+        await _onJobListItemDeleted!(item);
+      }
+      return entryId;
     } catch (error) {
-      _error = error.toString();
+      _setActionError(error, 'delete the job');
       notifyListeners();
       rethrow;
     }
@@ -1165,11 +1435,23 @@ class JobListProvider extends ChangeNotifier {
       final itemDate = item?.date ?? _currentMonth;
       await _jobListService.updateJobStatus(id, newStatus, itemDate);
     } catch (error) {
-      _error = error.toString();
+      _setActionError(error, 'change the job status');
       notifyListeners();
       rethrow;
     }
   }
+
+  /// Status and job-type names for [JobListSearch], resolved per search so
+  /// renamed labels are found by their current name.
+  static Iterable<String?> _searchLabels(JobListItem item) => [
+        JobListStatusProvider.instance
+            ?.getStatusById(item.jobStatusId)
+            ?.label,
+        InvoiceStatusProvider.instance
+            ?.getStatusById(item.invoiceStatusId)
+            ?.label,
+        JobTypeProvider.instance?.getJobTypeLabel(item.jobTypeId),
+      ];
 
   // Set search query with debouncing
   void setSearchQuery(String query) {
@@ -1362,6 +1644,7 @@ class JobListProvider extends ChangeNotifier {
   // Clear error
   void clearError() {
     _error = null;
+    _errorDetail = null;
     notifyListeners();
   }
 
@@ -1494,58 +1777,72 @@ class JobListProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _debounceTimer?.cancel();
     _searchDebounceTimer?.cancel();
+    _reconnectTimer?.cancel();
+    _healthyTimer?.cancel();
+    _syncUpTimer?.cancel();
+    SyncStatus.instance.reportListenerUp('jobList');
+    SyncStatus.instance.reportPendingWrites('jobList', 0);
+    _retryTimer?.cancel();
     _jobListSubscription?.cancel();
     _isSearchingNotifier.dispose();
+    unsavedCount.dispose();
     super.dispose();
   }
 
   // ── Duplicate client name check ──────────────────────────────────────────
 
-  /// Per-session cache: monthKey → lowercase client name set.
-  /// Populated on first call for a given month and reused within the session.
-  final Map<String, Set<String>> _clientNameCache = {};
+  /// monthKey → that month's jobs, for months other than the loaded one.
+  /// Only what the typing hint reads; a save re-reads with `fresh: true`.
+  final Map<String, List<JobListItem>> _monthItemsCache = {};
 
-  /// Returns a set of lower-cased client names for [month].
+  /// Jobs in [date]'s month whose client name is [client], compared by
+  /// [jobListClientKey] — the key the schedule, maps and Cloud Files pair
+  /// on, so two such jobs would be indistinguishable to them.
   ///
-  /// • Same month as [currentMonth]: uses the already-loaded in-memory list
-  ///   (0 extra reads).
-  /// • Different month: fetches ONLY the `client` field from Firestore once,
-  ///   caches the result for the rest of the session.
-  Future<Set<String>> fetchClientNamesForMonth(DateTime month) async {
-    final isCurrent =
-        _currentMonth.year == month.year && _currentMonth.month == month.month;
-    if (isCurrent) {
-      return allJobListItems
-          .map((e) => e.client.trim().toLowerCase())
-          .where((c) => c.isNotEmpty)
-          .toSet();
+  /// • Loaded month → the live in-memory list (0 extra reads).
+  /// • Other month → one read of that month, cached for the typing hint.
+  ///   [fresh] bypasses the cache: a save must see jobs other people added
+  ///   since.
+  ///
+  /// [excludeId] is the job being edited, which never clashes with itself.
+  Future<List<JobListItem>> findJobsWithClientName(
+    String client,
+    DateTime date, {
+    String excludeId = '',
+    bool fresh = false,
+  }) async {
+    final needle = jobListClientKey(client);
+    if (needle.isEmpty) return const [];
+
+    final List<JobListItem> items;
+    final isLoaded =
+        _currentMonth.year == date.year && _currentMonth.month == date.month;
+    if (isLoaded) {
+      items = allJobListItems;
+    } else {
+      final key = _jobListService.getMonthlyDocumentId(date);
+      final cached = fresh ? null : _monthItemsCache[key];
+      if (cached != null) {
+        items = cached;
+      } else {
+        final snapshot =
+            await _jobListService.getJobListItemsCollectionForMonth(date).get();
+        items = [
+          for (final d in snapshot.docs)
+            if (d.data() is Map<String, dynamic>)
+              JobListItem.fromMap(d.id, d.data() as Map<String, dynamic>),
+        ];
+        _monthItemsCache[key] = items;
+      }
     }
 
-    final key = _jobListService.getMonthlyDocumentId(month);
-    if (_clientNameCache.containsKey(key)) return _clientNameCache[key]!;
-
-    final snapshot =
-        await _jobListService.getJobListItemsCollectionForMonth(month).get();
-    final names = snapshot.docs
-        .map((d) {
-          final data = d.data();
-          if (data is Map<String, dynamic>) {
-            return (data['client'] as String? ?? '').trim().toLowerCase();
-          }
-          return '';
-        })
-        .where((c) => c.isNotEmpty)
-        .toSet();
-
-    _clientNameCache[key] = names;
-    return names;
-  }
-
-  /// Invalidate the cached client names for [month] (call after adding a job).
-  void invalidateClientNameCache(DateTime month) {
-    final key = _jobListService.getMonthlyDocumentId(month);
-    _clientNameCache.remove(key);
+    return [
+      for (final item in items)
+        if (item.id != excludeId && jobListClientKey(item.client) == needle)
+          item,
+    ];
   }
 }

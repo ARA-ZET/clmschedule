@@ -1,3 +1,4 @@
+import 'package:clmschedule/utils/text_search.dart';
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -74,13 +75,15 @@ class InventoryProvider extends ChangeNotifier {
 
     // Filter by search query
     if (_searchQuery.isNotEmpty) {
-      final query = _searchQuery.toLowerCase();
-      filtered = filtered.where((tool) {
-        return tool.name.toLowerCase().contains(query) ||
-            tool.toolId.toLowerCase().contains(query) ||
-            tool.description.toLowerCase().contains(query) ||
-            (tool.currentProject?.toLowerCase().contains(query) ?? false);
-      }).toList();
+      final search = TextSearch(_searchQuery);
+      filtered = filtered
+          .where((tool) => search.matches([
+                tool.name,
+                tool.toolId,
+                tool.description,
+                tool.currentProject,
+              ]))
+          .toList();
     }
 
     return filtered;

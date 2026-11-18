@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
@@ -90,7 +91,7 @@ class _XeroContactDetailScreenState
     final saved = await showXeroContactFormDialog(context, existing: contact);
     if (saved == null || !mounted) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Text('Updated ${saved.displayName} in Xero'),
         backgroundColor: Colors.green,

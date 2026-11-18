@@ -23,6 +23,7 @@ class JobListPreferences {
         'area': true,
         'quantity': true,
         'manDays': true,
+        'flyerCollection': true,
         'collectionAddress': true,
         'specialInstructions': true,
         'collectionDate': true,

@@ -3,6 +3,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/map_instruction.dart';
 import '../services/reference_cache_service.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 
 const String _kCollectionName = 'mapInstructions';
 
@@ -98,7 +100,11 @@ class MapInstructionProvider extends ChangeNotifier {
 
   Future<void> deleteInstruction(String id) async {
     try {
-      await _firestore.collection(_kCollectionName).doc(id).delete();
+      await RecycleBinWriter(_firestore).moveDocToBin(
+        _firestore.collection(_kCollectionName).doc(id),
+        type: RecycleBinType.mapInstruction,
+        label: (d) => binLabel(d, 'map instruction'),
+      );
       await ReferenceCacheService.bumpVersion(_kCollectionName);
       _instructions.removeWhere((i) => i.id == id);
       notifyListeners();

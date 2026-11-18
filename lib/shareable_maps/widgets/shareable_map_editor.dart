@@ -1,3 +1,5 @@
+import 'package:clmschedule/utils/text_search.dart';
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +14,8 @@ import 'package:web/web.dart' as web show document;
 import '../../config/flavor_config.dart';
 import '../../models/custom_polygon.dart';
 import '../utils/waypoint_spatial_index.dart';
+import '../services/map_photos.dart' show MapPhoto;
+import 'map_photo_viewer.dart';
 import '../../models/work_area.dart';
 import '../../models/work_suburb.dart';
 import '../../providers/auth_provider.dart';
@@ -19,11 +23,20 @@ import '../../providers/schedule_provider.dart';
 import '../../providers/unfinished_work_areas_provider.dart';
 import '../providers/shareable_map_provider.dart';
 import '../providers/map_gesture_provider.dart';
+import '../providers/map_letterbox_write_provider.dart';
+import '../../services/client_map_allocation_service.dart';
+import '../../track_editor/widgets/te_letterbox_update_dialog.dart';
 import '../models/map_layer.dart';
+import '../models/map_point.dart';
 import '../models/shareable_map.dart';
 import '../services/map_bitmap_cache.dart';
+import '../../utils/map_pin_icons.dart'
+    show MapPinIcons, MapPinLayout, MapPinStyle, PinPlacement;
 import '../../utils/route_marker_icons.dart';
 import '../../utils/vertex_delete_key.dart';
+import '../../undo/undo_actions.dart';
+import '../../undo/undo_history.dart';
+import '../../undo/undo_shortcuts.dart';
 import '../services/map_link_service.dart';
 import '../../widgets/linked_map_polygon_picker.dart';
 import '../adapters/client_area_adapter.dart';
@@ -33,6 +46,7 @@ import '../adapters/work_area_adapter.dart';
 import '../adapters/work_suburbs_adapter.dart';
 import 'area_estimates_table_panel.dart';
 import 'client_map_allocation_panel.dart';
+import '../providers/schedule_allocation_controller.dart';
 import 'regular_client_allocation_panel.dart';
 import 'map_layers_sidebar.dart';
 import 'cloud_track_rename_dialog.dart';
@@ -93,7 +107,7 @@ class _ShareableMapEditorState
     // auto-save still fires, and re-entering the editor always goes through
     // loadFromAdapter, which starts the listener again.
     ref.read(shareableMapRiverpod).pauseRealtimeSync();
-    clientMapAllocationPanelVisible.value = false;
+    closeScheduleAllocation(quiet: true);
     super.dispose();
   }
 
@@ -149,10 +163,18 @@ class _ShareableMapEditorState
               provider.adapter is ClientAreaCollectionAdapter
                   ? provider.adapter as ClientAreaCollectionAdapter
                   : null;
-          return Stack(
+          final undoKey = provider.undoKey;
+          final stack = Stack(
             children: [
               const MapViewWidget(),
-              if (caps.canManageLayers) const MapSidebarWidget(),
+              // The schedule allocation panel takes the left side instead.
+              if (caps.canManageLayers)
+                ValueListenableBuilder<ScheduleAllocationController?>(
+                  valueListenable: scheduleAllocation,
+                  builder: (_, allocation, __) => allocation != null
+                      ? const SizedBox.shrink()
+                      : const MapSidebarWidget(),
+                ),
               if (isWorkAreaEditor && !mobileViewer)
                 const _WorkAreaTableSidebar(),
               if (clientAreaAdapter != null && !mobileViewer)
@@ -165,12 +187,12 @@ class _ShareableMapEditorState
                   adapter: provider.adapter as RegularClientMapAdapter,
                 ),
               if (canEditInThisView && canAllocateCurrentMap(provider))
-                ValueListenableBuilder<bool>(
-                  valueListenable: clientMapAllocationPanelVisible,
-                  builder: (_, visible, __) => visible
+                ValueListenableBuilder<ScheduleAllocationController?>(
+                  valueListenable: scheduleAllocation,
+                  builder: (_, allocation, __) => allocation != null
                       ? ClientMapAllocationPanel(
-                          // A different map is a fresh panel.
-                          key: ValueKey(provider.currentMap!.id),
+                          key: ObjectKey(allocation),
+                          controller: allocation,
                         )
                       : const SizedBox.shrink(),
                 ),
@@ -302,6 +324,14 @@ class _ShareableMapEditorState
                   ),
                 ),
             ],
+          );
+          if (undoKey == null || !canEditInThisView || caps.readOnly) {
+            return stack;
+          }
+          return UndoShortcuts(
+            undoKey: undoKey,
+            interceptUndo: provider.undoInsideCurrentEdit,
+            child: stack,
           );
         },
       ),
@@ -518,24 +548,8 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
         const SizedBox(width: 4),
         // Map tools
         if (showAdminTools) ...[
-          _mapAwareAction(
-            isMaps: isMaps,
-            icon: Icons.undo,
-            label: '',
-            tooltip: 'Undo',
-            onPressed: () {
-              // TODO: Implement undo
-            },
-          ),
-          _mapAwareAction(
-            isMaps: isMaps,
-            icon: Icons.redo,
-            label: '',
-            tooltip: 'Redo',
-            onPressed: () {
-              // TODO: Implement redo
-            },
-          ),
+          if (provider.undoKey != null)
+            _undoRedoActions(isMaps, provider, provider.undoKey!),
           const SizedBox(width: 8),
         ],
         // Work areas import toggle (admin only — hidden in Maps viewer mode)
@@ -552,15 +566,18 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
           ),
         // Allocate this client map's areas to distributors on the schedule.
         if (showAdminTools && canAllocateCurrentMap(provider))
-          ValueListenableBuilder<bool>(
-            valueListenable: clientMapAllocationPanelVisible,
-            builder: (_, visible, __) => _mapAwareAction(
+          ValueListenableBuilder<ScheduleAllocationController?>(
+            valueListenable: scheduleAllocation,
+            builder: (_, allocation, __) => _mapAwareAction(
               isMaps: isMaps,
               icon: Icons.assignment_ind_outlined,
-              label: 'Allocate',
-              tooltip: 'Allocate areas to distributors on the schedule',
-              selected: visible,
-              onPressed: () => clientMapAllocationPanelVisible.value = !visible,
+              label: 'Schedule allocation',
+              tooltip: allocation != null
+                  ? 'Back to the map\'s own colours'
+                  : 'Colour the map by distributor and allocate areas on '
+                      'the schedule',
+              selected: allocation != null,
+              onPressed: () => toggleScheduleAllocation(provider),
             ),
           ),
         // Import button (admin only — hidden in Maps viewer mode)
@@ -595,7 +612,7 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
               // which of them this job's distributor is being sent to.
               await provider.refreshReferenceLayer();
               if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context).showToast(
                   SnackBar(
                     content: Text('Map "${result.mapName}" linked'),
                     backgroundColor: Colors.green,
@@ -768,12 +785,10 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
               ({CustomPolygon polygon, String layerId, int index})>(
             optionsBuilder: (TextEditingValue textEditingValue) {
               if (textEditingValue.text.isEmpty) return allPolygons;
-              final query = textEditingValue.text.toLowerCase();
-              return allPolygons.where((entry) {
-                final name = entry.polygon.name.toLowerCase();
-                final desc = entry.polygon.description.toLowerCase();
-                return name.contains(query) || desc.contains(query);
-              });
+              return TextSearch(textEditingValue.text).rank(
+                allPolygons,
+                (entry) => [entry.polygon.name, entry.polygon.description],
+              );
             },
             displayStringForOption: (option) => option.polygon.name.isNotEmpty
                 ? option.polygon.name
@@ -944,7 +959,7 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
   ) async {
     final layer = provider.referenceLayer;
     if (layer == null || layer.polygons.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('The linked map has no polygons left to add'),
         ),
@@ -961,12 +976,49 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
     if (picked == null || picked.isEmpty) return;
     final added = provider.adoptReferenceLayerPolygons(picked);
     if (!context.mounted || added == 0) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Text('$added polygon${added == 1 ? '' : 's'} added to the '
             'work areas'),
         backgroundColor: Colors.green,
       ),
+    );
+  }
+
+  /// Undo / Redo for this map's own history. While drawing or editing
+  /// vertices, Undo first steps back inside that edit.
+  Widget _undoRedoActions(
+      bool isMaps, ShareableMapProvider provider, UndoKey key) {
+    final history = ref.watch(undoHistoryRiverpod(key));
+    final inEdit = provider.isDrawing || provider.isEditingVertices;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _mapAwareAction(
+          isMaps: isMaps,
+          icon: Icons.undo,
+          label: '',
+          tooltip: history.canUndo
+              ? 'Undo: ${history.undoLabel} (Ctrl+Z)'
+              : 'Nothing to undo',
+          onPressed: history.canUndo || inEdit
+              ? () {
+                  if (provider.undoInsideCurrentEdit()) return;
+                  runUndo(context, history);
+                }
+              : null,
+        ),
+        _mapAwareAction(
+          isMaps: isMaps,
+          icon: Icons.redo,
+          label: '',
+          tooltip: history.canRedo
+              ? 'Redo: ${history.redoLabel} (Ctrl+Shift+Z)'
+              : 'Nothing to redo',
+          onPressed:
+              history.canRedo ? () => runRedo(context, history) : null,
+        ),
+      ],
     );
   }
 
@@ -1044,7 +1096,7 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
       final monthKey = adapter.monthKey;
       if (docId == null) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             const SnackBar(content: Text('Save the map first before sharing')),
           );
         }
@@ -1061,7 +1113,7 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
 
       await Clipboard.setData(ClipboardData(text: url));
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Row(
               children: [
@@ -1076,7 +1128,7 @@ class _MapEditorAppBarState extends riverpod.ConsumerState<MapEditorAppBar> {
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Failed to create share link: $e')),
         );
       }
@@ -1303,6 +1355,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     int zIndexInt = 0,
     InfoWindow infoWindow = InfoWindow.noText,
     VoidCallback? onTap,
+    ValueChanged<LatLng>? onDragStart,
     ValueChanged<LatLng>? onDrag,
     ValueChanged<LatLng>? onDragEnd,
   }) {
@@ -1319,6 +1372,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         zIndex: zIndexInt,
         infoWindow: infoWindow,
         onTap: onTap,
+        onDragStart: onDragStart,
         onDrag: onDrag,
         onDragEnd: onDragEnd,
       );
@@ -1336,6 +1390,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       zIndexInt: zIndexInt,
       infoWindow: infoWindow,
       onTap: onTap,
+      onDragStart: onDragStart,
       onDrag: onDrag,
       onDragEnd: onDragEnd,
     );
@@ -1400,7 +1455,11 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
   /// express a stop number — each numbered pin is its own bitmap. They are
   /// built off the build pass and cached by (number, colour), so a rebuild
   /// with an unchanged run costs nothing.
-  void _ensureRoutePinIcons(ShareableMap? map) {
+  ///
+  /// With a point colour override (the schedule allocation view) every
+  /// point gets a pin in the colour it returns, numbered when it is routed.
+  void _ensureRoutePinIcons(
+      ShareableMap? map, Color Function(MapPoint point)? colourOverride) {
     if (map == null) return;
 
     final specs = <String, ({String label, Color color})>{};
@@ -1408,14 +1467,16 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     for (final layer in map.layers) {
       for (final point in layer.points) {
         final sequence = point.routeSequence;
-        if (sequence == null) continue;
-        specs[point.id] = (label: '$sequence', color: point.color);
+        if (sequence == null && colourOverride == null) continue;
+        final label = sequence == null ? '' : '$sequence';
+        final color = colourOverride?.call(point) ?? point.color;
+        specs[point.id] = (label: label, color: color);
         sb
           ..write(point.id)
           ..write(':')
-          ..write(sequence)
+          ..write(label)
           ..write(':')
-          ..write(point.color.toARGB32())
+          ..write(color.toARGB32())
           ..write(';');
       }
     }
@@ -1437,6 +1498,100 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     RouteMarkerIcons.batch(specs).then((icons) {
       if (!mounted || _routePinKey != key) return;
       setState(() => _routePinIcons = icons);
+    });
+  }
+
+  // ── Descriptive pins ───────────────────────────────────────────────────
+
+  /// The provider's descriptive pins, rasterised: picture, anchor and
+  /// stacking per point id. Empty until the pictures are drawn.
+  Map<String, PlacedPin> _placedPins = const {};
+
+  /// Signature of the pins [_placedPins] was built for, so rasterising only
+  /// reruns when a pin changes (not when a point merely moves).
+  String _placedPinsKey = '';
+
+  /// Signature of the pins, spots and zoom last laid out, so the layout
+  /// only reruns when one of them changes.
+  String _pinLayoutKey = '';
+
+  /// The zoom step the pins were last laid out for (see [_pinLayoutZoom]).
+  double? _placedPinsZoom;
+
+  /// [zoom] rounded down to a half step: pins are laid out once per step,
+  /// and laying out for slightly less zoom than shown keeps them apart.
+  static double _pinLayoutZoom(double zoom) => (zoom * 2).floorToDouble() / 2;
+
+  /// After the camera settles, lay the pins out again if the zoom moved to
+  /// another step — close pins' tags collide when zoomed out.
+  void _relayoutPinsOnZoom(ShareableMapProvider provider) {
+    final zoom = _currentCamera?.zoom;
+    if (provider.pointPinRule == null || zoom == null) return;
+    if (_pinLayoutZoom(zoom) != _placedPinsZoom) setState(() {});
+  }
+
+  /// Work out the descriptive pin of every point [rule] covers, turn close
+  /// ones so their tags do not cover each other at [zoom]
+  /// ([MapPinLayout]), and rasterise them (once per distinct picture,
+  /// shared with Print Map's cache) off the build pass.
+  void _ensurePlacedPins(ShareableMap? map, PointPinRule? rule, double zoom) {
+    if (map == null) return;
+    final step = _pinLayoutZoom(zoom);
+    final raw = <(MapPoint, ({MapPinStyle style, int zIndex}))>[];
+    final inputs = StringBuffer('${identityHashCode(rule)}|$step|');
+    if (rule != null) {
+      for (final layer in map.layers) {
+        if (!rule.layerIds.contains(layer.id)) continue;
+        for (final point in layer.points) {
+          final pin = rule.pinFor(point);
+          if (pin == null) continue;
+          raw.add((point, pin));
+          inputs.write('${point.id}:${pin.style.key}:${pin.zIndex}:'
+              '${point.position.latitude},${point.position.longitude};');
+        }
+      }
+    }
+    final inputKey = inputs.toString();
+    if (inputKey == _pinLayoutKey) return;
+    _pinLayoutKey = inputKey;
+    _placedPinsZoom = step;
+
+    final placements = MapPinLayout.arrange(
+      [for (final (point, pin) in raw) (point.id, point.position, pin.style)],
+      step,
+    );
+    final specs = <String, ({MapPinStyle style, int zIndex})>{};
+    final sb = StringBuffer('${identityHashCode(rule)}|');
+    for (final (point, pin) in raw) {
+      final style =
+          pin.style.withPlacement(placements[point.id] ?? PinPlacement.up);
+      specs[point.id] = (style: style, zIndex: pin.zIndex);
+      sb.write('${point.id}:${style.key}:${pin.zIndex};');
+    }
+    final key = sb.toString();
+    if (key == _placedPinsKey) return;
+    _placedPinsKey = key;
+
+    if (specs.isEmpty) {
+      if (_placedPins.isNotEmpty) {
+        _placedPins = const {};
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) setState(() {});
+        });
+      }
+      return;
+    }
+    final styles = {for (final p in specs.values) p.style};
+    Future.wait(styles.map(MapPinIcons.bitmap)).then((_) {
+      if (!mounted || _placedPinsKey != key) return;
+      setState(() => _placedPins = {
+            for (final e in specs.entries)
+              if (MapPinIcons.cached(e.value.style) case final pin?)
+                e.key: PlacedPin(pin.$1, pin.$2, e.value.zIndex),
+          });
+    }).catchError((Object e) {
+      // Category icons stand in.
+      debugPrint('[MapView] descriptive pins failed: $e');
     });
   }
 
@@ -1520,7 +1675,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
           onTap: () {
             if (ref.read(mapGestureRiverpod).isHeld) return;
             if (editingPoints.length <= minPoints) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showToast(
                 SnackBar(
                   content: Text('Minimum $minPoints vertices required'),
                   duration: const Duration(seconds: 2),
@@ -1537,6 +1692,8 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
             }
             _showDeleteVertexDialog(context, provider, i);
           },
+          // One Ctrl+Z undoes the whole drag while still editing.
+          onDragStart: (_) => provider.beginEditingPointDrag(),
           onDrag: (newPosition) => provider.updateEditingPoint(i, newPosition),
           onDragEnd: (newPosition) =>
               provider.updateEditingPoint(i, newPosition),
@@ -1776,7 +1933,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     _dismissInfoWindow();
     final added = provider.adoptReferenceLayerPolygons([polygon]);
     if (added == 0) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Text('"${polygon.name}" added to the work areas'),
         backgroundColor: Colors.green,
@@ -1902,16 +2059,19 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     if (provider.isDrawing || provider.isEditingVertices) return;
     _dismissInfoWindow();
     final layerId = provider.cloudWaypointLayerForFolder(folderPath)?.id ?? '';
-    provider.openInfoWindow(InfoWindowData(
-      elementId: wpt.id,
-      layerId: layerId,
-      title: wpt.name,
-      description: wpt.description,
-      subtitle:
-          '${wpt.position.latitude.toStringAsFixed(6)}, ${wpt.position.longitude.toStringAsFixed(6)}',
-      type: 'point',
-      anchor: wpt.position,
-    ));
+    provider.openWaypointInfoWindow(
+      InfoWindowData(
+        elementId: wpt.id,
+        layerId: layerId,
+        title: wpt.name,
+        description: wpt.description,
+        subtitle:
+            '${wpt.position.latitude.toStringAsFixed(6)}, ${wpt.position.longitude.toStringAsFixed(6)}',
+        type: 'point',
+        anchor: wpt.position,
+      ),
+      sourceFile: wpt.sourceFile,
+    );
   }
 
   /// Centroid of a list of LatLng points.
@@ -2017,6 +2177,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
     required Map<PointCategory, BitmapDescriptor>? pointIcons,
     required Map<PointCategory, BitmapDescriptor>? waypointPointIcons,
     required Map<String, BitmapDescriptor> pointIconOverrides,
+    required Map<String, PlacedPin> placedPins,
   }) {
     final layerId = layer.id as String;
     final pointCount = (layer.points as List).length;
@@ -2032,10 +2193,14 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
             provider.drawingMode == DrawingMode.polyline ||
             provider.drawingMode == DrawingMode.point);
 
-    // The pin count is part of the key so markers rebuild once the numbered
-    // bitmaps finish rasterising, which happens after the first build.
+    // The pin set is part of the key so markers rebuild once the numbered
+    // bitmaps finish rasterising, which happens after the first build. Its
+    // identity, not just its size: recolouring pins (schedule allocation)
+    // hands over a new set of the same size.
     final key = '$pointCount|$isVisible|$canDrag|$selected|$isWaypoint'
-        '|rp:${pointIconOverrides.length}';
+        '|rp:${pointIconOverrides.length}:'
+        '${identityHashCode(pointIconOverrides)}'
+        '|pp:${identityHashCode(placedPins)}';
 
     // Cloud waypoint layers with a spatial index render exclusively through
     // the viewport-culled path (_viewportWaypointMarkers) and are hit-tested
@@ -2075,6 +2240,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
           : null,
       pointIcons: isWaypoint ? (waypointPointIcons ?? pointIcons) : pointIcons,
       pointIconOverrides: pointIconOverrides,
+      placedPins: placedPins,
       useAdvancedMarkers: _useAdvancedMarkers,
       markerVisible: isVisible,
     ) as List<Marker>;
@@ -2287,6 +2453,16 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         .toList()
       ..sort((a, b) => a.order.compareTo(b.order));
 
+    // Polygons as drawn: restyled by a view (schedule allocation) without
+    // touching the map itself, so the restyle is never saved.
+    final restyle = provider.polygonStyleOverride;
+    final polygonLayers = restyle == null
+        ? visibleLayers
+        : [
+            for (final l in visibleLayers)
+              l.copyWith(polygons: l.polygons.map(restyle).toList()),
+          ];
+
     // All layers sorted by draw order (including hidden ones for stable
     // marker IDs — hidden layers use markerVisible: false so Google Maps
     // hides them natively instead of removing from DOM).
@@ -2300,6 +2476,10 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
             provider.showSuburbsOverlay)
         ? ref.watch(scheduleRiverpod)
         : null;
+    // The Maps flavor only starts these streams from the gallery gate, so a
+    // map opened straight from /admin/map or /map/{code} would have none.
+    // Idempotent, and it never notifies synchronously, so safe in build.
+    overlaySchedule?.initializeWorkAreaStreams();
     final overlayWorkAreas = overlaySchedule?.workAreas ?? const <WorkArea>[];
     final overlaySuburbs = overlaySchedule?.workSuburbs ?? const <WorkSuburb>[];
 
@@ -2336,7 +2516,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         'sub:${suburb.id}:${suburb.polygonPoints.length}:${suburb.color.toARGB32()};',
       );
     }
-    for (final l in visibleLayers) {
+    for (final l in polygonLayers) {
       polyKeyBuf.write('${l.id}:${l.polygons.length}:');
       for (final polygon in l.polygons) {
         polyKeyBuf.write(
@@ -2357,7 +2537,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       polygons = _stablePolygons!;
     } else {
       final polys = <Polygon>{
-        ...visibleLayers.expand((layer) => layer.getGoogleMapsPolygons(
+        ...polygonLayers.expand((layer) => layer.getGoogleMapsPolygons(
               selectedElementId: provider.selectedElementId,
               editingElementId: provider.editingElementId,
               // Null during drawing so taps fall through to the map and
@@ -2531,7 +2711,9 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         !provider.capabilities.readOnly &&
         !provider.isDrawing &&
         !provider.isEditingVertices;
-    _ensureRoutePinIcons(map);
+    _ensureRoutePinIcons(map, provider.pointColourOverride);
+    _ensurePlacedPins(map, provider.pointPinRule,
+        _currentCamera?.zoom ?? map.defaultZoom);
     final pointIcons = _bitmapCache.pointCategoryIcons;
     final waypointIcon = _bitmapCache.waypoint;
     // Build a special pointIcons map for the cloud waypoints layer
@@ -2597,6 +2779,8 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       // cached Set is returned, and _markersForLayer never runs — leaving
       // the pins permanently unnumbered.
       ..write('|rp:${_routePinIcons.length}:$_routePinKey'.hashCode)
+      // Same for the descriptive pins, which also land a build late.
+      ..write('|pp:${identityHashCode(_placedPins)}')
       ..write('|drag:$isDraggable|');
     for (final p in provider.lassoPoints) {
       markerKeySb
@@ -2633,6 +2817,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
               pointIcons: pointIcons,
               waypointPointIcons: waypointPointIcons,
               pointIconOverrides: _routePinIcons,
+              placedPins: _placedPins,
             );
             totalRenderedMarkers += result.length;
             if (_layerMarkerCacheReused) {
@@ -2713,7 +2898,10 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                   // markers (letterbox.png) once the camera settles.
                   // This is cheap: spatial index query is O(viewport_cells)
                   // regardless of total waypoint count.
-                  onCameraIdle: () => _scheduleViewportRefresh(provider),
+                  onCameraIdle: () {
+                    _scheduleViewportRefresh(provider);
+                    _relayoutPinsOnZoom(provider);
+                  },
                   webGestureHandling:
                       ref.watch(mapGestureRiverpod).gestureHandling,
                   onTap: (position) {
@@ -2812,6 +3000,9 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
                                 !provider.capabilities.readOnly,
                             onDismiss: _dismissInfoWindow,
                             onStyle: canEditInThisView &&
+                                    provider.adapter
+                                        is! RegularClientMapAdapter &&
+                                    scheduleAllocation.value == null &&
                                     (iw.type == 'polygon' ||
                                         iw.type == 'polyline')
                                 ? () {
@@ -3086,8 +3277,9 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
       }
     }
 
-    // Preview work areas (shown when the work area picker is open).
-    if (provider.isWorkAreaPickerVisible) {
+    // Preview work areas (import picker) — only while that picker layer's
+    // eye toggle is on, mirroring what's drawn so hidden ones aren't hit.
+    if (provider.isWorkAreaPickerVisible && provider.pickerWorkAreasVisible) {
       final schedule = ref.read(scheduleRiverpod);
       for (final wa in schedule.workAreas) {
         if (provider.isWorkAreaImported(wa.name)) continue;
@@ -3097,6 +3289,25 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
             elementId: 'preview_wa_${wa.name}',
             layerId: '__preview_work_areas__',
             type: 'preview_work_area',
+          ));
+        }
+      }
+    }
+
+    // Preview suburbs (import picker). Their tap handler opens the suburb
+    // overlay info window, so they share the overlay_suburb hit type.
+    if (provider.isWorkAreaPickerVisible && provider.pickerSuburbsVisible) {
+      final schedule = ref.read(scheduleRiverpod);
+      for (final suburb in schedule.workSuburbs) {
+        if (provider.isSuburbImported(suburb.name)) continue;
+        final elementId = 'overlay_suburb_${suburb.id}';
+        if (hits.any((h) => h.elementId == elementId)) continue;
+        if (suburb.polygonPoints.length >= 3 &&
+            _pointInPolygon(tapLatLng, suburb.polygonPoints)) {
+          hits.add((
+            elementId: elementId,
+            layerId: '__overlay_suburbs__',
+            type: 'overlay_suburb',
           ));
         }
       }
@@ -3488,11 +3699,11 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
           '${notice.total} letterboxes in total');
     }
     // Replace, never queue: a notice still on screen is already out of date.
-    final messenger = ScaffoldMessenger.of(context)..hideCurrentSnackBar();
+    final messenger = ScaffoldMessenger.of(context)..hideCurrentToast();
 
     final untrusted = notice.results.where((r) => !r.count.isTrusted).length;
     if (untrusted == 0) {
-      messenger.showSnackBar(
+      messenger.showToast(
         SnackBar(
           content: Text(message.toString()),
           duration: const Duration(seconds: 5),
@@ -3509,7 +3720,7 @@ class _MapViewWidgetState extends riverpod.ConsumerState<MapViewWidget> {
         ? 'Uses unverified letterbox data — needs admin review before quoting.'
         : '$untrusted of ${notice.results.length} areas use unverified '
             'letterbox data — needs admin review before quoting.';
-    messenger.showSnackBar(
+    messenger.showToast(
       SnackBar(
         backgroundColor: kUnverifiedLetterboxColor,
         duration: const Duration(seconds: 12),
@@ -3886,7 +4097,7 @@ class MapDrawingControlsWidget extends riverpod.ConsumerWidget {
                                   }
 
                                   provider.finishLassoSelect();
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  ScaffoldMessenger.of(context).showToast(
                                     SnackBar(
                                       content: Text(addedCount == 0
                                           ? 'No areas found inside the lasso'
@@ -4198,7 +4409,7 @@ class MapEditorDialogs {
                 if (!dialogContext.mounted) return;
                 Navigator.pop(dialogContext);
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  ScaffoldMessenger.of(context).showToast(SnackBar(
                     content: Text(shown
                         ? 'Saved "$name" to $cloudFolder'
                         : 'Saved "$name" to $cloudFolder — it will show '
@@ -4433,9 +4644,8 @@ class MapEditorDialogs {
                 Autocomplete<String>(
                   optionsBuilder: (textEditingValue) {
                     if (textEditingValue.text.isEmpty) return workAreaNames;
-                    final q = textEditingValue.text.toLowerCase();
-                    return workAreaNames
-                        .where((n) => n.toLowerCase().contains(q));
+                    return TextSearch(textEditingValue.text)
+                        .rank(workAreaNames, (n) => [n]);
                   },
                   fieldViewBuilder: (ctx, controller, focusNode, onSubmitted) {
                     controller.addListener(() {
@@ -4466,9 +4676,8 @@ class MapEditorDialogs {
                 Autocomplete<String>(
                   optionsBuilder: (textEditingValue) {
                     if (textEditingValue.text.isEmpty) return sortedClients;
-                    final q = textEditingValue.text.toLowerCase();
-                    return sortedClients
-                        .where((c) => c.toLowerCase().contains(q));
+                    return TextSearch(textEditingValue.text)
+                        .rank(sortedClients, (c) => [c]);
                   },
                   fieldViewBuilder: (ctx, controller, focusNode, onSubmitted) {
                     clientController.addListener(() {
@@ -5300,6 +5509,9 @@ class _InfoWindowOverlayState
               ),
             ),
 
+            // ── Photo taken at this waypoint (poster / delivery) ───
+            if (data.photo != null) _buildPhoto(data.photo!),
+
             // ── Point category selector (points only) ──────────────
             if (widget.canEdit && data.type == 'point') _buildCategoryRow(data),
 
@@ -5331,8 +5543,8 @@ class _InfoWindowOverlayState
               ),
             ],
 
-            // ── Regular client plan (who works this area) ──────────
-            if (data.type == 'polygon' &&
+            // ── Regular client plan (who works this area or point) ──
+            if ((data.type == 'polygon' || data.type == 'point') &&
                 provider.adapter is RegularClientMapAdapter) ...[
               const Divider(height: 1, thickness: 1, color: Color(0xFFE8EAED)),
               MapOverlay(
@@ -5342,6 +5554,30 @@ class _InfoWindowOverlayState
                 ),
               ),
             ],
+
+            // ── Schedule allocation (who works this area, when) ────
+            if (data.type == 'polygon' || data.type == 'point')
+              ValueListenableBuilder<ScheduleAllocationController?>(
+                valueListenable: scheduleAllocation,
+                builder: (_, allocation, __) => allocation == null
+                    ? const SizedBox.shrink()
+                    : Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: Color(0xFFE8EAED)),
+                          MapOverlay(
+                            child: ScheduleAllocationInfoSection(
+                              controller: allocation,
+                              elementId: data.elementId,
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
 
             // ── Add to work areas (client map polygons only) ───────
             // The quick path: tap the polygon, take it, rather than going
@@ -5365,6 +5601,30 @@ class _InfoWindowOverlayState
               ),
             ],
 
+            // ── Update letterbox index (from the round's waypoints) ─
+            if (_letterboxUpdateSource() case final source?) ...[
+              const Divider(height: 1, thickness: 1, color: Color(0xFFE8EAED)),
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: MapOverlay(
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: TextButton.icon(
+                      onPressed: () => _updateLetterboxIndex(source),
+                      icon: Icon(Icons.markunread_mailbox_outlined,
+                          size: 16, color: Colors.indigo.shade400),
+                      label: Text(
+                        'Update letterbox index '
+                        '(${source.waypoints.length})',
+                        style: TextStyle(color: Colors.indigo.shade500),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+
             // ── Action buttons ─────────────────────────────────────
             if (widget.canEdit) ...[
               const Divider(height: 1, thickness: 1, color: Color(0xFFE8EAED)),
@@ -5379,6 +5639,88 @@ class _InfoWindowOverlayState
         ),
       ),
     );
+  }
+
+  /// The polygon and the visible letter-box waypoints inside it, when this
+  /// info window can offer "Update letterbox index" — a signed-in editor, a
+  /// saved polygon, and at least one waypoint to write. Null otherwise.
+  ({
+    String layerId,
+    int index,
+    CustomPolygon polygon,
+    List<LatLng> waypoints,
+  })? _letterboxUpdateSource() {
+    if (!widget.canEdit || widget.data.type != 'polygon') return null;
+    final provider = ref.watch(shareableMapRiverpod);
+    if (provider.capabilities.readOnly) return null;
+    if (!ref.watch(authRiverpod).isAuthenticated) return null;
+    final found = provider.polygonForElement(widget.data.elementId);
+    if (found == null || found.polygon.points.length < 3) return null;
+    final waypoints = provider.visibleCloudWaypointsIn(found.polygon.points);
+    if (waypoints.isEmpty) return null;
+    return (
+      layerId: found.layerId,
+      index: found.index,
+      polygon: found.polygon,
+      waypoints: waypoints,
+    );
+  }
+
+  /// Make the letter-box waypoints inside this polygon the letterbox index
+  /// there — the track editor's preview → replace → undo flow, run from the
+  /// client map. Afterwards the map's own areas are recounted from the new
+  /// index.
+  Future<void> _updateLetterboxIndex(
+      ({
+        String layerId,
+        int index,
+        CustomPolygon polygon,
+        List<LatLng> waypoints,
+      }) source) async {
+    final provider = ref.read(shareableMapRiverpod);
+    // Read up front: this info window may be closed by the time the dialog
+    // returns, and `ref` dies with it.
+    final writer = ref.read(mapLetterboxWriteRiverpod);
+    final messenger = ScaffoldMessenger.of(context);
+    final polygon = source.polygon;
+
+    // Who the area is for, so a Client Maps entry carries the client. Best
+    // effort: the update itself does not depend on it.
+    var client = '';
+    final map = provider.currentMap;
+    final adapter = provider.adapter;
+    if (map != null && adapter is FirestoreMapAdapter) {
+      try {
+        client = (await ClientMapAllocationService()
+                    .jobListItemFor(map, adapter.monthKey))
+                ?.client ??
+            '';
+      } catch (e) {
+        debugPrint('[MapLetterboxUpdate] client lookup failed: $e');
+      }
+    }
+    if (!mounted) return;
+
+    final changed = await showTELetterboxUpdateDialog(
+      context,
+      areaName: polygon.name.isEmpty ? 'this area' : polygon.name,
+      area: polygon.points,
+      positions: source.waypoints,
+      client: client,
+      sourcePolygonId: polygon.id,
+      writerProvider: mapLetterboxWriteRiverpod,
+      onIndexChanged: (ids) => provider.letterboxIndexChanged(
+        ids,
+        layerId: source.layerId,
+        polygonIndex: source.index,
+      ),
+    );
+    if (!changed) return;
+    messenger.showToast(SnackBar(
+      content: Text(writer.result?.summary ??
+          'Letterbox index restored to how it was before the update.'),
+      duration: const Duration(seconds: 6),
+    ));
   }
 
   Widget _buildPreviewActionsRow(BuildContext context) {
@@ -5792,6 +6134,60 @@ class _InfoWindowOverlayState
   }
 
   /// Row of category chips shown for point-type elements.
+  /// The waypoint's photo as a thumbnail; tap for the full-screen viewer.
+  Widget _buildPhoto(MapPhoto photo) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 2, 14, 8),
+      child: Tooltip(
+        message: 'View full size',
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => showMapPhotoViewer(context, photo),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              height: 170,
+              width: double.infinity,
+              color: const Color(0xFFF1F3F4),
+              foregroundDecoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0x1A000000)),
+              ),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.network(
+                    photo.thumbUrl,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const Center(
+                      child: Icon(Icons.image_not_supported_outlined,
+                          color: Color(0xFF80868B)),
+                    ),
+                  ),
+                  const Positioned(
+                    right: 6,
+                    bottom: 6,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Color(0x99000000),
+                        borderRadius: BorderRadius.all(Radius.circular(6)),
+                      ),
+                      child: Padding(
+                        padding: EdgeInsets.all(4),
+                        child: Icon(Icons.open_in_full,
+                            size: 14, color: Colors.white),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildCategoryRow(InfoWindowData data) {
     // Look up the current point from the provider to get its category.
     final provider = ref.watch(shareableMapRiverpod);
@@ -5853,7 +6249,7 @@ class _InfoWindowOverlayState
         child: AlertDialog(
           title: const Text('Delete element?'),
           content:
-              Text('Delete "${widget.data.title}"? This cannot be undone.'),
+              Text('Delete "${widget.data.title}"? Ctrl+Z undoes it.'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),

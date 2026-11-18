@@ -45,6 +45,12 @@ class TECloudSaveClientEntry {
   /// True once the user has successfully pressed "Trim & Save".
   bool trimmedSaved;
 
+  /// A "Save As-Is" / "Trim & Save" upload for this client is running. Held
+  /// here rather than in the client tile so it survives the user switching
+  /// tabs or a re-resolve mid-upload — see [TECloudSaveUpload].
+  bool uploadingAsIs = false;
+  bool uploadingTrimmed = false;
+
   /// Whether the client tile is currently expanded in the UI.
   bool expanded;
 
@@ -75,12 +81,54 @@ class TECloudSaveTabState {
   bool loading = false;
   String? error;
 
+  /// What the running resolve is waiting on, shown under the spinner.
+  String? stage;
+
+  /// Bumped by every [TECloudSaveStateProvider.beginResolve] and whenever a
+  /// running resolve is abandoned, so a late answer from an old attempt
+  /// cannot overwrite (or strand) the state.
+  int resolveSeq = 0;
+
   /// True once [TECloudSaveStateProvider.finishResolveSuccess] has fired at
   /// least once for this tab. Used to know whether the panel should kick
   /// off its first resolve.
   bool resolved = false;
 
   final List<TECloudSaveClientEntry> clients = [];
+}
+
+/// One resolve attempt on a tab's state. It stays bound to the state, not the
+/// tab, so it still lands after the live schedule sync swaps the tab
+/// ([TECloudSaveStateProvider.markStale]) — unless that abandoned it.
+class TECloudSaveResolveTicket {
+  final TECloudSaveTabState _state;
+  final int _seq;
+
+  TECloudSaveResolveTicket._(this._state, this._seq);
+
+  bool get isCurrent => _state.loading && _state.resolveSeq == _seq;
+}
+
+/// One running upload for a client, from
+/// [TECloudSaveStateProvider.beginUpload].
+///
+/// Bound to the tab's state and the client's NAME, not the entry object: a
+/// re-resolve replaces every entry, and the live schedule sync re-keys the
+/// state to a new tab, so the entry the upload started from may no longer be
+/// the one on screen when it finishes.
+class TECloudSaveUpload {
+  final TECloudSaveTabState _state;
+  final String clientName;
+  final bool trimmed;
+
+  /// The folder and (for a trim) the ticked areas the file was saved with.
+  /// If the user changed either while it uploaded, the client does not
+  /// show as saved — what is on screen is not what was saved.
+  final String folderPath;
+  final Set<int> selection;
+
+  TECloudSaveUpload._(this._state, this.clientName, this.trimmed,
+      this.folderPath, this.selection);
 }
 
 class TECloudSaveStateProvider extends ChangeNotifier {
@@ -97,6 +145,7 @@ class TECloudSaveStateProvider extends ChangeNotifier {
   bool isResolved(TETabItem tab) => _byTab[tab]?.resolved ?? false;
   bool isLoading(TETabItem tab) => _byTab[tab]?.loading ?? false;
   String? errorFor(TETabItem tab) => _byTab[tab]?.error;
+  String? stageFor(TETabItem tab) => _byTab[tab]?.stage;
   List<TECloudSaveClientEntry> clientsFor(TETabItem tab) {
     final list = _byTab[tab]?.clients;
     if (list == null) return const <TECloudSaveClientEntry>[];
@@ -105,10 +154,30 @@ class TECloudSaveStateProvider extends ChangeNotifier {
 
   // ── Resolver lifecycle ──────────────────────────────────────────────
 
-  void beginResolve(TETabItem tab) {
+  TECloudSaveResolveTicket beginResolve(TETabItem tab) {
     final state = _stateFor(tab);
     state.loading = true;
     state.error = null;
+    state.stage = null;
+    notifyListeners();
+    return TECloudSaveResolveTicket._(state, ++state.resolveSeq);
+  }
+
+  /// Starts a fresh attempt on the same state (after a timeout), abandoning
+  /// [ticket]'s. Null when [ticket] was already abandoned.
+  TECloudSaveResolveTicket? retryResolve(
+    TECloudSaveResolveTicket ticket,
+    String stage,
+  ) {
+    if (!ticket.isCurrent) return null;
+    final state = ticket._state..stage = stage;
+    notifyListeners();
+    return TECloudSaveResolveTicket._(state, ++state.resolveSeq);
+  }
+
+  void setResolveStage(TECloudSaveResolveTicket ticket, String stage) {
+    if (!ticket.isCurrent || ticket._state.stage == stage) return;
+    ticket._state.stage = stage;
     notifyListeners();
   }
 
@@ -118,10 +187,11 @@ class TECloudSaveStateProvider extends ChangeNotifier {
   /// name — the area list itself may have changed). Hand-added clients the
   /// schedule doesn't know are kept.
   void finishResolveSuccess(
-    TETabItem tab,
+    TECloudSaveResolveTicket ticket,
     List<TECloudSaveClientEntry> clients,
   ) {
-    final state = _stateFor(tab);
+    if (!ticket.isCurrent) return;
+    final state = ticket._state;
     final previous = <String, TECloudSaveClientEntry>{};
     for (final c in state.clients) {
       previous.putIfAbsent(c.clientName, () => c);
@@ -137,6 +207,8 @@ class TECloudSaveStateProvider extends ChangeNotifier {
       }
       c.savedAsIs = prev.savedAsIs;
       c.trimmedSaved = prev.trimmedSaved;
+      c.uploadingAsIs = prev.uploadingAsIs;
+      c.uploadingTrimmed = prev.uploadingTrimmed;
       c.expanded = prev.expanded;
       final ticked = {
         for (final i in prev.selectedPolyIndices)
@@ -159,13 +231,19 @@ class TECloudSaveStateProvider extends ChangeNotifier {
       ..clients.addAll(keptManual)
       ..loading = false
       ..error = null
+      ..stage = null
       ..resolved = true;
     notifyListeners();
   }
 
-  void finishResolveError(TETabItem tab, String error) {
-    final state = _stateFor(tab);
+  /// Ends the resolve with [error] shown and a Retry button. The panel does
+  /// not re-resolve an errored tab by itself — only Retry, or the schedule
+  /// changing under it ([markStale]), starts another attempt.
+  void finishResolveError(TECloudSaveResolveTicket ticket, String error) {
+    if (!ticket.isCurrent) return;
+    final state = ticket._state;
     state.loading = false;
+    state.stage = null;
     state.error = error;
     state.resolved = false;
     notifyListeners();
@@ -173,11 +251,17 @@ class TECloudSaveStateProvider extends ChangeNotifier {
 
   /// The schedule changed under [oldTab], which now lives on as [newTab].
   /// Keeps its client list (and saved ticks) but marks it unresolved, so the
-  /// panel re-resolves it the next time it is shown.
+  /// panel re-resolves it the next time it is shown. A resolve still running
+  /// read the old schedule, so it is abandoned rather than left to land.
   void markStale(TETabItem oldTab, TETabItem newTab) {
     final state = _byTab.remove(oldTab);
     if (state == null) return;
-    state.resolved = false;
+    state
+      ..resolved = false
+      ..loading = false
+      ..error = null
+      ..stage = null
+      ..resolveSeq += 1;
     _byTab[newTab] = state;
     notifyListeners();
   }
@@ -217,6 +301,46 @@ class TECloudSaveStateProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Marks [entry] as uploading and returns the handle to end it with
+  /// [finishUpload]. Null when [entry] is not listed on any tab any more.
+  TECloudSaveUpload? beginUpload(
+    TECloudSaveClientEntry entry, {
+    required bool trimmed,
+  }) {
+    final state =
+        _byTab.values.where((s) => s.clients.contains(entry)).firstOrNull;
+    if (state == null) return null;
+    if (trimmed) {
+      entry.uploadingTrimmed = true;
+    } else {
+      entry.uploadingAsIs = true;
+    }
+    notifyListeners();
+    return TECloudSaveUpload._(state, entry.clientName, trimmed,
+        entry.folderPath, {...entry.selectedPolyIndices});
+  }
+
+  /// Ends [upload] on whichever entry now stands for its client. With
+  /// [saved], the client shows as saved — unless its folder (or, for a
+  /// trim, its ticked areas) changed while the file was uploading.
+  void finishUpload(TECloudSaveUpload upload, {required bool saved}) {
+    final entry = upload._state.clients
+        .where((c) => c.clientName == upload.clientName)
+        .firstOrNull;
+    if (entry == null) return;
+    final unchanged = entry.folderPath == upload.folderPath &&
+        (!upload.trimmed ||
+            setEquals(entry.selectedPolyIndices, upload.selection));
+    if (upload.trimmed) {
+      entry.uploadingTrimmed = false;
+      if (saved && unchanged) entry.trimmedSaved = true;
+    } else {
+      entry.uploadingAsIs = false;
+      if (saved && unchanged) entry.savedAsIs = true;
+    }
+    notifyListeners();
+  }
+
   void toggleSelectedPoly(TECloudSaveClientEntry entry, int polyIndex) {
     if (!entry.selectedPolyIndices.add(polyIndex)) {
       entry.selectedPolyIndices.remove(polyIndex);
@@ -238,6 +362,9 @@ class TECloudSaveStateProvider extends ChangeNotifier {
   /// its underlying track/waypoint data changes enough that a fresh
   /// resolve is warranted.
   void clearTab(TETabItem tab) {
-    if (_byTab.remove(tab) != null) notifyListeners();
+    final state = _byTab.remove(tab);
+    if (state == null) return;
+    state.resolveSeq += 1;
+    notifyListeners();
   }
 }

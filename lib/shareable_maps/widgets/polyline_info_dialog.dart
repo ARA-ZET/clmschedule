@@ -115,7 +115,7 @@ class PolylineInfoDialog extends StatelessWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Delete Track'),
-        content: Text('Delete "${polyline.name}"? This cannot be undone.'),
+        content: Text('Delete "${polyline.name}"? Ctrl+Z undoes it.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),

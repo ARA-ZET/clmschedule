@@ -8,6 +8,7 @@
 // to, and save them straight into the payroll week that day belongs to —
 // atomically, in one Firestore transaction — without switching over to
 // the Payroll tab to do it manually.
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import '../../utils/schedule_time.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -96,6 +97,12 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
   /// Bumped on every status load, so a slow load for a date the admin has
   /// since moved away from cannot overwrite the current one.
   int _jobStatusRequest = 0;
+
+  /// Bumped whenever the box switches to another tab or date. This State is
+  /// reused when the admin flips between processing tabs, so anything that
+  /// finishes after an await (a prefill, a save's follow-up) checks it is
+  /// still for the tab and date on screen before touching the box.
+  int _target = 0;
 
   /// The auto-computed km/waypoints values as of the last time we filled
   /// them into the fields (on load, or on a previous auto-refresh) — lets
@@ -196,7 +203,7 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
     }
     if (!isPayrollWeekEditable(weekStartFor(picked))) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text(
                 'That week is more than 2 weeks old and is now read-only.'),
@@ -211,7 +218,9 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
   }
 
   Future<void> _loadForCurrentTarget() async {
-    final distributorId = widget.tab.distributorId;
+    final target = ++_target;
+    final tab = widget.tab;
+    final distributorId = tab.distributorId;
     if (distributorId == null) return;
     setState(() {
       _loaded = false;
@@ -257,7 +266,9 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
     _hasExisting = existing != null && existing.worked;
 
     final driving = await drivingFuture;
-    if (!mounted) return;
+    // A slower load for the tab or date the admin just left must not fill
+    // the box now showing another one.
+    if (!mounted || target != _target) return;
     _setsOrCode.text = existing?.specialCode ??
         existing?.flyerSets?.toString() ??
         defaultSetsOrCode(
@@ -275,12 +286,10 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
     _lastAutoKm = _autoKmWalked;
     _lastAutoWaypoints = _autoWaypoints;
 
-    if (mounted) {
-      setState(() => _loaded = true);
-      // The prefill above triggers each controller's dirty listener; clear
-      // it back out since this was a load, not an admin edit.
-      ref.read(teWageStatsRiverpod).setDirty(widget.tab, false);
-    }
+    setState(() => _loaded = true);
+    // The prefill above triggers each controller's dirty listener; clear
+    // it back out since this was a load, not an admin edit.
+    ref.read(teWageStatsRiverpod).setDirty(tab, false);
   }
 
   PayrollDailyEntry _buildEntry(List<String> knownCodes) {
@@ -314,17 +323,28 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
   /// Deliberately bypasses the shared [PayrollProvider]'s currently-open
   /// week (the Payroll tab might have a different week open right now) so
   /// this can never overwrite the wrong week.
+  ///
+  /// The button is busy only until the stats are committed to payroll.
+  /// Setting the day's schedule jobs to Done follows on its own, reported
+  /// under the button, so the admin can move on to the next track.
+  ///
+  /// Everything is read before the first await: the admin may switch tabs
+  /// mid-save, which hands this State another tab (see [_target]).
   Future<void> _save() async {
-    final distributorId = widget.tab.distributorId;
+    final tab = widget.tab;
+    final distributorId = tab.distributorId;
     if (distributorId == null) return;
+    final date = _date;
+    final target = _target;
+    final messenger = ScaffoldMessenger.of(context);
     // This box bypasses PayrollProvider (see the class doc above), so it
     // doesn't get that provider's isWeekEditable guard for free — check it
     // directly. In practice _date can't reach a locked week today (the
     // panel that shows this box only renders it for an editable suggested
     // date, and _pickDate refuses to move to a locked one), but this is
     // the actual data-layer backstop for that rule on this write path.
-    if (!isPayrollWeekEditable(weekStartFor(_date))) {
-      ScaffoldMessenger.of(context).showSnackBar(
+    if (!isPayrollWeekEditable(weekStartFor(date))) {
+      messenger.showToast(
         const SnackBar(
           content:
               Text('That week is more than 2 weeks old and is now read-only.'),
@@ -333,104 +353,102 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
       );
       return;
     }
+    final service = ref.read(payrollServiceRiverpod);
+    final settings = ref.read(payrollRiverpod).settings;
+    final wageStats = ref.read(teWageStatsRiverpod);
+    final schedule = ref.read(scheduleRiverpod);
+    final statuses = ref.read(jobStatusRiverpod);
+    final distributor =
+        schedule.distributors.where((d) => d.id == distributorId).firstOrNull;
+    final entry = _buildEntry(settings.bonusCodes);
+
     setState(() => _saving = true);
     try {
-      final service = ref.read(payrollServiceRiverpod);
-      final settings = ref.read(payrollRiverpod).settings;
-      final distributor = ref
-          .read(scheduleRiverpod)
-          .distributors
-          .where((d) => d.id == distributorId)
-          .firstOrNull;
       if (distributor == null) {
         throw Exception('Matched distributor no longer exists');
       }
-
-      final entry = _buildEntry(settings.bonusCodes);
       await service.saveDailyEntryForDistributor(
         distributor: distributor,
-        date: _date,
+        date: date,
         entry: entry,
         settings: settings,
       );
-      // Invalidate this week's cached prefill data so the next tab
-      // targeting the same week re-fetches the just-saved values instead of
-      // showing what was cached before this save.
-      _weekCache.remove(weekIdFor(weekStartFor(_date)));
-
-      ref.read(teWageStatsRiverpod).setDirty(widget.tab, false);
-      // Stats now exist for this day → the button becomes "Update to Payroll".
-      if (mounted) setState(() => _hasExisting = true);
-
-      // Recorded stats mean the round was worked, so the distributor's
-      // schedule jobs for that day are done. Payroll is already saved at this
-      // point, so a failure here is reported on its own, not as a failed save.
-      String? statusNote;
-      var statusFailed = false;
-      try {
-        statusNote = await _markScheduleJobsDone(distributorId, _date);
-        if (mounted) {
-          setState(() {
-            _scheduleNote = 'Schedule: $statusNote';
-            _scheduleNoteFailed = false;
-          });
-        }
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _scheduleNote = 'Schedule not updated: $e';
-            _scheduleNoteFailed = true;
-          });
-        }
-        debugPrint('[TEWageStats] marking schedule jobs done failed: $e');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Stats saved, but the schedule job status could '
-                  'not be set to done: $e'),
-              backgroundColor: Colors.orange.shade800,
-            ),
-          );
-        }
-        statusFailed = true;
-      }
-      // Show what the schedule says now, whichever way that went.
-      _loadScheduleStatus();
-
-      if (mounted && !statusFailed) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-                'Wage stats saved to payroll for ${_dateFormat.format(_date)}'
-                '${statusNote == null ? '' : ' · $statusNote'}'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Save failed: $e'), backgroundColor: Colors.red),
-        );
-      }
+      messenger.showToast(
+        SnackBar(content: Text('Save failed: $e'), backgroundColor: Colors.red),
+      );
+      if (mounted) setState(() => _saving = false);
+      return;
     }
-    if (mounted) setState(() => _saving = false);
+
+    // Invalidate this week's cached prefill data so the next tab
+    // targeting the same week re-fetches the just-saved values instead of
+    // showing what was cached before this save.
+    _weekCache.remove(weekIdFor(weekStartFor(date)));
+    wageStats.setDirty(tab, false);
+    final stillShown = mounted && target == _target;
+    if (mounted) {
+      setState(() {
+        _saving = false;
+        if (stillShown) {
+          // Stats now exist for this day → "Update to Payroll".
+          _hasExisting = true;
+          _scheduleNote = 'Schedule: setting jobs to Done…';
+          _scheduleNoteFailed = false;
+        }
+      });
+    }
+    messenger.showToast(
+      SnackBar(
+        content: Text(
+            'Wage stats saved to payroll for ${_dateFormat.format(date)}'),
+        backgroundColor: Colors.green,
+      ),
+    );
+
+    // Recorded stats mean the round was worked, so the distributor's
+    // schedule jobs for that day are done. Payroll is already saved at this
+    // point, so a failure here is reported on its own, not as a failed save.
+    String note;
+    var failed = false;
+    try {
+      note = 'Schedule: '
+          '${await _markScheduleJobsDone(schedule, statuses, distributorId, date)}';
+    } catch (e) {
+      debugPrint('[TEWageStats] marking schedule jobs done failed: $e');
+      note = 'Schedule not updated: $e';
+      failed = true;
+      messenger.showToast(
+        SnackBar(
+          content: Text('Stats saved, but the schedule job status could '
+              'not be set to done: $e'),
+          backgroundColor: Colors.orange.shade800,
+        ),
+      );
+    }
+    if (!mounted || target != _target) return;
+    setState(() {
+      _scheduleNote = note;
+      _scheduleNoteFailed = failed;
+    });
+    // Show what the schedule says now, whichever way that went.
+    _loadScheduleStatus();
   }
 
   /// Read the schedule status of the distributor's jobs on [_date].
   Future<void> _loadScheduleStatus() async {
     final distributorId = widget.tab.distributorId;
     if (distributorId == null) return;
+    final date = _date;
     final request = ++_jobStatusRequest;
     setState(() => _jobStatusLoading = true);
     List<String>? ids;
     try {
       final statuses = ref.read(jobStatusRiverpod);
+      final schedule = ref.read(scheduleRiverpod);
       if (statuses.statuses.isEmpty) await statuses.loadStatuses();
-      final jobs = await ref
-          .read(scheduleRiverpod)
-          .fetchJobsForDistributorAndDate(distributorId, _date);
+      final jobs =
+          await schedule.fetchJobsForDistributorAndDate(distributorId, date);
       ids = [for (final job in jobs) job.statusId];
     } catch (e) {
       debugPrint('[TEWageStats] reading schedule status failed: $e');
@@ -503,13 +521,18 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
   }
 
   /// Set every schedule job [distributorId] has on [date] to the "Done"
-  /// status. Returns a one-line outcome for the save message; throws when the
-  /// status cannot be set.
-  Future<String> _markScheduleJobsDone(
-      String distributorId, DateTime date) async {
+  /// status, in one schedule transaction. Returns a one-line outcome for the
+  /// save message; throws when the status cannot be set. Takes its providers
+  /// as arguments because it runs after the save has returned, when this
+  /// widget may be gone.
+  static Future<String> _markScheduleJobsDone(
+    ScheduleProvider schedule,
+    JobStatusProvider statuses,
+    String distributorId,
+    DateTime date,
+  ) async {
     // Resolve "Done" from the configured statuses rather than assuming its
     // id, so a renamed or re-created status still matches.
-    final statuses = ref.read(jobStatusRiverpod);
     if (statuses.statuses.isEmpty) await statuses.loadStatuses();
     final done = statuses.getStatusById('done') ??
         statuses.statuses
@@ -519,7 +542,6 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
       throw Exception('no "Done" status is configured for schedule jobs');
     }
 
-    final schedule = ref.read(scheduleRiverpod);
     final jobs =
         await schedule.fetchJobsForDistributorAndDate(distributorId, date);
     debugPrint('[TEWageStats] ${jobs.length} schedule job(s) for '
@@ -530,12 +552,13 @@ class _TEWageStatsBoxState extends riverpod.ConsumerState<TEWageStatsBox> {
           '${_dateFormat.format(date)}';
     }
 
-    var marked = 0;
-    for (final job in jobs) {
-      if (job.statusId == done.id) continue;
-      await schedule.updateJob(job.copyWith(statusId: done.id));
-      marked++;
-    }
+    // One transaction for all of them, not one per job in turn.
+    final toMark = [
+      for (final job in jobs)
+        if (job.statusId != done.id) job.copyWith(statusId: done.id),
+    ];
+    await schedule.updateJobs(toMark);
+    final marked = toMark.length;
     if (marked == 0) {
       return 'schedule job${jobs.length == 1 ? ' was' : 's were'} '
           'already ${done.label}';

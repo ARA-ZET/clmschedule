@@ -39,9 +39,20 @@ class DistributionReportTemplateProvider extends ChangeNotifier {
   /// Deliberately *not* seeded into Firestore on read — writing to the
   /// database as a side effect of opening a dialog would be surprising, and
   /// would resurrect the default every time someone deleted it.
+  ///
+  /// The Flyers & Posters and Flyer handout built-ins are always offered:
+  /// unlike the standard body, nobody has a Firestore copy of them, and a
+  /// saved doc with the same id replaces one.
   List<DistributionReportTemplate> get available {
-    if (_templates.isEmpty) return [DistributionReportTemplate.fallback];
-    final sorted = [..._templates];
+    if (_templates.isEmpty) {
+      return [...DistributionReportTemplate.builtIns];
+    }
+    final ids = _templates.map((t) => t.id).toSet();
+    final sorted = [
+      ..._templates,
+      for (final t in DistributionReportTemplate.alwaysOffered)
+        if (!ids.contains(t.id)) t,
+    ];
     sorted.sort((a, b) {
       final byOrder = a.order.compareTo(b.order);
       return byOrder != 0 ? byOrder : a.name.compareTo(b.name);

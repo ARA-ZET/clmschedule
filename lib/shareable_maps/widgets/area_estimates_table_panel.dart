@@ -9,6 +9,7 @@
 // drift apart the first time only one of them was fixed. What differs between
 // them is passed in: the heading, and whether a row shows the
 // houses-versus-apartments split and the client the area is for.
+import 'package:clmschedule/utils/text_search.dart';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -89,13 +90,11 @@ class _AreaEstimatesTablePanelState
       }
     }
 
-    // Filter by search query (case-insensitive substring match on name).
-    final query = _searchQuery.trim().toLowerCase();
-    final filtered = query.isEmpty
-        ? List<_PolyEntry>.from(entries)
-        : entries
-            .where((e) => e.poly.name.toLowerCase().contains(query))
-            .toList();
+    // Filter by search query (every word, any order, close spellings).
+    final query = _searchQuery.trim();
+    final search = TextSearch(query);
+    final filtered =
+        entries.where((e) => search.matches([e.poly.name])).toList();
 
     // Sort alphabetically A–Z or Z–A.
     filtered.sort((a, b) {

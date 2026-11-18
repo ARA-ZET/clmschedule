@@ -16,6 +16,7 @@
  */
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { requireStaff } = require("./require_staff");
 
 // The department was renamed (DRDLR → DALRRD → DLRRD) and the old
 // csggis.drdlr.gov.za host no longer resolves at all — it returns NXDOMAIN,
@@ -59,12 +60,7 @@ const UPSTREAM_TIMEOUT_MS = 180_000;
 exports.csgQuery = onCall(
   { region: "us-central1", timeoutSeconds: 300, memory: "512MiB" },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError(
-        "unauthenticated",
-        "Sign in to query the cadastral register."
-      );
-    }
+    requireStaff(request.auth, "Sign in to query the cadastral register.");
 
     const layerId = Number(request.data?.layerId);
     if (!Number.isInteger(layerId) || layerId < 0 || layerId > 30) {

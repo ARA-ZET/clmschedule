@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
 import '../models/happy_sun_shared.dart';
@@ -124,7 +125,7 @@ class _HappySunCheckoutScreenState extends riverpod
       });
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Progress saved'),
             backgroundColor: Colors.green,
@@ -134,7 +135,7 @@ class _HappySunCheckoutScreenState extends riverpod
     } catch (e) {
       setState(() => _isSaving = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error saving: $e'),
             backgroundColor: Colors.red,
@@ -175,7 +176,7 @@ class _HappySunCheckoutScreenState extends riverpod
       await inventoryProvider.checkOutTools(allToolIds, widget.project.id);
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Checkout completed successfully!'),
             backgroundColor: Colors.green,
@@ -186,7 +187,7 @@ class _HappySunCheckoutScreenState extends riverpod
     } catch (e) {
       setState(() => _isSaving = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error completing checkout: $e'),
             backgroundColor: Colors.red,
@@ -679,7 +680,7 @@ class _HappySunCheckoutScreenState extends riverpod
     // Play success sound
     SoundService().playSuccess();
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Row(
           children: [
@@ -706,7 +707,7 @@ class _HappySunCheckoutScreenState extends riverpod
     // Play warning sound
     SoundService().playWarning();
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Row(
           children: [

@@ -295,7 +295,12 @@ class XeroLineItemsEditor extends riverpod.ConsumerWidget {
       XeroLineAmountType.noTax: 'No tax',
     };
 
-    return Row(
+    // Wraps rather than overflowing where the editor is narrow — a phone, or
+    // embedded under the distribution report's preview.
+    return Wrap(
+      spacing: 10,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         const Text(
           'Amounts are',
@@ -305,7 +310,6 @@ class XeroLineItemsEditor extends riverpod.ConsumerWidget {
             color: ZohoPalette.textPrimary,
           ),
         ),
-        const SizedBox(width: 10),
         if (onLineAmountTypeChanged == null)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),

@@ -1,9 +1,11 @@
 // shareable_maps/widgets/regular_client_allocation_panel.dart
 //
 // Side panel of a regular client's map: the numbered distributor slots, their
-// man days (one bucket per day), which areas each slot works on each day, and
-// what is still unallocated. Every change is written straight to the plan via
+// man days (one bucket per day), which areas and points (traffic-light
+// handouts, poster spots) each slot works on each day, and what is still
+// unallocated. Every change is written straight to the plan via
 // RegularClientMapAdapter.applyPlan, which also recolours the map.
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
@@ -36,7 +38,7 @@ class _RegularClientAllocationPanelState
       await _adapter.applyPlan(next, ref.read(shareableMapRiverpod));
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        ScaffoldMessenger.of(context).showToast(SnackBar(
           content: Text('Could not save the plan: $e'),
           backgroundColor: Colors.red,
         ));
@@ -46,8 +48,14 @@ class _RegularClientAllocationPanelState
     }
   }
 
-  void _focus(RegularClientArea area) =>
-      ref.read(shareableMapRiverpod).focusOnPolygon(area.layerId, area.index);
+  void _focus(RegularClientArea area) {
+    final provider = ref.read(shareableMapRiverpod);
+    if (area.isPoint) {
+      provider.focusOnPoint(area.layerId, area.id);
+    } else {
+      provider.focusOnPolygon(area.layerId, area.index);
+    }
+  }
 
   Future<void> _renameSlot(RegularClientSlot slot) async {
     final controller = TextEditingController(text: slot.label);
@@ -84,7 +92,8 @@ class _RegularClientAllocationPanelState
         context: context,
         builder: (dialogContext) => AlertDialog(
           title: Text('Remove ${slot.label}?'),
-          content: Text('Its ${slot.polygonIds.length} area(s) go back to '
+          content: Text('Its ${slot.polygonIds.length} area(s) and '
+              'point(s) go back to '
               'unallocated unless another slot also holds them.'),
           actions: [
             TextButton(
@@ -113,7 +122,7 @@ class _RegularClientAllocationPanelState
         builder: (dialogContext) => AlertDialog(
           title: const Text('Drop the last day?'),
           content: const Text(
-              'Its areas will be removed from this slot.'),
+              'Its areas and points will be removed from this slot.'),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(false),
@@ -143,9 +152,9 @@ class _RegularClientAllocationPanelState
   @override
   Widget build(BuildContext context) {
     // Rebuild when the adapter swaps in a restyled map.
-    ref.watch(shareableMapRiverpod);
+    final provider = ref.watch(shareableMapRiverpod);
     final client = _adapter.client;
-    final areas = _adapter.areas;
+    final areas = _adapter.areasOf(provider.currentMap);
     final byId = {for (final a in areas) a.id: a};
     final unallocated = [
       for (final id in client.unallocatedIds(byId.keys)) byId[id]!,
@@ -153,8 +162,22 @@ class _RegularClientAllocationPanelState
     final missing = client.missingIds(byId.keys);
     _selected.removeWhere((id) => !byId.containsKey(id));
 
+    // Pins are drawn by a draw-time rule, which a (re)load of the map clears
+    // and which covers only the layers there were when it was set; put it
+    // back.
+    final rule = provider.pointPinRule;
+    final layers = provider.currentMap?.layers ?? const [];
+    if (rule == null || layers.any((l) => !rule.layerIds.contains(l.id))) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && identical(provider.adapter, _adapter)) {
+          _adapter.paintPoints(provider);
+        }
+      });
+    }
+
+    // Left side: the drawing toolbar sits top-right.
     return Positioned(
-      right: 0,
+      left: 0,
       top: 0,
       bottom: _collapsed ? null : 0,
       child: MapOverlay(
@@ -166,7 +189,7 @@ class _RegularClientAllocationPanelState
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.12),
                 blurRadius: 8,
-                offset: const Offset(-2, 0),
+                offset: const Offset(2, 0),
               ),
             ],
           ),
@@ -174,7 +197,7 @@ class _RegularClientAllocationPanelState
             mainAxisSize: _collapsed ? MainAxisSize.min : MainAxisSize.max,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _header(client, areas.length, unallocated.length),
+              _header(client, areas, unallocated.length),
               if (_busy) const LinearProgressIndicator(minHeight: 2),
               if (!_collapsed)
                 Expanded(
@@ -207,7 +230,10 @@ class _RegularClientAllocationPanelState
     );
   }
 
-  Widget _header(RegularClient client, int areaCount, int unallocated) {
+  Widget _header(
+      RegularClient client, List<RegularClientArea> areas, int unallocated) {
+    final points = areas.where((a) => a.isPoint).length;
+    final polygons = areas.length - points;
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
       color: Colors.indigo.shade50,
@@ -227,7 +253,9 @@ class _RegularClientAllocationPanelState
                   '${client.slots.length} distributor'
                   '${client.slots.length == 1 ? '' : 's'} · '
                   '${client.totalManDays} man days · '
-                  '$unallocated of $areaCount unallocated',
+                  '$polygons area${polygons == 1 ? '' : 's'}'
+                  '${points > 0 ? ' · $points point${points == 1 ? '' : 's'}' : ''}'
+                  ' · $unallocated unallocated',
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
                 ),
               ],
@@ -258,7 +286,8 @@ class _RegularClientAllocationPanelState
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              '${missing.length} allocated area(s) are no longer on the map '
+              '${missing.length} allocated area(s) or point(s) are no longer '
+              'on the map '
               'and will be skipped.',
               style: const TextStyle(fontSize: 12),
             ),
@@ -344,6 +373,8 @@ class _RegularClientAllocationPanelState
       RegularClientSlot slot, int dayIndex, Map<String, RegularClientArea> byId) {
     final ids = slot.days[dayIndex].polygonIds;
     final present = [for (final id in ids) if (byId[id] != null) byId[id]!];
+    final points = present.where((a) => a.isPoint).length;
+    final polygons = present.length - points;
     final letterboxes =
         present.fold<int>(0, (t, a) => t + a.polygon.letterBoxEstimate);
     return Padding(
@@ -352,8 +383,9 @@ class _RegularClientAllocationPanelState
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Day ${dayIndex + 1} · ${present.length} area'
-            '${present.length == 1 ? '' : 's'}'
+            'Day ${dayIndex + 1} · $polygons area'
+            '${polygons == 1 ? '' : 's'}'
+            '${points > 0 ? ' · $points point${points == 1 ? '' : 's'}' : ''}'
             '${letterboxes > 0 ? ' · $letterboxes letterboxes' : ''}',
             style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
           ),
@@ -361,7 +393,8 @@ class _RegularClientAllocationPanelState
             Padding(
               padding: const EdgeInsets.only(top: 2),
               child: Text(
-                'Tap an area on the map, or tick unallocated areas below.',
+                'Tap an area or point on the map, or tick unallocated ones '
+                'below.',
                 style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
               ),
             ),
@@ -372,6 +405,7 @@ class _RegularClientAllocationPanelState
               for (final a in present)
                 InputChip(
                   visualDensity: VisualDensity.compact,
+                  avatar: a.isPoint ? const Icon(Icons.place, size: 14) : null,
                   label: Text(a.name, style: const TextStyle(fontSize: 11)),
                   onPressed: () => _focus(a),
                   onDeleted: _busy
@@ -405,7 +439,7 @@ class _RegularClientAllocationPanelState
               ),
               if (_selected.isNotEmpty && client.slots.isNotEmpty)
                 PopupMenuButton<(String, int)>(
-                  tooltip: 'Assign ticked areas',
+                  tooltip: 'Assign ticked areas and points',
                   onSelected: (v) => _assignSelected(v.$1, v.$2),
                   itemBuilder: (_) => [
                     for (final s in client.slots)
@@ -435,7 +469,7 @@ class _RegularClientAllocationPanelState
           if (unallocated.isEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Text('Every area is allocated.',
+              child: Text('Everything is allocated.',
                   style: TextStyle(fontSize: 12, color: Colors.green.shade700)),
             ),
           for (final a in unallocated)
@@ -451,7 +485,15 @@ class _RegularClientAllocationPanelState
                   _selected.remove(a.id);
                 }
               }),
-              title: Text(a.name, style: const TextStyle(fontSize: 13)),
+              title: Row(children: [
+                if (a.isPoint) ...[
+                  Icon(Icons.place, size: 16, color: Colors.grey.shade600),
+                  const SizedBox(width: 4),
+                ],
+                Expanded(
+                  child: Text(a.name, style: const TextStyle(fontSize: 13)),
+                ),
+              ]),
               subtitle: a.polygon.letterBoxEstimate > 0
                   ? Text('${a.polygon.letterBoxEstimate} letterboxes',
                       style: const TextStyle(fontSize: 11))
@@ -468,7 +510,8 @@ class _RegularClientAllocationPanelState
   }
 }
 
-/// The allocation section of a regular-client polygon's info window: who
+/// The allocation section of a regular-client polygon's or point's info
+/// window: who
 /// holds it, and a chip per slot-day to toggle it.
 class RegularClientInfoSection extends riverpod.ConsumerStatefulWidget {
   final RegularClientMapAdapter adapter;
@@ -500,8 +543,9 @@ class _RegularClientInfoSectionState
 
   @override
   Widget build(BuildContext context) {
-    ref.watch(shareableMapRiverpod);
-    final area = widget.adapter.areaForElement(widget.elementId);
+    final provider = ref.watch(shareableMapRiverpod);
+    final area =
+        widget.adapter.areaForElement(provider.currentMap, widget.elementId);
     if (area == null) return const SizedBox.shrink();
     final client = widget.adapter.client;
     final holdings = client.holdingsOf(area.id);

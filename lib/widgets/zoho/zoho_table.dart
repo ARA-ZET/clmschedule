@@ -402,12 +402,21 @@ class ZohoCellText extends StatelessWidget {
   final bool strikeThrough;
   final FontWeight? weight;
 
+  /// Overrides [muted] — for a cell that needs to stand out, like an overdue
+  /// amount.
+  final Color? color;
+
+  /// Fixed-width digits, so money and dates line up down a column.
+  final bool tabular;
+
   const ZohoCellText(
     this.text, {
     super.key,
     this.muted = false,
     this.strikeThrough = false,
     this.weight,
+    this.color,
+    this.tabular = false,
   });
 
   @override
@@ -418,9 +427,11 @@ class ZohoCellText extends StatelessWidget {
       overflow: TextOverflow.ellipsis,
       style: TextStyle(
         fontSize: 13,
-        color: muted ? ZohoPalette.textMuted : ZohoPalette.textPrimary,
+        color:
+            color ?? (muted ? ZohoPalette.textMuted : ZohoPalette.textPrimary),
         fontWeight: weight,
         decoration: strikeThrough ? TextDecoration.lineThrough : null,
+        fontFeatures: tabular ? const [FontFeature.tabularFigures()] : null,
       ),
     );
   }
@@ -654,6 +665,50 @@ class ZohoSearchField extends StatelessWidget {
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(4),
             borderSide: const BorderSide(color: ZohoPalette.link),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Sets a list screen's toolbar and table in from the window edges as one
+/// bordered panel. Edge to edge on a wide monitor, the last column's figures
+/// sat flush against the right side of the screen and the rows read as endless
+/// strips.
+///
+/// Paints its own page-grey surround, so it looks the same whether its host is
+/// a grey Scaffold (the Xero and Zoho Books screens) or a plain tab body
+/// (Happy Sun's section).
+class ZohoPanel extends StatelessWidget {
+  final Widget child;
+
+  const ZohoPanel({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final narrow = MediaQuery.sizeOf(context).width < 600;
+    final gutter = narrow ? 8.0 : 24.0;
+
+    return ColoredBox(
+      color: ZohoPalette.pageBackground,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(gutter, gutter, gutter, narrow ? 8 : 16),
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            // Wide enough for every column with room for long names; past
+            // this the gaps between columns only grow.
+            constraints: const BoxConstraints(maxWidth: 1440),
+            child: Container(
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: ZohoPalette.surface,
+                border: Border.all(color: ZohoPalette.border),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: child,
+            ),
           ),
         ),
       ),

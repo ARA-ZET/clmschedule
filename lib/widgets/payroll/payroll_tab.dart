@@ -13,7 +13,11 @@ import '../../utils/payroll_week.dart';
 import 'banking_view.dart';
 import 'ops_stats_view.dart';
 import 'payroll_settings_dialog.dart';
+import 'payslip_access_page.dart';
 import 'payslip_detail_view.dart';
+import '../../undo/undo_history.dart';
+import '../../undo/undo_redo_buttons.dart';
+import '../../undo/undo_shortcuts.dart';
 
 final _currencyFormat = NumberFormat.currency(symbol: 'R ', decimalDigits: 2);
 final _weekDayFormat = DateFormat('d MMM');
@@ -108,19 +112,23 @@ class _PayrollTabState extends riverpod.ConsumerState<PayrollTab>
           view: _view,
           onViewChanged: (v) => setState(() => _view = v),
           opsStatsController: _opsStatsController,
+          undoKey: payroll.undoKey,
         ),
         if (payroll.isLoading)
           const LinearProgressIndicator(minHeight: 2)
         else
           const SizedBox(height: 2),
         Expanded(
-          child: switch (_view) {
-            _PayrollView.opsStats =>
-              OpsStatsView(controller: _opsStatsController),
-            _PayrollView.payslips =>
-              _PayslipsGrid(distributors: distributors, payroll: payroll),
-            _PayrollView.banking => const BankingView(),
-          },
+          child: UndoShortcuts(
+            undoKey: payroll.undoKey,
+            child: switch (_view) {
+              _PayrollView.opsStats =>
+                OpsStatsView(controller: _opsStatsController),
+              _PayrollView.payslips =>
+                _PayslipsGrid(distributors: distributors, payroll: payroll),
+              _PayrollView.banking => const BankingView(),
+            },
+          ),
         ),
       ],
     );
@@ -232,6 +240,9 @@ class _TopBar extends StatelessWidget {
   final ValueChanged<_PayrollView> onViewChanged;
   final OpsStatsController opsStatsController;
 
+  /// The open week's undo history.
+  final UndoKey undoKey;
+
   const _TopBar({
     required this.weekStart,
     required this.weekEnd,
@@ -245,6 +256,7 @@ class _TopBar extends StatelessWidget {
     required this.view,
     required this.onViewChanged,
     required this.opsStatsController,
+    required this.undoKey,
   });
 
   @override
@@ -377,6 +389,8 @@ class _TopBar extends StatelessWidget {
                   tooltip: 'Print / export PDF',
                   onPressed: onPrintBanking,
                 ),
+              UndoRedoButtons(undoKey: undoKey, color: Colors.white),
+              const PayslipAccessButton(),
               IconButton(
                 color: Colors.white,
                 icon: const Icon(Icons.settings_outlined),

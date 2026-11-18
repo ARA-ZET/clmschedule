@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -302,7 +303,7 @@ class _LetterboxCurationPageState
         if (f.bytes != null) f.bytes!,
     ];
     if (files.isEmpty && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(content: Text('Could not read those files.')),
       );
       return null;
@@ -325,7 +326,7 @@ class _LetterboxCurationPageState
 
     final affected = _provider.suburbsOverlapping(area);
     if (affected.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(content: Text('That area does not overlap any suburb.')),
       );
       return;

@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/driver.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 
 /// CRUD for `/drivers/{id}` (global collection, like `/distributors`).
 class DriverService {
@@ -29,7 +31,12 @@ class DriverService {
     await _col.doc(driver.id).update(driver.toMap());
   }
 
+  /// Moves the driver to the Recycle Bin.
   Future<void> deleteDriver(String id) async {
-    await _col.doc(id).delete();
+    await RecycleBinWriter().moveDocToBin(
+      _col.doc(id),
+      type: RecycleBinType.driver,
+      label: (d) => binLabel(d, 'driver'),
+    );
   }
 }

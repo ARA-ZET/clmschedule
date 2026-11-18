@@ -5,6 +5,8 @@ import 'package:xml/xml.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/work_area.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 
 final workAreaServiceRiverpod = riverpod.Provider<WorkAreaService>(
   (ref) => WorkAreaService(FirebaseFirestore.instance),
@@ -300,9 +302,13 @@ class WorkAreaService {
         .update(workArea.toFirestore());
   }
 
-  // Delete a work area
+  // Move a work area to the Recycle Bin
   Future<void> deleteWorkArea(String id) async {
-    await _firestore.collection(collectionName).doc(id).delete();
+    await RecycleBinWriter(_firestore).moveDocToBin(
+      _firestore.collection(collectionName).doc(id),
+      type: RecycleBinType.workArea,
+      label: (d) => '${(d['name'] as String?)?.trim().isNotEmpty == true ? (d['name'] as String).trim() : 'Unnamed'} (work area)',
+    );
   }
 
   // Create a new work area from polygon points

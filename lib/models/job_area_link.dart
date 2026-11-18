@@ -22,7 +22,9 @@ class JobAreaLink {
   /// Month key (e.g. `'09-2026'`) of the map's Firestore path.
   final String monthKey;
 
-  /// The polygon's stable id on that map (see `utils/polygon_ids.dart`).
+  /// The polygon's — or point's — stable id on that map (see
+  /// `utils/polygon_ids.dart`). A point (a traffic light, a handout spot)
+  /// resolves to a point-type polygon.
   final String polygonId;
 
   /// The polygon's name when it was allocated — a label for when the map
@@ -103,7 +105,8 @@ class JobAreaLink {
 /// One job's share of an allocation change: links to add and links (by
 /// [JobAreaLink.key]) to remove. Applied by
 /// `FirestoreService.applyAreaLinkChanges`, which touches nothing on the job
-/// but its `areaLinks`.
+/// but its `areaLinks` — and, when a copied area is converted to a link, the
+/// copy in `workMaps` (and its name in `workingAreas`).
 class AreaLinkChange {
   final String jobId;
 
@@ -113,12 +116,35 @@ class AreaLinkChange {
   final List<JobAreaLink> add;
   final Set<String> removeKeys;
 
+  /// Copied client-map polygons to take out of the job's stored `workMaps`,
+  /// matched by polygon id …
+  final Set<String> removeCopyIds;
+
+  /// … or, for copies made without an id, by `polygonGeometryKey`.
+  final Set<String> removeCopyGeometryKeys;
+
   const AreaLinkChange({
     required this.jobId,
     required this.date,
     this.add = const [],
     this.removeKeys = const {},
+    this.removeCopyIds = const {},
+    this.removeCopyGeometryKeys = const {},
   });
+
+  bool get removesCopies =>
+      removeCopyIds.isNotEmpty || removeCopyGeometryKeys.isNotEmpty;
+
+  /// Whether stored work-map polygon [p] is one of the copies this change
+  /// takes off the job. [geometryKey] is `polygonGeometryKey` — passed in so
+  /// this model needs no map utilities.
+  bool removesCopy(CustomPolygon p, String Function(CustomPolygon) geometryKey) {
+    if (JobAreaLink.isResolved(p)) return false;
+    final id = p.id;
+    if (id != null && removeCopyIds.contains(id)) return true;
+    return removeCopyGeometryKeys.isNotEmpty &&
+        removeCopyGeometryKeys.contains(geometryKey(p));
+  }
 
   /// [links] after this change: removals first, then additions not already
   /// present (a link to the same polygon is never stacked).

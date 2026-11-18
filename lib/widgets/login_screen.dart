@@ -1,6 +1,8 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/auth_provider.dart';
+import '../services/storage_health.dart';
 
 /// Login screen with email/password authentication
 /// Provides secure authentication UI with form validation
@@ -15,9 +17,7 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
-  final _nameController = TextEditingController();
 
-  bool _isSignUpMode = false;
   bool _obscurePassword = true;
   bool _showForgotPassword = false;
 
@@ -25,7 +25,6 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
-    _nameController.dispose();
     super.dispose();
   }
 
@@ -98,30 +97,6 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
 
                     const SizedBox(height: 16),
 
-                    // Name Field (only in sign up mode)
-                    if (_isSignUpMode) ...[
-                      TextFormField(
-                        controller: _nameController,
-                        textInputAction: TextInputAction.next,
-                        decoration: InputDecoration(
-                          labelText: 'Display Name',
-                          hintText: 'Enter your name',
-                          prefixIcon: const Icon(Icons.person_outline),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        validator: (value) {
-                          if (_isSignUpMode &&
-                              (value == null || value.trim().isEmpty)) {
-                            return 'Please enter your name';
-                          }
-                          return null;
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                    ],
-
                     // Password Field
                     TextFormField(
                       controller: _passwordController,
@@ -149,9 +124,6 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
                         if (value == null || value.isEmpty) {
                           return 'Please enter your password';
                         }
-                        if (_isSignUpMode && value.length < 6) {
-                          return 'Password must be at least 6 characters';
-                        }
                         return null;
                       },
                       onFieldSubmitted: (_) => _handleSubmit(authProvider),
@@ -159,8 +131,8 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
 
                     const SizedBox(height: 8),
 
-                    // Forgot Password Link (only in sign in mode)
-                    if (!_isSignUpMode && !_showForgotPassword)
+                    // Forgot Password Link
+                    if (!_showForgotPassword)
                       Align(
                         alignment: Alignment.centerRight,
                         child: TextButton(
@@ -194,9 +166,9 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
                                 child:
                                     CircularProgressIndicator(strokeWidth: 2),
                               )
-                            : Text(
-                                _isSignUpMode ? 'Create Account' : 'Sign In',
-                                style: const TextStyle(
+                            : const Text(
+                                'Sign In',
+                                style: TextStyle(
                                     fontSize: 16, fontWeight: FontWeight.w600),
                               ),
                       ),
@@ -239,27 +211,17 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
 
                     const SizedBox(height: 16),
 
-                    // Toggle Sign Up/Sign In
+                    // No self sign-up: every account is staff, so an admin
+                    // creates it in the Firebase console.
                     if (!_showForgotPassword)
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            _isSignUpMode
-                                ? 'Already have an account? '
-                                : 'Don\'t have an account? ',
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                          TextButton(
-                            onPressed:
-                                authProvider.isLoading ? null : _toggleMode,
-                            child: Text(
-                              _isSignUpMode ? 'Sign In' : 'Create Account',
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w600),
+                      Text(
+                        'Need an account? Ask an admin to create one.',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
                             ),
-                          ),
-                        ],
+                        textAlign: TextAlign.center,
                       ),
 
                     const SizedBox(height: 24),
@@ -283,14 +245,29 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
                             ),
                             const SizedBox(width: 12),
                             Expanded(
-                              child: Text(
-                                authProvider.errorMessage!,
-                                style: TextStyle(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onErrorContainer,
-                                  fontWeight: FontWeight.w500,
-                                ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    authProvider.errorMessage!,
+                                    style: TextStyle(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onErrorContainer,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  if (authProvider.storageFullError) ...[
+                                    const SizedBox(height: 10),
+                                    FilledButton.icon(
+                                      onPressed: StorageHealth.instance.fixNow,
+                                      icon: const Icon(
+                                          Icons.cleaning_services_outlined,
+                                          size: 18),
+                                      label: const Text('Fix now'),
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
                             IconButton(
@@ -316,50 +293,27 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
     );
   }
 
-  void _toggleMode() {
-    setState(() {
-      _isSignUpMode = !_isSignUpMode;
-      _showForgotPassword = false;
-    });
-    ref.read(authRiverpod).clearError();
-  }
-
   Future<void> _handleSubmit(AuthProvider authProvider) async {
     if (!_formKey.currentState!.validate()) return;
 
     final email = _emailController.text.trim();
     final password = _passwordController.text;
 
-    bool success;
-
-    if (_isSignUpMode) {
-      success = await authProvider.createUserWithEmailAndPassword(
-        email: email,
-        password: password,
-      );
-
-      // Update display name if account creation was successful
-      if (success && _nameController.text.trim().isNotEmpty) {
-        await authProvider.updateDisplayName(_nameController.text.trim());
-      }
-    } else {
-      success = await authProvider.signInWithEmailAndPassword(
-        email: email,
-        password: password,
-      );
-    }
+    final success = await authProvider.signInWithEmailAndPassword(
+      email: email,
+      password: password,
+    );
 
     if (success && mounted) {
       // Clear form fields on successful authentication
       _emailController.clear();
       _passwordController.clear();
-      _nameController.clear();
     }
   }
 
   Future<void> _handlePasswordReset(AuthProvider authProvider) async {
     if (_emailController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Please enter your email address first'),
           backgroundColor: Colors.orange,
@@ -370,7 +324,7 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
 
     final email = _emailController.text.trim();
     if (!RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(email)) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Please enter a valid email address'),
           backgroundColor: Colors.red,
@@ -386,16 +340,12 @@ class _LoginScreenState extends riverpod.ConsumerState<LoginScreen> {
         _showForgotPassword = false;
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text('Password reset email sent to $email'),
           backgroundColor: Colors.green,
-          action: SnackBarAction(
-            label: 'OK',
-            onPressed: () {
-              ScaffoldMessenger.of(context).hideCurrentSnackBar();
-            },
-          ),
+          // Tapping a toast's action closes that toast.
+          action: SnackBarAction(label: 'OK', onPressed: () {}),
         ),
       );
     }

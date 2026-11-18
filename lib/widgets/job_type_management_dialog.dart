@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -294,7 +295,7 @@ class _JobTypeManagementDialogState
   Future<void> _save() async {
     final label = _labelController.text.trim();
     if (label.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(content: Text('Please enter a label')),
       );
       return;
@@ -355,7 +356,7 @@ class _JobTypeManagementDialogState
       _cancelEdit();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Error: $e')),
         );
       }
@@ -386,7 +387,7 @@ class _JobTypeManagementDialogState
 
   Future<void> _delete(CustomJobType jt) async {
     if (jt.isDefault) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(content: Text('Default job types cannot be deleted.')),
       );
       return;
@@ -458,7 +459,7 @@ class _JobTypeManagementDialogState
         await provider.deleteJobType(jt.id);
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(content: Text('Error: $e')),
           );
         }

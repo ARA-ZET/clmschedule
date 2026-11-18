@@ -57,7 +57,7 @@ void main() {
     expect(amahle, lessThan(zolaFirst));
     expect(zolaFirst, lessThan(sat));
 
-    expect(find.widgetWithText(OutlinedButton, 'Add photos'), findsNWidgets(2));
+    expect(find.widgetWithText(TextButton, 'Add photos'), findsNWidgets(2));
 
     // Unticking a date unticks every shift on it and nothing else.
     await tester.tap(find.byType(Checkbox).first);

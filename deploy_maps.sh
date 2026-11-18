@@ -66,8 +66,8 @@ if [ -f "$INDEX_FILE" ]; then
         -e "s|<meta property=\"og:description\" content=\"CLM Schedule - Enterprise scheduling application\">|<meta property=\"og:description\" content=\"${MAPS_DESC}\">|g" \
         -e "s|<meta name=\"twitter:title\" content=\"CLM Schedule\">|<meta name=\"twitter:title\" content=\"${MAPS_TITLE}\">|g" \
         -e "s|<meta name=\"twitter:description\" content=\"CLM Schedule - Enterprise scheduling application\">|<meta name=\"twitter:description\" content=\"${MAPS_DESC}\">|g" \
-        -e "s|<meta property=\"og:image\" content=\"icons/Icon-512.png\">|<meta property=\"og:image\" content=\"${MAPS_ORIGIN}/assets/clm-official-logo.jpeg\">|g" \
-        -e "s|<meta name=\"twitter:image\" content=\"icons/Icon-512.png\">|<meta name=\"twitter:image\" content=\"${MAPS_ORIGIN}/assets/clm-official-logo.jpeg\">|g" \
+        -e "s|<meta property=\"og:image\" content=\"icons/Icon-512.png\">|<meta property=\"og:image\" content=\"${MAPS_ORIGIN}/assets/assets/clm-official-logo.jpeg\">|g" \
+        -e "s|<meta name=\"twitter:image\" content=\"icons/Icon-512.png\">|<meta name=\"twitter:image\" content=\"${MAPS_ORIGIN}/assets/assets/clm-official-logo.jpeg\">|g" \
         -e "s|var SINGLE_TAB    = false;|var SINGLE_TAB    = true; |" \
         "$INDEX_FILE"
     # Maps has no Firestore persistence, so duplicate tabs must stay blocked.
@@ -91,9 +91,10 @@ if [ -f "$MANIFEST_FILE" ]; then
 fi
 
 # Step 2: Deploy to Firebase Hosting (maps target → clm-maps site)
-echo -e "\n${BLUE}Step 2: Deploying mapPage function + Firebase Hosting (maps target)...${NC}"
-# mapPage must ship with (or before) Hosting — the /map/** rewrite points at it.
-firebase deploy --only functions:mapPage,hosting:maps --project clmschedule --account "$FIREBASE_ACCOUNT"
+echo -e "\n${BLUE}Step 2: Deploying mapPage + photoPage functions + Firebase Hosting (maps target)...${NC}"
+# Both functions must ship with (or before) Hosting — the /map/** and
+# /photos/** rewrites point at them.
+firebase deploy --only functions:mapPage,functions:photoPage,hosting:maps --project clmschedule --account "$FIREBASE_ACCOUNT"
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Deployment successful${NC}"

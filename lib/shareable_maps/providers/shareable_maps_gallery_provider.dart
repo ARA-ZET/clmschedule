@@ -1,9 +1,9 @@
+import 'package:clmschedule/utils/text_search.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import '../services/map_name_index_service.dart';
 import '../services/shareable_maps_firestore_service.dart';
-import '../services/map_link_service.dart';
-import '../services/map_thumbnail_service.dart';
 
 /// Riverpod provider for ShareableMapsGalleryProvider.
 final shareableMapsGalleryRiverpod =
@@ -58,6 +58,23 @@ class MapGalleryItem {
       thumbnailUrl: map.thumbnailUrl,
     );
   }
+
+  /// From the names-only index: no layers were fetched, so the layer and
+  /// element counts are unknown (0 hides their badges on the tile).
+  factory MapGalleryItem.fromIndex(MapIndexEntry e) => MapGalleryItem(
+        docId: e.docId,
+        name: e.name,
+        description: e.description,
+        createdAt: e.createdAt,
+        updatedAt: e.updatedAt,
+        monthKey: e.monthKey,
+        layerCount: 0,
+        elementCount: 0,
+        waypointCount: e.waypointCount,
+        centerLat: e.centerLat,
+        centerLng: e.centerLng,
+        thumbnailUrl: e.thumbnailUrl,
+      );
 }
 
 /// Groups maps by month for the gallery view.
@@ -84,6 +101,12 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
   String _filterTab = 'all'; // 'all', 'recent'
   String _searchQuery = '';
 
+  // Names-only index of every month's maps, fetched the first time the user
+  // searches, so a search covers months that were never loaded without
+  // downloading their layers (see MapNameIndexService).
+  List<MapGalleryItem>? _index;
+  bool _indexLoading = false;
+
   // Lazy month loading
   List<String> _availableMonths = []; // all months from Firestore, newest first
   final Set<String> _loadedMonths = {};
@@ -105,6 +128,13 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
   List<String> get unloadedMonths =>
       _availableMonths.where((mk) => !_loadedMonths.contains(mk)).toList();
 
+  /// True while a search is answered from every month, so "tap to load"
+  /// month rows are not needed.
+  bool get searchCoversAllMonths => _searchQuery.isNotEmpty && _index != null;
+
+  /// True while the all-months index is being fetched for a search.
+  bool get isSearchIndexLoading => _searchQuery.isNotEmpty && _indexLoading;
+
   /// Whether a specific month is currently being fetched.
   bool isMonthLoading(String monthKey) => _loadingMonths.contains(monthKey);
 
@@ -119,6 +149,8 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
     _error = null;
     _allMaps = [];
     _monthGroups = [];
+    _index = null;
+    MapNameIndexService.instance.invalidate();
     _loadedMonths.clear();
     _loadingMonths.clear();
     notifyListeners();
@@ -213,21 +245,13 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
     }
   }
 
-  /// Delete a map, its share links, thumbnail, and refresh the list.
-  Future<void> deleteMap(String monthKey, String docId) async {
+  /// Move a map (with its share links) to the Recycle Bin and refresh the
+  /// list. Returns the bin entry id, for the "Restore" action.
+  Future<String?> deleteMap(String monthKey, String docId) async {
     try {
-      // Clean up associated share links first
-      final linkService = MapLinkService();
-      await linkService.deleteLinksForMap(monthKey, docId);
-
-      // Clean up thumbnail from Storage
-      final thumbnailService = MapThumbnailService();
-      await thumbnailService.deleteThumbnail(
-        monthKey: monthKey,
-        docId: docId,
-      );
-
-      await _service.deleteMap(monthKey, docId);
+      final entryId = await _service.deleteMapToBin(monthKey, docId);
+      _index?.removeWhere((m) => m.docId == docId);
+      MapNameIndexService.instance.invalidate();
       // The current month is streamed and will auto-update.
       // For older months (one-time fetch), manually remove from local list.
       final currentMK =
@@ -237,6 +261,7 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
         _buildMonthGroups();
         notifyListeners();
       }
+      return entryId;
     } catch (e) {
       debugPrint('[ShareableMapsGallery] Delete error: $e');
       rethrow;
@@ -254,29 +279,53 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
 
   void setSearchQuery(String query) {
     _searchQuery = query.trim();
+    if (_searchQuery.isNotEmpty) _ensureIndex();
     notifyListeners();
+  }
+
+  Future<void> _ensureIndex() async {
+    if (_index != null || _indexLoading) return;
+    _indexLoading = true;
+    try {
+      final entries = await MapNameIndexService.instance.fetchAll();
+      _index = entries.map(MapGalleryItem.fromIndex).toList();
+    } catch (e) {
+      // Search still covers the loaded months.
+      debugPrint('[ShareableMapsGallery] Search index error: $e');
+    } finally {
+      _indexLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// What a search runs over: loaded maps (live, full detail) plus index
+  /// entries for maps in months that were never loaded.
+  List<MapGalleryItem> get _searchable {
+    final index = _index;
+    if (_searchQuery.isEmpty || index == null) return _allMaps;
+    final loaded = {for (final m in _allMaps) m.docId};
+    return [
+      ..._allMaps,
+      for (final m in index)
+        if (!loaded.contains(m.docId) && !_loadedMonths.contains(m.monthKey))
+          m,
+    ];
   }
 
   /// Apply search filter to a list of maps.
   List<MapGalleryItem> _applySearch(List<MapGalleryItem> maps) {
     if (_searchQuery.isEmpty) return maps;
-    final q = _searchQuery.toLowerCase();
-    return maps.where((m) {
-      return m.name.toLowerCase().contains(q) ||
-          m.description.toLowerCase().contains(q) ||
-          m.monthKey.contains(q);
-    }).toList();
+    final search = TextSearch(_searchQuery);
+    return maps
+        .where((m) => search.matches([m.name, m.description, m.monthKey]))
+        .toList();
   }
 
   List<MapGalleryItem> get filteredMaps {
-    List<MapGalleryItem> result;
-    switch (_filterTab) {
-      case 'recent':
-        final cutoff = DateTime.now().subtract(const Duration(days: 7));
-        result = _allMaps.where((m) => m.updatedAt.isAfter(cutoff)).toList();
-        break;
-      default:
-        result = _allMaps;
+    List<MapGalleryItem> result = _searchable;
+    if (_filterTab == 'recent') {
+      final cutoff = DateTime.now().subtract(const Duration(days: 7));
+      result = result.where((m) => m.updatedAt.isAfter(cutoff)).toList();
     }
     return _applySearch(result);
   }
@@ -284,35 +333,22 @@ class ShareableMapsGalleryProvider extends ChangeNotifier {
   /// Month groups with search applied.
   List<MonthGroup> get filteredMonthGroups {
     if (_searchQuery.isEmpty) return _monthGroups;
-    final q = _searchQuery.toLowerCase();
-    return _monthGroups
-        .map((group) {
-          final filtered = group.maps.where((m) {
-            return m.name.toLowerCase().contains(q) ||
-                m.description.toLowerCase().contains(q) ||
-                m.monthKey.contains(q);
-          }).toList();
-          return MonthGroup(
-            monthKey: group.monthKey,
-            label: group.label,
-            maps: filtered,
-          );
-        })
-        .where((g) => g.maps.isNotEmpty)
-        .toList();
+    return _groupByMonth(_applySearch(_searchable));
   }
 
   // ---------------------------------------------------------------------------
   // Grouping
   // ---------------------------------------------------------------------------
 
-  void _buildMonthGroups() {
+  void _buildMonthGroups() => _monthGroups = _groupByMonth(_allMaps);
+
+  List<MonthGroup> _groupByMonth(List<MapGalleryItem> maps) {
     final grouped = <String, List<MapGalleryItem>>{};
-    for (final map in _allMaps) {
+    for (final map in maps) {
       grouped.putIfAbsent(map.monthKey, () => []).add(map);
     }
 
-    _monthGroups = grouped.entries.map((entry) {
+    return grouped.entries.map((entry) {
       return MonthGroup(
         monthKey: entry.key,
         label: formatMonthLabel(entry.key),

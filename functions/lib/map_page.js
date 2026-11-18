@@ -27,6 +27,15 @@ const TEMPLATE_URL = "https://clm-maps.web.app/index.html";
 const TEMPLATE_TTL_MS = 60 * 1000;
 
 const COMPANY = "Community Life Media";
+
+/**
+ * The company logo as Hosting serves it. Flutter web bundles app assets
+ * under `assets/` again, so it is /assets/assets/… — /assets/clm-official-
+ * logo.jpeg falls through to the app's index.html and renders as a broken
+ * image (and an empty link preview).
+ */
+const LOGO_PATH = "/assets/assets/clm-official-logo.jpeg";
+
 const CODE_RE = /^[A-Za-z0-9_-]{4,64}$/;
 
 let _template = null;
@@ -83,8 +92,8 @@ function render(template, { title, description, heading, subheading, origin, can
   html = setMeta(html, "property", "og:description", description);
   html = setMeta(html, "name", "twitter:title", title);
   html = setMeta(html, "name", "twitter:description", description);
-  html = setMeta(html, "property", "og:image", `${origin}/assets/clm-official-logo.jpeg`);
-  html = setMeta(html, "name", "twitter:image", `${origin}/assets/clm-official-logo.jpeg`);
+  html = setMeta(html, "property", "og:image", `${origin}${LOGO_PATH}`);
+  html = setMeta(html, "name", "twitter:image", `${origin}${LOGO_PATH}`);
   html = setElementText(html, "splash-title", heading);
   html = setElementText(html, "splash-subtitle", subheading);
 

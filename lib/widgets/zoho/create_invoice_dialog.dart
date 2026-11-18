@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
@@ -12,6 +13,8 @@ import '../../services/job_list_service.dart';
 import '../../providers/job_type_provider.dart';
 import '../../utils/schedule_time.dart';
 import '../../utils/zoho_org.dart';
+import '../../services/zoho_books_service.dart';
+import '../slow_action_hint.dart';
 import 'line_items_editor.dart';
 import 'zoho_invoice_detail_screen.dart';
 import 'zoho_table.dart';
@@ -65,6 +68,14 @@ class _CreateInvoiceDialogState
   JobListItem? _backingItem;
   bool _isSaving = false;
   String? _error;
+
+  /// One per dialog, so a retry after a lost reply (or a second click) gets
+  /// the invoice the first call created rather than a new one.
+  final String _createKey = newZohoIdempotencyKey('invoice');
+
+  /// The invoice once Zoho has created it. A retry after the link step
+  /// failed only re-links it; it never raises another.
+  ZohoInvoice? _created;
 
   @override
   void initState() {
@@ -145,6 +156,9 @@ class _CreateInvoiceDialogState
   }
 
   Future<void> _create() async {
+    // The button disables while saving, but two clicks can land before that
+    // repaint.
+    if (_isSaving) return;
     if (!_formKey.currentState!.validate()) return;
     if (_selectedCustomer == null) {
       setState(() => _error = 'Choose a customer first.');
@@ -190,8 +204,9 @@ class _CreateInvoiceDialogState
     );
 
     try {
-      final created =
-          await ref.read(zohoInvoicesRiverpod(_orgId)).createInvoice(draft);
+      final created = _created ??= await ref
+          .read(zohoInvoicesRiverpod(_orgId))
+          .createInvoice(draft, idempotencyKey: _createKey);
 
       // Write the link back to the JobListItem. If this fails the invoice
       // still exists in Zoho, so say so rather than implying nothing happened.
@@ -226,7 +241,9 @@ class _CreateInvoiceDialogState
           setState(() {
             _isSaving = false;
             _error = 'Invoice ${created.invoiceNumber} was created in Zoho, '
-                'but linking it to this job failed: $e';
+                'but linking it to this job failed: $e\n'
+                'Press "Link invoice" to try the link again — it will not '
+                'create another invoice.';
           });
         }
         return;
@@ -234,7 +251,7 @@ class _CreateInvoiceDialogState
 
       if (!mounted) return;
       Navigator.of(context).pop(true);
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text('Invoice ${created.invoiceNumber} created'),
           backgroundColor: Colors.green,
@@ -391,6 +408,11 @@ class _CreateInvoiceDialogState
                   const SizedBox(height: 12),
                   Text(_error!, style: const TextStyle(color: Colors.red)),
                 ],
+                SlowActionHint(
+                    busy: _isSaving,
+                    action: _created == null
+                        ? 'Creating the invoice in Zoho'
+                        : 'Linking the invoice to the job'),
               ],
             ),
           ),
@@ -409,7 +431,7 @@ class _CreateInvoiceDialogState
                   height: 16,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              : const Text('Create in Zoho'),
+              : Text(_created == null ? 'Create in Zoho' : 'Link invoice'),
         ),
       ],
     );

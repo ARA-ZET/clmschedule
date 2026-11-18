@@ -9,6 +9,7 @@ class _FakeSchedule extends Fake implements ScheduleProvider {
 
   @override
   final List<Distributor> distributors;
+  @override
   final List<Job> jobs;
 
   @override

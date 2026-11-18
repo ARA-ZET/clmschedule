@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../slow_action_hint.dart';
 import 'invoice_save_saga.dart';
 import 'zoho_table.dart';
 
@@ -33,6 +34,9 @@ class SagaProgressPanel extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           for (final step in saga.steps) _buildStep(step),
+          SlowActionHint(
+              busy: saga.isRunning,
+              action: 'Working with ${saga.providerName}'),
           if (failed) ...[
             const Divider(height: 20),
             Row(
@@ -59,8 +63,13 @@ class SagaProgressPanel extends StatelessWidget {
                                 '${saga.providerName} but is not linked to the job. '
                                 'Retry, or note the number and link it manually — '
                                 'do not create another.'
-                            : 'Nothing was created in ${saga.providerName}. Safe to '
-                                'retry or cancel.',
+                            // A lost reply can hide an invoice that was in
+                            // fact raised; the retry sends the same request
+                            // key, so it picks that invoice up instead of
+                            // raising another.
+                            : 'The invoice was not confirmed by '
+                                '${saga.providerName}. Retry is safe — it will '
+                                'not create a second invoice.',
                     style: TextStyle(
                       fontSize: 12,
                       color: Colors.orange.shade900,

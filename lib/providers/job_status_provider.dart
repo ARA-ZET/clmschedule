@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_job_status.dart';
 import '../services/reference_cache_service.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 
 const String _kCollectionName = 'jobStatuses';
 
@@ -33,6 +35,11 @@ class JobStatusProvider extends ChangeNotifier {
         collectionName: _kCollectionName,
         fromDoc: (doc) =>
             CustomJobStatus.fromMap(Map<String, dynamic>.from(doc.data() as Map)),
+        onCached: (cached) {
+          _statuses = cached;
+          _isLoading = false;
+          notifyListeners();
+        },
       );
 
       if (_statuses.isEmpty) {
@@ -117,7 +124,11 @@ class JobStatusProvider extends ChangeNotifier {
     }
 
     try {
-      await _firestore.collection(_kCollectionName).doc(statusId).delete();
+      await RecycleBinWriter(_firestore).moveDocToBin(
+        _firestore.collection(_kCollectionName).doc(statusId),
+        type: RecycleBinType.jobStatus,
+        label: (d) => binLabel(d, 'schedule status'),
+      );
       await ReferenceCacheService.bumpVersion(_kCollectionName);
 
       _statuses.removeWhere((s) => s.id == statusId);

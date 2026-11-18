@@ -12,19 +12,25 @@
 //    (both keep it, e.g. a big area over two days).
 //  * A job whose day has passed, or whose link is frozen, is history, not a
 //    current owner: it is shown, but a move never takes the area off it.
+//  * An area COPIED onto a job (a regular-client round, or the older "add
+//    linked map polygons") counts as held too. Moving or re-allocating it
+//    converts it: the copy comes off and a link goes on, in one transaction.
 //
 // Who holds which area is read straight off the schedule jobs in the window
 // — nothing is stored on the map — so the two sides cannot drift apart.
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 
 import '../models/custom_polygon.dart';
 import '../models/job.dart';
 import '../models/job_area_link.dart';
 import '../models/job_list_item.dart';
+import '../models/regular_client.dart' show kRegularClientSlotPalette;
 import '../shareable_maps/models/shareable_map.dart';
+import '../shareable_maps/utils/linked_map_polygons.dart'
+    show polygonGeometryKey;
 import '../utils/schedule_time.dart';
 import 'firestore_service.dart';
 import 'job_list_service.dart';
@@ -35,15 +41,55 @@ const Duration kSlackBefore = Duration(days: 3);
 /// How far after the Job List date the schedule is searched.
 const Duration kSearchAfter = Duration(days: 60);
 
-/// One job's hold on one area.
+/// Colour of an area no distributor holds.
+const Color kUnallocatedAreaColor = Color(0xFF9E9E9E);
+
+/// One job's hold on one area: by [link], by a [copy] in its `workMaps`, or
+/// both (allocated before an old copy was converted).
 class AreaHolding {
   final Job job;
-  final JobAreaLink link;
-  const AreaHolding(this.job, this.link);
+  final String polygonId;
+  final JobAreaLink? link;
+  final CustomPolygon? copy;
+
+  const AreaHolding(this.job, this.polygonId, {this.link, this.copy})
+      : assert(link != null || copy != null);
+
+  /// Held only through a copy, not a link.
+  bool get isCopy => link == null;
 
   /// Worked already: frozen, or its day is before today. History — never
   /// counted as the current owner and never unlinked by a move.
-  bool get isHistory => link.isFrozen || job.date.isBefore(scheduleToday());
+  bool get isHistory =>
+      (link?.isFrozen ?? false) || job.date.isBefore(scheduleToday());
+
+  String get name => link?.name.isNotEmpty == true
+      ? link!.name
+      : (copy?.name ?? link?.name ?? '');
+
+  /// The change that takes this area off [job]: the link, the copy, or both.
+  AreaLinkChange removal() => AreaLinkChange(
+        jobId: job.id,
+        date: job.date,
+        removeKeys: {if (link != null) link!.key},
+        removeCopyIds: {if (copy?.id != null) copy!.id!},
+        removeCopyGeometryKeys: {if (copy != null) polygonGeometryKey(copy!)},
+      );
+}
+
+/// One scheduled day of one distributor and the map's areas it holds.
+class AllocationDay {
+  final Job job;
+  final List<AreaHolding> holdings;
+  const AllocationDay(this.job, this.holdings);
+}
+
+/// A distributor's days on this client, in date order.
+class AllocationGroup {
+  final String distributorId;
+  final Color color;
+  final List<AllocationDay> days;
+  const AllocationGroup(this.distributorId, this.color, this.days);
 }
 
 class ClientMapAllocationService {
@@ -169,13 +215,54 @@ class ClientMapAllocationService {
   }
 
   /// Every job's hold on the polygons of map [mapId], keyed by polygon id.
+  ///
+  /// [mapPolygons] may include the map's points (as point-type polygons):
+  /// a point is allocated just like an area.
+  ///
+  /// With [client] and [mapPolygons], copies of the map's polygons in the
+  /// `workMaps` of jobs carrying [client] count too — matched by polygon id,
+  /// else by outline. Points match by id only: a job's own address or
+  /// drop-off pin can sit on the same spot as a client-map point.
   static Map<String, List<AreaHolding>> holdingsByPolygon(
-      List<Job> jobs, String mapId) {
+    List<Job> jobs,
+    String mapId, {
+    String? client,
+    List<CustomPolygon> mapPolygons = const [],
+  }) {
+    final ids = <String>{};
+    final idByGeometry = <String, String>{};
+    for (final p in mapPolygons) {
+      final id = p.id;
+      if (id == null || id.isEmpty) continue;
+      ids.add(id);
+      if (p.isPolygon) {
+        idByGeometry.putIfAbsent(polygonGeometryKey(p), () => id);
+      }
+    }
+    final want = client == null ? '' : normaliseClient(client);
+
     final out = <String, List<AreaHolding>>{};
     for (final job in jobs) {
-      for (final link in job.areaLinks) {
-        if (link.mapId != mapId) continue;
-        out.putIfAbsent(link.polygonId, () => []).add(AreaHolding(job, link));
+      final links = <String, JobAreaLink>{
+        for (final link in job.areaLinks)
+          if (link.mapId == mapId) link.polygonId: link,
+      };
+      final copies = <String, CustomPolygon>{};
+      if (want.isNotEmpty &&
+          ids.isNotEmpty &&
+          job.clients.any((c) => normaliseClient(c) == want)) {
+        for (final p in job.workMaps) {
+          if (JobAreaLink.isResolved(p)) continue;
+          final id = (p.id != null && ids.contains(p.id))
+              ? p.id!
+              : (p.isPolygon ? idByGeometry[polygonGeometryKey(p)] : null);
+          if (id != null) copies.putIfAbsent(id, () => p);
+        }
+      }
+      for (final id in {...links.keys, ...copies.keys}) {
+        out
+            .putIfAbsent(id, () => [])
+            .add(AreaHolding(job, id, link: links[id], copy: copies[id]));
       }
     }
     for (final list in out.values) {
@@ -211,29 +298,185 @@ class ClientMapAllocationService {
             name: p.name,
           ),
     ];
-    final removals = <String, (Job, Set<String>)>{};
+    // The target's own copies of these areas become the new links.
+    final targetCopies = <AreaHolding>[
+      for (final link in add)
+        for (final h in holdings[link.polygonId] ?? const <AreaHolding>[])
+          if (h.job.id == target.id && h.copy != null) h,
+    ];
+    final removals = <String, List<AreaHolding>>{};
     if (move) {
       for (final link in add) {
         for (final h in currentOwners(holdings[link.polygonId])) {
           if (h.job.id == target.id) continue;
-          removals.putIfAbsent(h.job.id, () => (h.job, <String>{})).$2.add(
-                link.key,
-              );
+          removals.putIfAbsent(h.job.id, () => []).add(h);
         }
       }
     }
     return [
-      AreaLinkChange(jobId: target.id, date: target.date, add: add),
-      for (final r in removals.values)
-        AreaLinkChange(jobId: r.$1.id, date: r.$1.date, removeKeys: r.$2),
+      AreaLinkChange(
+        jobId: target.id,
+        date: target.date,
+        add: add,
+        removeCopyIds: {
+          for (final h in targetCopies)
+            if (h.copy!.id != null) h.copy!.id!,
+        },
+        removeCopyGeometryKeys: {
+          for (final h in targetCopies) polygonGeometryKey(h.copy!),
+        },
+      ),
+      for (final list in removals.values) _merge(list),
     ];
+  }
+
+  /// One change that takes every holding in [list] (all one job) off it.
+  static AreaLinkChange _merge(List<AreaHolding> list) {
+    final parts = list.map((h) => h.removal()).toList();
+    return AreaLinkChange(
+      jobId: list.first.job.id,
+      date: list.first.job.date,
+      removeKeys: {for (final c in parts) ...c.removeKeys},
+      removeCopyIds: {for (final c in parts) ...c.removeCopyIds},
+      removeCopyGeometryKeys: {
+        for (final c in parts) ...c.removeCopyGeometryKeys
+      },
+    );
+  }
+
+  /// The changes that move [holding] to [target]: a link on the target
+  /// (replacing any copy it has), and the link or copy off the old job.
+  static List<AreaLinkChange> moveChanges({
+    required String mapId,
+    required String monthKey,
+    required AreaHolding holding,
+    required Job target,
+    required Map<String, List<AreaHolding>> holdings,
+  }) {
+    final targetCopy = (holdings[holding.polygonId] ?? const <AreaHolding>[])
+        .where((h) => h.job.id == target.id && h.copy != null)
+        .map((h) => h.copy!)
+        .firstOrNull;
+    return [
+      AreaLinkChange(
+        jobId: target.id,
+        date: target.date,
+        add: [
+          JobAreaLink(
+            mapId: mapId,
+            monthKey: monthKey,
+            polygonId: holding.polygonId,
+            name: holding.name,
+          ),
+        ],
+        removeCopyIds: {if (targetCopy?.id != null) targetCopy!.id!},
+        removeCopyGeometryKeys: {
+          if (targetCopy != null) polygonGeometryKey(targetCopy)
+        },
+      ),
+      holding.removal(),
+    ];
+  }
+
+  // ── Colours & grouping ─────────────────────────────────────────────────
+
+  /// A colour per distributor in [jobs], handed out by first scheduled date
+  /// then [names] (falling back to id), so the same people keep the same
+  /// colours as long as the schedule does.
+  static Map<String, Color> distributorColours(List<Job> jobs,
+      {Map<String, String> names = const {}}) {
+    final first = <String, DateTime>{};
+    for (final j in jobs) {
+      final d = first[j.distributorId];
+      if (d == null || j.date.isBefore(d)) first[j.distributorId] = j.date;
+    }
+    String label(String id) => (names[id] ?? id).toLowerCase();
+    final order = first.keys.toList()
+      ..sort((a, b) {
+        final byDate = first[a]!.compareTo(first[b]!);
+        return byDate != 0 ? byDate : label(a).compareTo(label(b));
+      });
+    return {
+      for (var i = 0; i < order.length; i++)
+        order[i]: kRegularClientSlotPalette[i % kRegularClientSlotPalette.length],
+    };
+  }
+
+  /// [candidates] plus every other job holding one of the map's areas
+  /// (history before the window), grouped per distributor, each with its
+  /// days in date order and the areas held that day.
+  static List<AllocationGroup> groups(
+    List<Job> candidates,
+    Map<String, List<AreaHolding>> holdings,
+    Map<String, Color> colours,
+  ) {
+    final jobs = <String, Job>{for (final j in candidates) j.id: j};
+    final byJob = <String, List<AreaHolding>>{};
+    for (final list in holdings.values) {
+      for (final h in list) {
+        jobs.putIfAbsent(h.job.id, () => h.job);
+        byJob.putIfAbsent(h.job.id, () => []).add(h);
+      }
+    }
+    final byDistributor = <String, List<AllocationDay>>{};
+    for (final j in jobs.values) {
+      byDistributor
+          .putIfAbsent(j.distributorId, () => [])
+          .add(AllocationDay(j, byJob[j.id] ?? const []));
+    }
+    final out = [
+      for (final e in byDistributor.entries)
+        AllocationGroup(
+          e.key,
+          colours[e.key] ?? kUnallocatedAreaColor,
+          e.value..sort((a, b) => a.job.date.compareTo(b.job.date)),
+        ),
+    ];
+    // By first day; colour order where those tie.
+    final rank = {
+      for (final (i, id) in colours.keys.indexed) id: i,
+    };
+    out.sort((a, b) {
+      final byDate = a.days.first.job.date.compareTo(b.days.first.job.date);
+      return byDate != 0
+          ? byDate
+          : (rank[a.distributorId] ?? 0).compareTo(rank[b.distributorId] ?? 0);
+    });
+    return out;
+  }
+
+  /// The colour an allocated element is drawn in: its current owner's, or
+  /// once worked its latest holder's; grey when nobody holds it.
+  static Color colourFor(
+      List<AreaHolding>? held, Map<String, Color> colours) {
+    if (held == null || held.isEmpty) return kUnallocatedAreaColor;
+    final current = currentOwners(held);
+    final owner = current.isNotEmpty ? current.first : held.last;
+    return colours[owner.job.distributorId] ?? kUnallocatedAreaColor;
+  }
+
+  /// [p] as the allocation view draws it: grey when nobody holds it, else
+  /// the colour of its current owner (or, once worked, its latest holder),
+  /// with a heavy outline when more than one distributor shares it.
+  static CustomPolygon styleFor(CustomPolygon p, List<AreaHolding>? held,
+      Map<String, Color> colours) {
+    if (held == null || held.isEmpty) {
+      return p.copyWith(
+          color: kUnallocatedAreaColor, fillOpacity: 0.25, strokeWidth: 2);
+    }
+    final current = currentOwners(held);
+    final shared = {for (final h in held) h.job.distributorId}.length > 1;
+    return p.copyWith(
+      color: colourFor(held, colours),
+      fillOpacity: current.isEmpty ? 0.3 : 0.45,
+      strokeWidth: shared ? 5 : 2,
+    );
   }
 
   Future<void> apply(List<AreaLinkChange> changes, {required String action}) =>
       _schedule.applyAreaLinkChanges(changes, action: action);
 
-  /// Takes [link] off [job].
-  Future<void> unallocate(Job job, JobAreaLink link) => apply([
-        AreaLinkChange(jobId: job.id, date: job.date, removeKeys: {link.key}),
-      ], action: 'unallocateArea');
+  /// Takes [holding]'s area off its job — the link, the copy, or both.
+  Future<void> unallocate(AreaHolding holding) =>
+      apply([holding.removal()], action: 'unallocateArea');
 }

@@ -2,6 +2,7 @@
 // Entry point for the erfProperty flavor.
 // Uses the main clmschedule Firebase project.
 
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -42,6 +43,7 @@ class ErfPropertyApp extends StatelessWidget {
             .read(mapModalObserverRiverpod),
       ],
       debugShowCheckedModeBanner: false,
+      builder: AppToastHost.builder,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
         useMaterial3: true,

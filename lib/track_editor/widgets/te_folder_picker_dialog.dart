@@ -15,6 +15,7 @@
 //     newest month first, with a search box across client, round and month.
 //   * "Browse storage" walks Cloud Storage directly, for a folder uploaded
 //     moments ago that the index hasn't caught up with yet.
+import 'package:clmschedule/utils/text_search.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -87,14 +88,14 @@ List<TEMonthGroup> teFolderMonthGroups(
     if (segs.length >= 5) children.add(segs.take(5).join('/'));
   }
 
-  final q = query.trim().toLowerCase();
-  bool matches(String s) => q.isEmpty || s.toLowerCase().contains(q);
+  final search = TextSearch(query);
+  bool matches(String s) => search.matches([s]);
   String last(String path) => path.substring(path.lastIndexOf('/') + 1);
 
   final groups = <TEMonthGroup>[];
   months.forEach((monthPath, clients) {
     final label = last(monthPath);
-    final monthMatches = q.isNotEmpty && matches(label);
+    final monthMatches = !search.isEmpty && matches(label);
     final folders = <TEFolderNode>[];
     for (final entry in clients.entries) {
       final name = last(entry.key);
@@ -102,14 +103,14 @@ List<TEMonthGroup> teFolderMonthGroups(
         for (final c in entry.value.toList()..sort(_naturalCompare))
           TEFolderNode(last(c), c),
       ];
-      if (q.isEmpty || monthMatches || matches(name)) {
+      if (search.isEmpty || monthMatches || matches(name)) {
         folders.add(TEFolderNode(name, entry.key, children));
         continue;
       }
       final hits = children.where((c) => matches(c.name)).toList();
       if (hits.isNotEmpty) folders.add(TEFolderNode(name, entry.key, hits));
     }
-    if (folders.isEmpty && !(q.isEmpty || monthMatches)) return;
+    if (folders.isEmpty && !(search.isEmpty || monthMatches)) return;
     folders.sort((a, b) => _naturalCompare(a.name, b.name));
     groups.add(TEMonthGroup(label, monthPath, folders));
   });

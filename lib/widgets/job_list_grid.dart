@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:async';
 
 import 'package:clmschedule/providers/toggler_provider.dart';
@@ -25,8 +26,10 @@ import '../providers/job_type_provider.dart';
 import '../providers/vat_settings_provider.dart';
 import '../services/xero_invoice_status_sync.dart';
 import '../services/job_list_service.dart';
+import '../services/job_draft_service.dart';
 import '../shareable_maps/services/map_link_service.dart';
-import 'distribution_report_dialog.dart';
+import '../services/distribution_report_draft_service.dart';
+import 'distribution_report_page.dart';
 import '../providers/zoho_sync_settings_provider.dart';
 import '../utils/job_lifecycle_rules.dart';
 import 'zoho/unlink_void_invoice.dart';
@@ -52,6 +55,12 @@ import 'job_list_column_config.dart';
 import 'job_invoices_sheet.dart';
 import 'reminder_dialog.dart' as reminder;
 import 'map_picker_dialog.dart';
+import '../services/job_list_undo.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_screen.dart';
+import '../undo/undo_history.dart';
+import '../undo/undo_redo_buttons.dart';
+import 'slow_action_hint.dart';
 
 enum _DateShiftPromptChoice {
   keepSchedule,
@@ -155,6 +164,7 @@ class JobListColumnLabels {
     'area': 'Area',
     'quantity': 'Qty / Vehicle',
     'manDays': 'Man-Days',
+    'flyerCollection': 'Flyer Col.',
     'collectionAddress': 'Col. Address',
     'specialInstructions': 'Special Instructions',
     'collectionDate': 'Col. Date',
@@ -189,6 +199,7 @@ class JobListDataColumns extends StatelessWidget {
     'area',
     'quantity',
     'manDays',
+    'flyerCollection',
     'collectionAddress',
     'specialInstructions',
     'collectionDate',
@@ -240,6 +251,7 @@ class JobListFrozenHeaders extends StatelessWidget {
     'area',
     'quantity',
     'manDays',
+    'flyerCollection',
     'collectionAddress',
     'specialInstructions',
     'collectionDate',
@@ -310,7 +322,7 @@ class JobListFrozenHeaders extends StatelessWidget {
                       await provider.refreshLastCheckedTime();
 
                       if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                        ScaffoldMessenger.of(context).showToast(
                           SnackBar(
                             content: Text(
                                 'Last checked time refreshed to ${now.toString().substring(0, 19)}'),
@@ -360,6 +372,7 @@ class JobListFrozenHeaders extends StatelessWidget {
       'area',
       'quantity',
       'manDays',
+      'flyerCollection',
       'collectionAddress',
       'specialInstructions',
       'collectionDate',
@@ -433,10 +446,18 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
   final Function(BuildContext, JobListItem) onShowEditDialog;
   final Function(BuildContext, JobListItem) onShowCopyDialog;
   final Function(BuildContext, JobListItem) onShowDeleteConfirmation;
+
   /// Called after an inline job-status change has been written, so the grid —
   /// whose context outlives this cell's — can offer to void the invoice.
   final void Function(JobListItem before, JobListItem after) onJobStatusChanged;
   final String? Function(int, String) getVehicleTrailerComboFromQuantity;
+
+  /// A half-written distribution report is saved for this job.
+  final bool hasReportDraft;
+
+  /// The grid's edit flow, handed to the distribution report so it edits
+  /// jobs and invoices through the same dialog and writes.
+  final ReportJobEditor? onEditJobForReport;
 
   const JobListDataCellsBuilder({
     super.key,
@@ -451,6 +472,8 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
     required this.onShowDeleteConfirmation,
     required this.onJobStatusChanged,
     required this.getVehicleTrailerComboFromQuantity,
+    this.hasReportDraft = false,
+    this.onEditJobForReport,
   });
 
   List<DataCell> buildCells(BuildContext context, riverpod.WidgetRef ref) {
@@ -538,15 +561,16 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                     final invoiceStatusProvider =
                         ref.read(invoiceStatusRiverpod);
                     Future.microtask(() async {
-                      await jobListProvider.updateJobListItemWithTracking(
+                      await ref.read(jobListUndoRiverpod).edit(
                         item,
                         updatedItem,
-                        resolveJobStatusLabel: (statusId) =>
-                            jobListStatusProvider.getStatusById(statusId)?.label,
-                        resolveInvoiceStatusLabel: (statusId) =>
-                            invoiceStatusProvider.getStatusById(statusId)?.label,
-                        resolveQuantityLabel:
-                            getVehicleTrailerComboFromQuantity,
+                        labels: JobListLabelResolvers(
+                          jobStatus: (statusId) =>
+                              jobListStatusProvider.getStatusById(statusId)?.label,
+                          invoiceStatus: (statusId) =>
+                              invoiceStatusProvider.getStatusById(statusId)?.label,
+                          quantity: getVehicleTrailerComboFromQuantity,
+                        ),
                       );
                       // Cancelling from this dropdown must offer the void just
                       // as cancelling from the edit dialog does — otherwise the
@@ -626,9 +650,8 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                       !isManualInvoiceStatusAllowed(
                         job: item,
                         newStatusId: newStatusId,
-                        statusMap: ref
-                            .read(zohoSyncSettingsRiverpod)
-                            .invoiceStatusMap,
+                        statusMap:
+                            ref.read(zohoSyncSettingsRiverpod).invoiceStatusMap,
                       )) {
                     // An invoiced job follows its books; only Paid (cash,
                     // direct EFT the books may never see) is set by hand.
@@ -636,7 +659,7 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                             AccountingProvider.xero.name
                         ? 'Xero'
                         : 'Zoho Books';
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    ScaffoldMessenger.of(context).showToast(SnackBar(
                       content: Text(
                           'Invoice ${item.resolvedInvoiceNumber} is linked to '
                           '$books, so its status follows the books. Only '
@@ -677,20 +700,17 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                     final jobListStatusProvider =
                         ref.read(jobListStatusRiverpod);
                     Future.microtask(
-                        () => jobListProvider.updateJobListItemWithTracking(
-                              item,
-                              updatedItem,
-                              resolveJobStatusLabel: (statusId) =>
-                                  jobListStatusProvider
-                                      .getStatusById(statusId)
-                                      ?.label,
-                              resolveInvoiceStatusLabel: (statusId) =>
-                                  invoiceStatusProvider
-                                      .getStatusById(statusId)
-                                      ?.label,
-                              resolveQuantityLabel:
-                                  getVehicleTrailerComboFromQuantity,
-                            ));
+                        () => ref.read(jobListUndoRiverpod).edit(
+                          item,
+                          updatedItem,
+                          labels: JobListLabelResolvers(
+                            jobStatus: (statusId) =>
+                                jobListStatusProvider.getStatusById(statusId)?.label,
+                            invoiceStatus: (statusId) =>
+                                invoiceStatusProvider.getStatusById(statusId)?.label,
+                            quantity: getVehicleTrailerComboFromQuantity,
+                          ),
+                        ));
                   }
                 },
               ),
@@ -763,12 +783,14 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                 }
 
                 final updatedItem = item.copyWith(reminders: updatedReminders);
-                jobListProvider.updateJobListItemWithTracking(
+                ref.read(jobListUndoRiverpod).edit(
                   item,
                   updatedItem,
-                  resolveJobStatusLabel: (_) => null,
-                  resolveInvoiceStatusLabel: (_) => null,
-                  resolveQuantityLabel: getVehicleTrailerComboFromQuantity,
+                  labels: JobListLabelResolvers(
+                    jobStatus: (_) => null,
+                    invoiceStatus: (_) => null,
+                    quantity: getVehicleTrailerComboFromQuantity,
+                  ),
                 );
               }
             },
@@ -898,6 +920,30 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
             )
           ],
         ),
+      ));
+    }
+
+    // Needs flyer collection — a tick on Community Life Media jobs, saved
+    // the moment it is clicked. Blank for the other companies, unless one
+    // was ticked before its job type changed (so it can still be cleared).
+    if (prefsProvider.isColumnVisible('flyerCollection')) {
+      final width = JobListColumnConfig.getWidth('flyerCollection');
+      cells.add(DataCell(
+        item.isCommunityLifeMediaJob || item.needsFlyerCollection
+            ? SizedBox(
+                width: width,
+                child: Tooltip(
+                  message: item.needsFlyerCollection
+                      ? 'Flyers need collecting — click to clear'
+                      : 'Tick if the flyers need collecting',
+                  child: Checkbox(
+                    value: item.needsFlyerCollection,
+                    onChanged: (value) => onUpdateField(
+                        item, 'needsFlyerCollection', value ?? false),
+                  ),
+                ),
+              )
+            : SizedBox(width: width),
       ));
     }
 
@@ -1177,8 +1223,8 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
     // provider-neutral fields existed carries only the legacy `zoho*` ones, and
     // reading those directly would make this blind to its own history.
     if (item.hasAccountingInvoice) {
-      final invoicedWithXero = item.resolvedInvoiceProviderId ==
-          AccountingProvider.xero.name;
+      final invoicedWithXero =
+          item.resolvedInvoiceProviderId == AccountingProvider.xero.name;
       final colour = invoicedWithXero
           ? XeroInvoiceStatus.parse(item.resolvedInvoiceStatus).color
           : ZohoInvoiceStatus.parse(
@@ -1213,8 +1259,8 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
           color: colour,
           tooltip: 'Invoice ${item.resolvedInvoiceNumber} is void — tap to '
               'view it or unlink it and invoice again',
-          onPressed: () => _showVoidInvoiceActions(
-              context, ref, item, jobType, openInvoice),
+          onPressed: () =>
+              _showVoidInvoiceActions(context, ref, item, jobType, openInvoice),
         );
       }
 
@@ -1328,8 +1374,10 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
     VoidCallback? onPressed,
     Color? color,
     bool struckThrough = false,
+    bool dot = false,
   }) {
     final size = scaleProvider.smallIconSize;
+    final plain = Icon(icon, size: size, color: color);
     return SizedBox(
       width: JobListColumnConfig.actionSlotWidth,
       child: IconButton(
@@ -1342,7 +1390,13 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
                       size: size * 0.72, color: Colors.grey.shade600),
                 ],
               )
-            : Icon(icon, size: size, color: color),
+            : dot
+                ? Badge(
+                    smallSize: 7,
+                    backgroundColor: Colors.amber.shade700,
+                    child: plain,
+                  )
+                : plain,
         tooltip: tooltip,
         onPressed: struckThrough ? null : onPressed,
         padding: EdgeInsets.zero,
@@ -1380,10 +1434,15 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
       scaleProvider: scaleProvider,
       struckThrough: !hasMap,
       color: Colors.teal.shade700,
-      tooltip: hasMap
-          ? 'Compile distribution report'
-          : 'No map linked — link one in the Area column to report on this job',
-      onPressed: () => showDistributionReportDialog(context, item),
+      // Marked when a half-written report is saved, so it can be found again.
+      dot: hasMap && hasReportDraft,
+      tooltip: !hasMap
+          ? 'No map linked — link one in the Area column to report on this job'
+          : hasReportDraft
+              ? 'Continue distribution report (draft saved)'
+              : 'Compile distribution report',
+      onPressed: () =>
+          openDistributionReport(context, item, editJob: onEditJobForReport),
     );
   }
 
@@ -1418,7 +1477,7 @@ class JobListDataCellsBuilder extends riverpod.ConsumerWidget {
     );
 
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text('Map "${result.mapName}" linked to job'),
           backgroundColor: Colors.green,
@@ -1458,6 +1517,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     'area': 'area',
     'quantity': 'quantity',
     'manDays': 'manDays',
+    'needsFlyerCollection': 'flyerCollection',
     'collectionAddress': 'collectionAddress',
     'specialInstructions': 'specialInstructions',
     'collectionDate': 'collectionDate',
@@ -1508,6 +1568,9 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     // Synchronize vertical scrolling between main table and frozen column
     _mainVerticalScrollController.addListener(_syncMainVerticalScroll);
     _frozenVerticalScrollController.addListener(_syncFrozenVerticalScroll);
+
+    // So Add Job can offer a saved draft the moment it opens.
+    ref.read(jobDraftServiceRiverpod).prefetch();
   }
 
   /// True between scheduling a Xero status refresh and it running, so a burst
@@ -1646,6 +1709,10 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
   Widget build(BuildContext context) {
     final jobListProvider = ref.watch(jobListRiverpod);
     final prefsProvider = ref.watch(jobListPreferencesRiverpod);
+    // Watched here so the grid rebuilds when a draft is saved or cleared;
+    // rows read it in their (lazy) item builder, where watching is not
+    // allowed.
+    ref.watch(distributionReportDraftIdsRiverpod);
     return Builder(
       builder: (context) {
         final scaleProvider = ref.watch(scaleRiverpod);
@@ -1656,8 +1723,9 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         _scheduleXeroStatusRefresh(jobListItems);
         _scheduleInvoiceStatusReconcile(jobListItems);
 
-        // Error state
-        if (hasError && jobListItems.isEmpty) {
+        // Error state. With jobs loaded the tab shows a banner over the
+        // grid instead (see JobListTab), so only an empty list lands here.
+        if (hasError && jobListProvider.allJobListItems.isEmpty) {
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -1666,7 +1734,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
                     size: scaleProvider.xlargeIconSize, color: Colors.red[300]),
                 const SizedBox(height: 16),
                 Text(
-                  'Error loading job list',
+                  "Couldn't load the Job List",
                   style: Theme.of(context).textTheme.headlineSmall,
                 ),
                 const SizedBox(height: 8),
@@ -1722,7 +1790,12 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
                         onMonthSelected: jobListProvider.goToMonth,
                         availableMonths: jobListProvider.getAvailableMonths(),
                         mode: Mode.joblist,
-                        trailingActions: [_accountingButton(context)],
+                        trailingActions: [
+                          const UndoRedoButtons(undoKey: UndoKey.jobList),
+                          const RecentlyDeletedButton(
+                              tab: RecycleBinTab.jobList),
+                          _accountingButton(context),
+                        ],
                       ),
                     ),
                     // Subtle loading indicator when data is loading but items exist (refreshing)
@@ -1786,7 +1859,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
                                 decoration: InputDecoration(
                                   isDense: true,
                                   hintText:
-                                      'Search by client, invoice, or area...',
+                                      'Search anything: client, date (12/10), invoice, status, address...',
                                   prefixIcon: Icon(Icons.search, size: 20),
                                   suffixIcon: isSearching
                                       ? Padding(
@@ -1936,34 +2009,11 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
                                 borderRadius: BorderRadius.circular(6)),
                           ),
                         ),
-                        if (jobListProvider.pendingUpdatesCount > 0) ...[
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                            decoration: BoxDecoration(
-                              color: Colors.orange.shade100,
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: Colors.orange.shade300),
-                            ),
-                            alignment: Alignment.center,
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.sync,
-                                    size: 16, color: Colors.orange.shade700),
-                                const SizedBox(width: 4),
-                                Text(
-                                  '${jobListProvider.pendingUpdatesCount}',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.orange.shade700,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+                        // Unsaved edits, shown only once a save is slow —
+                        // quick saves show nothing extra.
+                        const SizedBox(width: 8),
+                        PendingSavesChip(
+                            pending: jobListProvider.unsavedCount),
                       ],
                     ),
                   ),
@@ -2351,6 +2401,12 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           onJobStatusChanged: _handleInlineJobStatusChanged,
           getVehicleTrailerComboFromQuantity:
               _getVehicleTrailerComboFromQuantity,
+          onEditJobForReport: _showEditJobDialog,
+          hasReportDraft: (ref
+                      .read(distributionReportDraftIdsRiverpod)
+                      .valueOrNull ??
+                  const <String>{})
+              .contains(item.id),
         ).buildCells(context, ref);
 
         // Map cells to columns, enforcing exact header widths and
@@ -2446,7 +2502,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           if (VehicleTrailerCombo.isVehicleJobType(item.jobTypeId) &&
               (newQuantity < 1 || newQuantity > 9)) {
             // Invalid quantity for vehicle combo, don't update
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context).showToast(
               const SnackBar(
                 content: Text('Invalid vehicle combination selected'),
                 backgroundColor: Colors.red,
@@ -2467,13 +2523,25 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           updatedItem = item.copyWith(manDays: value as double);
           break;
         case 'date':
-          updatedItem = item.copyWith(date: value as DateTime);
+          final jobTypes = JobTypeProvider.instance;
+          // An appointment's date and time are its booking: move the
+          // Collection Schedule's copy (time slot, collection day) with it.
+          updatedItem = (jobTypes?.needsTimeSlot(item.jobTypeId) ?? false)
+              ? item.withAppointment(
+                  value as DateTime,
+                  onCollectionSchedule:
+                      jobTypes!.appearsOnCollectionSchedule(item.jobTypeId),
+                )
+              : item.copyWith(date: value as DateTime);
           break;
         case 'collectionAddress':
           updatedItem = item.copyWith(collectionAddress: value as String);
           break;
         case 'collectionDate':
           updatedItem = item.copyWith(collectionDate: value as DateTime);
+          break;
+        case 'needsFlyerCollection':
+          updatedItem = item.copyWith(needsFlyerCollection: value as bool);
           break;
         case 'specialInstructions':
           updatedItem = item.copyWith(specialInstructions: value as String);
@@ -2499,27 +2567,34 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       final jobListStatusProvider = ref.read(jobListStatusRiverpod);
       final invoiceStatusProvider = ref.read(invoiceStatusRiverpod);
 
-      // Use debounced update system with change tracking
-      ref.read(jobListRiverpod).updateJobListItemWithTracking(
-            item,
-            updatedItem,
-            resolveJobStatusLabel: (statusId) =>
-                jobListStatusProvider.getStatusById(statusId)?.label,
-            resolveInvoiceStatusLabel: (statusId) =>
-                invoiceStatusProvider.getStatusById(statusId)?.label,
-            resolveQuantityLabel: _getVehicleTrailerComboFromQuantity,
-          );
+      // Use debounced update system with change tracking; an Undo step on
+      // the Job List.
+      final undoStep = ref.read(jobListUndoRiverpod).edit(
+        item,
+        updatedItem,
+        labels: JobListLabelResolvers(
+          jobStatus: (statusId) =>
+              jobListStatusProvider.getStatusById(statusId)?.label,
+          invoiceStatus: (statusId) =>
+              invoiceStatusProvider.getStatusById(statusId)?.label,
+          quantity: _getVehicleTrailerComboFromQuantity,
+        ),
+      );
 
       if (field == 'date') {
-        unawaited(_maybeReallocateScheduleAfterDateChange(
-          context,
-          originalItem: item,
-          updatedItem: updatedItem,
-        ));
+        unawaited(undoStep.then((step) async {
+          if (!context.mounted) return;
+          await _maybeReallocateScheduleAfterDateChange(
+            context,
+            originalItem: item,
+            updatedItem: updatedItem,
+            undoStep: step,
+          );
+        }));
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Error updating job: $e')),
         );
       }
@@ -2572,12 +2647,14 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         JobListItem job;
         bool skipAllocation = false;
         bool invoiced = false;
+        String? message;
 
         // Handle different return types from dialog
         if (result is Map<String, dynamic>) {
           job = result['job'] as JobListItem;
           skipAllocation = result['skipAllocation'] == true;
           invoiced = result['invoiced'] == true;
+          message = result['message'] as String?;
         } else if (result is JobListItem) {
           job = result;
           skipAllocation = false;
@@ -2592,11 +2669,12 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             // No database operation needed as job was saved in the dialog already
             _broadcastJobCreated(job, action: 'add');
             if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showToast(
                 SnackBar(
-                  content: Text(invoiced
-                      ? 'Job and invoice saved successfully!'
-                      : 'Collection job added successfully without schedule allocation!'),
+                  content: Text(message ??
+                      (invoiced
+                          ? 'Job and invoice saved successfully!'
+                          : 'Collection job added successfully without schedule allocation!')),
                   backgroundColor: Colors.green,
                 ),
               );
@@ -2605,7 +2683,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             await ref.read(jobListRiverpod).addJobListItem(job);
             _broadcastJobCreated(job, action: 'add');
             if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showToast(
                 const SnackBar(
                   content: Text('Job added successfully!'),
                   backgroundColor: Colors.green,
@@ -2615,7 +2693,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           }
         } catch (e) {
           if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context).showToast(
               SnackBar(
                 content: Text('Error adding job: $e'),
                 backgroundColor: Colors.red,
@@ -2633,7 +2711,10 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     }
   }
 
-  void _showEditJobDialog(BuildContext context, JobListItem item) async {
+  /// Edit [item] in the Add/Edit Job dialog and write the result. Completes
+  /// true once a change has been saved — the distribution report opens this
+  /// same flow to create a job's invoice.
+  Future<bool> _showEditJobDialog(BuildContext context, JobListItem item) async {
     // `dynamic` because the invoicing path returns
     // {'job': ..., 'skipAllocation': true} to say it already wrote the job —
     // writing again here would clobber the Zoho link it just stamped on.
@@ -2643,16 +2724,45 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     );
 
     if (rawResult is Map<String, dynamic>) {
+      final saved = rawResult['job'] as JobListItem;
+      // The job is already written; the schedule still follows its client
+      // and date like any other edit.
+      var scheduleClient = item.client;
+      if (context.mounted &&
+          saved.client.trim().toLowerCase() !=
+              item.client.trim().toLowerCase()) {
+        final choice = await _showClientRenamePrompt(
+          context,
+          originalItem: item,
+          updatedItem: saved,
+        );
+        if (context.mounted &&
+            choice == _ClientRenamePromptChoice.updateJobListAndSchedule) {
+          await _syncClientRenameOnSchedule(
+            context,
+            originalItem: item,
+            updatedItem: saved,
+          );
+          scheduleClient = saved.client;
+        }
+      }
       if (context.mounted) {
-        _broadcastJobCreated(rawResult['job'] as JobListItem, action: 'update');
-        ScaffoldMessenger.of(context).showSnackBar(
+        await _maybeReallocateScheduleAfterDateChange(
+          context,
+          originalItem: item.copyWith(client: scheduleClient),
+          updatedItem: saved,
+        );
+      }
+      if (context.mounted) {
+        _broadcastJobCreated(saved, action: 'update');
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text('Job and invoice saved successfully!'),
             backgroundColor: Colors.green,
           ),
         );
       }
-      return;
+      return true;
     }
 
     final result = rawResult is JobListItem ? rawResult : null;
@@ -2669,59 +2779,75 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             originalItem: item,
             updatedItem: result,
           );
-          if (!context.mounted) return;
+          if (!context.mounted) return false;
           if (choice == null || choice == _ClientRenamePromptChoice.cancel) {
-            return;
+            return false;
           }
           renameChoice = choice;
         }
 
         final jobListStatusProvider = ref.read(jobListStatusRiverpod);
         final invoiceStatusProvider = ref.read(invoiceStatusRiverpod);
-        await ref.read(jobListRiverpod).updateJobListItemWithTracking(
-              item,
-              result,
-              resolveJobStatusLabel: (statusId) =>
-                  jobListStatusProvider.getStatusById(statusId)?.label,
-              resolveInvoiceStatusLabel: (statusId) =>
-                  invoiceStatusProvider.getStatusById(statusId)?.label,
-              resolveQuantityLabel: _getVehicleTrailerComboFromQuantity,
-            );
-
-        await _maybeReallocateScheduleAfterDateChange(
-          context,
-          originalItem: item,
-          updatedItem: result,
+        final undoStep = await ref.read(jobListUndoRiverpod).edit(
+          item,
+          result,
+          labels: JobListLabelResolvers(
+            jobStatus: (statusId) =>
+                jobListStatusProvider.getStatusById(statusId)?.label,
+            invoiceStatus: (statusId) =>
+                invoiceStatusProvider.getStatusById(statusId)?.label,
+            quantity: _getVehicleTrailerComboFromQuantity,
+          ),
         );
 
-        if (renameChoice ==
-            _ClientRenamePromptChoice.updateJobListAndSchedule) {
+        // Rename first, while the days still sit around the old date that
+        // ties them to this job; the date shift then finds them by the new
+        // name.
+        final renameOnSchedule =
+            renameChoice == _ClientRenamePromptChoice.updateJobListAndSchedule;
+        if (renameOnSchedule) {
           await _syncClientRenameOnSchedule(
             context,
             originalItem: item,
             updatedItem: result,
+            undoStep: undoStep,
           );
         }
+        // Written already; only the schedule follow-up is left.
+        if (!context.mounted) return true;
+
+        await _maybeReallocateScheduleAfterDateChange(
+          context,
+          originalItem:
+              renameOnSchedule ? item.copyWith(client: result.client) : item,
+          updatedItem: result,
+          undoStep: undoStep,
+        );
 
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             const SnackBar(content: Text('Job updated successfully!')),
           );
         }
+        return true;
       } catch (e) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(content: Text('Error updating job: $e')),
           );
         }
       }
     }
+    return false;
   }
 
+  /// [undoStep]: the Job List undo step of the edit, which records the
+  /// shift so undoing the edit moves the schedule back too.
   Future<void> _maybeReallocateScheduleAfterDateChange(
     BuildContext context, {
     required JobListItem originalItem,
     required JobListItem updatedItem,
+    JobListUndoStep? undoStep,
   }) async {
     final sw = Stopwatch()..start();
     debugPrint(
@@ -2775,7 +2901,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
 
     if (choice == _DateShiftPromptChoice.keepSchedule) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text(
                 'Job date updated. Existing schedule allocation was kept.'),
@@ -2800,10 +2926,14 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         '[job-date-shift] finished in ${sw.elapsedMilliseconds}ms result changed=${result.changed} removed=${result.removed} added=${result.added}',
       );
 
+      if (result.changed) {
+        undoStep?.cascades
+            .add(ScheduleShiftCascade(result.removedJobs, result.addedJobs));
+      }
       if (!context.mounted) return;
 
       if (result.changed) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text(
                 'Shifted ${result.removed} scheduled job(s) to the new date plan (${result.added} added).'),
@@ -2811,7 +2941,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           ),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content:
                 Text('No eligible schedule jobs were shifted for this change.'),
@@ -2824,7 +2954,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         '[job-date-shift] failed in ${sw.elapsedMilliseconds}ms error=$e',
       );
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text('Job date was updated but schedule shift failed: $e'),
           backgroundColor: Colors.red,
@@ -2853,32 +2983,35 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     try {
       final jobListStatusProvider = ref.read(jobListStatusRiverpod);
       final invoiceStatusProvider = ref.read(invoiceStatusRiverpod);
-      await ref.read(jobListRiverpod).updateJobListItemWithTracking(
-            originalItem,
-            updatedItem,
-            resolveJobStatusLabel: (statusId) =>
-                jobListStatusProvider.getStatusById(statusId)?.label,
-            resolveInvoiceStatusLabel: (statusId) =>
-                invoiceStatusProvider.getStatusById(statusId)?.label,
-            resolveQuantityLabel: _getVehicleTrailerComboFromQuantity,
-          );
+      final undoStep = await ref.read(jobListUndoRiverpod).edit(
+        originalItem,
+        updatedItem,
+        labels: JobListLabelResolvers(
+          jobStatus: (statusId) =>
+              jobListStatusProvider.getStatusById(statusId)?.label,
+          invoiceStatus: (statusId) =>
+              invoiceStatusProvider.getStatusById(statusId)?.label,
+          quantity: _getVehicleTrailerComboFromQuantity,
+        ),
+      );
 
       if (choice == _ClientRenamePromptChoice.updateJobListAndSchedule) {
         await _syncClientRenameOnSchedule(
           context,
           originalItem: originalItem,
           updatedItem: updatedItem,
+          undoStep: undoStep,
         );
       }
 
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(content: Text('Client updated successfully.')),
         );
       }
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(content: Text('Error updating client: $e')),
       );
     }
@@ -2888,6 +3021,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     BuildContext context, {
     required JobListItem originalItem,
     required JobListItem updatedItem,
+    JobListUndoStep? undoStep,
   }) async {
     final service = ScheduleReallocationService(
       scheduleProvider: ref.read(scheduleRiverpod),
@@ -2895,14 +3029,33 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     );
 
     try {
+      // The client's other items keep their own schedule days. Best effort:
+      // without them the nearest days still go to this item.
+      var clientItems = const <JobListItem>[];
+      final d = originalItem.date;
+      try {
+        clientItems =
+            await ref.read(jobListServiceRiverpod).getJobListItemsForClients([
+          originalItem.client
+        ], [
+          DateTime(d.year, d.month - 1),
+          d,
+          DateTime(d.year, d.month + 1),
+        ]);
+      } catch (e) {
+        debugPrint('[job-client-rename] sibling lookup failed: $e');
+      }
       final updatedCount = await service.renameClientInAllocatedJobs(
         originalItem: originalItem,
         updatedItem: updatedItem,
+        clientItems: clientItems,
+        onRenamed: (jobs, from, to) =>
+            undoStep?.cascades.add(ScheduleRenameCascade(jobs, from, to)),
       );
       if (!context.mounted) return;
 
       if (updatedCount > 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content:
                 Text('Updated client name on $updatedCount scheduled job(s).'),
@@ -2910,7 +3063,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           ),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text(
                 'Client name changed in Job List. No linked schedule jobs were updated.'),
@@ -2919,7 +3072,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
       }
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text(
               'Client name changed in Job List, but schedule sync failed: $e'),
@@ -3095,11 +3248,16 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     if (result != null && context.mounted) {
       JobListItem job;
       bool skipAllocation = false;
+      // When the server has the duplicate. The dialog saves without waiting
+      // for it, but the map-clone callable below links the new job on the
+      // server, so it must not run before.
+      Future<void> onServer = Future<void>.value();
 
       // Handle different return types from dialog
       if (result is Map<String, dynamic>) {
         job = result['job'] as JobListItem;
         skipAllocation = result['skipAllocation'] == true;
+        onServer = (result['saved'] as Future<void>?) ?? onServer;
       } else if (result is JobListItem) {
         job = result;
         skipAllocation = false;
@@ -3118,7 +3276,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
           savedJob = job;
           _broadcastJobCreated(savedJob, action: 'copy');
           if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context).showToast(
               const SnackBar(
                 content: Text(
                     'Job copied and added successfully without schedule allocation!'),
@@ -3127,11 +3285,12 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
             );
           }
         } else {
-          savedJob =
-              await ref.read(jobListRiverpod).addJobListItemAndReturn(job);
+          final added = ref.read(jobListRiverpod).addJobListItemLocal(job);
+          savedJob = added.job;
+          onServer = added.saved;
           _broadcastJobCreated(savedJob, action: 'copy');
           if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context).showToast(
               const SnackBar(
                 content: Text('Job copied and added successfully!'),
                 backgroundColor: Colors.green,
@@ -3149,18 +3308,29 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         debugPrint('📋 [CopyJob] saved duplicate id="${savedJob.id}"; '
             'sourceShareableMapId="$sourceShareableMapId" → '
             '${sourceShareableMapId.isNotEmpty && savedJob.id.isNotEmpty ? "WILL clone map" : "SKIP map clone"}');
-        if (sourceShareableMapId.isNotEmpty && savedJob.id.isNotEmpty) {
-          unawaited(_duplicateMapForCopiedJob(
-            sourceJobMonthId: sourceJobMonthId,
-            sourceJobItemId: sourceJobItemId,
-            newJobMonthId: _jobListMonthId(savedJob.date),
-            newJobItemId: savedJob.id,
-            newJob: savedJob,
+        // A regular-client job gets a fresh map made from its plan's map by
+        // the dialog (`_createRegularClientJobMap`), not a clone of the
+        // source's — which would link a second map to it.
+        if (sourceShareableMapId.isNotEmpty &&
+            savedJob.id.isNotEmpty &&
+            savedJob.regularClientId.isEmpty) {
+          final copied = savedJob;
+          unawaited(onServer.then(
+            (_) => _duplicateMapForCopiedJob(
+              sourceJobMonthId: sourceJobMonthId,
+              sourceJobItemId: sourceJobItemId,
+              newJobMonthId: _jobListMonthId(copied.date),
+              newJobItemId: copied.id,
+              newJob: copied,
+            ),
+            // A refused save is already reported; there is no job to copy
+            // the map onto.
+            onError: (_) {},
           ));
         }
       } catch (e) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(
               content: Text('Error copying job: $e'),
               backgroundColor: Colors.red,
@@ -3212,6 +3382,11 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         'sourceJobItemId': sourceJobItemId,
         'newJobMonthId': newJobMonthId,
         'newJobItemId': newJobItemId,
+        // A job's map is named after its client only — no date, no
+        // "(Copy)". The month goes on the description's first line (the
+        // server's `copyDescription`); a second job in the same month is
+        // told apart by whatever the user adds to the name or description.
+        'newName': newJob.client.trim(),
       });
       debugPrint('✅ [CopyJob] duplicateMapForJobCopy result: ${result.data}');
 
@@ -3240,7 +3415,7 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
     } catch (e, st) {
       debugPrint('❌ [CopyJob] duplicateMapForJobCopy failed: $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Map clone failed: $e'),
             backgroundColor: Colors.orange,
@@ -3284,28 +3459,19 @@ class _JobListGridState extends riverpod.ConsumerState<JobListGrid> {
         await voidInvoiceForJob(context: context, ref: ref, job: item);
       }
 
-      await ref.read(jobListRiverpod).deleteJobListItem(item.id);
-
-      // Drop the reverse index too, or the Invoices screen keeps offering a
-      // route back to a job that no longer exists. Which index depends on the
-      // provider: Zoho's rows predate the neutral one and still use their own.
-      final service = ref.read(jobListServiceRiverpod);
-      if (item.hasZohoInvoice) {
-        await service.removeZohoInvoiceLink(item.zohoInvoiceId);
-      }
-      if (item.resolvedInvoiceProviderId == AccountingProvider.xero.name &&
-          item.resolvedInvoiceId.isNotEmpty) {
-        await service.removeAccountingInvoiceLink(item.resolvedInvoiceId);
-      }
+      // Goes to the Recycle Bin together with its invoice reverse indexes
+      // (so the Invoices screen stops routing to it) and any Happy Sun
+      // project; restoring puts them all back.
+      final entryId =
+          await ref.read(jobListRiverpod).deleteJobListItem(item.id);
 
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Job deleted successfully')),
-        );
+        showMovedToBinSnackBar(context, ref,
+            what: '"${item.client}"', entryId: entryId);
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Error deleting job: $e')),
         );
       }

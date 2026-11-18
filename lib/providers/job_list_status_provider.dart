@@ -4,6 +4,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_job_list_status.dart';
 import '../services/reference_cache_service.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 
 const String _kCollectionName = 'customJobListStatuses';
 
@@ -12,6 +14,12 @@ final jobListStatusRiverpod =
         (ref) => JobListStatusProvider());
 
 class JobListStatusProvider extends ChangeNotifier {
+  /// Latest instance, so the Job List search can show status labels
+  /// without threading the provider through (same pattern as
+  /// JobTypeProvider.instance).
+  static JobListStatusProvider? _instance;
+  static JobListStatusProvider? get instance => _instance;
+
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   List<CustomJobListStatus> _statuses = [];
   bool _isLoading = false;
@@ -22,6 +30,7 @@ class JobListStatusProvider extends ChangeNotifier {
   String? get error => _error;
 
   JobListStatusProvider() {
+    _instance = this;
     loadStatuses();
   }
 
@@ -40,6 +49,11 @@ class JobListStatusProvider extends ChangeNotifier {
           final data = Map<String, dynamic>.from(doc.data() as Map);
           data['id'] = doc.id;
           return CustomJobListStatus.fromMap(data);
+        },
+        onCached: (cached) {
+          _statuses = cached;
+          _isLoading = false;
+          notifyListeners();
         },
       );
     } catch (e) {
@@ -135,7 +149,11 @@ class JobListStatusProvider extends ChangeNotifier {
         return;
       }
 
-      await _firestore.collection(_kCollectionName).doc(id).delete();
+      await RecycleBinWriter(_firestore).moveDocToBin(
+        _firestore.collection(_kCollectionName).doc(id),
+        type: RecycleBinType.jobListStatus,
+        label: (d) => binLabel(d, 'job list status'),
+      );
       await ReferenceCacheService.bumpVersion(_kCollectionName);
       _statuses.removeWhere((status) => status.id == id);
       notifyListeners();

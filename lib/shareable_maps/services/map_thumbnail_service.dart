@@ -5,6 +5,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import '../../env.dart';
 import '../../services/storage_upload.dart';
+import '../../utils/map_pin_icons.dart' show MapPinStyle;
 
 /// A path (polygon or polyline) with its display color for thumbnail rendering.
 class ThumbnailPathData {
@@ -27,10 +28,15 @@ class ThumbnailMarkerData {
   final Color color;
   final String? label;
 
+  /// Descriptive pin drawn instead of the lettered dot where the marker is
+  /// drawn locally (the printed map). Static Maps URLs ignore it.
+  final MapPinStyle? pin;
+
   const ThumbnailMarkerData({
     required this.position,
     required this.color,
     this.label,
+    this.pin,
   });
 }
 
@@ -117,6 +123,10 @@ class MapThumbnailService {
       return null;
     }
   }
+
+  /// Where a map's thumbnail lives in Storage.
+  static String pathFor(String monthKey, String docId) =>
+      '$_folder/${monthKey}_$docId.png';
 
   /// Delete the thumbnail image from Storage (e.g. when a map is deleted).
   Future<void> deleteThumbnail({

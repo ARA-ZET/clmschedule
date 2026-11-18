@@ -1,3 +1,4 @@
+import 'package:clmschedule/utils/text_search.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -179,10 +180,33 @@ class ChatService {
   // Mark multiple messages as read
   Future<void> markMultipleMessagesAsRead(
       List<String> messageIds, String userId) async {
+    if (messageIds.isEmpty) return;
     try {
-      for (String messageId in messageIds) {
-        await markMessageAsRead(messageId, userId);
+      // One read and one write for the whole batch. Each id used to cost a
+      // full read and rewrite of the month's message array.
+      final ids = messageIds.toSet();
+      final monthDoc = _getCurrentMonthDocument();
+      final snapshot = await monthDoc.get();
+      if (!snapshot.exists) return;
+
+      final docData = snapshot.data() == null
+          ? null
+          : Map<String, dynamic>.from(snapshot.data() as Map);
+      final messagesData =
+          List<Map<String, dynamic>>.from(docData?['messages'] ?? []);
+
+      var changed = false;
+      for (var i = 0; i < messagesData.length; i++) {
+        final message = messagesData[i];
+        if (!ids.contains(message['id'])) continue;
+        final readBy = List<String>.from(message['readBy'] ?? []);
+        if (readBy.contains(userId)) continue;
+        readBy.add(userId);
+        messagesData[i] = {...message, 'readBy': readBy, 'isRead': true};
+        changed = true;
       }
+
+      if (changed) await monthDoc.update({'messages': messagesData});
     } catch (e) {
       print('ChatService: Error marking multiple messages as read: $e');
     }
@@ -292,10 +316,11 @@ class ChatService {
       final messagesData = data?['messages'] as List<dynamic>? ?? [];
 
       final matchingMessages = <ChatMessage>[];
+      final search = TextSearch(query);
 
       for (var messageData in messagesData) {
-        final content = messageData['content']?.toString().toLowerCase() ?? '';
-        if (content.contains(query.toLowerCase())) {
+        final content = messageData['content']?.toString() ?? '';
+        if (search.matches([content])) {
           matchingMessages
               .add(ChatMessage.fromMap(Map<String, dynamic>.from(messageData as Map)));
         }
@@ -389,8 +414,16 @@ class ChatService {
     });
   }
 
+  /// Set once the stale-status query is refused (index missing). Every
+  /// refused query leaves a ~500-character `firestore_targets_*` entry in
+  /// localStorage that the Firestore SDK never removes; retrying every 5
+  /// minutes in an always-open tab filled Barrie's browser storage (11,469
+  /// entries, Nov 2026) until nothing could save. Don't retry this session.
+  static bool _staleCleanupRefused = false;
+
   // Clean up stale online statuses
   Future<void> cleanupStaleOnlineStatuses() async {
+    if (_staleCleanupRefused) return;
     try {
       final now = DateTime.now();
       final staleThreshold =
@@ -419,7 +452,11 @@ class ChatService {
     } catch (e) {
       // If this fails due to missing index, it's not critical - online statuses will still work
       // Users can create the index by clicking the link in the error message if needed
-      if (e.toString().contains('requires an index')) {
+      if (e.toString().contains('requires an index') ||
+          (e is FirebaseException &&
+              (e.code == 'failed-precondition' ||
+                  e.code == 'permission-denied'))) {
+        _staleCleanupRefused = true;
         print(
             'ChatService: Composite index required for stale status cleanup. Feature disabled until index is created.');
       } else {
@@ -486,13 +523,13 @@ class ChatService {
         docsToSearch = allUsersSnapshot.docs;
       }
 
+      final search = TextSearch(query);
       for (var doc in docsToSearch) {
         final data = doc.data();
         final displayName = data['name'] ?? data['email'] ?? 'User';
 
         // Filter by query if provided
-        if (query.isEmpty ||
-            displayName.toLowerCase().contains(query.toLowerCase())) {
+        if (search.matches([displayName as String])) {
           users.add({
             'id': doc.id,
             'displayName': displayName,

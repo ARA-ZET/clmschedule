@@ -5,6 +5,8 @@
 //     start time and end time.
 //   ─ Waypoints section: count + scrollable name list, with a visibility toggle
 //     that also hides/shows the markers on the map.
+import 'package:clmschedule/utils/text_search.dart';
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:gpx/gpx.dart';
@@ -138,13 +140,9 @@ class _PolygonsSectionState extends riverpod.ConsumerState<_PolygonsSection> {
   }
 
   List<WorkArea> get _filtered {
-    final q = _searchCtrl.text.trim().toLowerCase();
-    if (q.isEmpty) return _allWorkAreas;
-    return _allWorkAreas
-        .where((w) =>
-            w.name.toLowerCase().contains(q) ||
-            w.description.toLowerCase().contains(q))
-        .toList();
+    final search = TextSearch(_searchCtrl.text);
+    if (search.isEmpty) return _allWorkAreas;
+    return search.rank(_allWorkAreas, (w) => [w.name, w.description]);
   }
 
   Future<void> _addSelected() async {
@@ -1091,11 +1089,11 @@ class _WaypointsSectionState extends riverpod.ConsumerState<_WaypointsSection> {
         layerProvider.liveKeptWaypoints(widget.tabIndex, widget.waypoints);
 
     final allWaypoints = widget.waypoints;
-    final filtered = _query.isEmpty
-        ? allWaypoints
-        : allWaypoints
-            .where((w) => (w.name ?? '').toLowerCase().contains(_query))
-            .toList();
+    // Same rule as the map markers (track_editor_map), so the list and the
+    // map show the same waypoints.
+    final search = TextSearch(_query);
+    final filtered =
+        allWaypoints.where((w) => search.matches([w.name ?? ''])).toList();
 
     return Container(
       width: 420,
@@ -1467,7 +1465,7 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       final fileName = _buildFileName(widget.waypoints.length);
       await fm.saveGpxCombinedFile(fileName, widget.tracks, widget.waypoints);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Saved as $fileName'),
             backgroundColor: Colors.green,
@@ -1476,7 +1474,7 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
               content: Text('Save failed: $e'), backgroundColor: Colors.red),
         );
@@ -1491,13 +1489,13 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       final fm = TEFileManager();
       final gpxStorage = GpxStorageService();
       final fileName = _buildFileName(widget.waypoints.length);
-      final gpxContent =
-          await fm.toGpxCombinedString(widget.tracks, widget.waypoints);
+      final gpxContent = await fm
+          .toGpxCombinedString(widget.tracks, widget.waypoints, pretty: false);
 
       final folderPath = widget.storageFolderPath;
       if (folderPath == null || folderPath.isEmpty) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             const SnackBar(
               content: Text(
                   'No cloud folder selected — pick a client folder via the processing panel first.'),
@@ -1511,7 +1509,7 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
 
       await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Uploaded to cloud: $fileName'),
             backgroundColor: Colors.blue,
@@ -1520,7 +1518,7 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
               content: Text('Cloud upload failed: $e'),
               backgroundColor: Colors.red),
@@ -1531,8 +1529,8 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
   }
 
   /// Overwrite the original cloud file this tab was opened from with the
-  /// current tracks/waypoints, then rebuild `_compiled_waypoints.json`
-  /// if the file's waypoints changed.
+  /// current tracks/waypoints. The folder's compiled files are rebuilt by
+  /// the server's upload trigger (`compileGpxOnUpload`).
   Future<void> _onOverwriteSource(BuildContext context) async {
     final sourcePath = widget.sourceStoragePath;
     if (sourcePath == null || sourcePath.isEmpty) return;
@@ -1573,23 +1571,29 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       // Serialize as combined GPX (tracks + waypoints in one file).
       final String gpxContent;
       if (widget.tracks.isNotEmpty || widget.waypoints.isNotEmpty) {
-        gpxContent =
-            await fm.toGpxCombinedString(widget.tracks, widget.waypoints);
+        gpxContent = await fm.toGpxCombinedString(
+            widget.tracks, widget.waypoints,
+            pretty: false);
       } else {
         throw StateError('Nothing to save: no tracks or waypoints.');
       }
 
-      // Delete old, upload new (same filename).
-      await gpxStorage.deleteFile(sourcePath);
+      // Uploading to the same name replaces the file in one step. It used
+      // to be deleted first, which cost a round trip, left nothing at all
+      // if the upload then failed, and set off a delete-triggered recompile
+      // that could finish after the upload's and drop this file from the
+      // folder's compiled tracks. The upload's own trigger recompiles the
+      // folder, so there is no compile call to wait for here either.
       await gpxStorage.uploadGpxFile(folderPath, fileName, gpxContent);
-
-      // Recompile server-side after overwrite.
-      if (folderPath.isNotEmpty) {
-        await gpxStorage.callCompileGpxFolder(folderPath);
+      // A name holding characters uploads strip (say a ':') was saved under
+      // the cleaned-up name, so the original is still there — remove it
+      // now that its replacement is safely stored.
+      if (GpxStorageService.sanitizeFileName(fileName) != fileName) {
+        await gpxStorage.deleteFile(sourcePath);
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Overwrote $fileName'),
             backgroundColor: Colors.green,
@@ -1598,7 +1602,7 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Overwrite failed: $e'),
             backgroundColor: Colors.red,
@@ -1623,8 +1627,10 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
 
       if (trimmedTracks.isNotEmpty || trimmedWpts.isNotEmpty) {
         gpxFileName = _buildFileName(trimmedWpts.length, type: 'Track Trimmed');
-        gpxContent = await fm.toGpxCombinedString(trimmedTracks, trimmedWpts);
-        await fm.saveGpxCombinedFile(gpxFileName, trimmedTracks, trimmedWpts);
+        // Built once, compact, for both the download and the upload.
+        gpxContent = await fm.toGpxCombinedString(trimmedTracks, trimmedWpts,
+            pretty: false);
+        await fm.saveGpxString(gpxFileName, gpxContent);
       }
 
       // ── Upload to Cloud Storage ──────────────────────────────────────
@@ -1656,7 +1662,7 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
           '${cloudUploaded > 0 ? ' · $cloudUploaded uploaded' : ''}';
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Trimmed: $msg'),
             backgroundColor: Colors.deepOrange,
@@ -1665,7 +1671,7 @@ class _SaveTrimSectionState extends State<_SaveTrimSection> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Trim failed: $e'),
             backgroundColor: Colors.red,
@@ -1917,7 +1923,7 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Updated $_sourceFileName ($_contentSummary)'),
             backgroundColor: Colors.green,
@@ -1926,7 +1932,7 @@ class _CloudUpdateSectionState extends State<_CloudUpdateSection> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Update failed: $e'),
             backgroundColor: Colors.red,

@@ -3,6 +3,7 @@
 // Pick the distributor a track belongs to by hand — for when the name in the
 // file name matched nobody on the schedule (usually a misspelling), or matched
 // the wrong person. The closest names to the one in the file are listed first.
+import 'package:clmschedule/utils/text_search.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/distributor.dart';
@@ -70,13 +71,14 @@ class _TEDistributorPickerDialogState
             .take(_maxSuggestions)
             .map((r) => r.distributor)
             .toList();
-    final rest = [
-      for (final r in _ranked)
-        if (!suggestions.contains(r.distributor) &&
-            (query.isEmpty ||
-                r.distributor.name.toLowerCase().contains(query)))
-          r.distributor,
-    ];
+    // Typing: best name matches first (words any order, close spellings).
+    final rest = query.isEmpty
+        ? [
+            for (final r in _ranked)
+              if (!suggestions.contains(r.distributor)) r.distributor,
+          ]
+        : TextSearch(query)
+            .rank(_ranked.map((r) => r.distributor), (d) => [d.name]);
     // Suggestions lead; below them everyone else alphabetically.
     if (query.isEmpty) {
       rest.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));

@@ -20,6 +20,23 @@ class JobDraftService {
 
   String? get _uid => _auth.currentUser?.uid;
 
+  /// The last draft this session saw, by user, so reopening Add Job can offer
+  /// it on the first frame instead of after a server round-trip. A user id
+  /// mapped to null means "known to have no draft".
+  final Map<String, Map<String, dynamic>?> _known = {};
+
+  /// The draft as last seen, without waiting: null when there is none, or
+  /// when nothing has been read yet — see [isKnown].
+  Map<String, dynamic>? get cached => _known[_uid];
+
+  /// Whether [cached] is an answer rather than "not looked yet".
+  bool get isKnown => _uid != null && _known.containsKey(_uid);
+
+  /// Read the draft ahead of the dialog opening, so its prompt is instant.
+  Future<void> prefetch() async {
+    if (!isKnown) await load();
+  }
+
   DocumentReference<Map<String, dynamic>>? get _doc {
     final uid = _uid;
     if (uid == null) return null;
@@ -38,11 +55,13 @@ class JobDraftService {
     final doc = _doc;
     if (doc == null) return false;
 
+    final data = {
+      ...fields,
+      'savedAt': Timestamp.fromDate(DateTime.now()),
+    };
     try {
-      await doc.set({
-        ...fields,
-        'savedAt': Timestamp.fromDate(DateTime.now()),
-      });
+      await doc.set(data);
+      _known[_uid!] = data;
       return true;
     } catch (e) {
       if (kDebugMode) debugPrint('JobDraftService.save failed: $e');
@@ -62,8 +81,20 @@ class JobDraftService {
     if (doc == null) return null;
 
     try {
-      final snap = await doc.get();
-      if (!snap.exists || snap.data() == null) return null;
+      // The local cache first: it answers in milliseconds, where the default
+      // server-first read made the restore prompt pop up seconds after the
+      // dialog had opened. The cache throws when it has never seen the doc,
+      // and "no draft" is confirmed with the server so a draft saved on
+      // another machine is still found.
+      DocumentSnapshot<Map<String, dynamic>>? snap;
+      try {
+        snap = await doc.get(const GetOptions(source: Source.cache));
+      } catch (_) {}
+      if (snap == null || !snap.exists) snap = await doc.get();
+      if (!snap.exists || snap.data() == null) {
+        _known[_uid!] = null;
+        return null;
+      }
 
       final data = Map<String, dynamic>.from(snap.data()!);
       final savedAt = (data['savedAt'] as Timestamp?)?.toDate();
@@ -71,6 +102,7 @@ class JobDraftService {
         await clear();
         return null;
       }
+      _known[_uid!] = data;
       return data;
     } catch (e) {
       if (kDebugMode) debugPrint('JobDraftService.load failed: $e');
@@ -79,6 +111,8 @@ class JobDraftService {
   }
 
   Future<void> clear() async {
+    final uid = _uid;
+    if (uid != null) _known[uid] = null;
     try {
       await _doc?.delete();
     } catch (e) {

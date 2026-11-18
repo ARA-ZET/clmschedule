@@ -6,6 +6,8 @@ import '../providers/day_off_provider.dart';
 import '../models/regular_client.dart';
 import '../providers/schedule_provider.dart';
 import '../shareable_maps/models/shareable_map.dart';
+import '../shareable_maps/utils/linked_map_polygons.dart'
+    show mapPointAsWorkMap;
 
 /// Service class responsible for automatically assigning jobs to distributors
 /// based on their availability and index order
@@ -147,9 +149,14 @@ class JobAssignmentService {
     bool allowOccupied = false,
   }) {
     final polygonsById = <String, CustomPolygon>{
-      for (final layer in map.layers)
+      for (final layer in map.layers) ...{
         for (final p in layer.polygons)
           if ((p.id ?? '').isNotEmpty) p.id!: p,
+        // Points (handout and poster spots) go on the job as point-type
+        // polygons carrying the point's id.
+        for (final pt in layer.points)
+          if (pt.id.isNotEmpty) pt.id: mapPointAsWorkMap(pt),
+      },
     };
     final start = DateTime(startDate.year, startDate.month, startDate.day);
     final lastDate = DateTime(start.year, start.month + 3, start.day);

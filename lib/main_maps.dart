@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -60,6 +61,7 @@ class CLMMapApp extends StatelessWidget {
             .read(mapModalObserverRiverpod),
       ],
       debugShowCheckedModeBanner: false,
+      builder: AppToastHost.builder,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF1967D2),
@@ -172,6 +174,8 @@ class _DeepLinkMapLoaderState extends State<_DeepLinkMapLoader> {
       final provider = riverpod.ProviderScope.containerOf(context)
           .read(shareableMapRiverpod);
       await provider.loadFromAdapter(adapter);
+      // Opened by its share code, so its photos are found by it too.
+      provider.setShareCode(widget.shareCode);
 
       if (mounted) {
         Navigator.pushReplacement(

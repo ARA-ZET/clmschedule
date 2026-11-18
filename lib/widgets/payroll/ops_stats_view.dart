@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart' show mapEquals;
@@ -232,23 +233,49 @@ class _OpsStatsViewState extends riverpod.ConsumerState<OpsStatsView> {
     final key = dayKeyFor(day);
     final payroll = ref.read(payrollRiverpod);
     final rows = _rowsByDayKey[key] ?? {};
-    // Only cells that differ from what the provider holds (saved, or
-    // already queued to save) — re-sending every distributor's cell would
-    // let one stale cell overwrite another column's newer value.
+    // Only cells the admin actually changed — differing from what the cell
+    // was loaded with AND from what the provider holds. Comparing with the
+    // provider alone let a cell still showing an older value count as an
+    // "edit" and overwrite a newer one (Fri 6 Nov 2026, 18:26). Each edit
+    // also carries the value it was made on top of, and the server skips it
+    // if that has changed since.
     final edits = <String, PayrollDailyEntry>{};
+    final basedOn = <String, PayrollDailyEntry>{};
     for (final e in rows.entries) {
       final entry = e.value.toEntry(settings.bonusCodes);
+      if (sameDailyEntry(entry, e.value.basedOn)) continue;
       final saved = payroll.week.payslips[e.key]?.dailyEntries[key] ??
           PayrollDailyEntry.empty(day);
-      if (!mapEquals(saved.toMap(), entry.toMap())) edits[e.key] = entry;
+      if (mapEquals(saved.toMap(), entry.toMap())) continue;
+      edits[e.key] = entry;
+      basedOn[e.key] = e.value.basedOn;
     }
     if (edits.isEmpty) return;
     setState(() => _savingDayKeys.add(key));
     try {
-      await payroll.updateDayForAllDistributors(day, edits);
+      final notSaved = await payroll.updateDayForAllDistributors(day, edits,
+          basedOn: basedOn);
+      if (notSaved.isNotEmpty && mounted) {
+        // Show what the server holds now, so the admin can re-check it.
+        final latest = ref.read(payrollRiverpod).week.payslips;
+        for (final e in rows.entries) {
+          if (!edits.containsKey(e.key)) continue;
+          final now = latest[e.key]?.dailyEntries[key] ??
+              PayrollDailyEntry.empty(day);
+          if (!sameDailyEntry(now, edits[e.key]!)) e.value.resetTo(now);
+        }
+        ScaffoldMessenger.maybeOf(context)?.showToast(SnackBar(
+          backgroundColor: Colors.orange.shade800,
+          duration: const Duration(seconds: 10),
+          content: Text('Not saved for ${notSaved.join(', ')} on '
+              '${_dayBlockFormat.format(day)}: their figures were changed '
+              'elsewhere while this screen was showing older ones. The grid '
+              'now shows the latest — re-enter if it is still wrong.'),
+        ));
+      }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
+        ScaffoldMessenger.maybeOf(context)?.showToast(SnackBar(
             content: Text(
                 'Couldn\'t save ${_dayBlockFormat.format(day)} — please re-enter: $e')));
       }
@@ -596,6 +623,24 @@ class _GridEntryState {
 
   static String _formatSetsOrCode(PayrollDailyEntry e) =>
       e.specialCode ?? e.flyerSets?.toString() ?? '';
+
+  /// The saved entry this cell's current text was loaded from — what an edit
+  /// is made on top of.
+  PayrollDailyEntry get basedOn => _lastLoadedEntry;
+
+  /// Shows [entry] even over what the admin typed — used when their edit
+  /// was refused because the server's value had changed underneath it.
+  void resetTo(PayrollDailyEntry entry) {
+    setsOrCode.text = _formatSetsOrCode(entry);
+    kmWalked.text = entry.kmWalked?.toString() ?? '';
+    waypoints.text = entry.waypointsReached?.toString() ?? '';
+    auditScore.text = entry.auditScore?.toString() ?? '';
+    notes.text = entry.notes;
+    estimateReached = entry.estimateReached;
+    suggestedSetsOrCode =
+        entry.autoDefault ? _formatSetsOrCode(entry) : null;
+    _lastLoadedEntry = entry;
+  }
 
   void _refreshField(
       TextEditingController controller, String oldValue, String newValue) {

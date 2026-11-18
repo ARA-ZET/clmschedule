@@ -1,8 +1,10 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
 import '../../models/collection_job.dart';
 import '../../models/driver.dart';
+import '../../models/job.dart';
 import '../../models/dropsheet_day.dart';
 import '../../models/dropsheet_task.dart';
 import '../../models/dropsheet_task_type_config.dart';
@@ -13,6 +15,7 @@ import '../../config/cloud_feature_flags.dart';
 import '../../providers/schedule_provider.dart';
 import '../../services/dropsheet_route_planner.dart';
 import '../../utils/dropsheet_maps.dart';
+import '../../utils/shared_drop_points.dart';
 import '../dropsheet/dropsheet_tab.dart' show TaskDragPayload;
 import 'day_planner_palette.dart';
 
@@ -67,6 +70,11 @@ class _DayPlannerPanelState extends riverpod.ConsumerState<DayPlannerPanel> {
             date: widget.date,
             onAddDriver: () => _showAddDriverDialog(context),
             onSyncFromSchedule: () async {
+              if (!dropsheet.isDayReady) {
+                ScaffoldMessenger.of(context).showToast(const SnackBar(
+                    content: Text(DropsheetProvider.notReadyMessage)));
+                return;
+              }
               // Past days are archived records — re-syncing one can push
               // allocated stops back to "Unassigned", so confirm first.
               if (dropsheet.isHistoricalDate) {
@@ -99,7 +107,7 @@ class _DayPlannerPanelState extends riverpod.ConsumerState<DayPlannerPanel> {
               final synced = await dropsheet.syncFromSchedule(
                   force: dropsheet.isHistoricalDate);
               if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showToast(
                 SnackBar(
                   content: Text(synced
                       ? 'Synced new stops from schedule.'
@@ -127,7 +135,7 @@ class _DayPlannerPanelState extends riverpod.ConsumerState<DayPlannerPanel> {
         drivers.activeDrivers.where((d) => !used.contains(d.id)).toList();
 
     if (available.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text(
               'All active drivers are already on this day. Add more drivers from the Dropsheet tab.'),
@@ -300,8 +308,8 @@ class _SectionList extends riverpod.ConsumerWidget {
     // Live job IDs scheduled for this date — distributor stops are only
     // shown if their underlying schedule job still exists.
     final schedule = ref.watch(scheduleRiverpod);
-    final jobIds = {
-      for (final j in schedule.getJobsForDate(date)) j.id,
+    final jobById = {
+      for (final j in schedule.getJobsForDate(date)) j.id: j,
     };
 
     if (day.sections.isEmpty) {
@@ -327,7 +335,7 @@ class _SectionList extends riverpod.ConsumerWidget {
           child: _PanelSection(
             section: section,
             allSections: day.sections,
-            liveJobIds: jobIds,
+            jobById: jobById,
             date: date,
           ),
         );
@@ -339,13 +347,14 @@ class _SectionList extends riverpod.ConsumerWidget {
 class _PanelSection extends riverpod.ConsumerStatefulWidget {
   final DropsheetDriverSection section;
   final List<DropsheetDriverSection> allSections;
-  final Set<String> liveJobIds;
+  /// The day's schedule jobs, by id — what the map pins stops from.
+  final Map<String, Job> jobById;
   final DateTime date;
 
   const _PanelSection({
     required this.section,
     required this.allSections,
-    required this.liveJobIds,
+    required this.jobById,
     required this.date,
   });
 
@@ -375,7 +384,7 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
     // Tasks not seeded from the schedule (no jobId) are still shown so
     // user-added stops aren't hidden. Schedule-seeded tasks must point
     // at a job that still exists for the current date.
-    return id == null || widget.liveJobIds.contains(id);
+    return id == null || widget.jobById.containsKey(id);
   }
 
   /// Reads the Leave task's startTime for this section, falling back to
@@ -419,7 +428,7 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
       });
     }
     if (!config.depot.hasCoordinates) {
-      messenger.showSnackBar(
+      messenger.showToast(
         SnackBar(
           content: Text(config.depot.address.trim().isEmpty
               ? 'No office address set. Add one in Task manager.'
@@ -462,7 +471,7 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
 
       if (!mounted) return;
       if (route == null) {
-        messenger.showSnackBar(
+        messenger.showToast(
           const SnackBar(
             content: Text(
                 'No routable stops in this section (need geocoded addresses).'),
@@ -487,11 +496,13 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
         polyline: route.fullPolyline,
         totalDistanceMeters: route.totalDistanceMeters,
         totalDurationSeconds: route.totalDurationSeconds,
+        waitByTaskKey: route.waitMinutes,
+        lateByTaskKey: route.lateMinutes,
       );
 
       if (!mounted) return;
       final verb = optimise ? 'optimised' : 'calculated';
-      messenger.showSnackBar(
+      messenger.showToast(
         SnackBar(
           content: Text(
             'Route $verb: ${route.taskOrder.length} stops · '
@@ -504,7 +515,7 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
     } catch (e, st) {
       debugPrint('[DayPlanner] route FAILED: $e\n$st');
       if (mounted) {
-        messenger.showSnackBar(
+        messenger.showToast(
           SnackBar(content: Text('Route calculation failed: $e')),
         );
       }
@@ -540,6 +551,11 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
                 t.typeData['isPickupDivider'] != true)
             .firstOrNull;
 
+    // A Junk & Stuff / Happy Sun job with people dropped at it is one row:
+    // the job, its crew listed under it.
+    final sites = jobSitesInSection(section);
+    final placedSites = <String>{};
+
     // Filtered visible stops, but we still need their absolute index in
     // `section.tasks` for `moveTask` calls.
     final stops = <_StopEntry>[];
@@ -549,13 +565,39 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
       // Distributor stops still respect the "live job" filter so deleted
       // schedule jobs disappear from the planner.
       if (_isDistributorStop(t) && !_hasLiveJob(t)) continue;
-      stops.add(_StopEntry(task: t, absoluteIndex: i, order: stops.length + 1));
+      final site = sites[t.id];
+      if (site != null) {
+        // The job site's row stands where its first task is in the run.
+        if (!placedSites.add(site.job.id)) continue;
+        final at = [
+          for (var j = 0; j < section.tasks.length; j++)
+            if (site.taskIds.contains(section.tasks[j].id)) j,
+        ];
+        stops.add(_StopEntry(
+          task: site.job,
+          absoluteIndex: section.tasks.indexOf(site.job),
+          firstIndex: at.first,
+          lastIndex: at.last,
+          order: 0,
+          site: site,
+        ));
+        continue;
+      }
+      stops.add(_StopEntry(task: t, absoluteIndex: i, order: 0));
     }
+
+    // The map's pin numbers (same helper), so "3" here is pin 3 there. A
+    // stop with no location has no pin and no number.
+    final numbers = stopNumbersFor(section,
+        stopCount: (t) => plannerStops(t, widget.jobById).length);
 
     // Show the drop-off/pick-up toggle only for non-Unassigned sections that
     // contain at least one pick-up task.
     final hasPickUp = !isUnassigned &&
         stops.any((e) => e.task.type == DropsheetTaskType.pickUp);
+
+    // Stops sharing a drop / pick-up point with others on this run.
+    final sharedStops = sharedStopsInSection(section);
 
     // Build the view-filtered list with sequential order numbers.
     final viewStops = <_StopEntry>[];
@@ -568,16 +610,55 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
       viewStops.add(_StopEntry(
         task: entry.task,
         absoluteIndex: entry.absoluteIndex,
-        order: viewStops.length + 1,
+        firstIndex: entry.firstIndex,
+        lastIndex: entry.lastIndex,
+        order: numbers[entry.task.id] ?? 0,
+        site: entry.site,
       ));
+    }
+
+    // Moves the row [entry] to just before [before] / just after [after].
+    // A job site moves with its whole crew, so the driver's run keeps them
+    // together.
+    void moveEntry(_StopEntry entry, {_StopEntry? before, _StopEntry? after}) {
+      final site = entry.site;
+      if (site != null) {
+        Future.microtask(() => dropsheet.moveTasksTogether(
+              site.taskIds.toList(),
+              section.id,
+              beforeTaskId:
+                  before == null ? null : section.tasks[before.firstIndex].id,
+              afterTaskId:
+                  after == null ? null : section.tasks[after.lastIndex].id,
+              undoLabel: 'Move stop',
+            ));
+        return;
+      }
+      Future.microtask(() => dropsheet.moveTask(
+            fromSectionId: section.id,
+            fromIndex: entry.absoluteIndex,
+            toSectionId: section.id,
+            toIndex: before?.firstIndex ?? after!.lastIndex,
+          ));
     }
 
     return DragTarget<TaskDragPayload>(
       onWillAcceptWithDetails: (d) => d.data.fromSectionId != section.id,
       onAcceptWithDetails: (d) {
+        // A job site's row brings its crew along.
+        final from = widget.allSections
+            .where((s) => s.id == d.data.fromSectionId)
+            .firstOrNull;
+        final site =
+            from == null ? null : jobSitesInSection(from)[d.data.task.id];
+        if (site != null) {
+          Future.microtask(() => dropsheet.moveTasksTogether(
+              site.taskIds.toList(), section.id));
+          return;
+        }
         // Append at end of visible stops within this section.
         final destAbs =
-            stops.isEmpty ? section.tasks.length : stops.last.absoluteIndex + 1;
+            stops.isEmpty ? section.tasks.length : stops.last.lastIndex + 1;
         // Defer the mutation so we don't notify listeners while the
         // ReorderableListView / DragTarget machinery is still laying
         // out (which would mutate a LayoutBuilder mid-layout).
@@ -611,10 +692,17 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
                 onRemove: isUnassigned
                     ? null
                     : () => dropsheet.removeDriverSection(section.id),
-                onOptimise:
-                    isUnassigned || stops.isEmpty ? null : _optimiseRoute,
-                onCalculate:
-                    isUnassigned || stops.isEmpty ? null : _calculateRoute,
+                // Own transport has no driver, so no route to work out.
+                onOptimise: isUnassigned ||
+                        section.isOwnTransport ||
+                        stops.isEmpty
+                    ? null
+                    : _optimiseRoute,
+                onCalculate: isUnassigned ||
+                        section.isOwnTransport ||
+                        stops.isEmpty
+                    ? null
+                    : _calculateRoute,
                 isOptimising: _optimising,
                 isCalculating: _calculating,
               ),
@@ -659,25 +747,23 @@ class _PanelSectionState extends riverpod.ConsumerState<_PanelSection> {
                     return _StopRow(
                       key: ValueKey(entry.task.id),
                       task: entry.task,
+                      sharedNote: sharedStopNote(entry.task, sharedStops),
+                      crew: entry.site?.crew
+                              .where((c) => !_isDistributorStop(c) ||
+                                  _hasLiveJob(c))
+                              .toList() ??
+                          const [],
+                      groupTaskIds: entry.site?.taskIds.toList(),
                       sectionId: section.id,
                       absoluteIndex: entry.absoluteIndex,
                       color: color,
                       number: entry.order,
                       canMoveUp: index > 0,
                       canMoveDown: index < viewStops.length - 1,
-                      onMoveUp: () => Future.microtask(() => dropsheet.moveTask(
-                            fromSectionId: section.id,
-                            fromIndex: entry.absoluteIndex,
-                            toSectionId: section.id,
-                            toIndex: viewStops[index - 1].absoluteIndex,
-                          )),
+                      onMoveUp: () =>
+                          moveEntry(entry, before: viewStops[index - 1]),
                       onMoveDown: () =>
-                          Future.microtask(() => dropsheet.moveTask(
-                                fromSectionId: section.id,
-                                fromIndex: entry.absoluteIndex,
-                                toSectionId: section.id,
-                                toIndex: viewStops[index + 1].absoluteIndex,
-                              )),
+                          moveEntry(entry, after: viewStops[index + 1]),
                       otherSections: widget.allSections
                           .where((s) => s.id != section.id)
                           .toList(),
@@ -696,11 +782,24 @@ class _StopEntry {
   final DropsheetTask task;
   final int absoluteIndex;
   final int order;
+
+  /// Where the row's tasks start and end in `section.tasks`: a job site
+  /// spans its job and crew, any other row just its own task.
+  final int firstIndex;
+  final int lastIndex;
+
+  /// The job site this row stands for, if any.
+  final JobSite? site;
+
   _StopEntry({
     required this.task,
     required this.absoluteIndex,
     required this.order,
-  });
+    int? firstIndex,
+    int? lastIndex,
+    this.site,
+  })  : firstIndex = firstIndex ?? absoluteIndex,
+        lastIndex = lastIndex ?? absoluteIndex;
 }
 
 class _SectionHeader extends StatelessWidget {
@@ -734,7 +833,9 @@ class _SectionHeader extends StatelessWidget {
         : null;
     final subtitle = isUnassigned
         ? '$stopCount unassigned'
-        : [
+        : section.isOwnTransport
+            ? '$stopCount on own transport'
+            : [
             if (section.vehicle != null) section.vehicle!.displayName,
             if (section.trailer != null &&
                 section.trailer != TrailerType.noTrailer)
@@ -754,7 +855,11 @@ class _SectionHeader extends StatelessWidget {
             radius: 14,
             backgroundColor: Colors.white,
             child: Icon(
-              isUnassigned ? Icons.help_outline : Icons.local_shipping,
+              isUnassigned
+                  ? Icons.help_outline
+                  : section.isOwnTransport
+                      ? Icons.directions_walk
+                      : Icons.local_shipping,
               size: 16,
               color: color,
             ),
@@ -904,6 +1009,13 @@ class _StopRow extends riverpod.ConsumerWidget {
   final VoidCallback? onMoveUp;
   final VoidCallback? onMoveDown;
   final List<DropsheetDriverSection> otherSections;
+  final String? sharedNote;
+
+  /// A job site's crew, listed under the job.
+  final List<DropsheetTask> crew;
+
+  /// Every task of a job site, moved together to another driver.
+  final List<String>? groupTaskIds;
 
   const _StopRow({
     super.key,
@@ -917,6 +1029,9 @@ class _StopRow extends riverpod.ConsumerWidget {
     required this.otherSections,
     this.onMoveUp,
     this.onMoveDown,
+    this.sharedNote,
+    this.crew = const [],
+    this.groupTaskIds,
   });
 
   @override
@@ -938,6 +1053,8 @@ class _StopRow extends riverpod.ConsumerWidget {
     final legDistance = (task.typeData['legDistanceM'] as num?)?.toDouble();
     final legDuration = (task.typeData['legDurationS'] as num?)?.toInt();
     final routeBits = <String>[
+      // The booked time, so the planner can see a stop is due at 10:00.
+      if (task.appointmentTime.isNotEmpty) 'booked ${task.appointmentTime}',
       if (legDistance != null && legDistance > 0)
         '${(legDistance / 1000).toStringAsFixed(1)} km',
       if (legDuration != null && legDuration > 0)
@@ -979,7 +1096,7 @@ class _StopRow extends riverpod.ConsumerWidget {
             shape: BoxShape.circle,
           ),
           child: Text(
-            '$number',
+            number > 0 ? '$number' : '–',
             style: const TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.w700,
@@ -1019,6 +1136,43 @@ class _StopRow extends riverpod.ConsumerWidget {
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 11, color: Colors.black54),
+              ),
+            if (crew.isNotEmpty) _crewList(),
+            if (sharedNote != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Row(
+                  children: [
+                    const Icon(Icons.groups,
+                        size: 13, color: Color(0xFF00796B)),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        sharedNote!,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF00796B),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            if (task.bookingTimingNote case final note?)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  note,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    // Late red, early blue.
+                    color: task.appointmentLateMinutes > 0
+                        ? const Color(0xFFC62828)
+                        : const Color(0xFF1565C0),
+                  ),
+                ),
               ),
             if (routeBits.isNotEmpty)
               Padding(
@@ -1079,6 +1233,12 @@ class _StopRow extends riverpod.ConsumerWidget {
                 tooltip: 'Move to driver',
                 icon: const Icon(Icons.swap_horiz, size: 18),
                 onSelected: (targetId) {
+                  final group = groupTaskIds;
+                  if (group != null) {
+                    Future.microtask(
+                        () => dropsheet.moveTasksTogether(group, targetId));
+                    return;
+                  }
                   final target = otherSections.firstWhere(
                     (s) => s.id == targetId,
                     orElse: () => otherSections.first,
@@ -1150,6 +1310,51 @@ class _StopRow extends riverpod.ConsumerWidget {
   // ---------------------------------------------------------------------------
   // Display helpers
   // ---------------------------------------------------------------------------
+
+  /// The people dropped at a job site, one per line.
+  Widget _crewList() {
+    const teal = Color(0xFF00796B);
+    return Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.groups, size: 13, color: teal),
+              const SizedBox(width: 4),
+              Text(
+                'Crew · ${crew.length}',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: teal,
+                ),
+              ),
+            ],
+          ),
+          for (final c in crew)
+            Padding(
+              padding: const EdgeInsets.only(left: 17, top: 1),
+              child: Text(
+                [
+                  crewMemberName(c),
+                  if (c.tel.trim().isNotEmpty) c.tel.trim(),
+                ].join(' · '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: teal,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
   String _titleFor(DropsheetTask t) {
     switch (t.type) {

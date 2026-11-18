@@ -58,9 +58,25 @@ class DistributionLagProvider extends ChangeNotifier {
         _zohoSync = zohoSync,
         _jobListService = jobListService {
     _schedule.addListener(_onScheduleChanged);
-    _jobTypes.addListener(_recompute);
-    _zohoSync.addListener(_recompute);
+    _jobTypes.addListener(_scheduleRecompute);
+    _zohoSync.addListener(_scheduleRecompute);
     _onScheduleChanged();
+  }
+
+  /// Pending [_recompute]. Its inputs (three Job List months, the previous
+  /// schedule month, the schedule, job types, Zoho settings) tend to change
+  /// in bursts — a month load, a drag landing — and each used to re-run the
+  /// whole pairing on the UI thread.
+  Timer? _recomputeTimer;
+  bool _disposed = false;
+  static const Duration _recomputeDelay = Duration(milliseconds: 200);
+
+  void _scheduleRecompute() {
+    if (_disposed) return;
+    _recomputeTimer ??= Timer(_recomputeDelay, () {
+      _recomputeTimer = null;
+      if (!_disposed) _recompute();
+    });
   }
 
   /// Worst lag over [jobs] (one distributor's day), or null when none of them
@@ -92,7 +108,7 @@ class DistributionLagProvider extends ChangeNotifier {
       _month = month;
       _subscribe(month);
     }
-    if (!identical(_schedule.jobs, _lastScheduleJobs)) _recompute();
+    if (!identical(_schedule.jobs, _lastScheduleJobs)) _scheduleRecompute();
   }
 
   void _subscribe(DateTime month) {
@@ -106,7 +122,7 @@ class DistributionLagProvider extends ChangeNotifier {
       _itemSubs.add(_jobListService.getJobListItems(m).listen(
         (items) {
           _itemsByMonth[key] = items;
-          _recompute();
+          _scheduleRecompute();
         },
         onError: (e) =>
             debugPrint('DistributionLagProvider: job list $key error: $e'),
@@ -119,7 +135,7 @@ class DistributionLagProvider extends ChangeNotifier {
         .listen(
       (jobs) {
         _prevMonthJobs = jobs;
-        _recompute();
+        _scheduleRecompute();
       },
       onError: (e) =>
           debugPrint('DistributionLagProvider: previous schedule error: $e'),
@@ -170,8 +186,10 @@ class DistributionLagProvider extends ChangeNotifier {
   @override
   void dispose() {
     _schedule.removeListener(_onScheduleChanged);
-    _jobTypes.removeListener(_recompute);
-    _zohoSync.removeListener(_recompute);
+    _jobTypes.removeListener(_scheduleRecompute);
+    _zohoSync.removeListener(_scheduleRecompute);
+    _disposed = true;
+    _recomputeTimer?.cancel();
     _cancelSubscriptions();
     super.dispose();
   }

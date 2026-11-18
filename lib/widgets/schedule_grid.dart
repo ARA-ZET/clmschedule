@@ -1,4 +1,7 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:async';
+
+import 'package:clmschedule/utils/grid_drag_auto_scroll.dart';
 
 import 'package:clmschedule/providers/toggler_provider.dart';
 import 'package:flutter/material.dart';
@@ -10,14 +13,25 @@ import 'package:two_dimensional_scrollables/two_dimensional_scrollables.dart';
 import '../models/distributor.dart';
 import '../models/job.dart';
 import '../models/schedule_confirmation_status.dart';
+import '../models/track_upload.dart';
 import '../providers/auth_provider.dart';
+import '../providers/collection_schedule_provider.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/scale_provider.dart';
 import '../providers/schedule_selection_provider.dart';
+import '../providers/track_uploads_provider.dart';
+import '../utils/schedule_booking_slots.dart';
+import 'schedule_booking_column.dart';
 import 'day_planner/day_planner_page.dart';
 import 'month_navigation_widget.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_screen.dart';
+import '../undo/undo_history.dart';
+import '../undo/undo_redo_buttons.dart';
 import 'schedule_batch_drop.dart';
 import 'schedule_job_cell.dart';
+import 'weather/weather_header_chip.dart';
+import 'slow_action_hint.dart';
 
 /// Data class to optimize grid rebuilds with Selector pattern
 class _ScheduleGridData {
@@ -83,8 +97,46 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
   final ScrollController _horizontalScrollController = ScrollController();
   final ScrollController _verticalScrollController = ScrollController();
 
+  // Auto-scrolls the grid while a job drag hovers near its edges.
+  final GlobalKey _gridViewportKey = GlobalKey();
+  late final EdgeAutoScroller _edgeAutoScroller;
+
+  @override
+  void initState() {
+    super.initState();
+    _edgeAutoScroller = EdgeAutoScroller(
+      viewportKey: _gridViewportKey,
+      horizontal: _horizontalScrollController,
+      vertical: _verticalScrollController,
+    );
+  }
+
+  // The one Collection Schedule sync, and the months last asked of it for
+  // the van column (see [_serveBookingMonths]).
+  CollectionScheduleProvider? _collectionSync;
+  String _servedBookingMonths = '';
+
+  /// Asks the Collection Schedule sync to serve the grid's months, so the van
+  /// column has their bookings without a listener of its own. Only when the
+  /// months change, and after the frame (it may start listeners).
+  void _serveBookingMonths(List<DateTime> dates) {
+    final months = {for (final d in dates) DateTime(d.year, d.month)};
+    final key =
+        (months.map((m) => m.year * 100 + m.month).toList()..sort()).join(',');
+    if (key == _servedBookingMonths) return;
+    _servedBookingMonths = key;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final sync = ref.read(collectionScheduleRiverpod);
+      _collectionSync = sync;
+      sync.showOnScheduleGrid(months);
+    });
+  }
+
   @override
   void dispose() {
+    _collectionSync?.showOnScheduleGrid(const []);
+    _edgeAutoScroller.dispose();
     _horizontalScrollController.dispose();
     _verticalScrollController.dispose();
     super.dispose();
@@ -117,7 +169,7 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
     final jobsWithMaps = jobs.where((j) => j.workMaps.isNotEmpty).toList();
 
     if (jobsWithMaps.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(content: Text('No map areas for this day')),
       );
       return;
@@ -185,7 +237,7 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
   }
 
   // Scroll to today's date in the horizontal scrollbar
-  void _scrollToToday(List<DateTime> dates) {
+  void _scrollToToday(List<DateTime> dates, List<ScheduleGridColumn> columns) {
     if (!_hasScrolledToToday && dates.isNotEmpty) {
       final todayIndex = _getTodayIndex(dates);
       if (todayIndex >= 0) {
@@ -198,10 +250,21 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
                 150.0; // Width of distributor names column
             final availableWidth = viewportWidth - pinnedColumnWidth;
 
-            // Position to center today's column in the viewport
-            final targetPosition = (todayIndex * cellWidth) -
-                (availableWidth / 2) +
-                (cellWidth / 2);
+            // Centre today's date and its vans column in the viewport.
+            // Only dates from today on have a vans column, so add up the
+            // real widths of the columns before it.
+            var before = 0.0;
+            var pairWidth = 0.0;
+            for (final column in columns) {
+              final width = _columnWidth(column);
+              if (column.dateIndex < todayIndex) {
+                before += width;
+              } else if (column.dateIndex == todayIndex) {
+                pairWidth += width;
+              }
+            }
+            final targetPosition =
+                before - (availableWidth / 2) + (pairWidth / 2);
 
             final maxScroll =
                 _horizontalScrollController.position.maxScrollExtent;
@@ -222,6 +285,35 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
 
   static const double cellWidth = 200.0;
   static const double headerHeight = 40.0;
+
+  /// The Collection Schedule column after each date: one narrow lane per
+  /// van (H M N). The distributor rows are its half-hour time rows.
+  static const double bookingColumnWidth = 84.0;
+
+  static double _columnWidth(ScheduleGridColumn column) =>
+      column.vans ? bookingColumnWidth : cellWidth;
+
+  // The vans column's widgets, kept across rebuilds. They don't depend on
+  // the schedule's jobs, so handing back the same widget lets Flutter skip
+  // them when the grid rebuilds for a job change; a van cell rebuilds only
+  // when its own day's bookings change (it watches them itself).
+  final Map<(int, int, int), Widget> _vanCells = {};
+  final Map<(int, bool), Widget> _vanHeaders = {};
+
+  static int _dayKey(DateTime d) => d.year * 10000 + d.month * 100 + d.day;
+
+  Widget _vanCell(DateTime date, int row, int timeRows) =>
+      _vanCells.putIfAbsent(
+        (_dayKey(date), row, timeRows),
+        () => RepaintBoundary(
+          child: BookingColumnCell(date: date, row: row, timeRows: timeRows),
+        ),
+      );
+
+  Widget _vanHeader(DateTime date, bool isToday) => _vanHeaders.putIfAbsent(
+        (_dayKey(date), isToday),
+        () => BookingColumnHeader(date: date, isToday: isToday),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -247,16 +339,50 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
     if (_currentMonthDisplay != gridData.currentMonthDisplay) {
       _currentMonthDisplay = gridData.currentMonthDisplay;
       _hasScrolledToToday = false; // Reset scroll flag for new month
+      _vanCells.clear();
+      _vanHeaders.clear();
     }
 
     final dates = _getDates(gridData.currentMonth, scheduleProvider);
+    // Column 0 is the names. After it every date has its jobs column, and
+    // dates from today on also have a Collection Schedule (vans) column —
+    // it is for planning, so past days don't get one.
+    final todayCivil = scheduleToday();
+    final columns = scheduleGridColumns(dates, todayCivil);
+    final showsVans = columns.any((c) => c.vans);
+    // Only today-onward months are loaded for the vans column.
+    _serveBookingMonths([
+      for (final c in columns)
+        if (c.vans) dates[c.dateIndex],
+    ]);
     final distributors = gridData.distributors;
+    // The first rows (up to 16) double as the Collection Schedule column's
+    // half-hour time rows: row 1 = 08:00–08:30 … row 16 = 15:30–16:00.
+    final timeRows = bookingTimeRows(distributors.length);
 
+    // Collapsed rows are 48 (was 40) so a distributor's name keeps its full
+    // size with the half-hour label under it (user request 2026-11-18).
     final double rowHeight =
-        gridData.isFullscreen ? 92.0 * gridData.scale : 40.0 * gridData.scale;
+        gridData.isFullscreen ? 92.0 * gridData.scale : 48.0 * gridData.scale;
+
+    // clmgpx "track uploaded" pings for yesterday, today and tomorrow only,
+    // resolved against the grid's rows. Same matching as the clmworking
+    // roster. Days outside that window are not fetched, so show no marks.
+    final uploads = TrackUploadIndex.build(
+      ref
+              .watch(trackUploadsRiverpod((
+                from: trackUploadDayId(DateTime(
+                    todayCivil.year, todayCivil.month, todayCivil.day - 1)),
+                to: trackUploadDayId(DateTime(
+                    todayCivil.year, todayCivil.month, todayCivil.day + 1)),
+              )))
+              .valueOrNull ??
+          const <TrackUpload>[],
+      distributors,
+    );
 
     // Scroll to today's date when data is loaded
-    _scrollToToday(dates);
+    _scrollToToday(dates, columns);
 
     return Column(
       children: [
@@ -273,11 +399,15 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
             const _DayConfirmationButton(label: 'Today', dayOffset: 0),
             const _DayConfirmationButton(label: 'Tomorrow', dayOffset: 1),
             const _SelectJobsButton(),
+            const UndoRedoButtons(undoKey: UndoKey.schedule),
+            const RecentlyDeletedButton(tab: RecycleBinTab.schedule),
+            const _ScheduleSaveStatus(),
           ],
         ),
 
         Expanded(
           child: Scrollbar(
+            key: _gridViewportKey,
             controller: _horizontalScrollController,
             thumbVisibility: true,
             trackVisibility: true,
@@ -298,12 +428,14 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
                 ),
                 pinnedRowCount: 1,
                 pinnedColumnCount: 1,
-                columnCount: dates.length +
-                    1, // All dates + 1 for distributor names column
+                // Distributor names, then [columns]: each date's job column,
+                // followed by its vans column from today on.
+                columnCount: columns.length + 1,
                 rowCount: distributors.length + 1, // +1 for date headers row
                 columnBuilder: (int column) {
                   return TableSpan(
-                    extent: FixedTableSpanExtent(column == 0 ? 150 : cellWidth),
+                    extent: FixedTableSpanExtent(
+                        column == 0 ? 150 : _columnWidth(columns[column - 1])),
                   );
                 },
                 rowBuilder: (int row) {
@@ -376,11 +508,16 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
                       );
                     } else {
                       // Date headers
-                      final date = dates[vicinity.column - 1];
+                      final gridColumn = columns[vicinity.column - 1];
+                      final date = dates[gridColumn.dateIndex];
                       final today = scheduleNow();
                       final isToday = date.year == today.year &&
                           date.month == today.month &&
                           date.day == today.day;
+
+                      if (gridColumn.vans) {
+                        return TableViewCell(child: _vanHeader(date, isToday));
+                      }
 
                       return TableViewCell(
                         child: _DateHeaderCell(
@@ -389,55 +526,114 @@ class _ScheduleGridState extends riverpod.ConsumerState<ScheduleGrid> {
                           label:
                               '${DateFormat('EEE').format(date)} ${date.day} ${_getMonthAbbreviation(date.month)}',
                           onOpenMap: () => _openDateMap(context, date),
+                          uploaded: uploads.uploadedOn(date),
+                          unmatched: uploads.unmatchedOn(date),
+                          distributors: distributors,
                         ),
                       );
                     }
                   } else {
                     final distributor = distributors[vicinity.row - 1];
                     if (vicinity.column == 0) {
-                      // Distributor names column
+                      // Distributor names column. Blue = track uploaded
+                      // today, as on the clmworking roster.
+                      final uploadedToday =
+                          uploads.isUploaded(distributor.id, todayCivil);
+                      // The half hour this row stands for in the Collection
+                      // Schedule columns ("08:00–08:30"), under the name —
+                      // only while a date in view has a vans column.
+                      final slotLabel = showsVans && vicinity.row - 1 < timeRows
+                          ? rowSlotLabel(vicinity.row - 1)
+                          : null;
                       return TableViewCell(
                         child: Card(
                           child: Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 8),
-                            child: Row(
-                              children: [
-                                Text(
-                                  '${vicinity.row}.', // Index number
-                                  style: Theme.of(
-                                    context,
-                                  ).textTheme.titleMedium,
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    distributor.name,
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.titleSmall,
-                                    overflow: TextOverflow.ellipsis,
+                            child: NameWithSlotLabel(
+                              slotLabel: slotLabel,
+                              name: Row(
+                                children: [
+                                  Text(
+                                    '${vicinity.row}.', // Index number
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium
+                                        ?.copyWith(
+                                          fontWeight: FontWeight.bold,
+                                          color: distributorNameColor(context),
+                                        ),
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Tooltip(
+                                      message: uploadedToday
+                                          ? 'Track uploaded today'
+                                          : '',
+                                      child: Text(
+                                        distributor.name,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .titleSmall
+                                            ?.copyWith(
+                                              // Bold dark grey (user
+                                              // 2026-11-18); blue still =
+                                              // track uploaded today.
+                                              color: uploadedToday
+                                                  ? trackUploadedColor(context)
+                                                  : distributorNameColor(
+                                                      context),
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
                       );
                     } else {
                       // Job cells - use isolated widget for better performance
-                      final date = dates[vicinity.column - 1];
+                      final gridColumn = columns[vicinity.column - 1];
+                      final date = dates[gridColumn.dateIndex];
+
+                      if (gridColumn.vans) {
+                        // This row's half hour (under the name), one lane
+                        // per van, coloured where the van is booked.
+                        return TableViewCell(
+                          child: _vanCell(date, vicinity.row - 1, timeRows),
+                        );
+                      }
+
                       final jobs = scheduleProvider
                           .getJobsForDistributorAndDate(distributor.id, date);
 
                       return TableViewCell(
                         child: RepaintBoundary(
-                          child: ScheduleJobCell(
-                            distributor: distributor,
-                            date: date,
-                            jobs: jobs,
-                            cellWidth: cellWidth,
-                            rowHeight: rowHeight,
-                            isFullscreen: gridData.isFullscreen,
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: ScheduleJobCell(
+                                  distributor: distributor,
+                                  date: date,
+                                  jobs: jobs,
+                                  cellWidth: cellWidth,
+                                  rowHeight: rowHeight,
+                                  isFullscreen: gridData.isFullscreen,
+                                ),
+                              ),
+                              // Once every job in the cell is Done the track
+                              // has been processed, so the mark is noise.
+                              if (uploads.isUploaded(distributor.id, date) &&
+                                  !(jobs.isNotEmpty &&
+                                      jobs.every((j) => j.statusId == 'done')))
+                                Positioned.fill(
+                                  child: _TrackUploadedMark(
+                                      hasJobs: jobs.isNotEmpty),
+                                ),
+                            ],
                           ),
                         ),
                       );
@@ -462,11 +658,21 @@ class _DateHeaderCell extends riverpod.ConsumerWidget {
   final String label;
   final VoidCallback onOpenMap;
 
+  /// distributorId -> upload time for this day's matched track uploads.
+  final Map<String, DateTime?> uploaded;
+
+  /// Uploaded names that match no distributor row.
+  final List<String> unmatched;
+  final List<Distributor> distributors;
+
   const _DateHeaderCell({
     required this.date,
     required this.isToday,
     required this.label,
     required this.onOpenMap,
+    required this.uploaded,
+    required this.unmatched,
+    required this.distributors,
   });
 
   @override
@@ -519,7 +725,43 @@ class _DateHeaderCell extends riverpod.ConsumerWidget {
                       ),
                       textAlign: TextAlign.center,
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
+                    WeatherHeaderChip(
+                      date: date,
+                      iconSize: scaleProvider.smallIconSize,
+                    ),
+                    const SizedBox(width: 6),
+                    if (uploaded.isNotEmpty || unmatched.isNotEmpty) ...[
+                      SizedBox(
+                        height: scaleProvider.smallIconSize,
+                        width: scaleProvider.smallIconSize,
+                        child: IconButton(
+                          padding: EdgeInsets.zero,
+                          iconSize: scaleProvider.smallIconSize - 2,
+                          icon: Badge(
+                            isLabelVisible: unmatched.isNotEmpty,
+                            label: Text('${unmatched.length}'),
+                            backgroundColor: Colors.orange.shade800,
+                            child: Icon(Icons.cloud_done,
+                                color: trackUploadedColor(context)),
+                          ),
+                          tooltip: unmatched.isEmpty
+                              ? '${uploaded.length} track(s) uploaded'
+                              : '${uploaded.length} track(s) uploaded · '
+                                  '${unmatched.length} no match',
+                          onPressed: () => showDialog<void>(
+                            context: context,
+                            builder: (_) => _TrackUploadsDialog(
+                              title: label,
+                              uploaded: uploaded,
+                              unmatched: unmatched,
+                              distributors: distributors,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                    ],
                     SizedBox(
                       height: scaleProvider.smallIconSize,
                       width: scaleProvider.smallIconSize,
@@ -538,6 +780,157 @@ class _DateHeaderCell extends riverpod.ConsumerWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Distributor names on the grid: bold dark grey so they stand out without
+/// being harsh (user 2026-11-18: solid black was too much); the theme's text
+/// colour if a dark theme is used.
+Color distributorNameColor(BuildContext context) {
+  final theme = Theme.of(context);
+  return theme.brightness == Brightness.dark
+      ? theme.colorScheme.onSurface
+      : Colors.grey.shade800;
+}
+
+/// Blue for "track uploaded", readable in light and dark themes. Kept apart
+/// from the selection/drop-target blue by only ever colouring text and icons.
+Color trackUploadedColor(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+        ? Colors.blue.shade300
+        : Colors.blue.shade700;
+
+/// Blue ring (plus a top-left cloud-tick) around the card in a schedule cell
+/// whose distributor uploaded that day's track.
+///
+/// The ring sits just outside the card and follows its corners concentrically,
+/// so the green/orange/red lag border on the job card itself stays visible.
+class _TrackUploadedMark extends StatelessWidget {
+  /// A job card sits 5px inside the cell (cell Card margin 4 + JobCard
+  /// margin 1); the empty cell's add-button card sits 4px in.
+  final bool hasJobs;
+
+  const _TrackUploadedMark({required this.hasJobs});
+
+  /// Radius of every Card in the cell: Material 3's default, as used by
+  /// JobCard._borderedShape. The app sets no cardTheme shape.
+  static const double _cardRadius = 12;
+
+  /// Gap between the cell edge and the ring's outer edge.
+  static const double _ringInset = 1;
+
+  @override
+  Widget build(BuildContext context) {
+    final blue = trackUploadedColor(context);
+    final cardInset = hasJobs ? 5.0 : 4.0;
+    // Concentric with the card: the ring's radius grows by the distance it
+    // sits outside the card.
+    final radius = _cardRadius + (cardInset - _ringInset);
+
+    // IgnorePointer so the mark never steals a drag or tap from the job card.
+    return IgnorePointer(
+      child: Semantics(
+        label: 'Track uploaded',
+        child: Padding(
+          padding: const EdgeInsets.all(_ringInset),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border.all(color: blue, width: 2.5),
+              borderRadius: BorderRadius.circular(radius),
+            ),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surface,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: blue, width: 1.5),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(1.5),
+                  child: Icon(Icons.cloud_done, size: 13, color: blue),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A day's track uploads: matched distributors with times, then names that
+/// matched nobody — the same split the clmworking roster shows.
+class _TrackUploadsDialog extends StatelessWidget {
+  final String title;
+  final Map<String, DateTime?> uploaded;
+  final List<String> unmatched;
+  final List<Distributor> distributors;
+
+  const _TrackUploadsDialog({
+    required this.title,
+    required this.uploaded,
+    required this.unmatched,
+    required this.distributors,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final blue = trackUploadedColor(context);
+    final time = DateFormat('HH:mm');
+    // Grid order, so the list reads the same as the rows.
+    final matched =
+        distributors.where((d) => uploaded.containsKey(d.id)).toList();
+
+    Widget heading(String text) => Padding(
+          padding: const EdgeInsets.only(top: 8, bottom: 4),
+          child: Text(text.toUpperCase(),
+              style: theme.textTheme.labelSmall
+                  ?.copyWith(color: theme.hintColor, letterSpacing: 0.5)),
+        );
+
+    return AlertDialog(
+      title: Text('Tracks uploaded · $title'),
+      content: SizedBox(
+        width: 320,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            heading('Uploaded (${matched.length})'),
+            if (matched.isEmpty)
+              Text('None', style: TextStyle(color: theme.hintColor)),
+            for (final d in matched)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.cloud_done, color: blue),
+                title: Text(d.name, style: TextStyle(color: blue)),
+                trailing: uploaded[d.id] == null
+                    ? null
+                    : Text(time.format(uploaded[d.id]!)),
+              ),
+            if (unmatched.isNotEmpty) ...[
+              heading('No match (${unmatched.length})'),
+              for (final name in unmatched)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading:
+                      Icon(Icons.help_outline, color: Colors.orange.shade800),
+                  title: Text(name),
+                ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
     );
   }
 }
@@ -571,13 +964,26 @@ class _SelectJobsButton extends riverpod.ConsumerWidget {
               onSelected: (v) => selection.setSelectMode(v),
             ),
           ),
-          if (count > 0)
+          if (count > 0) ...[
+            const SizedBox(width: 4),
+            Tooltip(
+              message: 'Delete the $count selected '
+                  '${count == 1 ? 'job' : 'jobs'} — Undo puts them back',
+              child: ActionChip(
+                avatar: Icon(Icons.delete_outline,
+                    size: 18, color: Colors.red.shade700),
+                label: Text('Delete $count',
+                    style: TextStyle(color: Colors.red.shade700)),
+                onPressed: () => deleteSelectedJobs(context, ref),
+              ),
+            ),
             IconButton(
               icon: const Icon(Icons.clear, size: 18),
               tooltip: 'Clear selection',
               visualDensity: VisualDensity.compact,
               onPressed: selection.clear,
             ),
+          ],
         ],
       ),
     );
@@ -709,7 +1115,7 @@ class _DayConfirmationButtonState
       // A silently swallowed failure here is what makes the button look
       // unresponsive — the write never landed but nothing said so.
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             backgroundColor: Colors.red,
             content: Text(
@@ -798,6 +1204,21 @@ class _DayConfirmationButtonState
           ),
         );
       },
+    );
+  }
+}
+
+/// "Saving…" for schedule changes still on their way to the server — shown
+/// only once a save is slow, so a quick drag shows nothing extra.
+class _ScheduleSaveStatus extends riverpod.ConsumerWidget {
+  const _ScheduleSaveStatus();
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: PendingSavesChip(
+          pending: ref.read(scheduleRiverpod).pendingWriteCount),
     );
   }
 }

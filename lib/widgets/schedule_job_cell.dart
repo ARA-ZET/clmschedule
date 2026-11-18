@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -12,6 +13,7 @@ import '../providers/unfinished_work_areas_provider.dart';
 import '../providers/scale_provider.dart';
 import '../providers/schedule_selection_provider.dart';
 import '../utils/distribution_lag.dart';
+import '../utils/grid_drag_auto_scroll.dart';
 import '../utils/schedule_job_merge.dart';
 import 'job_card.dart';
 import 'schedule_batch_drop.dart';
@@ -43,7 +45,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
   /// deleted jobs from being re-written to Firestore.
   static void _showJobGoneSnackBar(BuildContext context) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       const SnackBar(
         content: Text('Job no longer exists — it was changed or deleted'),
         backgroundColor: Colors.orange,
@@ -105,7 +107,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
         debugPrint(
             'Warning: Job assigned to schedule but failed to remove from unfinished: $removeError');
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(
               content: const Text(
                   'Job assigned but may still appear in unfinished list. Please remove it manually if so.'),
@@ -119,7 +121,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
       }
 
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: const Row(
               children: [
@@ -138,7 +140,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
       // Add to schedule failed — nothing removed, no data loss
       debugPrint('Unfinished drop failed: $e');
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Failed to assign: $e'),
             backgroundColor: Colors.red,
@@ -153,7 +155,10 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final scaleProvider = ref.read(scaleRiverpod);
-    final isDayOff = ref.watch(dayOffRiverpod).isDayOff(distributor.id, date);
+    // select: a days-off change rebuilds only the cells whose answer changed,
+    // not the whole grid.
+    final isDayOff = ref.watch(
+        dayOffRiverpod.select((p) => p.isDayOff(distributor.id, date)));
     // Worst lag behind the Job List date over every job in this cell; the
     // select keeps cells from rebuilding unless their own lag changes.
     final lag =
@@ -212,7 +217,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
 
             if (isSameDayAndDistributor) {
               if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context).showToast(
                   SnackBar(
                     content: Row(
                       children: [
@@ -282,7 +287,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
                     date,
                   );
                   if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    ScaffoldMessenger.of(context).showToast(
                       SnackBar(
                         content: const Row(
                           children: [
@@ -310,7 +315,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
                     date,
                   );
                   if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    ScaffoldMessenger.of(context).showToast(
                       SnackBar(
                         content: const Row(
                           children: [
@@ -337,7 +342,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
                     date,
                   );
                   if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    ScaffoldMessenger.of(context).showToast(
                       SnackBar(
                         content: const Row(
                           children: [
@@ -369,7 +374,7 @@ class ScheduleJobCell extends riverpod.ConsumerWidget {
             } catch (e) {
               debugPrint('Drag-drop operation failed: $e');
               if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context).showToast(
                   SnackBar(
                     content: Row(
                       children: [
@@ -609,6 +614,10 @@ class _SelectableJob extends riverpod.ConsumerWidget {
       hapticFeedbackOnStart: !selecting,
       feedback: feedback,
       childWhenDragging: whenDragging,
+      onDragStarted: GridDragAutoScroll.start,
+      onDragUpdate: (details) =>
+          GridDragAutoScroll.update(details.globalPosition),
+      onDragEnd: (_) => GridDragAutoScroll.end(),
       child: child,
     );
   }
@@ -633,10 +642,12 @@ class _AddJobButton extends riverpod.ConsumerStatefulWidget {
 
 class _AddJobButtonState extends riverpod.ConsumerState<_AddJobButton> {
   bool _isAddingJob = false;
-  bool _isMarkingDayOff = false;
 
   Future<void> _addJob() async {
     if (_isAddingJob) return;
+    // Captured now: the new job shows at once, which replaces this empty
+    // cell (and this widget) long before the save finishes or fails.
+    final messenger = ScaffoldMessenger.of(context);
     setState(() => _isAddingJob = true);
     try {
       final newJob = Job(
@@ -654,39 +665,34 @@ class _AddJobButtonState extends riverpod.ConsumerState<_AddJobButton> {
             .addJobWithUndo(newJob, newJob.date);
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to add job: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
+      messenger.showToast(
+        SnackBar(
+          content: Text('Failed to add job: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
     } finally {
       if (mounted) setState(() => _isAddingJob = false);
     }
   }
 
+  /// No spinner: [DayOffProvider] shows the day as off straight away and
+  /// saves it behind. Marking twice is harmless (arrayUnion).
   Future<void> _markDayOff() async {
-    if (_isMarkingDayOff) return;
-    setState(() => _isMarkingDayOff = true);
+    final messenger = ScaffoldMessenger.of(context);
     try {
       await ref
           .read(dayOffRiverpod)
           .markDayOff(widget.distributor.id, widget.date);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to mark day off: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isMarkingDayOff = false);
+      messenger.showToast(
+        SnackBar(
+          content: Text('Failed to mark day off: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
     }
   }
 
@@ -694,7 +700,7 @@ class _AddJobButtonState extends riverpod.ConsumerState<_AddJobButton> {
   Widget build(BuildContext context) {
     final iconSize = widget.scaleProvider.mediumIconSize;
 
-    if (_isAddingJob || _isMarkingDayOff) {
+    if (_isAddingJob) {
       return Center(
         child: SizedBox(
           width: iconSize,
@@ -753,42 +759,29 @@ class _DayOffCard extends riverpod.ConsumerStatefulWidget {
 }
 
 class _DayOffCardState extends riverpod.ConsumerState<_DayOffCard> {
-  bool _isLoading = false;
-
+  /// [DayOffProvider] clears the day at once and saves behind — no spinner,
+  /// the cell turns back into an empty one straight away. This card is gone
+  /// by the time the save finishes, so the messenger is captured first.
   Future<void> _removeDayOff() async {
-    if (_isLoading) return;
-    setState(() => _isLoading = true);
+    final messenger = ScaffoldMessenger.of(context);
     try {
       await ref
           .read(dayOffRiverpod)
           .removeDayOff(widget.distributor.id, widget.date);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to remove day off: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
+      messenger.showToast(
+        SnackBar(
+          content: Text('Failed to remove day off: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final scaleProvider = ref.read(scaleRiverpod);
-
-    final loadingIndicator = SizedBox(
-      width: 12,
-      height: 12,
-      child: CircularProgressIndicator(
-        strokeWidth: 1.5,
-        valueColor: AlwaysStoppedAnimation<Color>(Colors.white54),
-      ),
-    );
 
     if (widget.isFullscreen) {
       return Card(
@@ -817,20 +810,18 @@ class _DayOffCardState extends riverpod.ConsumerState<_DayOffCard> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  _isLoading
-                      ? loadingIndicator
-                      : GestureDetector(
-                          onTap: _removeDayOff,
-                          child: Text(
-                            'REMOVE',
-                            style: TextStyle(
-                              color: Colors.red,
-                              fontWeight: FontWeight.bold,
-                              fontSize: scaleProvider.smallFontSize,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                        ),
+                  GestureDetector(
+                    onTap: _removeDayOff,
+                    child: Text(
+                      'REMOVE',
+                      style: TextStyle(
+                        color: Colors.red,
+                        fontWeight: FontWeight.bold,
+                        fontSize: scaleProvider.smallFontSize,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
                 ],
               ),
               Container(
@@ -857,29 +848,26 @@ class _DayOffCardState extends riverpod.ConsumerState<_DayOffCard> {
         onTap: _removeDayOff,
         borderRadius: BorderRadius.circular(4),
         child: Center(
-          child: _isLoading
-              ? loadingIndicator
-              : Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.event_busy,
-                        color: Colors.white70,
-                        size: scaleProvider.smallIconSize),
-                    const SizedBox(width: 2),
-                    Flexible(
-                      child: Text(
-                        'DAY OFF',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: scaleProvider.smallFontSize,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.event_busy,
+                  color: Colors.white70, size: scaleProvider.smallIconSize),
+              const SizedBox(width: 2),
+              Flexible(
+                child: Text(
+                  'DAY OFF',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: scaleProvider.smallFontSize,
+                  ),
+                  overflow: TextOverflow.ellipsis,
                 ),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -1,7 +1,7 @@
 {
   "indexes": [
     {
-      "collectionGroup": "userStatus",
+      "collectionGroup": "user_status",
       "queryScope": "COLLECTION",
       "fields": [
         {
@@ -11,6 +11,24 @@
         {
           "fieldPath": "lastSeen",
           "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "recycleBin",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "tab",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "restoredAt",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "deletedAt",
+          "order": "DESCENDING"
         }
       ]
     }
@@ -113,6 +131,28 @@
     {
       "collectionGroup": "items",
       "fieldPath": "storageFolderPath",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "arrayConfig": "CONTAINS",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "uploads",
+      "fieldPath": "date",
       "indexes": [
         {
           "order": "ASCENDING",

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
@@ -170,7 +171,7 @@ class _BankingViewState extends riverpod.ConsumerState<BankingView> {
                               onStatusChanged: (status) {
                                 if (status == PaymentStatus.paid &&
                                     missing.isNotEmpty) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  ScaffoldMessenger.of(context).showToast(
                                     SnackBar(
                                       content: Text(
                                           "Can't mark ${d.name} paid — no "
@@ -181,9 +182,25 @@ class _BankingViewState extends riverpod.ConsumerState<BankingView> {
                                   );
                                   return;
                                 }
+                                final messenger =
+                                    ScaffoldMessenger.of(context);
                                 ref
                                     .read(payrollRiverpod)
-                                    .updatePaymentStatus(d.id, status);
+                                    .updatePaymentStatus(d.id, status)
+                                    .catchError((Object e) {
+                                  // Refused: the screen isn't live, or the
+                                  // amount changed on the server — paying
+                                  // from it could pay the wrong amount.
+                                  messenger.showToast(SnackBar(
+                                    content: Text(e is PayrollNotInSyncException ||
+                                            e is PayrollAmountChangedException
+                                        ? e.toString()
+                                        : "Couldn't update ${d.name}'s payment "
+                                            'status — please try again.'),
+                                    backgroundColor: Colors.red,
+                                    duration: const Duration(seconds: 10),
+                                  ));
+                                });
                               },
                               onSelectAccount: (accountId) => ref
                                   .read(payrollRiverpod)
@@ -429,14 +446,41 @@ class _BankingRow extends StatelessWidget {
           ),
           SizedBox(
             width: _kNetPayWidth,
-            child: Text(
-              _currencyFormat.format(payslip.netWage),
-              textAlign: TextAlign.right,
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 16,
-                color: payslip.netWage < 0 ? Colors.red.shade700 : null,
-              ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  _currencyFormat.format(payslip.netWage),
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: payslip.netWage < 0 ? Colors.red.shade700 : null,
+                  ),
+                ),
+                if (_paidDifference(payslip) case final diff?)
+                  Tooltip(
+                    message: 'Marked paid at '
+                        '${_currencyFormat.format(payslip.paidAmount)}'
+                        '${payslip.paidAt == null ? '' : ' on ${DateFormat('EEE d MMM HH:mm').format(payslip.paidAt!)}'}'
+                        '${payslip.paidBy == null ? '' : ' by ${payslip.paidBy}'}'
+                        '. The payslip has changed since.',
+                    child: Text(
+                      diff > 0
+                          ? '${_currencyFormat.format(diff)} still owed'
+                          : '${_currencyFormat.format(-diff)} overpaid',
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: diff > 0
+                            ? Colors.red.shade700
+                            : Colors.orange.shade800,
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
         ],
@@ -523,4 +567,14 @@ class _SummaryFigure extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Net pay minus what was recorded as paid, when the payslip is marked paid
+/// and has changed since (e.g. a day corrected after payday). Null when
+/// there's nothing to flag.
+double? _paidDifference(PayrollPayslip p) {
+  final paid = p.paidAmount;
+  if (p.paymentStatus != PaymentStatus.paid || paid == null) return null;
+  final diff = p.netWage - paid;
+  return diff.abs() < 0.005 ? null : diff;
 }

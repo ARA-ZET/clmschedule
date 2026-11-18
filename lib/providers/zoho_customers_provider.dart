@@ -171,10 +171,12 @@ class ZohoCustomersProvider extends ChangeNotifier {
 
   /// Create a customer in Zoho and merge it into local state.
   /// Rethrows so the calling form can surface the failure.
-  Future<ZohoCustomer> createCustomer(ZohoCustomer customer) async {
+  Future<ZohoCustomer> createCustomer(ZohoCustomer customer,
+      {String? idempotencyKey}) async {
     _error = null;
     try {
-      final created = await _service.createCustomer(customer);
+      final created = await _service.createCustomer(customer,
+          idempotencyKey: idempotencyKey);
       _customers = [..._customers, created];
       notifyListeners();
       return created;

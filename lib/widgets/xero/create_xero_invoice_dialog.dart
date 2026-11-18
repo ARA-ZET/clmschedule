@@ -8,28 +8,44 @@ import '../../models/xero_contact.dart';
 import '../../models/xero_invoice.dart';
 import '../../providers/company_provider.dart';
 import '../../providers/job_type_provider.dart';
+import '../../providers/xero_tax_rates_provider.dart';
 import '../../services/job_list_service.dart';
 import '../../services/xero_accounting_service.dart';
 import '../../utils/schedule_time.dart';
 import '../zoho/invoice_save_saga.dart';
 import '../zoho/saga_progress_panel.dart';
+import '../zoho/zoho_table.dart';
 import 'xero_contact_picker.dart';
+import 'xero_invoice_detail_screen.dart';
+import 'xero_line_items_editor.dart';
+import 'xero_ui.dart';
 
 /// Raise a Xero invoice for an existing Job List item.
 ///
 /// Reuses [InvoiceSaveSaga] — the job already exists here, so its first step is
 /// a no-op, but the ordering, resume-after-failure and never-create-twice rules
 /// are the same ones the Zoho flow relies on, and worth not reimplementing.
+///
+/// When the dialog closes on "View invoice", the new invoice opens on the
+/// caller's navigator rather than the dialog's root one, so Back returns to the
+/// Job List as it does when an invoice is opened from its row.
 Future<void> showCreateXeroInvoiceDialog(
   BuildContext context,
   JobListItem job,
-) {
-  return showDialog<void>(
+) async {
+  final openInvoiceId = await showDialog<String>(
     context: context,
     barrierDismissible: false,
     builder: (_) => CreateXeroInvoiceDialog(job: job),
   );
+  if (openInvoiceId == null || !context.mounted) return;
+  await Navigator.of(context).push(MaterialPageRoute(
+    builder: (_) => XeroInvoiceDetailScreen(invoiceId: openInvoiceId),
+  ));
 }
+
+/// Payment terms offered beside the due date. Days after the invoice date.
+const _dueTerms = <int, String>{0: 'On receipt', 7: '7 days', 30: '30 days'};
 
 class CreateXeroInvoiceDialog extends riverpod.ConsumerStatefulWidget {
   final JobListItem job;
@@ -107,13 +123,32 @@ class _CreateXeroInvoiceDialogState
   double get _unitAmount => double.tryParse(_amountController.text.trim()) ?? 0;
   double get _quantity => double.tryParse(_quantityController.text.trim()) ?? 1;
 
-  bool get _canSubmit =>
-      _saga == null &&
-      // Must exist in Xero: the saga no longer creates contacts.
-      (_contact?.existsInXero ?? false) &&
-      _descriptionController.text.trim().isNotEmpty &&
-      _unitAmount > 0 &&
-      _salesAccountCode.isNotEmpty;
+  bool get _canSubmit => _saga == null && _missing.isEmpty;
+
+  /// What still stands between the form and the Create button, in words, so a
+  /// disabled button never leaves anyone guessing.
+  List<String> get _missing => [
+        // Must exist in Xero: the saga no longer creates contacts.
+        if (!(_contact?.existsInXero ?? false)) 'choose a customer',
+        if (_descriptionController.text.trim().isEmpty) 'add a description',
+        if (_unitAmount <= 0) 'enter a price',
+        if (_salesAccountCode.isEmpty) 'set the Xero sales account',
+      ];
+
+  /// The due date never sits before the invoice date — Xero would accept it,
+  /// and the invoice would be overdue the moment it was raised.
+  void _setIssuedOn(DateTime d) {
+    setState(() {
+      final term = _dueOn.difference(_issuedOn).inDays;
+      _issuedOn = d;
+      _dueOn = d.add(Duration(days: term < 0 ? 0 : term));
+    });
+  }
+
+  int? get _selectedTerm {
+    final days = _dueOn.difference(_issuedOn).inDays;
+    return _dueTerms.containsKey(days) ? days : null;
+  }
 
   /// A stable Idempotency-Key. Xero caps these at 128 characters and they must
   /// be identical across retries of the *same* logical request, so the parts are
@@ -183,7 +218,9 @@ class _CreateXeroInvoiceDialogState
           _buildInvoice(contact.contactId),
           // A job whose earlier invoice was voided and unlinked is a new
           // request: without the revision Xero would replay the void one.
-          idempotencyKey: _idempotencyKey('invoice', savedJob.id,
+          idempotencyKey: _idempotencyKey(
+              'invoice',
+              savedJob.id,
               savedJob.voidedInvoiceIds.isEmpty
                   ? null
                   : 'r${savedJob.voidedInvoiceIds.length}'),
@@ -211,51 +248,79 @@ class _CreateXeroInvoiceDialogState
   @override
   Widget build(BuildContext context) {
     final saga = _saga;
-    final dateFormat = DateFormat('d MMM y');
-    final currency = NumberFormat.currency(symbol: 'R ', decimalDigits: 2);
-    final lineTotal = _unitAmount * _quantity;
+    final job = widget.job;
+
+    // Tax rates feed the indicative VAT line only. Loaded once per session and
+    // shared with the line-items editor, so this costs at most one call.
+    final taxRates = ref.watch(xeroTaxRatesRiverpod);
+    if (!taxRates.hasLoaded && !taxRates.isLoading && taxRates.error == null) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => taxRates.ensureLoaded());
+    }
+    final totals = XeroLineTotals.forLine(
+      amount: _unitAmount * _quantity,
+      lineAmountType: _lineAmountType,
+      ratePercent: taxRates.percentFor(_salesTaxType),
+    );
 
     return AlertDialog(
-      title: const Text('Create invoice in Xero'),
+      insetPadding: xeroDialogInset(context),
+      titlePadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+      contentPadding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+      actionsPadding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(saga == null ? 'New invoice' : 'Creating invoice'),
+          const SizedBox(height: 2),
+          // Named so nobody has to wonder whose books this lands in.
+          const Text(
+            'Community Life Media · Xero',
+            style: TextStyle(fontSize: 12, color: ZohoPalette.textMuted),
+          ),
+        ],
+      ),
       content: SizedBox(
-        width: 480,
+        width: 520,
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                '${widget.job.client} · ${widget.job.area}',
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 12),
+              _JobSummary(job: job),
+              const SizedBox(height: 18),
               if (saga == null) ...[
+                const XeroSectionLabel('Bill to'),
                 XeroContactPicker(
                   value: _contact,
                   seedName: [
-                    widget.job.client.trim(),
-                    widget.job.area.trim(),
+                    job.client.trim(),
+                    job.area.trim(),
                   ].where((p) => p.isNotEmpty).join(', '),
                   onChanged: (c) => setState(() => _contact = c),
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: 20),
+                const XeroSectionLabel('Line item'),
                 TextField(
                   controller: _descriptionController,
                   onChanged: (_) => setState(() {}),
+                  textCapitalization: TextCapitalization.sentences,
                   decoration: const InputDecoration(
                     labelText: 'Description',
                     border: OutlineInputBorder(),
                     isDense: true,
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 12),
                 Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Expanded(
                       child: TextField(
                         controller: _quantityController,
                         keyboardType: TextInputType.number,
                         onChanged: (_) => setState(() {}),
+                        style: const TextStyle(fontFeatures: xeroTabular),
                         decoration: const InputDecoration(
                           labelText: 'Quantity',
                           border: OutlineInputBorder(),
@@ -263,7 +328,7 @@ class _CreateXeroInvoiceDialogState
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 12),
                     Expanded(
                       flex: 2,
                       child: TextField(
@@ -271,14 +336,15 @@ class _CreateXeroInvoiceDialogState
                         keyboardType: const TextInputType.numberWithOptions(
                             decimal: true),
                         onChanged: (_) => setState(() {}),
+                        style: const TextStyle(fontFeatures: xeroTabular),
                         decoration: InputDecoration(
-                          labelText: 'Unit amount',
-                          helperText:
-                              _lineAmountType == XeroLineAmountType.inclusive
-                                  ? 'Incl VAT'
-                                  : _lineAmountType == XeroLineAmountType.noTax
-                                      ? 'No VAT'
-                                      : 'Excl VAT',
+                          labelText: 'Unit price',
+                          prefixText: 'R ',
+                          suffixText: switch (_lineAmountType) {
+                            XeroLineAmountType.inclusive => 'incl VAT',
+                            XeroLineAmountType.noTax => 'no VAT',
+                            XeroLineAmountType.exclusive => 'excl VAT',
+                          },
                           border: const OutlineInputBorder(),
                           isDense: true,
                         ),
@@ -286,80 +352,106 @@ class _CreateXeroInvoiceDialogState
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 20),
+                const XeroSectionLabel('Details'),
                 TextField(
                   controller: _referenceController,
                   decoration: const InputDecoration(
                     labelText: 'Reference',
+                    helperText: 'Shown to the customer on the invoice',
                     border: OutlineInputBorder(),
                     isDense: true,
                   ),
                 ),
-                const SizedBox(height: 10),
-                Row(
+                const SizedBox(height: 12),
+                XeroFieldPair(
+                  first: XeroDateField(
+                    label: 'Invoice date',
+                    value: _issuedOn,
+                    onChanged: _setIssuedOn,
+                  ),
+                  second: XeroDateField(
+                    label: 'Due date',
+                    value: _dueOn,
+                    firstDate: _issuedOn,
+                    onChanged: (d) => setState(() => _dueOn = d),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    Expanded(
-                      child: _DateField(
-                        label: 'Invoice date',
-                        value: _issuedOn,
-                        format: dateFormat,
-                        onChanged: (d) => setState(() => _issuedOn = d),
+                    const Text('Due',
+                        style: TextStyle(
+                            fontSize: 12, color: ZohoPalette.textMuted)),
+                    for (final term in _dueTerms.entries)
+                      ChoiceChip(
+                        label: Text(term.value),
+                        selected: _selectedTerm == term.key,
+                        visualDensity: VisualDensity.compact,
+                        labelStyle: const TextStyle(fontSize: 12),
+                        onSelected: (_) => setState(() =>
+                            _dueOn = _issuedOn.add(Duration(days: term.key))),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _DateField(
-                        label: 'Due date',
-                        value: _dueOn,
-                        format: dateFormat,
-                        onChanged: (d) => setState(() => _dueOn = d),
-                      ),
-                    ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Text(
-                    'Line total ${currency.format(lineTotal)}'
-                    '${_lineAmountType == XeroLineAmountType.exclusive ? ' excl VAT' : ''}',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
+                const SizedBox(height: 18),
+                _TotalsPreview(
+                  totals: totals,
+                  lineAmountType: _lineAmountType,
+                  vatKnown: taxRates.percentFor(_salesTaxType) != null,
                 ),
-                if (_salesAccountCode.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 10),
-                    child: Text(
-                      'No Xero sales account is configured for Community Life '
-                      'Media. Set it in Settings → Companies first.',
-                      style: TextStyle(fontSize: 12, color: Colors.orange),
-                    ),
+                if (_salesAccountCode.isEmpty || _configError != null) ...[
+                  const SizedBox(height: 14),
+                  XeroNotice(
+                    tone: _configError != null
+                        ? XeroNoticeTone.error
+                        : XeroNoticeTone.warning,
+                    message: _configError ??
+                        'No Xero sales account is configured for Community '
+                            'Life Media. Set it in Settings → Companies first.',
                   ),
-                if (_configError != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 10),
-                    child: Text(_configError!,
-                        style:
-                            const TextStyle(fontSize: 12, color: Colors.red)),
-                  ),
+                ],
               ] else
                 // onRetry matters here: the saga resumes from the failed
                 // step, so a link failure after the invoice was raised is
                 // recoverable without billing the customer twice.
                 SagaProgressPanel(saga: saga, onRetry: () => _saga!.run()),
+              if (saga != null && saga.isFinished && !saga.hasFailed) ...[
+                const SizedBox(height: 12),
+                XeroNotice(
+                  tone: XeroNoticeTone.success,
+                  message: 'Invoice ${saga.invoice?.invoiceNumber ?? ''} is in '
+                      'Xero and linked to this job.',
+                ),
+              ],
             ],
           ),
         ),
       ),
       actions: [
         if (saga == null) ...[
+          if (_missing.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Text(
+                'To continue, ${_missing.join(', ')}.',
+                style:
+                    const TextStyle(fontSize: 12, color: ZohoPalette.textMuted),
+              ),
+            ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('Cancel'),
           ),
-          FilledButton(
+          FilledButton.icon(
             onPressed: _canSubmit ? _start : null,
-            child: const Text('Create invoice'),
+            icon: const Icon(Icons.receipt_long, size: 16),
+            label: Text(totals.inclVat > 0
+                ? 'Create · ${xeroCurrency.format(totals.inclVat)}'
+                : 'Create invoice'),
           ),
         ] else ...[
           if (saga.hasFailed && !saga.isRunning)
@@ -374,44 +466,154 @@ class _CreateXeroInvoiceDialogState
             // say so rather than offering a neutral "Cancel".
             child: Text(saga.invoiceExists ? 'Done' : 'Close'),
           ),
+          if (saga.invoiceExists && !saga.isRunning)
+            FilledButton.icon(
+              onPressed: () =>
+                  Navigator.of(context).pop(saga.invoice!.invoiceId),
+              icon: const Icon(Icons.open_in_new, size: 16),
+              label: const Text('View invoice'),
+            ),
         ],
       ],
     );
   }
 }
 
-class _DateField extends StatelessWidget {
-  final String label;
-  final DateTime value;
-  final DateFormat format;
-  final ValueChanged<DateTime> onChanged;
+/// The job being invoiced, at a glance — so the figures below can be checked
+/// against it without closing the dialog.
+class _JobSummary extends StatelessWidget {
+  final JobListItem job;
 
-  const _DateField({
-    required this.label,
-    required this.value,
-    required this.format,
-    required this.onChanged,
+  const _JobSummary({required this.job});
+
+  @override
+  Widget build(BuildContext context) {
+    final typeLabel =
+        JobTypeProvider.instance?.getJobTypeLabel(job.jobTypeId) ?? '';
+    final facts = [
+      xeroDate.format(job.date),
+      if (typeLabel.isNotEmpty) typeLabel,
+      if (job.quantity > 0)
+        '${NumberFormat.decimalPattern().format(job.quantity)} qty',
+      if (job.amount > 0) '${xeroCurrency.format(job.amount)} on the Job List',
+    ];
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: ZohoPalette.headerBackground,
+        border: Border.all(color: ZohoPalette.border),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.work_outline,
+              size: 18, color: ZohoPalette.textMuted),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  [job.client, job.area]
+                      .where((p) => p.trim().isNotEmpty)
+                      .join(' · '),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: ZohoPalette.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  facts.join(' · '),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: ZohoPalette.textMuted,
+                    fontFeatures: xeroTabular,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Subtotal, VAT and total for the one line being raised.
+///
+/// Indicative, like the line-items editor's: Xero rounds per line and its own
+/// split is what gets written back to the job.
+class _TotalsPreview extends StatelessWidget {
+  final XeroLineTotals totals;
+  final XeroLineAmountType lineAmountType;
+  final bool vatKnown;
+
+  const _TotalsPreview({
+    required this.totals,
+    required this.lineAmountType,
+    required this.vatKnown,
   });
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: () async {
-        final picked = await showDatePicker(
-          context: context,
-          initialDate: value,
-          firstDate: DateTime(value.year - 2),
-          lastDate: DateTime(value.year + 2),
+    final noTax = lineAmountType == XeroLineAmountType.noTax;
+
+    Widget row(String label, double value, {bool strong = false}) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: strong ? 14 : 13,
+                    fontWeight: strong ? FontWeight.w700 : FontWeight.w400,
+                    color: strong
+                        ? ZohoPalette.textPrimary
+                        : ZohoPalette.textMuted,
+                  ),
+                ),
+              ),
+              Text(
+                xeroCurrency.format(value),
+                style: TextStyle(
+                  fontSize: strong ? 17 : 13,
+                  fontWeight: strong ? FontWeight.w700 : FontWeight.w500,
+                  color: ZohoPalette.textPrimary,
+                  fontFeatures: xeroTabular,
+                ),
+              ),
+            ],
+          ),
         );
-        if (picked != null) onChanged(picked);
-      },
-      child: InputDecorator(
-        decoration: InputDecoration(
-          labelText: label,
-          border: const OutlineInputBorder(),
-          isDense: true,
-        ),
-        child: Text(format.format(value)),
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      decoration: BoxDecoration(
+        border: Border.all(color: ZohoPalette.border),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!noTax) ...[
+            row('Subtotal (excl VAT)', totals.exclVat),
+            row(vatKnown ? 'VAT' : 'VAT (rate not loaded)', totals.vat),
+            const Divider(height: 14, color: ZohoPalette.border),
+          ],
+          row(noTax ? 'Total' : 'Total (incl VAT)', totals.inclVat,
+              strong: true),
+          const SizedBox(height: 4),
+          const Text(
+            'Xero issues the invoice number and confirms the final total.',
+            style: TextStyle(fontSize: 11, color: ZohoPalette.textMuted),
+          ),
+        ],
       ),
     );
   }

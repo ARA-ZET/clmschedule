@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/shareable_map_provider.dart';
@@ -240,7 +241,7 @@ class _MapExportDialogState extends riverpod.ConsumerState<MapExportDialog> {
       );
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Exported ${selectedLayers.length} layer(s) to KML'),
             backgroundColor: Colors.green,

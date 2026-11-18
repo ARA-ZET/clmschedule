@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -5,6 +7,8 @@ import '../models/job_invoice_link.dart';
 import '../models/job_list_item.dart';
 import '../utils/job_lifecycle_rules.dart';
 import 'monthly_service.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 
 final jobListServiceRiverpod = riverpod.Provider<JobListService>(
   (ref) => JobListService(FirebaseFirestore.instance),
@@ -27,6 +31,44 @@ class JobListService {
   /// that may not be currently loaded into memory.
   CollectionReference getJobListItemsCollectionForMonth(DateTime date) {
     return _monthlyService.getJobListItemsCollection(date);
+  }
+
+  /// Runs an invoice-link transaction, and when it fails, asks the server
+  /// whether the link landed anyway.
+  ///
+  /// On a slow connection a web transaction can commit and still time out
+  /// before the reply arrives. FlutterFire web then reports the timeout as a
+  /// meaningless TypeError ("'minified:tw' is not a subtype of
+  /// 'minified:a7'"), because it casts every failure to a JS error. Treating
+  /// that as a failure told the user to link by hand an invoice that was
+  /// already linked, and skipped the reverse index written afterwards.
+  Future<void> _runInvoiceLinkTxn(
+    DocumentReference ref,
+    Future<void> Function(Transaction txn) body, {
+    required bool Function(Map<String, dynamic> data) landed,
+  }) async {
+    try {
+      await _firestore.runTransaction(body,
+          timeout: const Duration(seconds: 60));
+    } catch (e) {
+      try {
+        final snap = await ref.get(const GetOptions(source: Source.server));
+        if (snap.exists &&
+            landed(Map<String, dynamic>.from(snap.data() as Map))) {
+          return;
+        }
+      } catch (_) {
+        // Could not check either — report the original failure.
+      }
+      // The masked timeout is the only TypeError a transaction raises on web.
+      if (e is TimeoutException || (kIsWeb && e is TypeError)) {
+        throw TimeoutException(
+            'Saving the invoice link to the job timed out — the connection '
+            'is slow or dropped. Press Retry; it will not create another '
+            'invoice.');
+      }
+      rethrow;
+    }
   }
 
   // Get all job list items for current month
@@ -60,6 +102,24 @@ class JobListService {
             doc.id, Map<String, dynamic>.from(doc.data() as Map));
       }).toList();
     });
+  }
+
+  /// A new job's id, made on this device — no server round trip.
+  String newJobListItemId(DateTime date) =>
+      _getJobListItemsCollection(date).doc().id;
+
+  /// Saves a new job under [id] (from [newJobListItemId]).
+  ///
+  /// The Job List listener shows it straight away from the local write; the
+  /// returned future completes when the server has it. Firestore queues the
+  /// write and keeps retrying it through dropped connections, so the future
+  /// only fails for a refusal (e.g. permissions). The month document is
+  /// written alongside, never waited for.
+  Future<void> setNewJobListItem(String id, JobListItem jobListItem) {
+    unawaited(_monthlyService.ensureJobListMonthlyDocExists(jobListItem.date));
+    return _getJobListItemsCollection(jobListItem.date)
+        .doc(id)
+        .set(jobListItem.toMap());
   }
 
   // Add a new job list item
@@ -133,7 +193,7 @@ class JobListService {
     await _monthlyService.ensureJobListMonthlyDocExists(date);
     final ref = _getJobListItemsCollection(date).doc(jobId);
 
-    await _firestore.runTransaction((txn) async {
+    await _runInvoiceLinkTxn(ref, (txn) async {
       final snap = await txn.get(ref);
       if (!snap.exists) {
         throw StateError(
@@ -170,7 +230,7 @@ class JobListService {
           'priceIsInclVat': false,
         },
       });
-    });
+    }, landed: (data) => data['zohoInvoiceId'] == zohoInvoiceId);
 
     // Reverse index. Jobs live under jobLists/{month}/items/{id}, so without
     // this an invoice has no way back to its job — acting from the Invoices
@@ -219,7 +279,7 @@ class JobListService {
     await _monthlyService.ensureJobListMonthlyDocExists(date);
     final ref = _getJobListItemsCollection(date).doc(jobId);
 
-    await _firestore.runTransaction((txn) async {
+    await _runInvoiceLinkTxn(ref, (txn) async {
       final snap = await txn.get(ref);
       if (!snap.exists) {
         throw StateError(
@@ -254,7 +314,7 @@ class JobListService {
         // "price was typed incl VAT" flag no longer describes them.
         'priceIsInclVat': false,
       });
-    });
+    }, landed: (data) => data['accountingInvoiceId'] == invoiceId);
 
     // Reverse index, so an invoice can find its way back to its job. Jobs live
     // under jobLists/{month}/items/{id}, which a query from the Invoices screen
@@ -292,7 +352,7 @@ class JobListService {
     await _monthlyService.ensureJobListMonthlyDocExists(date);
     final ref = _getJobListItemsCollection(date).doc(jobId);
 
-    await _firestore.runTransaction((txn) async {
+    await _runInvoiceLinkTxn(ref, (txn) async {
       final snap = await txn.get(ref);
       if (!snap.exists) {
         throw StateError(
@@ -325,7 +385,10 @@ class JobListService {
         'amountInclVat': incl,
         'priceIsInclVat': false,
       });
-    });
+    },
+        landed: (data) => JobListItem.fromMap(jobId, data)
+            .splitInvoices
+            .any((i) => i.invoiceId == link.invoiceId));
 
     await _writeSplitIndexes(link, jobId: jobId, date: date);
 
@@ -766,7 +829,75 @@ class JobListService {
     await _firestore.collection('zohoInvoiceLinks').doc(zohoInvoiceId).delete();
   }
 
-  // Delete a job list item
+  /// Deletes [item] into the Recycle Bin and returns the entry id (null if
+  /// it was already gone).
+  ///
+  /// Its invoice reverse indexes (Zoho and accounting, splits included) and
+  /// [extraRelated] (its Happy Sun project) are copied into the entry and
+  /// deleted with it in one batch, so restoring brings them all back. Index
+  /// docs that now point at another job are left alone.
+  Future<String?> deleteJobListItemToBin(
+    JobListItem item, {
+    List<DocumentReference<Map<String, dynamic>>> extraRelated = const [],
+  }) async {
+    await _monthlyService.ensureJobListMonthlyDocExists(item.date);
+    final ref = _getJobListItemsCollection(item.date).doc(item.id)
+        as DocumentReference<Map<String, dynamic>>;
+    final snap = await ref.get();
+    final data = snap.data();
+    if (data == null) return null;
+
+    DocumentReference<Map<String, dynamic>> index(String col, String id) =>
+        _firestore.collection(col).doc(id);
+    final candidates = <String, DocumentReference<Map<String, dynamic>>>{
+      for (final r in [
+        if (item.hasZohoInvoice) index('zohoInvoiceLinks', item.zohoInvoiceId),
+        if (item.resolvedInvoiceId.isNotEmpty)
+          index('accountingInvoiceLinks', item.resolvedInvoiceId),
+        for (final split in item.splitInvoices) ...[
+          index('accountingInvoiceLinks', split.invoiceId),
+          if (split.providerId == 'zoho')
+            index('zohoInvoiceLinks', split.invoiceId),
+        ],
+        ...extraRelated,
+      ])
+        r.path: r,
+    };
+    final related = <RecycleBinRelated>[];
+    final relatedRefs = <DocumentReference<Map<String, dynamic>>>[];
+    for (final r in candidates.values) {
+      final d = (await r.get()).data();
+      if (d == null) continue;
+      if (d.containsKey('jobId') && d['jobId'] != item.id) continue;
+      related.add(RecycleBinRelated(r.path, d));
+      relatedRefs.add(r);
+    }
+
+    final client = item.client.trim().isEmpty ? 'Job' : item.client.trim();
+    final batch = _firestore.batch();
+    final entryRef = RecycleBinWriter(_firestore).addToBatch(
+      batch,
+      RecycleBinRecord(
+        type: RecycleBinType.jobListItem,
+        label: [
+          client,
+          if (item.area.trim().isNotEmpty) item.area.trim(),
+          getMonthlyDocumentId(item.date),
+        ].join(' · '),
+        originalPath: ref.path,
+        payload: data,
+        related: related,
+      ),
+    );
+    batch.delete(ref);
+    for (final r in relatedRefs) {
+      batch.delete(r);
+    }
+    await batch.commit();
+    return entryRef.id;
+  }
+
+  // Delete a job list item permanently. Prefer [deleteJobListItemToBin].
   Future<void> deleteJobListItem(String id, [DateTime? date]) async {
     final targetDate = date ?? DateTime.now();
 
@@ -785,6 +916,65 @@ class JobListService {
           doc.id, Map<String, dynamic>.from(doc.data()! as Map));
     }
     return null;
+  }
+
+  /// Items for any of [clients] in each month that [months] fall in — one
+  /// small query per month and 30 names, rather than reading whole months.
+  /// Names match exactly as stored, so callers fold in what they already
+  /// hold for case-insensitive matching.
+  Future<List<JobListItem>> getJobListItemsForClients(
+    Iterable<String> clients,
+    Iterable<DateTime> months,
+  ) async {
+    final names = {
+      for (final c in clients)
+        if (c.trim().isNotEmpty) ...{c, c.trim()},
+    }.toList();
+    if (names.isEmpty) return const [];
+    final monthStarts = {for (final m in months) DateTime(m.year, m.month)};
+    final queries = <Future<QuerySnapshot>>[
+      for (final month in monthStarts)
+        for (var i = 0; i < names.length; i += 30)
+          _getJobListItemsCollection(month)
+              .where('client',
+                  whereIn: names.sublist(i, (i + 30).clamp(0, names.length)))
+              .get(),
+    ];
+    final snaps = await Future.wait(queries);
+    final byId = <String, JobListItem>{};
+    for (final doc in snaps.expand((s) => s.docs)) {
+      byId[doc.id] = JobListItem.fromMap(
+          doc.id, Map<String, dynamic>.from(doc.data()! as Map));
+    }
+    return byId.values.toList();
+  }
+
+  /// Items whose cloud folder is one of [folders], in each month that
+  /// [months] fall in — how a folder of tracks finds the job it belongs to.
+  Future<List<JobListItem>> getJobListItemsForFolders(
+    Iterable<String> folders,
+    Iterable<DateTime> months,
+  ) async {
+    final paths = {
+      for (final f in folders)
+        if (f.trim().isNotEmpty) f.trim(),
+    }.toList();
+    if (paths.isEmpty) return const [];
+    final monthStarts = {for (final m in months) DateTime(m.year, m.month)};
+    final snaps = await Future.wait([
+      for (final month in monthStarts)
+        for (var i = 0; i < paths.length; i += 30)
+          _getJobListItemsCollection(month)
+              .where('storageFolderPath',
+                  whereIn: paths.sublist(i, (i + 30).clamp(0, paths.length)))
+              .get(),
+    ]);
+    final byId = <String, JobListItem>{};
+    for (final doc in snaps.expand((s) => s.docs)) {
+      byId[doc.id] = JobListItem.fromMap(
+          doc.id, Map<String, dynamic>.from(doc.data()! as Map));
+    }
+    return byId.values.toList();
   }
 
   // Update job status only
@@ -913,6 +1103,12 @@ class JobListService {
       final data = <String, dynamic>{
         ...storedData,
         ...(jobListItem.toMap()..remove('storageFolderPath')),
+        // The move arrives at the Cloud Function as a create with no
+        // "before"; this is what lets it rename the job's map to match.
+        'movedFrom': {
+          'client': storedData['client'],
+          'date': storedData['date'],
+        },
       };
       txn.set(newRef, data);
       txn.delete(oldRef);

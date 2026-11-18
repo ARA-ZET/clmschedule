@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
 import '../models/inventory_tool.dart';
@@ -42,7 +43,7 @@ class _EditBaseNameToolsDialogState extends riverpod.ConsumerState<EditBaseNameT
 
   Future<void> _saveChanges() async {
     if (_baseNameController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Base name cannot be empty'),
           backgroundColor: Colors.red,
@@ -125,7 +126,7 @@ class _EditBaseNameToolsDialogState extends riverpod.ConsumerState<EditBaseNameT
 
       if (mounted) {
         Navigator.of(context).pop(true);
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text(
               quantityDiff > 0
@@ -140,7 +141,7 @@ class _EditBaseNameToolsDialogState extends riverpod.ConsumerState<EditBaseNameT
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error updating tools: $e'),
             backgroundColor: Colors.red,

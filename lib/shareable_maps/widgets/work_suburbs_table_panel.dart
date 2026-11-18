@@ -2,6 +2,7 @@
 //
 // Left-side panel for the work-suburbs editor showing a table of all polygons
 // with editable letter-box estimate fields.
+import 'package:clmschedule/utils/text_search.dart';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -50,12 +51,10 @@ class _WorkSuburbsTablePanelState
       totalEstimate += e.poly.letterBoxEstimate;
     }
 
-    final query = _searchQuery.trim().toLowerCase();
-    final filtered = query.isEmpty
-        ? List<_PolyEntry>.from(entries)
-        : entries
-            .where((e) => e.poly.name.toLowerCase().contains(query))
-            .toList();
+    final query = _searchQuery.trim();
+    final search = TextSearch(query);
+    final filtered =
+        entries.where((e) => search.matches([e.poly.name])).toList();
 
     filtered.sort((a, b) {
       final cmp =

@@ -4,10 +4,13 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../models/custom_polygon.dart';
 import '../../models/distributor.dart';
 import '../../models/job.dart';
+import '../../services/job_client_bookings.dart';
+import '../../utils/map_pin_icons.dart';
 import '../models/map_layer.dart';
 import '../models/map_point.dart';
 import '../models/map_polyline.dart';
 import '../models/shareable_map.dart';
+import '../providers/shareable_map_provider.dart' show PointPinRule;
 import 'map_data_adapter.dart';
 
 /// Read-only adapter that aggregates all polygons from jobs scheduled on a
@@ -27,6 +30,47 @@ class DateScheduleAdapter extends MapDataAdapter {
 
   @override
   String get adapterId => 'date_schedule';
+
+  static String _pointId(Job job, int mapIndex) =>
+      'date_${job.id}_point_$mapIndex';
+  static String _dropOffId(Job job) => 'date_${job.id}_dropoff';
+
+  static const _layerId = 'date_schedule_layer';
+
+  /// Draws [jobs]' points with the same pins and stacking as Print Map
+  /// ([pinsFor]).
+  static PointPinRule pinRule(
+    List<Job> jobs,
+    Map<String, JobClientBookings> bookings,
+  ) {
+    final pins = pinsFor(jobs, bookings);
+    return PointPinRule(layerIds: const {_layerId}, pinFor: (p) => pins[p.id]);
+  }
+
+  /// The pin each of [jobs]' points is drawn as, by the point id [load]
+  /// gives it — the same pins and stacking as Print Map. [bookings] (by job
+  /// id, see [JobClientBookings.load]) says which points are Junk & Stuff or
+  /// Happy Sun jobs; until it arrives they show their category pictures.
+  static Map<String, ({MapPinStyle style, int zIndex})> pinsFor(
+    List<Job> jobs,
+    Map<String, JobClientBookings> bookings,
+  ) {
+    final pins = <String, ({MapPinStyle style, int zIndex})>{};
+    for (final job in jobs) {
+      final booked = bookings[job.id] ?? JobClientBookings.none;
+      for (var i = 0; i < job.workMaps.length; i++) {
+        final p = job.workMaps[i];
+        if (!p.isPoint || p.points.isEmpty) continue;
+        pins[_pointId(job, i)] =
+            (style: booked.styleFor(p), zIndex: booked.layerFor(p));
+      }
+      if (job.dropOffPoint != null) {
+        pins[_dropOffId(job)] =
+            (style: MapPinStyle.dropOff, zIndex: PinLayer.dropOff);
+      }
+    }
+    return pins;
+  }
 
   @override
   String get displayName {
@@ -67,6 +111,7 @@ class DateScheduleAdapter extends MapDataAdapter {
           .firstOrNull;
       // Collect non-empty client names
       final clientNames = job.clients.where((c) => c.isNotEmpty).toList();
+      var hasDropOffPin = false;
       for (var mapIndex = 0; mapIndex < job.workMaps.length; mapIndex++) {
         final p = job.workMaps[mapIndex];
         final parts = <String>[
@@ -78,7 +123,7 @@ class DateScheduleAdapter extends MapDataAdapter {
 
         if (p.isPoint && p.points.isNotEmpty) {
           allPoints.add(MapPoint(
-            id: 'date_${job.id}_point_$mapIndex',
+            id: _pointId(job, mapIndex),
             name: p.name,
             description: desc,
             position: p.points.first,
@@ -87,6 +132,7 @@ class DateScheduleAdapter extends MapDataAdapter {
             createdAt: now,
             updatedAt: now,
           ));
+          if (p.pointCategory == PointCategory.dropoff) hasDropOffPin = true;
         } else if (p.isPolyline) {
           allPolylines.add(MapPolyline.create(
             name: p.name,
@@ -105,10 +151,28 @@ class DateScheduleAdapter extends MapDataAdapter {
           );
         }
       }
+      // The drop-off pin the day planner, print map and dropsheet use, also
+      // when it is stored only as `dropOffPoint` (no dropoff map point).
+      final dropOff = job.dropOffPoint;
+      if (!hasDropOffPin && dropOff != null) {
+        allPoints.add(MapPoint(
+          id: _dropOffId(job),
+          name: 'Drop-off Point',
+          description: [
+            if (distName != null) distName,
+            if (clientNames.isNotEmpty) clientNames.join(', '),
+          ].join(' — '),
+          position: dropOff,
+          color: PointCategory.dropoff.color,
+          pointCategory: PointCategory.dropoff,
+          createdAt: now,
+          updatedAt: now,
+        ));
+      }
     }
 
     final layer = MapLayer(
-      id: 'date_schedule_layer',
+      id: _layerId,
       name: 'Scheduled Areas',
       description: 'All work areas for $displayName',
       order: 0,

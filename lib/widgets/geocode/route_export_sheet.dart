@@ -6,9 +6,7 @@ import '../../services/route_export_service.dart';
 import '../../services/route_planner_service.dart';
 // save_file.dart is the web (File System Access API) implementation; the
 // stub takes over wherever dart:io exists, matching the other call sites.
-import '../../utils/save_file.dart'
-    if (dart.library.io) '../../utils/save_file_stub.dart';
-import '../../utils/web_file_download.dart';
+import '../../utils/save_with_picker.dart';
 import 'geocode_ui.dart';
 
 /// Everything you can take away from a planned route: the KML for Google
@@ -92,19 +90,13 @@ class _RouteExportSheetState extends State<RouteExportSheet> {
       extension,
       widget.route.plannedAt,
     );
-    final bytes = RouteExportService.toBytes(content);
-
-    final saved = await saveFileWithPicker(
-      suggestedName: name,
-      bytes: bytes,
+    final result = await saveWithPicker(
+      fileName: name,
+      load: () async => RouteExportService.toBytes(content),
       mimeType: mimeType,
       typeDescription: typeDescription,
-      extension: '.$extension',
     );
-    if (saved) return 'Saved $name';
-
-    final path = await triggerFileDownload(bytes, name, mimeType);
-    return path == null ? 'Downloaded $name' : 'Saved to $path';
+    return result.message;
   }
 
   @override

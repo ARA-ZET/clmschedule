@@ -1,5 +1,8 @@
+import 'package:clmschedule/utils/text_search.dart';
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
+import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
 import '../config/flavor_config.dart';
 import '../providers/map_instruction_provider.dart';
 import '../models/job.dart';
@@ -10,12 +13,15 @@ import '../providers/job_status_provider.dart';
 import '../models/job_linked_map.dart';
 import 'job_map_link.dart';
 import 'print_map_view.dart';
+import 'schedule_batch_drop.dart' show deleteScheduleJobsNow;
+import '../undo/undo_history.dart';
 import '../providers/schedule_provider.dart';
 import '../providers/job_list_provider.dart';
 import '../providers/scale_provider.dart';
 import '../providers/unfinished_work_areas_provider.dart';
 import '../shareable_maps/providers/shareable_map_provider.dart';
 import '../shareable_maps/adapters/schedule_job_adapter.dart';
+import '../services/job_client_bookings.dart';
 import '../shareable_maps/widgets/shareable_map_editor.dart';
 
 /// Fresh copy of the job from the provider, or null when it no longer
@@ -25,8 +31,54 @@ import '../shareable_maps/widgets/shareable_map_editor.dart';
 Job? _freshJobOrNull(ScheduleProvider scheduleProvider, String jobId) =>
     scheduleProvider.jobs.where((j) => j.id == jobId).firstOrNull;
 
+/// The dropoff-category point among [maps], if any.
+LatLng? _dropOffWorkMapPoint(List<CustomPolygon> maps) {
+  for (final wm in maps) {
+    if (wm.isPoint &&
+        wm.pointCategory == PointCategory.dropoff &&
+        wm.points.isNotEmpty) {
+      return wm.points.first;
+    }
+  }
+  return null;
+}
+
+/// [maps] with its dropoff-category point moved to [point].
+List<CustomPolygon> _withDropOffWorkMapPoint(
+        List<CustomPolygon> maps, LatLng point) =>
+    [
+      for (final wm in maps)
+        wm.isPoint && wm.pointCategory == PointCategory.dropoff
+            ? wm.copyWith(points: [point])
+            : wm,
+    ];
+
+bool _samePoint(LatLng? a, LatLng? b) {
+  if (a == null || b == null) return a == b;
+  return (a.latitude - b.latitude).abs() < 1e-7 &&
+      (a.longitude - b.longitude).abs() < 1e-7;
+}
+
+/// Has the work areas editor just loaded for [job] draw its points as Print
+/// Map does: category pictures at once, then the job's own picture and time
+/// on Junk & Stuff / Happy Sun points once its Job List bookings arrive.
+void _showPrintMapPins(ShareableMapProvider mapProvider, Job job) {
+  mapProvider
+      .setPointPinRule(ScheduleJobAdapter.pinRule(JobClientBookings.none));
+  JobClientBookings.load([job]).then((bookings) {
+    final booked = bookings[job.id];
+    // Still this job's map: the editor may have been closed meanwhile.
+    if (booked == null || mapProvider.currentMap?.id != 'job_${job.id}') {
+      return;
+    }
+    mapProvider.setPointPinRule(ScheduleJobAdapter.pinRule(booked));
+  }).catchError((Object e) {
+    debugPrint('JobCard: Job List bookings lookup failed: $e');
+  });
+}
+
 void _showJobDeletedSnackBar(BuildContext context) {
-  ScaffoldMessenger.of(context).showSnackBar(
+  ScaffoldMessenger.of(context).showToast(
     const SnackBar(
       content: Text('This job was deleted — the change was not saved'),
       backgroundColor: Colors.orange,
@@ -98,7 +150,7 @@ class JobCard extends riverpod.ConsumerWidget {
       );
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Failed to open print map: $e'),
             backgroundColor:
@@ -710,23 +762,27 @@ class _ClientListDialogState extends State<_ClientListDialog> {
     );
   }
 
-  void _showDeleteJobConfirmation(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Job'),
-        content: const Text(
-          'Are you sure you want to permanently delete this entire job from the database?\n\n'
-          'This action cannot be undone and will remove all job data including clients, work areas, and schedule information.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          _DeleteJobButton(jobId: widget.jobId),
-        ],
-      ),
+  /// Deletes the job straight away — no confirmation. It goes to the
+  /// Recycle Bin as an Undo step: the toast's Undo, Ctrl+Z or the
+  /// Schedule's Undo button puts it back.
+  void _deleteJobNow(BuildContext context) {
+    final container = riverpod.ProviderScope.containerOf(context);
+    final schedule = container.read(scheduleRiverpod);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final job = schedule.jobs.where((j) => j.id == widget.jobId).firstOrNull;
+    Navigator.of(context).pop(); // close this dialog
+    if (job == null) {
+      messenger?.showToast(const SnackBar(
+        content: Text('Job no longer exists — it was changed or deleted'),
+        backgroundColor: Colors.orange,
+      ));
+      return;
+    }
+    deleteScheduleJobsNow(
+      messenger,
+      schedule,
+      container.read(undoHistoryRiverpod(UndoKey.schedule)),
+      [job],
     );
   }
 
@@ -767,8 +823,8 @@ class _ClientListDialogState extends State<_ClientListDialog> {
               const Text('Edit Client List'),
               IconButton(
                 icon: const Icon(Icons.delete_forever, color: Colors.red),
-                onPressed: () => _showDeleteJobConfirmation(context),
-                tooltip: 'Delete entire job from database',
+                onPressed: () => _deleteJobNow(context),
+                tooltip: 'Delete this job (Undo puts it back)',
               ),
             ],
           ),
@@ -802,13 +858,10 @@ class _ClientListDialogState extends State<_ClientListDialog> {
                                       if (textEditingValue.text.isEmpty) {
                                         return uniqueClients.take(10);
                                       }
-                                      return uniqueClients
-                                          .where((String client) {
-                                        return client.toLowerCase().contains(
-                                              textEditingValue.text
-                                                  .toLowerCase(),
-                                            );
-                                      }).take(10);
+                                      return TextSearch(textEditingValue.text)
+                                          .rank(uniqueClients,
+                                              (String client) => [client])
+                                          .take(10);
                                     },
                                     onSelected: (String selectedClient) {
                                       _controllers[index].text = selectedClient;
@@ -1151,9 +1204,17 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                     distributorName = distributor.name;
                   } catch (_) {}
 
+                  // Where the editor shows the drop-off pin on open — tells a
+                  // pin the user dragged from one left where it was.
+                  final openedJob = widget.job;
+                  final openedDropOff = _dropOffWorkMapPoint(
+                          openedJob.ownWorkMaps) ??
+                      openedJob.dropOffPoint ??
+                      Job.estimateDropOffPointFromWorkMaps(openedJob.workMaps);
+
                   // Create a save callback that updates the job via ScheduleProvider
                   final adapter = ScheduleJobAdapter(
-                    job: widget.job,
+                    job: openedJob,
                     distributorName: distributorName,
                     unfinishedProvider: unfinishedProvider,
                     onSave: (polygons, workingAreaNames) async {
@@ -1170,10 +1231,25 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                         if (context.mounted) _showJobDeletedSnackBar(context);
                         return;
                       }
-                      final modifiedJob = freshJob.copyWith(
+                      var modifiedJob = freshJob.copyWith(
                         workingAreas: workingAreaNames,
                         workMaps: polygons,
                       );
+                      final savedDropOff = _dropOffWorkMapPoint(polygons);
+                      if (savedDropOff != null) {
+                        if (!_samePoint(savedDropOff, openedDropOff)) {
+                          // Dragged in the editor: this is the new drop-off.
+                          modifiedJob =
+                              modifiedJob.copyWith(dropOffPoint: savedDropOff);
+                        } else if (freshJob.dropOffPoint != null) {
+                          // Untouched here — keep the live point, which may
+                          // have been dragged on another screen meanwhile.
+                          modifiedJob = modifiedJob.copyWith(
+                            workMaps: _withDropOffWorkMapPoint(
+                                polygons, freshJob.dropOffPoint!),
+                          );
+                        }
+                      }
                       debugPrint(
                           '[JobCard.onSave] modifiedJob workMaps: ${modifiedJob.workMaps.length}');
                       for (final wm in modifiedJob.workMaps) {
@@ -1217,6 +1293,7 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                   );
 
                   await mapProvider.loadFromAdapter(adapter);
+                  _showPrintMapPins(mapProvider, openedJob);
 
                   if (!context.mounted) return;
 
@@ -1241,7 +1318,7 @@ class _WorkAreaListEditorState extends State<_WorkAreaListEditor> {
                   }
                 } catch (e) {
                   if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    ScaffoldMessenger.of(context).showToast(
                       SnackBar(
                         content: Text('Failed to open map editor: $e'),
                         backgroundColor: Colors.red.shade800,
@@ -1437,17 +1514,12 @@ class _WorkAreaListDialogState
                   return workAreas.where(
                       (area) => !_workMaps.any((wm) => wm.name == area.name));
                 }
-                return workAreas.where((WorkArea area) {
-                  if (_workMaps.any((wm) => wm.name == area.name)) {
-                    return false; // Don't show already added areas
-                  }
-                  return area.name.toLowerCase().contains(
-                            textEditingValue.text.toLowerCase(),
-                          ) ||
-                      area.description.toLowerCase().contains(
-                            textEditingValue.text.toLowerCase(),
-                          );
-                });
+                return TextSearch(textEditingValue.text).rank(
+                  // Don't show already added areas
+                  workAreas.where(
+                      (area) => !_workMaps.any((wm) => wm.name == area.name)),
+                  (WorkArea area) => [area.name, area.description],
+                );
               },
               displayStringForOption: (WorkArea area) => area.name,
               onSelected: (WorkArea area) {
@@ -1523,85 +1595,6 @@ class _WorkAreaListDialogState
             child: const Text('Save Changes'),
           ),
       ],
-    );
-  }
-}
-
-class _DeleteJobButton extends riverpod.ConsumerStatefulWidget {
-  final String jobId;
-
-  const _DeleteJobButton({
-    required this.jobId,
-  });
-
-  @override
-  riverpod.ConsumerState<_DeleteJobButton> createState() =>
-      _DeleteJobButtonState();
-}
-
-class _DeleteJobButtonState extends riverpod.ConsumerState<_DeleteJobButton> {
-  bool _isDeleting = false;
-
-  Future<void> _deleteJob() async {
-    if (_isDeleting) return;
-
-    setState(() {
-      _isDeleting = true;
-    });
-
-    try {
-      await ref.read(scheduleRiverpod).deleteJob(widget.jobId);
-
-      if (context.mounted) {
-        Navigator.of(context).pop(); // Close confirmation dialog
-        Navigator.of(context).pop(); // Close client list dialog
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Job deleted successfully'),
-            backgroundColor: Colors.green,
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        Navigator.of(context).pop(); // Close confirmation dialog
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to delete job: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-    } finally {
-      if (context.mounted) {
-        setState(() {
-          _isDeleting = false;
-        });
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ElevatedButton(
-      onPressed: _isDeleting ? null : _deleteJob,
-      style: ElevatedButton.styleFrom(
-        backgroundColor: Colors.red,
-        foregroundColor: Colors.white,
-      ),
-      child: _isDeleting
-          ? const SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-              ),
-            )
-          : const Text('Delete Job'),
     );
   }
 }

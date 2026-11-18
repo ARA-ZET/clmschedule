@@ -1,15 +1,19 @@
 // providers/cloud_file_manager_provider.dart
 //
 // State management for browsing Cloud Storage folders and files.
-// Root: "Distribution/" — navigates year → month → client → round → files.
+// Root: "Distribution/" — navigates year → month → client → files.
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../services/cloud_archive_service.dart';
 import '../services/file_search_service.dart';
 import '../services/gpx_storage_service.dart';
 import '../shareable_maps/services/shareable_maps_firestore_service.dart';
+import '../utils/local_upload_file.dart';
+import '../utils/schedule_time.dart';
 import '../utils/text_encoding.dart';
 
 /// Hierarchy depth constants for the folder structure:
@@ -17,9 +21,22 @@ import '../utils/text_encoding.dart';
 /// 1: Year (e.g. 2026)
 /// 2: Month (e.g. Apr 2026)
 /// 3: Client name
-/// 4: Round (e.g. Round 1)
-/// 5+: Sub-folders inside a round
-enum FolderLevel { root, year, month, client, round, sub }
+/// 4+: Sub-folders inside a client
+enum FolderLevel { root, year, month, client, sub }
+
+/// Totals for one child folder, summed over it and its subfolders from the
+/// `fileFolders` index. Compiled JSON is not indexed, so [liveFiles] counts
+/// only the files an archive would move.
+class FolderStats {
+  int liveFiles = 0;
+  int liveBytes = 0;
+  int archivedFiles = 0;
+  int archivedBytes = 0;
+  DateTime? lastModified;
+
+  bool get fullyArchived => archivedFiles > 0 && liveFiles == 0;
+  int get totalBytes => liveBytes + archivedBytes;
+}
 
 class CloudFileManagerProvider with ChangeNotifier {
   final GpxStorageService _storage = GpxStorageService();
@@ -36,6 +53,16 @@ class CloudFileManagerProvider with ChangeNotifier {
   List<StorageFileItem> _files = [];
   bool _isLoading = false;
   String? _error;
+  int _loadRequestId = 0;
+  String? _loadedPath;
+
+  /// The current folder's `_archive.json`, when some of its files have been
+  /// moved into an archive ZIP.
+  ArchiveManifest? _manifest;
+
+  /// Per child-folder totals; only filled from the month level down, where a
+  /// listing's whole subtree is a few dozen index docs.
+  Map<String, FolderStats> _folderStats = const {};
 
   // Bulk-task progress state. While [_taskTotal] > 0 a long-running
   // batch operation (upload/copy/move/delete) is in progress and the UI
@@ -60,7 +87,23 @@ class CloudFileManagerProvider with ChangeNotifier {
   String get currentPath => _breadcrumbs.last.path;
   String get currentName => _breadcrumbs.last.name;
   List<StorageFolderItem> get folders => _folders;
-  List<StorageFileItem> get files => _files;
+
+  /// Files in the current folder, minus bookkeeping (`.folder` placeholders
+  /// and the archive manifest).
+  List<StorageFileItem> get files => _files
+      .where((f) => f.name != '.folder' && f.name != kArchiveManifestFile)
+      .toList(growable: false);
+
+  /// Files of this folder that were moved into an archive ZIP (not in [files]).
+  List<ArchivedFileEntry> get archivedFiles {
+    final m = _manifest;
+    if (m == null) return const [];
+    final live = _files.map((f) => f.name).toSet();
+    return m.files.where((e) => !live.contains(e.name)).toList();
+  }
+
+  ArchiveManifest? get manifest => _manifest;
+  Map<String, FolderStats> get folderStats => _folderStats;
   bool get isLoading => _isLoading;
   String? get error => _error;
   bool get isAtRoot => _breadcrumbs.length <= 1;
@@ -93,14 +136,15 @@ class CloudFileManagerProvider with ChangeNotifier {
   /// beneath it). Call this once when the search bar opens, before [search].
   void beginSearch() {
     _searchScopeFolderPath = currentPath;
+    // Fetch the scope's file names while the user starts typing.
+    _search.prefetch(currentPath);
   }
 
-  /// Search for files whose name contains [query] (case-insensitive,
-  /// anywhere in the name), scoped to [searchScopeFolderPath] and every
-  /// subfolder beneath it. Backed by a single indexed `array-contains`
-  /// Firestore query (see [FileSearchService]) rather than a recursive
-  /// Storage listAll() walk, so it stays fast and cheap regardless of how
-  /// many folders exist.
+  /// Search for files whose name matches [query] (words any order, close
+  /// spellings allowed), scoped to [searchScopeFolderPath] and every
+  /// subfolder beneath it. The scope's file names come from one indexed
+  /// Firestore query per search session (see [FileSearchService]); later
+  /// keystrokes filter them in memory.
   ///
   /// Safe to call on every keystroke — stale responses (from a query that's
   /// since been superseded) are discarded.
@@ -133,6 +177,7 @@ class CloudFileManagerProvider with ChangeNotifier {
     _searchResults = [];
     _searchLoading = false;
     _searchScopeFolderPath = null;
+    _search.clearCache(); // next search picks up new uploads
     notifyListeners();
   }
 
@@ -206,8 +251,6 @@ class CloudFileManagerProvider with ChangeNotifier {
         return FolderLevel.month;
       case 4:
         return FolderLevel.client;
-      case 5:
-        return FolderLevel.round;
       default:
         return FolderLevel.sub;
     }
@@ -223,8 +266,6 @@ class CloudFileManagerProvider with ChangeNotifier {
       case FolderLevel.month:
         return 'Client';
       case FolderLevel.client:
-        return 'Round';
-      case FolderLevel.round:
       case FolderLevel.sub:
         return 'Folder';
     }
@@ -254,39 +295,150 @@ class CloudFileManagerProvider with ChangeNotifier {
         // Client name — no suggestions, free text
         return [];
       case FolderLevel.client:
-        // Suggest next round number
-        final existingRounds = _folders
-            .map((f) => RegExp(r'^Round (\d+)$').firstMatch(f.name))
-            .where((m) => m != null)
-            .map((m) => int.parse(m!.group(1)!))
-            .toList();
-        final nextRound = existingRounds.isEmpty
-            ? 1
-            : (existingRounds.reduce((a, b) => a > b ? a : b) + 1);
-        return ['Round $nextRound'];
-      case FolderLevel.round:
       case FolderLevel.sub:
         return [];
     }
   }
 
-  /// Load the current folder contents.
+  /// Load the current folder contents. A refresh of the same folder keeps
+  /// the old rows on screen while it loads; a different folder starts empty.
+  /// Responses for a folder the user has already left are dropped.
   Future<void> loadCurrentFolder() async {
+    final requestId = ++_loadRequestId;
+    final path = currentPath;
     _isLoading = true;
     _error = null;
+    if (_loadedPath != path) {
+      _folders = [];
+      _files = [];
+      _manifest = null;
+      _folderStats = const {};
+    }
     notifyListeners();
 
+    // Names first: one listing call, shown as soon as it lands. Sizes, dates,
+    // the archive manifest and folder totals fill in afterwards so they never
+    // hold the folder up.
     try {
-      final contents = await _storage.listFolderContents(currentPath);
+      final contents = await _storage.listFolderEntries(path);
+      if (requestId != _loadRequestId) return;
+      // A refresh keeps the details it already has until new ones arrive.
+      final previous = _loadedPath == path
+          ? {for (final f in _files) f.name: f}
+          : const <String, StorageFileItem>{};
       _folders = contents.folders;
-      _files = contents.files;
+      _files = [
+        for (final f in contents.files)
+          if (previous[f.name] case final old?)
+            StorageFileItem(
+              name: f.name,
+              fullPath: f.fullPath,
+              lastModified: old.lastModified,
+              sizeBytes: old.sizeBytes,
+            )
+          else
+            f,
+      ];
+      if (_loadedPath != path) _manifest = null;
+      _loadedPath = path;
     } catch (e) {
+      if (requestId != _loadRequestId) return;
       _error = 'Failed to load folder: $e';
       debugPrint(_error);
     }
 
     _isLoading = false;
     notifyListeners();
+    if (_error != null) return;
+    unawaited(_loadFileDetails(path, requestId));
+    if (_files.any((f) => f.name == kArchiveManifestFile)) {
+      unawaited(_loadManifest(path, requestId));
+    } else if (_manifest != null) {
+      _manifest = null;
+      notifyListeners();
+    }
+    if (depth >= 3) unawaited(_loadFolderStats(path, requestId));
+  }
+
+  Future<void> _loadFileDetails(String path, int requestId) async {
+    final listed = _files;
+    if (listed.isEmpty) return;
+    try {
+      final details = await _storage.fileDetails(path, listed);
+      if (requestId != _loadRequestId || details.isEmpty) return;
+      _files = [
+        for (final f in _files)
+          if (details[f.name] case final d?)
+            StorageFileItem(
+              name: f.name,
+              fullPath: f.fullPath,
+              lastModified: d.updated,
+              sizeBytes: d.size,
+            )
+          else
+            f,
+      ];
+      notifyListeners();
+    } catch (e) {
+      debugPrint('fileDetails($path): $e');
+    }
+  }
+
+  Future<void> _loadManifest(String path, int requestId) async {
+    try {
+      final manifest = await CloudArchiveService().readManifest(path);
+      if (requestId != _loadRequestId) return;
+      _manifest = manifest;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('archiveManifest($path): $e');
+    }
+  }
+
+  Future<void> _loadFolderStats(String path, int requestId) async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('fileFolders')
+          .where('ancestorFolders', arrayContains: path)
+          .limit(500)
+          .get();
+      final stats = <String, FolderStats>{};
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        final folderPath = data['folderPath'] as String? ?? '';
+        if (!folderPath.startsWith('$path/')) continue;
+        final child = '$path/${folderPath.substring(path.length + 1).split('/').first}';
+        final s = stats.putIfAbsent(child, FolderStats.new);
+        final files = data['files'];
+        if (files is Map) {
+          files.forEach((_, v) {
+            if (v is! Map) return;
+            s.liveFiles++;
+            s.liveBytes += (v['sizeBytes'] as num?)?.toInt() ?? 0;
+            final ts = v['updatedAt'];
+            if (ts is Timestamp) {
+              final d = ts.toDate();
+              if (s.lastModified == null || d.isAfter(s.lastModified!)) {
+                s.lastModified = d;
+              }
+            }
+          });
+        }
+        final archived = data['archivedFiles'];
+        if (archived is Map) {
+          archived.forEach((_, v) {
+            if (v is! Map) return;
+            s.archivedFiles++;
+            s.archivedBytes += (v['sizeBytes'] as num?)?.toInt() ?? 0;
+          });
+        }
+      }
+      if (requestId != _loadRequestId) return;
+      _folderStats = stats;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('folderStats($path): $e');
+    }
   }
 
   /// Navigate into a subfolder.
@@ -324,15 +476,18 @@ class CloudFileManagerProvider with ChangeNotifier {
     return null;
   }
 
-  /// Delete a file and refresh the folder.
-  Future<void> deleteFile(StorageFileItem file) async {
+  /// Move a file to the Recycle Bin and refresh the folder. Returns the bin
+  /// entry id, for the "Restore" action.
+  Future<String?> deleteFile(StorageFileItem file) async {
     try {
-      await _storage.deleteFile(file.fullPath);
+      final entryId = await _storage.moveFileToBin(file.fullPath);
       await loadCurrentFolder();
+      return entryId;
     } catch (e) {
       _error = 'Failed to delete: $e';
       debugPrint(_error);
       notifyListeners();
+      return null;
     }
   }
 
@@ -350,7 +505,7 @@ class CloudFileManagerProvider with ChangeNotifier {
       await _runWithLimit<StorageFileItem, bool>(list, 6, (f) async {
         _updateTask(currentItem: f.name);
         try {
-          await _storage.deleteFile(f.fullPath);
+          await _storage.moveFileToBin(f.fullPath);
           ok++;
           return true;
         } catch (e) {
@@ -581,11 +736,11 @@ class CloudFileManagerProvider with ChangeNotifier {
     }
   }
 
-  /// Recursively delete a folder (all files and subfolders) and refresh.
-  /// Returns the number of files removed, or `null` if the operation failed.
+  /// Move a folder (all files and subfolders) to the Recycle Bin and
+  /// refresh. Returns the number of files moved, or `null` if it failed.
   Future<int?> deleteFolder(StorageFolderItem folder) async {
     try {
-      final removed = await _storage.deleteFolderRecursive(folder.fullPath);
+      final (_, removed) = await _storage.moveFolderToBin(folder.fullPath);
       await loadCurrentFolder();
       return removed;
     } catch (e) {
@@ -612,29 +767,43 @@ class CloudFileManagerProvider with ChangeNotifier {
     }
   }
 
-  /// Upload many files to the current folder in parallel with progress.
+  /// Upload files from the user's computer — picked, dropped, or a whole
+  /// folder — into [folder] (the open folder by default), four at a time
+  /// with progress.
+  ///
+  /// A relative path with folders in it ("Photos/a.jpg") recreates those
+  /// subfolders, as Drive's folder upload does. Each file is read only when
+  /// its upload starts, so a large drop is never held in memory at once.
+  ///
   /// The Cloud Function compiles `_compiled_tracks.json` and
-  /// `_compiled_waypoints.json` automatically once the new GPX files land,
-  /// so multi-file uploads always end up with up-to-date compiled aggregates.
-  /// Returns the number of files that uploaded successfully.
-  Future<int> uploadFiles(
-    List<({String name, Uint8List bytes, String? contentType})> entries,
-  ) async {
-    if (entries.isEmpty) return 0;
-    _beginTask('Uploading files', entries.length);
+  /// `_compiled_waypoints.json` automatically once new GPX files land, and
+  /// ignores everything else. Returns the number that uploaded.
+  Future<int> uploadFiles(List<LocalUploadFile> files, {String? folder}) async {
+    if (files.isEmpty) return 0;
+    _beginTask('Uploading files', files.length);
     int ok = 0;
-    final folder = currentPath;
+    final base = folder ?? currentPath;
     try {
-      await _runWithLimit<({String name, Uint8List bytes, String? contentType}),
-          bool>(entries, 4, (e) async {
-        _updateTask(currentItem: e.name);
+      await _runWithLimit<LocalUploadFile, bool>(files, 4, (f) async {
+        _updateTask(currentItem: f.relativePath);
         try {
-          await _storage.uploadFileBytes(folder, e.name, e.bytes,
-              contentType: e.contentType);
+          final segments = f.relativePath
+              .split('/')
+              .map(GpxStorageService.sanitizeFileName)
+              .where((s) => s.isNotEmpty)
+              .toList();
+          if (segments.isEmpty) return false;
+          final name = segments.removeLast();
+          await _storage.uploadFileBytes(
+            [base, ...segments].join('/'),
+            name,
+            await f.read(),
+            contentType: contentTypeFor(name),
+          );
           ok++;
           return true;
         } catch (err) {
-          debugPrint('uploadFiles: failed ${e.name}: $err');
+          debugPrint('uploadFiles: failed ${f.relativePath}: $err');
           return false;
         }
       });
@@ -643,6 +812,53 @@ class CloudFileManagerProvider with ChangeNotifier {
     }
     await loadCurrentFolder();
     return ok;
+  }
+
+  /// Storage content type by extension. Without one, Storage serves the
+  /// file as `application/octet-stream` and browsers download photos and
+  /// PDFs instead of showing them.
+  static String? contentTypeFor(String fileName) {
+    final dot = fileName.lastIndexOf('.');
+    if (dot < 0) return null;
+    switch (fileName.substring(dot + 1).toLowerCase()) {
+      case 'gpx':
+        return 'application/gpx+xml';
+      case 'kml':
+        return 'application/vnd.google-earth.kml+xml';
+      case 'kmz':
+        return 'application/vnd.google-earth.kmz';
+      case 'json':
+        return 'application/json';
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'png':
+        return 'image/png';
+      case 'webp':
+        return 'image/webp';
+      case 'gif':
+        return 'image/gif';
+      case 'heic':
+        return 'image/heic';
+      case 'pdf':
+        return 'application/pdf';
+      case 'mp4':
+        return 'video/mp4';
+      case 'mov':
+        return 'video/quicktime';
+      case 'csv':
+        return 'text/csv';
+      case 'txt':
+        return 'text/plain';
+      case 'zip':
+        return 'application/zip';
+      case 'docx':
+        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      case 'xlsx':
+        return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      default:
+        return null;
+    }
   }
 
   /// Create a new subfolder in the current directory and refresh.
@@ -670,9 +886,19 @@ class CloudFileManagerProvider with ChangeNotifier {
     await loadCurrentFolder();
   }
 
+  /// This month's folder, e.g. "Distribution/2026/Nov 2026". Uses the SAST
+  /// schedule clock so it matches the schedule's month in any timezone.
+  static String currentMonthPath() {
+    final now = scheduleNow();
+    return '$rootPath/${now.year}/${DateFormat('MMM yyyy').format(now)}';
+  }
+
+  /// Open on this month's folder — the default landing spot.
+  Future<void> goToCurrentMonth() => navigateToPath(currentMonthPath());
+
   /// Navigate directly to a specific folder path, building breadcrumbs from
-  /// the path segments. E.g. "Distribution/2026/Apr 2026/Client/Round 1"
-  /// produces breadcrumbs: Distribution > 2026 > Apr 2026 > Client > Round 1.
+  /// the path segments. E.g. "Distribution/2026/Apr 2026/Client" produces
+  /// breadcrumbs: Distribution > 2026 > Apr 2026 > Client.
   Future<void> navigateToPath(String folderPath) async {
     _breadcrumbs.clear();
     final segments = folderPath.split('/').where((s) => s.isNotEmpty).toList();

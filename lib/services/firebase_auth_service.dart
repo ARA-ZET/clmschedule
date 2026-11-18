@@ -1,6 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../services/storage_health.dart';
 import '../services/user_service.dart';
 import '../models/user.dart' as app_user;
 
@@ -72,6 +73,10 @@ class FirebaseAuthService {
       throw _handleAuthException(e);
     } catch (e) {
       debugPrint('Unexpected error during sign in: $e');
+      if (StorageHealth.isStorageFullError(e)) {
+        StorageHealth.instance.noteError(e);
+        throw const StorageFullException();
+      }
       throw Exception('An unexpected error occurred. Please try again.');
     }
   }
@@ -208,7 +213,9 @@ class FirebaseAuthService {
             firebaseUser.email?.split('@').first ??
             'User',
         photoUrl: photoUrl ?? firebaseUser.photoURL,
-        role: _getDefaultRole(firebaseUser.email ?? ''),
+        // Every new account starts as a plain user; an admin promotes it.
+        // Never derive a role from the email — anyone can pick an address.
+        role: app_user.UserRole.user,
       );
       debugPrint('User created/updated in database: ${user.email}');
     } catch (e) {
@@ -217,24 +224,18 @@ class FirebaseAuthService {
     }
   }
 
-  /// Get default role based on email
-  app_user.UserRole _getDefaultRole(String email) {
-    if (email.contains('admin')) {
-      return app_user.UserRole.admin;
-    } else if (email.contains('manager')) {
-      return app_user.UserRole.manager;
-    } else {
-      return app_user.UserRole.user;
-    }
-  }
-
   /// Get current user from database
-  Future<app_user.User?> getCurrentUserFromDatabase() async {
+  ///
+  /// [fromCache] reads only the local Firestore cache: instant, but null when
+  /// this device has never loaded the profile.
+  Future<app_user.User?> getCurrentUserFromDatabase(
+      {bool fromCache = false}) async {
     final firebaseUser = currentUser;
     if (firebaseUser == null) return null;
 
     try {
-      return await _userService.getUserById(firebaseUser.uid);
+      return await _userService.getUserById(firebaseUser.uid,
+          source: fromCache ? Source.cache : Source.serverAndCache);
     } catch (e) {
       debugPrint('Error getting user from database: $e');
       return null;
@@ -243,6 +244,13 @@ class FirebaseAuthService {
 
   /// Handle Firebase Auth exceptions and return user-friendly error messages
   Exception _handleAuthException(FirebaseAuthException e) {
+    // Sign-in saves its token in the browser's localStorage; when that is
+    // full the SDK reports an "unknown" error wrapping QuotaExceededError.
+    if (StorageHealth.isStorageFullError(e.message) ||
+        StorageHealth.isStorageFullError(e)) {
+      StorageHealth.instance.noteError(e);
+      return const StorageFullException();
+    }
     switch (e.code) {
       case 'user-not-found':
         return Exception('No user found with this email address.');
@@ -305,4 +313,16 @@ class FirebaseAuthService {
           .toList(),
     };
   }
+}
+
+/// Sign-in failed because the browser's storage for this site is full —
+/// the account is fine; this computer can't keep the sign-in.
+class StorageFullException implements Exception {
+  const StorageFullException();
+
+  @override
+  String toString() =>
+      "Exception: Can't sign in on this computer: the browser's storage for "
+      'CLM Schedule is full. Your password is fine. Press "Fix now" to clear '
+      'it, then sign in again.';
 }

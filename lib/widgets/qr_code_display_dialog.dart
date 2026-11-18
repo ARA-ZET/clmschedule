@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../models/inventory_tool.dart';
@@ -60,7 +61,7 @@ class QrCodeDisplayDialog extends StatelessWidget {
                 ElevatedButton.icon(
                   onPressed: () {
                     // TODO: Implement print functionality
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    ScaffoldMessenger.of(context).showToast(
                       const SnackBar(
                         content: Text('Print functionality to be implemented'),
                       ),

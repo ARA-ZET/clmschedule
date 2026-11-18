@@ -39,6 +39,15 @@ class PayrollPayslip {
   /// Free-text note on this week's payment (e.g. "sent late", "verify ref").
   final String paymentNotes;
 
+  /// The net wage, as the server held it, at the moment this payslip was
+  /// marked paid — with when and by whom. Kept so a later change to the
+  /// payslip shows up as money still owed, and so a dispute can be checked
+  /// against what was actually paid. Null when not marked paid (and for
+  /// payments recorded before 2026-11-09).
+  final double? paidAmount;
+  final DateTime? paidAt;
+  final String? paidBy;
+
   /// Keyed by `dayKeyFor(date)`, one entry per day Fri..Thu.
   final Map<String, PayrollDailyEntry> dailyEntries;
 
@@ -89,6 +98,9 @@ class PayrollPayslip {
     this.paymentAccountSnapshot,
     this.paymentStatus = PaymentStatus.notPaid,
     this.paymentNotes = '',
+    this.paidAmount,
+    this.paidAt,
+    this.paidBy,
     this.dailyEntries = const {},
     this.isDeductingAdvanceThisWeek = false,
     this.advanceDeductionAmount = 0,
@@ -181,6 +193,9 @@ class PayrollPayslip {
           : null,
       paymentStatus: PaymentStatus.fromString(data['paymentStatus'] as String?),
       paymentNotes: data['paymentNotes'] as String? ?? '',
+      paidAmount: (data['paidAmount'] as num?)?.toDouble(),
+      paidAt: (data['paidAt'] as Timestamp?)?.toDate(),
+      paidBy: data['paidBy'] as String?,
       dailyEntries: entries,
       isDeductingAdvanceThisWeek:
           data['isDeductingAdvanceThisWeek'] as bool? ?? false,
@@ -217,6 +232,9 @@ class PayrollPayslip {
         'paymentAccountSnapshot': paymentAccountSnapshot?.toMap(),
         'paymentStatus': paymentStatus.name,
         'paymentNotes': paymentNotes,
+        if (paidAmount != null) 'paidAmount': paidAmount,
+        if (paidAt != null) 'paidAt': Timestamp.fromDate(paidAt!),
+        if (paidBy != null) 'paidBy': paidBy,
         'dailyEntries': dailyEntries.map((k, v) => MapEntry(k, v.toMap())),
         'isDeductingAdvanceThisWeek': isDeductingAdvanceThisWeek,
         'advanceDeductionAmount': advanceDeductionAmount,
@@ -246,6 +264,10 @@ class PayrollPayslip {
     bool clearPaymentAccountSnapshot = false,
     PaymentStatus? paymentStatus,
     String? paymentNotes,
+    double? paidAmount,
+    DateTime? paidAt,
+    String? paidBy,
+    bool clearPaid = false,
     Map<String, PayrollDailyEntry>? dailyEntries,
     bool? isDeductingAdvanceThisWeek,
     double? advanceDeductionAmount,
@@ -278,6 +300,9 @@ class PayrollPayslip {
           : (paymentAccountSnapshot ?? this.paymentAccountSnapshot),
       paymentStatus: paymentStatus ?? this.paymentStatus,
       paymentNotes: paymentNotes ?? this.paymentNotes,
+      paidAmount: clearPaid ? null : (paidAmount ?? this.paidAmount),
+      paidAt: clearPaid ? null : (paidAt ?? this.paidAt),
+      paidBy: clearPaid ? null : (paidBy ?? this.paidBy),
       dailyEntries: dailyEntries ?? this.dailyEntries,
       isDeductingAdvanceThisWeek:
           isDeductingAdvanceThisWeek ?? this.isDeductingAdvanceThisWeek,

@@ -47,6 +47,14 @@ class DistributionReportFolder {
   /// dialog so a missing count is visible rather than silently absent.
   final String? error;
 
+  /// Distributor names as written in the folder's track and photo file names
+  /// ("Petros"), not yet matched to anyone. For the Name / ID table.
+  final List<String> workerNames;
+
+  /// Photos (jpg/png) in the folder and below — the poster count's
+  /// cross-check, since every poster photo should make one waypoint.
+  final int photoCount;
+
   const DistributionReportFolder({
     required this.path,
     this.waypointCount = 0,
@@ -56,6 +64,8 @@ class DistributionReportFolder {
     this.compiledAt,
     this.dateSource = DistributionDateSource.none,
     this.error,
+    this.workerNames = const [],
+    this.photoCount = 0,
   });
 
   /// Last path segment — "Round 1" — for display. The full path is long and
@@ -79,12 +89,19 @@ class DistributionReportFolder {
 class DistributionReportTotals {
   final int quantityDistributed;
 
+  /// Distinct names from the selected folders' file names, in first-seen
+  /// order.
+  final List<String> workerNames;
+  final int photoCount;
+
   /// SAST civil date, or null when nothing supplied one.
   final DateTime? startDate;
   final DistributionDateSource dateSource;
 
   const DistributionReportTotals({
     required this.quantityDistributed,
+    this.workerNames = const [],
+    this.photoCount = 0,
     this.startDate,
     this.dateSource = DistributionDateSource.none,
   });
@@ -116,6 +133,9 @@ class DistributionReport {
   /// Public share URL, or empty when the map could not be resolved.
   final String mapLink;
 
+  /// The code in [mapLink]. A poster job's photo gallery is keyed by it.
+  final String shareCode;
+
   /// Why there is no map. Null when one was found.
   final String? mapError;
 
@@ -145,6 +165,7 @@ class DistributionReport {
     this.recordedQuantityDistributed = 0,
     this.mapName = '',
     this.mapLink = '',
+    this.shareCode = '',
     this.mapError,
     this.areas = const [],
     this.folders = const [],
@@ -171,6 +192,8 @@ class DistributionReport {
   /// rendering an empty sentence.
   DistributionReportTotals totalsFor(Set<String> selectedPaths) {
     var quantity = 0;
+    var photos = 0;
+    final names = <String, String>{};
     DateTime? earliest;
     var source = DistributionDateSource.none;
 
@@ -179,6 +202,10 @@ class DistributionReport {
       if (!selectedPaths.contains(folder.path)) continue;
 
       quantity += folder.waypointCount;
+      photos += folder.photoCount;
+      for (final name in folder.workerNames) {
+        names.putIfAbsent(name.toLowerCase(), () => name);
+      }
 
       final date = folder.date;
       if (date == null) continue;
@@ -190,6 +217,8 @@ class DistributionReport {
 
     return DistributionReportTotals(
       quantityDistributed: quantity,
+      workerNames: names.values.toList(),
+      photoCount: photos,
       startDate: earliest ?? jobDate,
       dateSource:
           earliest == null ? DistributionDateSource.jobDate : source,

@@ -381,10 +381,12 @@ class ZohoInvoicesProvider extends ChangeNotifier {
 
   /// Create an invoice and merge the result into local state.
   /// Rethrows so the calling form can surface the failure.
-  Future<ZohoInvoice> createInvoice(ZohoInvoice invoice) async {
+  Future<ZohoInvoice> createInvoice(ZohoInvoice invoice,
+      {String? idempotencyKey}) async {
     _error = null;
     try {
-      final created = await _service.createInvoice(invoice);
+      final created = await _service.createInvoice(invoice,
+          idempotencyKey: idempotencyKey);
       _invoices = [created, ..._invoices];
       notifyListeners();
       return created;
@@ -493,6 +495,7 @@ class ZohoInvoicesProvider extends ChangeNotifier {
     DateTime? date,
     String paymentMode = 'cash',
     String reference = '',
+    String? idempotencyKey,
   }) {
     return _mutate(
       invoiceId,
@@ -503,6 +506,7 @@ class ZohoInvoicesProvider extends ChangeNotifier {
         date: date,
         paymentMode: paymentMode,
         reference: reference,
+        idempotencyKey: idempotencyKey,
       ),
     );
   }

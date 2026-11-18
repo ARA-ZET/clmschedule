@@ -1,4 +1,6 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
@@ -16,9 +18,13 @@ import '../../providers/dropsheet_task_config_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../shareable_maps/providers/map_gesture_provider.dart';
 import '../date_schedule_map_page.dart';
+import '../../utils/shared_drop_points.dart';
+import '../../utils/dropsheet_maps.dart';
 import 'day_planner_palette.dart';
 import 'day_planner_panel.dart';
 import '../../shareable_maps/widgets/map_overlay.dart';
+import '../../undo/undo_redo_buttons.dart';
+import '../../undo/undo_shortcuts.dart';
 
 /// Split-screen page launched from the schedule grid's date map button.
 ///
@@ -51,6 +57,10 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
 
   Set<Marker> _markers = const {};
   String _markersSignature = '';
+
+  /// Every stop pin as last drawn (shared points expanded) — what a dragged
+  /// pin can snap onto.
+  List<_MarkerSpec> _stopSpecs = const [];
   bool _markersLoading = false;
 
   bool _initialFitDone = false;
@@ -87,6 +97,8 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       ref.read(sectionPickUpViewProvider.notifier).state = {};
       ref.read(markerLabelsProvider.notifier).state = true;
       ref.read(dropsheetRiverpod).setDate(widget.date);
+      // The map and panel read this day's jobs from the schedule provider.
+      ref.read(scheduleRiverpod).ensureDateLoaded(widget.date);
       _scheduleMarkerRefresh();
     });
 
@@ -209,6 +221,10 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
           ),
         ),
         actions: [
+          UndoRedoButtons(
+            undoKey: dropsheet.undoKey,
+            color: const Color(0xFF5F6368),
+          ),
           IconButton(
             tooltip: 'Fit to bounds',
             icon: const Icon(Icons.zoom_out_map,
@@ -233,35 +249,38 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
           const SizedBox(width: 8),
         ],
       ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final isWide = constraints.maxWidth >= 900;
-          final panelWidth =
-              isWide ? constraints.maxWidth * 0.36 : constraints.maxWidth;
-          final mapWidget =
-              _buildMap(initialCamera, polygons, polylines, dropsheet.day);
-          if (!isWide) {
-            return Column(
+      body: UndoShortcuts(
+        undoKey: dropsheet.undoKey,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final isWide = constraints.maxWidth >= 900;
+            final panelWidth =
+                isWide ? constraints.maxWidth * 0.36 : constraints.maxWidth;
+            final mapWidget =
+                _buildMap(initialCamera, polygons, polylines, dropsheet.day);
+            if (!isWide) {
+              return Column(
+                children: [
+                  Expanded(flex: 3, child: mapWidget),
+                  const Divider(height: 1),
+                  Expanded(
+                    flex: 2,
+                    child: DayPlannerPanel(date: widget.date),
+                  ),
+                ],
+              );
+            }
+            return Row(
               children: [
-                Expanded(flex: 3, child: mapWidget),
-                const Divider(height: 1),
-                Expanded(
-                  flex: 2,
+                Expanded(child: mapWidget),
+                SizedBox(
+                  width: panelWidth.clamp(320.0, 480.0),
                   child: DayPlannerPanel(date: widget.date),
                 ),
               ],
             );
-          }
-          return Row(
-            children: [
-              Expanded(child: mapWidget),
-              SizedBox(
-                width: panelWidth.clamp(320.0, 480.0),
-                child: DayPlannerPanel(date: widget.date),
-              ),
-            ],
-          );
-        },
+          },
+        ),
       ),
     );
   }
@@ -307,6 +326,13 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
             ),
             if (_selectedMarker != null && _infoWindowOffset != null)
               _buildInfoOverlay(constraints, day),
+            if (_busyMessage != null || _savingCount > 0)
+              Positioned(
+                top: 12,
+                left: 0,
+                right: 0,
+                child: Center(child: _buildBusyChip()),
+              ),
             // Show a small indicator while bitmaps are being generated so the
             // map never partially shows markers.
             if (_markersLoading)
@@ -364,21 +390,28 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       width: cardW,
       child: PointerInterceptor(
         child: MapOverlay(
-          child: _MarkerInfoCard(
+          child: spec.isGroup
+              ? _SharedPointInfoCard(
+                  spec: spec,
+                  onClose: () => setState(() => _selectedMarker = null),
+                  onSplit: (member) => _splitOff(spec, member),
+                  onMoveAll: (toSectionId) {
+                    setState(() => _selectedMarker = null);
+                    ref.read(dropsheetRiverpod).moveTasksTogether(
+                        [for (final m in spec.members) m.taskId], toSectionId);
+                  },
+                )
+              : _MarkerInfoCard(
             spec: spec,
             day: day,
             onClose: () => setState(() => _selectedMarker = null),
             onReassign: (toSectionId) {
               setState(() => _selectedMarker = null);
-              final dropsheet = ref.read(dropsheetRiverpod);
-              final toSection =
-                  day.sections.firstWhere((s) => s.id == toSectionId);
-              dropsheet.moveTask(
-                fromSectionId: spec.sectionId,
-                fromIndex: spec.taskAbsoluteIndex,
-                toSectionId: toSectionId,
-                toIndex: toSection.tasks.length,
-              );
+              // By id: the marker's index is from when it was drawn, and a
+              // sync or reorder since then made it move a different task.
+              ref
+                  .read(dropsheetRiverpod)
+                  .moveTasksTogether([spec.taskId], toSectionId);
             },
           ),
         ),
@@ -576,7 +609,9 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       final sectionInPickUpView = pickUpViewBySectionId[section.id] ?? false;
       final sectionHasPickUp =
           section.tasks.any((t) => t.type == DropsheetTaskType.pickUp);
-      var order = 0;
+      // Same numbering as the panel and the printed dropsheet.
+      final numbers = stopNumbersFor(section,
+          stopCount: (t) => plannerStops(t, jobById).length);
       for (var idx = 0; idx < section.tasks.length; idx++) {
         final t = section.tasks[idx];
         if (t.isMandatory) continue;
@@ -588,15 +623,13 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
           if (!sectionInPickUpView && isPickUp) continue;
         }
         // Distributor-linked tasks: use the job's stored coordinate.
-        final jobId = t.typeData['distributorJobId'] as String?;
-        Job? job;
-        if (t.isDistributorTask && jobId != null) {
-          job = jobById[jobId];
-        }
-        final stops = _stopPointsFor(t, job);
+        final job = plannerJobFor(t, jobById);
+        final stops = plannerStops(t, jobById);
         if (stops.isEmpty) continue;
+        // Own transport is unnumbered (0): its pins show a walking icon.
+        var order = section.isOwnTransport ? -1 : numbers[t.id]! - 1;
         for (final stop in stops) {
-          order += 1;
+          if (!section.isOwnTransport) order += 1;
           final labels = _markerLabelsFor(t, config);
           final primary = stop.suffix == null
               ? labels.primary
@@ -607,7 +640,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
             id: 'm_${section.id}_${t.id}_${stop.role}',
             position: stop.position,
             color: color,
-            number: order,
+            number: section.isOwnTransport ? 0 : order,
             primaryLabel: primary,
             secondaryLabel: labels.secondary,
             job: job,
@@ -622,17 +655,35 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       }
     }
 
+    final stopSpecs = pending;
+    // One driver's drop-offs (or pick-ups) within kSharedDropRadiusM of
+    // each other are one stop: drawn as a single pin naming everyone.
+    // A Junk & Stuff / Happy Sun job and the people dropped at it are one
+    // pin too, named after the job.
+    final display = _groupSharedStops(pending, {
+      for (final section in day.sections) ...jobSitesInSection(section),
+    });
+
     final markers = <Marker>{};
     // Render all marker bitmaps in parallel rather than awaiting one at
     // a time. Canvas operations release the main thread between frames,
     // so this turns N sequential awaits into a single batched wait.
-    final bitmaps = await Future.wait(pending.map(
+    final bitmaps = await Future.wait(display.map(
       (spec) => _markerCache.get(
         color: spec.color,
         number: spec.number,
         primaryLabel: showLabels ? spec.primaryLabel : '',
         secondaryLabel: showLabels ? spec.secondaryLabel : '',
         isPickUp: spec.isPickUp,
+        iconCodePoint: spec.sectionId == kOwnTransportSectionId
+            ? Icons.directions_walk.codePoint
+            : null,
+        // A shared point is one stop: it shows its first stop number and
+        // lists each distributor on a line of its own so no name is cut off.
+        numberText: spec.isGroup
+            ? '${spec.members.map((m) => m.number).reduce(math.min)}'
+            : null,
+        lines: showLabels && spec.isGroup ? spec.labelLines : const [],
       ),
     ));
     // Several distributors dropped at the same spot would draw their bitmaps
@@ -643,7 +694,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     // the first. Pixel-based, so it holds at every zoom level.
     final stackIndex = <int>[];
     final seenAtSpot = <String, int>{};
-    for (final spec in pending) {
+    for (final spec in display) {
       final key = '${spec.position.latitude.toStringAsFixed(4)},'
           '${spec.position.longitude.toStringAsFixed(4)}';
       final k = seenAtSpot[key] ?? 0;
@@ -651,10 +702,9 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       stackIndex.add(k);
     }
 
-    for (var i = 0; i < pending.length; i++) {
-      final spec = pending[i];
+    for (var i = 0; i < display.length; i++) {
+      final spec = display[i];
       final markerBitmap = bitmaps[i];
-      final hasJob = spec.job != null;
       final k = stackIndex[i];
       markers.add(
         Marker(
@@ -668,18 +718,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
           zIndexInt: k,
           draggable: true,
           onTap: () => _onMarkerTap(spec),
-          onDragEnd: (LatLng pos) {
-            // Per-area pins store their coordinate on the task, so dragging one
-            // must not move the job's primary drop-off/pick-up point.
-            final isWorkAreaPin = spec.task?.typeData['workAreaPin'] == true;
-            if (!hasJob || isWorkAreaPin) {
-              _persistTaskCoords(spec, pos);
-            } else if (spec.task?.type == DropsheetTaskType.pickUp) {
-              _persistPickUp(spec.job!, pos);
-            } else {
-              _persistDropOff(spec.job!, pos);
-            }
-          },
+          onDragEnd: (LatLng pos) => _onStopDragged(spec, pos),
         ),
       );
     }
@@ -708,8 +747,119 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     if (seq != _rebuildSeq) return;
     setState(() {
       _markers = markers;
+      _stopSpecs = stopSpecs;
       _markersLoading = false;
+      // A shared-point card follows its pin as stops join or leave it.
+      final selected = _selectedMarker;
+      if (selected != null && selected.isGroup) {
+        final ids = selected.members.map((m) => m.taskId).toSet();
+        _selectedMarker = display
+            .where((d) =>
+                d.isGroup && d.members.any((m) => ids.contains(m.taskId)))
+            .firstOrNull;
+      }
     });
+  }
+
+  /// [specs] with each driver's shareable stops (drop-offs, pick-ups) that
+  /// lie within [kSharedDropRadiusM] of each other merged into one marker.
+  /// The same rule the dropsheet uses ([sharedStopsByTaskId]).
+  /// A job site ([sites]) is merged into one marker named after its job.
+  List<_MarkerSpec> _groupSharedStops(
+      List<_MarkerSpec> specs, Map<String, JobSite> sites) {
+    final out = <_MarkerSpec>[];
+    final bySite = <String, List<_MarkerSpec>>{};
+    for (final s in specs) {
+      final site = s.task == null || s.isPickUp ? null : sites[s.task!.id];
+      if (site != null) {
+        bySite.putIfAbsent('${s.sectionId}|${site.job.id}', () => []).add(s);
+      }
+    }
+    final placed = <String>{};
+    final byDriverAndPass = <String, List<_MarkerSpec>>{};
+    for (final s in specs) {
+      final site = s.task == null || s.isPickUp ? null : sites[s.task!.id];
+      final siteSpecs =
+          site == null ? null : bySite['${s.sectionId}|${site.job.id}'];
+      // Only while the job's own pin is drawn; else its crew stand alone.
+      final host =
+          siteSpecs?.where((m) => m.taskId == site!.job.id).firstOrNull;
+      if (siteSpecs != null && host != null && siteSpecs.length > 1) {
+        if (placed.add(host.id)) out.add(_jobSiteSpec(host, siteSpecs));
+        continue;
+      }
+      final t = s.task;
+      // Nobody drops Own transport people off — never a shared point.
+      if (t == null ||
+          !isShareableStop(t) ||
+          s.sectionId == kOwnTransportSectionId) {
+        out.add(s);
+        continue;
+      }
+      byDriverAndPass.putIfAbsent('${s.sectionId}|${s.isPickUp}', () => []).add(s);
+    }
+    for (final list in byDriverAndPass.values) {
+      for (final g in clusterByDistance(list, (s) => s.position)) {
+        out.add(g.length == 1 ? g.single : _sharedPointSpec(g));
+      }
+    }
+    return out;
+  }
+
+  /// One pin for a job site: the job's label, then a line per crew member.
+  _MarkerSpec _jobSiteSpec(_MarkerSpec host, List<_MarkerSpec> group) {
+    final crew = group.where((m) => m.taskId != host.taskId).toList();
+    final job = host.task!.job.trim().isEmpty
+        ? host.primaryLabel
+        : host.task!.job.trim();
+    return _MarkerSpec(
+      id: 'site_${host.id}',
+      position: host.position,
+      color: host.color,
+      number: group.map((m) => m.number).reduce(math.min),
+      primaryLabel: job,
+      secondaryLabel: 'Crew · ${crew.length}',
+      job: null,
+      task: host.task,
+      driverName: host.driverName,
+      sectionId: host.sectionId,
+      taskId: host.taskId,
+      taskAbsoluteIndex: host.taskAbsoluteIndex,
+      members: [host, ...crew],
+      siteJob: host,
+      labelLines: [
+        job,
+        for (final m in crew) '–  ${crewMemberName(m.task!)}',
+      ],
+    );
+  }
+
+  _MarkerSpec _sharedPointSpec(List<_MarkerSpec> group) {
+    final first = group.first;
+    final names = group
+        .map((m) => stopPersonName(m.task!))
+        .where((n) => n.isNotEmpty)
+        .toList();
+    final what = first.isPickUp ? 'Shared pick-up' : 'Shared drop';
+    return _MarkerSpec(
+      id: 'g_${first.id}',
+      position: first.position,
+      color: first.color,
+      number: first.number,
+      primaryLabel: names.join(' + '),
+      secondaryLabel: '$what point · ${group.length} people',
+      job: null,
+      driverName: first.driverName,
+      sectionId: first.sectionId,
+      taskId: first.taskId,
+      taskAbsoluteIndex: first.taskAbsoluteIndex,
+      isPickUp: first.isPickUp,
+      members: group,
+      labelLines: [
+        for (final m in group)
+          '${m.number}. ${stopPersonName(m.task!).isEmpty ? m.primaryLabel : stopPersonName(m.task!)}',
+      ],
+    );
   }
 
   Future<void> _onMarkerTap(_MarkerSpec spec) async {
@@ -739,6 +889,249 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
     setState(() => _infoWindowOffset = next);
   }
 
+  /// A pin was dropped at [dropped]. A shared-point pin moves all its stops.
+  /// Dropped within [kSharedDropRadiusM] of another drop-off (or pick-up)
+  /// pin, it snaps onto that exact spot so they become one stop.
+  Future<void> _onStopDragged(_MarkerSpec spec, LatLng dropped) async {
+    final stops = spec.stops;
+    final movingIds = stops.map((m) => m.id).toSet();
+    final shareable =
+        stops.every((m) => m.task != null && isShareableStop(m.task!));
+    _MarkerSpec? target;
+    if (shareable) {
+      var best = kSharedDropRadiusM;
+      for (final other in _stopSpecs) {
+        if (movingIds.contains(other.id)) continue;
+        if (other.isPickUp != spec.isPickUp) continue;
+        if (other.task == null) continue;
+        // Drop-offs also snap onto a Junk & Stuff / Happy Sun job's house,
+        // joining its crew.
+        final isSite = !spec.isPickUp && isJobSiteTask(other.task!);
+        if (!isShareableStop(other.task!) && !isSite) continue;
+        final d = distanceMeters(other.position, dropped);
+        if (d <= best) {
+          best = d;
+          target = other;
+        }
+      }
+    }
+    final at = target?.position ?? dropped;
+    if (stops.length == 1 && target == null) {
+      await _persistStop(stops.single, at);
+      return;
+    }
+    final count = stops.length + (target == null ? 0 : 1);
+    await _runWithFeedback(
+      target == null ? 'Moving $count stops…' : 'Combining $count stops…',
+      (applied) => _persistStops(stops, at, onApplied: applied),
+    );
+    if (target != null && mounted) _announceSharedPoint(stops, target);
+  }
+
+  // ── Progress feedback ─────────────────────────────────────────────────────
+  //
+  // Combining stops rewrites several jobs and the dropsheet, and redraws the
+  // schedule, map and panel. The message is painted before any of that
+  // starts; once the change shows, a small "Saving…" chip stays until the
+  // schedule save lands (it keeps retrying offline), and the map stays usable.
+
+  /// Shown while a change is being applied; null when idle.
+  String? _busyMessage;
+
+  /// Map saves still running in the background.
+  int _savingCount = 0;
+
+  /// Runs [work] with [message] on the map until [work] reports the change
+  /// applied (or finishes), then "Saving…" until it finishes.
+  Future<void> _runWithFeedback(
+    String message,
+    Future<void> Function(VoidCallback onApplied) work,
+  ) async {
+    setState(() {
+      _busyMessage = message;
+      _savingCount++;
+    });
+    // Let the message paint before the heavy synchronous part starts.
+    await WidgetsBinding.instance.endOfFrame;
+    void applied() {
+      if (mounted && _busyMessage == message) {
+        setState(() => _busyMessage = null);
+      }
+    }
+
+    try {
+      await work(applied);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showToast(
+          SnackBar(content: Text('Could not save: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          if (_busyMessage == message) _busyMessage = null;
+          _savingCount--;
+        });
+      }
+    }
+  }
+
+  Widget _buildBusyChip() {
+    final busy = _busyMessage;
+    final text = busy ??
+        (_savingCount == 1 ? 'Saving…' : 'Saving $_savingCount changes…');
+    // Informational only: clicks pass straight through to the map.
+    return IgnorePointer(
+      child: Card(
+        elevation: busy != null ? 6 : 3,
+        color: busy != null ? const Color(0xFF202124) : Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+              horizontal: busy != null ? 16 : 12, vertical: busy != null ? 10 : 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: busy != null ? Colors.white : null,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                text,
+                style: TextStyle(
+                  fontSize: busy != null ? 13 : 12,
+                  fontWeight: FontWeight.w600,
+                  color: busy != null ? Colors.white : const Color(0xFF202124),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Saves all [stops] at [position] as one change: the jobs in one
+  /// schedule write, task-only pins in one dropsheet save. Saving them one
+  /// by one redrew everything once per stop and froze the page.
+  Future<void> _persistStops(List<_MarkerSpec> stops, LatLng position,
+      {VoidCallback? onApplied}) {
+    final jobsById = <String, Job>{};
+    final pinSectionByTaskId = <String, String>{};
+    for (final stop in stops) {
+      final isWorkAreaPin = stop.task?.typeData['workAreaPin'] == true;
+      if (stop.job == null || isWorkAreaPin) {
+        pinSectionByTaskId[stop.taskId] = stop.sectionId;
+        continue;
+      }
+      final job = jobsById[stop.job!.id] ?? _liveJob(stop.job!);
+      jobsById[job.id] = stop.task?.type == DropsheetTaskType.pickUp
+          ? job.copyWith(pickUpPoint: position)
+          : job.copyWith(dropOffPoint: position);
+    }
+    final pins = ref.read(dropsheetRiverpod).updateTasksCoords(
+        pinSectionByTaskId, position.latitude, position.longitude);
+    final jobs = ref
+        .read(scheduleRiverpod)
+        .updateJobs(jobsById.values.toList(), onApplied: onApplied);
+    return Future.wait([pins, jobs]);
+  }
+
+  /// Saves [stop] at [position]: a job's drop-off / pick-up point, or the
+  /// task's own coordinate for per-area pins and tasks without a job.
+  Future<void> _persistStop(_MarkerSpec stop, LatLng position) {
+    // Per-area pins store their coordinate on the task, so dragging one
+    // must not move the job's primary drop-off/pick-up point.
+    final isWorkAreaPin = stop.task?.typeData['workAreaPin'] == true;
+    if (stop.job == null || isWorkAreaPin) {
+      return _persistTaskCoords(stop, position);
+    }
+    if (stop.task?.type == DropsheetTaskType.pickUp) {
+      return _persistPickUp(stop.job!, position);
+    }
+    return _persistDropOff(stop.job!, position);
+  }
+
+  /// "Thabo now shares a drop point with Sipho" — offering to put them on
+  /// the same driver when the spot is on another driver's run.
+  void _announceSharedPoint(List<_MarkerSpec> moved, _MarkerSpec target) {
+    final who = moved
+        .map((m) => stopPersonName(m.task!))
+        .where((n) => n.isNotEmpty)
+        .join(', ');
+    final site = isJobSiteTask(target.task!);
+    final with_ = site
+        ? (target.task!.job.trim().isEmpty
+            ? target.primaryLabel
+            : target.task!.job.trim())
+        : stopPersonName(target.task!);
+    final what = target.isPickUp ? 'pick-up' : 'drop';
+    final otherDriver = target.sectionId != moved.first.sectionId &&
+        target.sectionId != kUnassignedSectionId;
+    final day = ref.read(dropsheetRiverpod).day;
+    final driver = day.sections
+            .where((s) => s.id == target.sectionId)
+            .firstOrNull
+            ?.driverName ??
+        '';
+    ScaffoldMessenger.of(context).showToast(SnackBar(
+      content: Text(
+          '${who.isEmpty ? 'Stop' : who} '
+          '${site ? 'is now on the crew for' : 'now shares a $what point with'} '
+          '${with_.isEmpty ? 'another stop' : with_}'
+          '${otherDriver ? ' on ${driver.isEmpty ? 'another driver' : driver}\'s run' : ''}.'),
+      duration: const Duration(seconds: 6),
+      action: otherDriver
+          ? SnackBarAction(
+              label: 'Move to ${driver.isEmpty ? 'driver' : driver}',
+              onPressed: () => ref.read(dropsheetRiverpod).moveTasksTogether(
+                    [for (final m in moved) m.taskId],
+                    target.sectionId,
+                    afterTaskId: target.taskId,
+                  ),
+            )
+          : null,
+    ));
+  }
+
+  /// Takes [member] off the shared point [group]: back to the middle of its
+  /// own work area when that is far enough away, else
+  /// [kSharedDropRadiusM] × 1.5 off to one side.
+  Future<void> _splitOff(_MarkerSpec group, _MarkerSpec member) async {
+    final here = group.position;
+    LatLng? home;
+    final job = member.job == null ? null : _liveJob(member.job!);
+    if (job != null) {
+      final polygon = job.workMaps
+          .where((w) => w.isPolygon && w.points.isNotEmpty)
+          .firstOrNull;
+      if (polygon != null) home = centroidOf(polygon.points);
+    }
+    if (home == null || distanceMeters(home, here) <= kSharedDropRadiusM) {
+      final i = group.members.indexOf(member);
+      final bearing = (i * 72) * math.pi / 180;
+      const d = kSharedDropRadiusM * 1.5;
+      home = LatLng(
+        here.latitude + d * math.cos(bearing) / 111320,
+        here.longitude +
+            d *
+                math.sin(bearing) /
+                (111320 * math.cos(here.latitude * math.pi / 180)),
+      );
+    }
+    final name = member.task == null ? '' : stopPersonName(member.task!);
+    await _runWithFeedback(
+      'Splitting off ${name.isEmpty ? 'stop' : name}…',
+      (applied) => _persistStops([member], home!, onApplied: applied),
+    );
+  }
+
   /// Persists dragged coordinates for a non-distributor task back into its
   /// typeData lat/lng fields so the position survives a hot reload.
   Future<void> _persistTaskCoords(_MarkerSpec spec, LatLng pos) async {
@@ -748,25 +1141,27 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
           spec.sectionId, spec.taskId, pos.latitude, pos.longitude);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(content: Text('Could not save position: $e')),
       );
     }
   }
 
+  /// The job as the schedule holds it now. The marker's [Job] is the one it
+  /// was built with; saving a copy of that would undo any edit made since.
+  Job _liveJob(Job job) =>
+      ref.read(scheduleRiverpod).jobs.where((j) => j.id == job.id).firstOrNull ??
+      job;
+
+  // ScheduleProvider.updateJob moves the dropsheet's linked tasks too (this
+  // sheet and any other date's), at once rather than after the save lands.
   Future<void> _persistDropOff(Job job, LatLng position) async {
     final schedule = ref.read(scheduleRiverpod);
-    final dropsheet = ref.read(dropsheetRiverpod);
-    final updated = job.copyWith(dropOffPoint: position);
     try {
-      await schedule.updateJob(updated);
-      // Optimistically refresh the dropsheet's cached coords so the
-      // route optimiser stops reading the stale position before the
-      // cloud auto-sync trigger lands.
-      await dropsheet.refreshDropOffCoords(job.id, position);
+      await schedule.updateJob(_liveJob(job).copyWith(dropOffPoint: position));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(content: Text('Could not save drop-off: $e')),
       );
     }
@@ -774,14 +1169,11 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
 
   Future<void> _persistPickUp(Job job, LatLng position) async {
     final schedule = ref.read(scheduleRiverpod);
-    final dropsheet = ref.read(dropsheetRiverpod);
-    final updated = job.copyWith(pickUpPoint: position);
     try {
-      await schedule.updateJob(updated);
-      await dropsheet.refreshPickUpCoords(job.id, position);
+      await schedule.updateJob(_liveJob(job).copyWith(pickUpPoint: position));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(content: Text('Could not save pick-up point: $e')),
       );
     }
@@ -799,72 +1191,6 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
         if (id == null) continue;
         out[id] = s.id;
       }
-    }
-    return out;
-  }
-
-  /// Returns the coordinate(s) at which a task should be pinned on the map.
-  ///
-  /// For distributor drop-off / pick-up tasks linked to a Job, the live
-  /// `dropOffPoint` (or first delivery vertex) is preferred so that
-  /// markers stay in sync with edits made on the schedule grid. For all
-  /// other task types we fall back to the cached `lat`/`lng` (or
-  /// loading/offload variants for furniture moves) written by the editor
-  /// when the address was geocoded.
-  List<_StopPoint> _stopPointsFor(DropsheetTask t, Job? job) {
-    final out = <_StopPoint>[];
-    if (t.isDistributorTask) {
-      // Per-area drop-offs (and pick-ups derived from them) pin their own
-      // coordinate so they render as distinct pins. The default drop-off keeps
-      // using the job's point so it tracks schedule-grid edits live.
-      final tLat = (t.typeData['lat'] as num?)?.toDouble();
-      final tLng = (t.typeData['lng'] as num?)?.toDouble();
-      if (t.typeData['workAreaPin'] == true && tLat != null && tLng != null) {
-        out.add(_StopPoint(LatLng(tLat, tLng), 'single'));
-        return out;
-      }
-      final p = job != null
-          ? (t.type == DropsheetTaskType.pickUp
-              ? defaultPickUpFor(job)
-              : defaultDropOffFor(job))
-          : null;
-      if (p != null) {
-        out.add(_StopPoint(p, 'single'));
-        return out;
-      }
-      if (tLat != null && tLng != null) {
-        out.add(_StopPoint(LatLng(tLat, tLng), 'single'));
-      }
-      return out;
-    }
-    if (job != null) {
-      // Pick-up tasks use the job's pickUpPoint (falls back to dropOffPoint);
-      // drop-off tasks use dropOffPoint / work-area centroid.
-      final p = t.type == DropsheetTaskType.pickUp
-          ? defaultPickUpFor(job)
-          : defaultDropOffFor(job);
-      if (p != null) {
-        out.add(_StopPoint(p, 'single'));
-        return out;
-      }
-    }
-    if (t.type == DropsheetTaskType.furnitureMove) {
-      final ll = (t.typeData['loadingLat'] as num?)?.toDouble();
-      final lo = (t.typeData['loadingLng'] as num?)?.toDouble();
-      if (ll != null && lo != null) {
-        out.add(_StopPoint(LatLng(ll, lo), 'loading', suffix: 'load'));
-      }
-      final ol = (t.typeData['offloadLat'] as num?)?.toDouble();
-      final og = (t.typeData['offloadLng'] as num?)?.toDouble();
-      if (ol != null && og != null) {
-        out.add(_StopPoint(LatLng(ol, og), 'offload', suffix: 'offload'));
-      }
-      return out;
-    }
-    final lat = (t.typeData['lat'] as num?)?.toDouble();
-    final lng = (t.typeData['lng'] as num?)?.toDouble();
-    if (lat != null && lng != null) {
-      out.add(_StopPoint(LatLng(lat, lng), 'single'));
     }
     return out;
   }
@@ -893,9 +1219,9 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
       case MarkerLabelField.none:
         return '';
       case MarkerLabelField.taskLabel:
-        return task.job;
+        return task.displayJob; // with an appointment's booked time
       case MarkerLabelField.details:
-        return task.details;
+        return task.detailsText;
       case MarkerLabelField.contact:
         return task.contact;
       case MarkerLabelField.tel:
@@ -932,12 +1258,7 @@ class _DayPlannerPageState extends riverpod.ConsumerState<DayPlannerPage> {
         ..write(':');
       for (final t in s.tasks) {
         if (t.isMandatory) continue;
-        final jobId = t.typeData['distributorJobId'] as String?;
-        Job? linkedJob;
-        if (t.isDistributorTask && jobId != null) {
-          linkedJob = jobsById[jobId];
-        }
-        final stops = _stopPointsFor(t, linkedJob);
+        final stops = plannerStops(t, jobsById);
         if (stops.isEmpty) continue;
         final labels = _markerLabelsFor(t, config);
         sb
@@ -1084,6 +1405,22 @@ class _MarkerSpec {
   final bool isPickUp;
   final bool isOffice;
 
+  /// The stops one shared-point marker stands for, in route order; empty for
+  /// an ordinary single-stop marker.
+  final List<_MarkerSpec> members;
+
+  /// A shared point's badge: one line per distributor.
+  final List<String> labelLines;
+
+  /// For a job site's marker: the job's own stop; [members] holds it first,
+  /// then the crew.
+  final _MarkerSpec? siteJob;
+
+  bool get isGroup => members.length > 1;
+
+  /// The stops this marker moves when dragged.
+  List<_MarkerSpec> get stops => isGroup ? members : [this];
+
   _MarkerSpec({
     required this.id,
     required this.position,
@@ -1099,14 +1436,10 @@ class _MarkerSpec {
     required this.taskAbsoluteIndex,
     this.isPickUp = false,
     this.isOffice = false,
+    this.members = const [],
+    this.labelLines = const [],
+    this.siteJob,
   });
-}
-
-class _StopPoint {
-  final LatLng position;
-  final String role;
-  final String? suffix;
-  const _StopPoint(this.position, this.role, {this.suffix});
 }
 
 // =============================================================================
@@ -1403,7 +1736,19 @@ class _MarkerInfoCard extends riverpod.ConsumerWidget {
   List<Widget> _buildFields(DropsheetTask t) {
     final rows = <({String label, String value})>[];
 
-    if (t.job.isNotEmpty) rows.add((label: 'Label', value: t.job));
+    if (t.job.isNotEmpty) rows.add((label: 'Label', value: t.displayJob));
+    if (t.appointmentTime.isNotEmpty) {
+      rows.add((label: 'Booked', value: t.appointmentTime));
+    }
+    if (t.appointmentWaitMinutes > 0) {
+      rows.add((
+        label: 'Early',
+        value: '${t.appointmentWaitMinutes} min — wait',
+      ));
+    }
+    if (t.appointmentLateMinutes > 0) {
+      rows.add((label: 'LATE', value: '${t.appointmentLateMinutes} min'));
+    }
     if (t.startTime.isNotEmpty) rows.add((label: 'Start', value: t.startTime));
     if (t.location.isNotEmpty) rows.add((label: 'Location', value: t.location));
     if (t.details.isNotEmpty) rows.add((label: 'Notes', value: t.details));
@@ -1502,5 +1847,240 @@ class _MarkerInfoCard extends riverpod.ConsumerWidget {
       case DropsheetTaskType.custom:
         return Icons.note_alt_outlined;
     }
+  }
+}
+
+// =============================================================================
+// Shared drop point card — every distributor dropped (or collected) there
+// =============================================================================
+
+class _SharedPointInfoCard extends riverpod.ConsumerWidget {
+  final _MarkerSpec spec;
+  final VoidCallback onClose;
+  final ValueChanged<_MarkerSpec> onSplit;
+  final ValueChanged<String> onMoveAll;
+
+  const _SharedPointInfoCard({
+    required this.spec,
+    required this.onClose,
+    required this.onSplit,
+    required this.onMoveAll,
+  });
+
+  @override
+  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+    final liveDay = ref.watch(dropsheetRiverpod).day;
+    final liveById = {
+      for (final s in liveDay.sections)
+        for (final t in s.tasks) t.id: t,
+    };
+    final otherSections =
+        liveDay.sections.where((s) => s.id != spec.sectionId).toList();
+    final what = spec.isPickUp ? 'pick-up' : 'drop';
+    // A job site: the job heads the card, its crew are listed below.
+    final siteJob = spec.siteJob;
+    final listed = siteJob == null
+        ? spec.members
+        : spec.members.where((m) => m.taskId != siteJob.taskId).toList();
+
+    return Material(
+      elevation: 8,
+      borderRadius: BorderRadius.circular(12),
+      clipBehavior: Clip.hardEdge,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            color: spec.color,
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+            child: Row(
+              children: [
+                const Icon(Icons.groups, color: Colors.white, size: 16),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    siteJob != null
+                        ? spec.primaryLabel
+                        : 'Shared $what point · ${spec.members.length}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  spec.driverName.isEmpty ? 'Driver' : spec.driverName,
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: onClose,
+                  child: const Icon(Icons.close, color: Colors.white, size: 18),
+                ),
+              ],
+            ),
+          ),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 260),
+            child: ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.fromLTRB(12, 8, 8, 4),
+              children: [
+                if (siteJob != null)
+                  _siteJob(liveById[siteJob.taskId] ?? siteJob.task,
+                      listed.length),
+                for (final m in listed)
+                  _member(m, liveById[m.taskId] ?? m.task),
+              ],
+            ),
+          ),
+          if (otherSections.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Divider(height: 1),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Move all to driver:',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade600,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: [
+                      for (final s in otherSections)
+                        ActionChip(
+                          avatar: CircleAvatar(
+                            radius: 6,
+                            backgroundColor:
+                                colorForSection(s.id, liveDay.sections),
+                          ),
+                          label: Text(
+                            s.driverName.isEmpty ? 'Driver' : s.driverName,
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () => onMoveAll(s.id),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// The job site's own line: where, when, and how many are on its crew.
+  Widget _siteJob(DropsheetTask? task, int crewCount) {
+    final where = task == null ? '' : DropsheetMaps.locationLabel(task);
+    final booked = task?.appointmentTime ?? '';
+    final eta = (task?.typeData['eta'] as String?) ?? '';
+    final details = [
+      if (where.isNotEmpty) where,
+      if (booked.isNotEmpty) 'booked $booked',
+      if (eta.isNotEmpty) 'arr $eta',
+    ].join(' · ');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (details.isNotEmpty)
+            Text(details,
+                style: const TextStyle(fontSize: 11, color: Colors.black54)),
+          const SizedBox(height: 4),
+          Text(
+            'Crew · $crewCount',
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF00796B),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _member(_MarkerSpec m, DropsheetTask? task) {
+    final name = task == null
+        ? ''
+        : spec.siteJob != null
+            ? crewMemberName(task)
+            : stopPersonName(task);
+    final area = task?.shortWorkArea ?? '';
+    final tel = task?.tel.trim() ?? '';
+    final eta = (task?.typeData['eta'] as String?) ?? '';
+    final details = [
+      if (area.isNotEmpty) area,
+      if (tel.isNotEmpty) tel,
+      if (eta.isNotEmpty) 'arr $eta',
+    ].join(' · ');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 20,
+            height: 20,
+            alignment: Alignment.center,
+            decoration:
+                BoxDecoration(color: spec.color, shape: BoxShape.circle),
+            child: Text(
+              '${m.number}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name.isEmpty ? (task?.displayJob ?? 'Stop') : name,
+                  style: const TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+                if (details.isNotEmpty)
+                  Text(
+                    details,
+                    style:
+                        const TextStyle(fontSize: 11, color: Colors.black54),
+                  ),
+              ],
+            ),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              minimumSize: const Size(0, 28),
+              textStyle: const TextStyle(fontSize: 11),
+            ),
+            onPressed: () => onSplit(m),
+            child: const Text('Split off'),
+          ),
+        ],
+      ),
+    );
   }
 }

@@ -104,9 +104,9 @@ void main() {
       expect(byId(Company.clmId).accountingProvider, AccountingProvider.xero);
       expect(byId(Company.junkAndStuffId).accountingProvider,
           AccountingProvider.zoho);
-      // Undecided, handled manually — a real state, not a gap.
+      // Its own Zoho organisation under the Junk & Stuff login (ZohoOrg).
       expect(
-          byId(Company.happySunId).accountingProvider, AccountingProvider.none);
+          byId(Company.happySunId).accountingProvider, AccountingProvider.zoho);
     });
 
     // Xero was implemented in Aug 2026; before that this asserted it was not.
@@ -487,6 +487,29 @@ void main() {
         ),
         AccountingProvider.xero,
       );
+    });
+  });
+
+  group('Junk & Stuff and Happy Sun jobs always sync to the Dropsheet', () {
+    test('transport of goods (a collection-schedule type) syncs', () {
+      expect(_type(appearsOnCollectionSchedule: true).syncsToDropsheet, isTrue);
+    });
+
+    test('window cleaning (a Happy Sun service) syncs', () {
+      expect(_type(isHappySunService: true).syncsToDropsheet, isTrue);
+    });
+
+    test('an assigned Junk & Stuff type syncs without any flag', () {
+      expect(_type(companyId: Company.junkAndStuffId).syncsToDropsheet, isTrue);
+    });
+
+    test('CLM distribution does not, unless flagged', () {
+      expect(_type(companyId: Company.clmId).syncsToDropsheet, isFalse);
+      expect(
+          _type(companyId: Company.clmId)
+              .copyWith(appearsOnDropsheet: true)
+              .syncsToDropsheet,
+          isTrue);
     });
   });
 }

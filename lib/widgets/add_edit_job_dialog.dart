@@ -1,3 +1,7 @@
+import 'package:clmschedule/utils/text_search.dart';
+import 'package:clmschedule/widgets/app_toast.dart';
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,10 +17,15 @@ import '../models/custom_polygon.dart';
 import '../models/happy_sun_shared.dart';
 import '../models/regular_client.dart';
 import '../providers/regular_clients_provider.dart';
+import '../services/client_address_pin.dart';
 import '../services/regular_client_matcher.dart';
 import '../services/regular_client_service.dart';
+import '../shareable_maps/models/map_layer.dart';
 import '../shareable_maps/models/shareable_map.dart';
 import '../shareable_maps/services/shareable_maps_firestore_service.dart';
+import '../shareable_maps/utils/linked_map_polygons.dart'
+    show mapPointAsWorkMap;
+import '../shareable_maps/utils/map_copy_description.dart';
 import '../providers/company_provider.dart';
 import '../providers/xero_items_provider.dart';
 import '../providers/zoho_item_autofill_provider.dart';
@@ -38,6 +47,7 @@ import '../services/job_assignment_service.dart';
 import '../shareable_maps/services/map_link_service.dart';
 import 'address_point_search_dialog.dart';
 import 'job_assignment_preview_dialog.dart';
+import 'time_slot_strip.dart';
 import 'happy_sun_tools_dialog.dart';
 import '../models/zoho_customer.dart';
 import '../models/company.dart';
@@ -50,8 +60,12 @@ import '../providers/zoho_customers_provider.dart';
 import '../providers/zoho_invoices_provider.dart';
 import '../providers/zoho_sync_settings_provider.dart';
 import '../services/job_list_service.dart';
-import '../utils/save_file.dart'
-    if (dart.library.io) '../utils/save_file_stub.dart';
+import '../services/zoho_books_service.dart';
+import '../utils/accounting_error.dart';
+import '../utils/save_with_picker.dart';
+import '../utils/distribution_lag.dart';
+import '../utils/appointment_slots.dart';
+import '../utils/save_timeline.dart';
 import '../utils/schedule_time.dart';
 import 'zoho/customer_picker_field.dart';
 import 'xero/xero_contact_picker.dart';
@@ -69,6 +83,7 @@ import '../models/job_invoice_link.dart';
 import '../utils/zoho_org.dart';
 import 'zoho/zoho_status_chip.dart';
 import 'zoho/zoho_table.dart';
+import 'slow_action_hint.dart';
 
 class AddEditJobDialog extends riverpod.ConsumerStatefulWidget {
   final JobListItem? jobToEdit;
@@ -103,15 +118,69 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   final _scrollController = ScrollController();
 
   // Loading state
-  bool _isProcessing = false;
+  bool _processing = false;
+
+  /// True from the instant a save button is pressed until its handler
+  /// returns. Set synchronously, before the first await: the handlers used to
+  /// mark themselves busy only after the duplicate-name lookup, so on a slow
+  /// connection every click in those seconds started its own save — one
+  /// impatient user raised the same invoice 12 times.
+  bool _submitting = false;
+
+  /// Every button checks this, so it covers the submit lock too.
+  bool get _isProcessing => _processing || _submitting;
+  set _isProcessing(bool value) => _processing = value;
+
+  /// Runs [action] unless a save is already under way. The lock is taken
+  /// before [action] awaits anything and released when it finishes.
+  Future<void> _submitOnce(Future<void> Function() action) async {
+    if (_isProcessing || _isSavingDraft) return;
+    setState(() => _submitting = true);
+    try {
+      await action();
+    } finally {
+      _submitting = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// Times the save under way, step by step, for the browser console — see
+  /// [SaveTimeline]. One per save attempt.
+  SaveTimeline? _timeline;
+
+  SaveTimeline _startTimeline(String what) {
+    final name = _clientController.text.trim();
+    return _timeline = SaveTimeline(name.isEmpty ? what : '$what "$name"');
+  }
+
+  /// The server's confirmation of the job this dialog added (the Job List
+  /// shows it before then). Handed back to the caller as `saved`, for work
+  /// that needs the job on the server, such as copying its map.
+  Future<void>? _jobSaved;
 
   // Shareable map suggestions for the Area field (name → share URL)
   List<_MapSuggestion> _mapSuggestions = [];
+
+  /// The suggestions, shared by every dialog opened in the next
+  /// [_mapSuggestionsTtl]. Reading all of `mapLinks` (600+ documents) used to
+  /// happen on every open, competing with the save for a slow connection.
+  static Future<List<_MapSuggestion>>? _mapSuggestionsLoad;
+  static DateTime? _mapSuggestionsLoadedAt;
+  static const Duration _mapSuggestionsTtl = Duration(minutes: 10);
+
+  /// Regular client plans read for this dialog, so the save and the
+  /// allocation read each plan once.
+  final Map<String, Future<RegularClient>> _regularClientCache = {};
 
   // Controllers for text fields
   late final TextEditingController _invoiceController;
   late final TextEditingController _amountController;
   late final TextEditingController _clientController;
+
+  /// Who to ask for on the day and their number — the dropsheet's Contact
+  /// and Tel. On the client's line; optional.
+  late final TextEditingController _contactPersonController;
+  late final TextEditingController _contactPhoneController;
 
   late final TextEditingController _areaController;
   late final TextEditingController _quantityController;
@@ -136,6 +205,22 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   // Date values
   DateTime? _selectedDate;
   DateTime? _selectedCollectionDate;
+
+  /// "Needs flyer collection", offered on Community Life Media jobs only.
+  bool _needsFlyerCollection = false;
+
+  /// An appointment's booked slot (job types with a time slot): its start
+  /// ("10:00") and length in half-hours. Null until picked.
+  String? _slotStart;
+  int? _slotCount;
+
+  /// The user picked the appointment's day here. Until then a booking moved
+  /// to another day on the Collection Schedule keeps that day.
+  bool _appointmentDayEdited = false;
+
+  /// Whether the selected job type belongs to Community Life Media.
+  bool get _isClmJob =>
+      JobListItem.isCommunityLifeMediaJobType(_selectedJobType);
 
   // Tools needed for Happy Sun jobs (window/solar cleaning)
   CategorizedTools? _toolsNeeded;
@@ -415,6 +500,13 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     _amountController =
         TextEditingController(text: job?.amount.toStringAsFixed(2) ?? '');
     _clientController = TextEditingController(text: job?.client ?? '');
+    _clientController.addListener(_onClientTextChanged);
+    _contactPersonController =
+        TextEditingController(text: job?.contactPerson ?? '');
+    _contactPhoneController =
+        TextEditingController(text: job?.contactPhone ?? '');
+    // A copy opens on the source's name, so flag the clash straight away.
+    _scheduleClientClashCheck();
     _areaController = TextEditingController(text: job?.area ?? '');
     _quantityController =
         TextEditingController(text: job?.quantity.toString() ?? '');
@@ -529,13 +621,24 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
 
     // Initialize dates - null for new jobs, existing values for editing
     _selectedDate = job?.date;
-    _selectedCollectionDate = job?.collectionDate;
+    // The 2000-01-01 sentinel means "no collection date": show the field
+    // empty rather than as 01 Jan 2000 (saving still writes the sentinel).
+    _selectedCollectionDate =
+        job != null && job.hasCollectionDate ? job.collectionDate : null;
+    // Ticked for a new job or a copy; an existing job shows its own.
+    _needsFlyerCollection = initialNeedsFlyerCollection(job, isCopy: _isCopy);
+    // The booked slot as the Collection Schedule shows it (its own time
+    // slot first, then the date's time). Midnight means none was booked.
+    if (job != null && job.resolvedTimeSlot != '00:00') {
+      _slotStart = job.resolvedTimeSlot;
+      _slotCount = job.resolvedTimeSlots;
+    }
 
     // Initialize tools needed for Happy Sun jobs
     _toolsNeeded = job?.toolsNeeded;
 
-    // Fetch shareable map names for area field suggestions
-    _loadMapNames();
+    // The Area field's map suggestions load when that field is first used
+    // (see _loadMapNames).
   }
 
   /// Job type a new job opens with: Flyer Distribution, found by label so a
@@ -551,56 +654,180 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     return seededId;
   }
 
+  /// Fills the Area field's map suggestions. Called when the field first
+  /// gets focus, not when the dialog opens, and served from the session copy
+  /// when one is fresh — see [_mapSuggestionsLoad].
+  bool _mapNamesRequested = false;
+
   Future<void> _loadMapNames() async {
+    if (_mapNamesRequested) return;
+    _mapNamesRequested = true;
+    final loadedAt = _mapSuggestionsLoadedAt;
+    if (_mapSuggestionsLoad == null ||
+        (loadedAt != null &&
+            DateTime.now().difference(loadedAt) > _mapSuggestionsTtl)) {
+      _mapSuggestionsLoadedAt = null;
+      _mapSuggestionsLoad = _fetchMapSuggestions().then((list) {
+        _mapSuggestionsLoadedAt = DateTime.now();
+        return list;
+      }, onError: (Object e) {
+        // Not kept: the next dialog tries again.
+        _mapSuggestionsLoad = null;
+        throw e;
+      });
+    }
     try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('mapLinks')
-          .orderBy('createdAt', descending: true)
-          .get();
-      final suggestions = <_MapSuggestion>[];
-      final seen = <String>{};
-      for (final doc in snapshot.docs) {
-        final data = doc.data();
-        final name = data['mapName'] as String? ?? '';
-        if (name.isEmpty) continue;
-        final code = doc.id;
-        final url = MapLinkService.buildShareUrl(code);
-        // Deduplicate by name
-        if (seen.add(name.toLowerCase())) {
-          suggestions.add(_MapSuggestion(name: name, url: url));
-        }
-      }
-      suggestions
-          .sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-      if (mounted) {
-        setState(() => _mapSuggestions = suggestions);
-      }
+      final suggestions = await _mapSuggestionsLoad!;
+      if (mounted) setState(() => _mapSuggestions = suggestions);
     } catch (e) {
       debugPrint('Failed to load map suggestions: $e');
     }
   }
 
+  static Future<List<_MapSuggestion>> _fetchMapSuggestions() async {
+    final snapshot = await FirebaseFirestore.instance
+        .collection('mapLinks')
+        .orderBy('createdAt', descending: true)
+        .get();
+    final suggestions = <_MapSuggestion>[];
+    final seen = <String>{};
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      final name = data['mapName'] as String? ?? '';
+      if (name.isEmpty) continue;
+      final url = MapLinkService.buildShareUrl(doc.id);
+      // Deduplicate by name
+      if (seen.add(name.toLowerCase())) {
+        suggestions.add(_MapSuggestion(name: name, url: url));
+      }
+    }
+    suggestions
+        .sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return suggestions;
+  }
+
   // ── Client field ───────────────────────────────────────────────────────────
 
   String? _validateClient(String? value) {
-    if (value == null || value.isEmpty) return 'Client is required';
+    if (value == null || value.trim().isEmpty) return 'Client is required';
+    return null;
+  }
 
-    final trimmed = value.trim().toLowerCase();
-    final editingOwn =
-        widget.jobToEdit?.client.trim().toLowerCase() == trimmed;
-    if (editingOwn) return null;
+  // Two Job List jobs with one client name in a month are indistinguishable to
+  // schedule allocation, the job's map and its Cloud Files folder — all of
+  // them pair on the name (see `jobListClientKey`). So a name that is already
+  // taken is flagged while typing and refused on save.
 
-    final jlp = ref.read(jobListRiverpod);
-    final jobDate = _selectedDate ?? DateTime.now();
-    final sameMonth = jlp.currentMonth.year == jobDate.year &&
-        jlp.currentMonth.month == jobDate.month;
-    if (!sameMonth) return null;
+  /// Other jobs in the job's month already using the typed client name.
+  List<JobListItem> _clientClashes = const [];
+  Timer? _clientClashTimer;
+  int _clientClashSeq = 0;
+  String _clientClashCheckedFor = '';
+  final FocusNode _clientFocus = FocusNode();
 
-    final exists = jlp.allJobListItems
-        .any((item) => item.client.trim().toLowerCase() == trimmed);
-    return exists
-        ? 'Client already exists this month — use a different name'
-        : null;
+  void _onClientTextChanged() {
+    // The controller also fires on cursor moves; only a new name matters.
+    final key = jobListClientKey(_clientController.text);
+    if (key == _clientClashCheckedFor) return;
+    _scheduleClientClashCheck();
+  }
+
+  void _scheduleClientClashCheck() {
+    _clientClashTimer?.cancel();
+    _clientClashTimer =
+        Timer(const Duration(milliseconds: 350), _refreshClientClashes);
+  }
+
+  Future<void> _refreshClientClashes() async {
+    final seq = ++_clientClashSeq;
+    _clientClashCheckedFor = jobListClientKey(_clientController.text);
+    final clashes = await _findClientClashes(fresh: false);
+    if (!mounted || seq != _clientClashSeq) return;
+    setState(() => _clientClashes = clashes);
+  }
+
+  /// An edit that keeps the job's name and month is never refused: a
+  /// duplicate that predates this check stays editable.
+  bool get _keepsOwnName {
+    final job = widget.jobToEdit;
+    if (job == null || job.id.isEmpty) return false; // add or copy
+    final date = _selectedDate ?? job.date;
+    return jobListClientKey(job.client) ==
+            jobListClientKey(_clientController.text) &&
+        job.date.year == date.year &&
+        job.date.month == date.month;
+  }
+
+  Future<List<JobListItem>> _findClientClashes({required bool fresh}) async {
+    if (_keepsOwnName) return const [];
+    try {
+      return await ref.read(jobListRiverpod).findJobsWithClientName(
+            _clientController.text,
+            _selectedDate ?? DateTime.now(),
+            excludeId: widget.jobToEdit?.id ?? '',
+            fresh: fresh,
+          );
+    } catch (e) {
+      // Non-fatal: if the check fails (e.g. offline), let the save proceed.
+      debugPrint('⚠️ Duplicate client check failed: $e');
+      return const [];
+    }
+  }
+
+  /// Save-time gate on every save path. Re-reads the month, so a job someone
+  /// else added since the dialog opened is caught too. Returns false, after
+  /// explaining why, when the name is taken.
+  Future<bool> _clientNameIsFree() async {
+    final clashes = await _findClientClashes(fresh: true);
+    if (!mounted) return false;
+    if (clashes.isEmpty) return true;
+    setState(() => _clientClashes = clashes);
+
+    final name = _clientController.text.trim();
+    final month = DateFormat('MMMM yyyy').format(_selectedDate ?? DateTime.now());
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: Icon(Icons.warning_amber_rounded, color: Colors.orange.shade700),
+        title: const Text('Job name already used'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('"$name" is already on the Job List for $month:'),
+            const SizedBox(height: 8),
+            for (final job in clashes)
+              Padding(
+                padding: const EdgeInsets.only(left: 8, bottom: 4),
+                child: Text(
+                  '• ${job.client} — ${DateFormat('d MMM yyyy').format(job.date)}',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+            const SizedBox(height: 8),
+            const Text(
+              'Schedule allocation, maps and Cloud Files tell jobs apart by '
+              'name, so two jobs with the same name get mixed up. Give this '
+              'job its own name, for example by adding the round or week.',
+            ),
+          ],
+        ),
+        actions: [
+          FilledButton(
+            // The dialog's own context: this form sits under a nested
+            // navigator, and the outer context would pop the form instead.
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Rename job'),
+          ),
+        ],
+      ),
+    );
+    if (mounted) {
+      _clientFocus.requestFocus();
+      _clientController.selection = TextSelection(
+          baseOffset: 0, extentOffset: _clientController.text.length);
+    }
+    return false;
   }
 
   /// The Client field.
@@ -616,15 +843,128 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   /// byte-identical copies of this field, which is exactly the arrangement that
   /// let the desktop layout drift from the mobile one on the Zoho integration.
   Widget _buildClientField() {
+    final clashes = _clientClashes;
+    final warn = Colors.orange.shade800;
     return TextFormField(
       controller: _clientController,
-      decoration: const InputDecoration(
+      focusNode: _clientFocus,
+      decoration: InputDecoration(
         labelText: 'Client *',
-        border: OutlineInputBorder(),
+        border: const OutlineInputBorder(),
+        enabledBorder: clashes.isEmpty
+            ? null
+            : OutlineInputBorder(borderSide: BorderSide(color: warn)),
+        helperText: clashes.isEmpty
+            ? null
+            : 'Already used this month (${[
+                for (final j in clashes)
+                  DateFormat('d MMM').format(j.date),
+              ].join(', ')}) — rename this job so the schedule, maps and '
+                'Cloud Files can tell them apart',
+        helperMaxLines: 3,
+        helperStyle: TextStyle(color: warn, fontWeight: FontWeight.w600),
       ),
       validator: _validateClient,
     );
   }
+
+  /// Row 1: Invoice and Amount (unless the app raises the invoice), then the
+  /// Client with its Contact person and Phone beside it. On a narrow form
+  /// Invoice and Amount take their own line, so the client's three stay
+  /// together.
+  Widget _buildClientLine(bool isMobile) {
+    final showInvoice = !_hideInvoiceOwnedFields;
+    final invoice = TextFormField(
+      controller: _invoiceController,
+      decoration: const InputDecoration(
+        labelText: 'Invoice',
+        border: OutlineInputBorder(),
+      ),
+    );
+
+    if (isMobile) {
+      return Column(children: [
+        if (showInvoice) ...[
+          invoice,
+          const SizedBox(height: 12),
+          _buildAmountField(),
+          const SizedBox(height: 12),
+        ],
+        _buildClientField(),
+        const SizedBox(height: 12),
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(child: _buildContactPersonField()),
+          const SizedBox(width: 12),
+          Expanded(child: _buildContactPhoneField()),
+        ]),
+      ]);
+    }
+
+    List<Widget> clientFields() => [
+          Expanded(flex: 4, child: _buildClientField()),
+          const SizedBox(width: 16),
+          Expanded(flex: 3, child: _buildContactPersonField()),
+          const SizedBox(width: 16),
+          Expanded(flex: 3, child: _buildContactPhoneField()),
+        ];
+
+    if (!showInvoice) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: clientFields(),
+      );
+    }
+    return LayoutBuilder(builder: (context, constraints) {
+      if (constraints.maxWidth >= 900) {
+        return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(flex: 2, child: invoice),
+          const SizedBox(width: 16),
+          Expanded(flex: 2, child: _buildAmountField()),
+          const SizedBox(width: 16),
+          ...clientFields(),
+        ]);
+      }
+      return Column(children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(child: invoice),
+          const SizedBox(width: 16),
+          Expanded(child: _buildAmountField()),
+        ]),
+        const SizedBox(height: 16),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: clientFields(),
+        ),
+      ]);
+    });
+  }
+
+  /// Who the driver asks for on the day — the dropsheet's Contact.
+  Widget _buildContactPersonField() => TextFormField(
+        key: const ValueKey('contactPersonField'),
+        controller: _contactPersonController,
+        textCapitalization: TextCapitalization.words,
+        decoration: const InputDecoration(
+          labelText: 'Contact person',
+          border: OutlineInputBorder(),
+        ),
+      );
+
+  /// The number the driver rings — the dropsheet's Tel. Optional, but a
+  /// number that is too short to dial is caught here, not on the road.
+  Widget _buildContactPhoneField() => TextFormField(
+        key: const ValueKey('contactPhoneField'),
+        controller: _contactPhoneController,
+        keyboardType: TextInputType.phone,
+        inputFormatters: [
+          FilteringTextInputFormatter.allow(RegExp(r'[0-9+()\- /]')),
+        ],
+        decoration: const InputDecoration(
+          labelText: 'Phone number',
+          border: OutlineInputBorder(),
+        ),
+        validator: JobListItem.contactPhoneProblem,
+      );
 
   /// Under the client field: the regular client plan that best matches the
   /// typed name, or a picker over every plan. Choosing one fills the man days
@@ -722,10 +1062,46 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       if (c.totalManDays > 0) {
         _manDaysController.text = c.totalManDays.toStringAsFixed(1);
       }
-      if (_clientController.text.trim().isEmpty) {
-        _clientController.text = c.name;
-      }
+      // Picking the plan names the client: the plan's name is the one the
+      // client goes by, and a half-typed or stale name would otherwise stay.
+      _clientController.text = c.name;
     });
+    _matchCustomerToClientName();
+  }
+
+  /// Link the invoice customer to the client name, when none is chosen yet —
+  /// a customer the user picked by hand is left alone.
+  Future<void> _matchCustomerToClientName() async {
+    final typed = _clientController.text.trim();
+    if (typed.isEmpty) return;
+
+    if (_isXeroJob) {
+      if (_xeroContact != null) return;
+      try {
+        final page = await ref
+            .read(xeroAccountingServiceRiverpod)
+            .listContacts(searchTerm: typed, pageSize: 5);
+        if (!mounted || _xeroContact != null) return;
+        final needle = typed.toLowerCase();
+        for (final contact in page.items) {
+          if (contact.displayName.trim().toLowerCase() == needle) {
+            setState(() => _xeroContact = contact);
+            break;
+          }
+        }
+      } catch (_) {
+        // No match is the normal outcome.
+      }
+      return;
+    }
+
+    if (_invoiceProvider != AccountingProvider.zoho) return;
+    if (_zohoCustomer != null) return;
+    final customers = ref.read(zohoCustomersRiverpod(_zohoOrgId));
+    await customers.initialize();
+    if (!mounted || _zohoCustomer != null) return;
+    final match = customers.findByName(_clientController.text.trim());
+    if (match != null) setState(() => _zohoCustomer = match);
   }
 
   /// Handles a job type selection change. Extracted so both the compact
@@ -1089,9 +1465,8 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         if (textEditingValue.text.isEmpty) {
           return const Iterable<_MapSuggestion>.empty();
         }
-        final query = textEditingValue.text.toLowerCase();
-        return _mapSuggestions
-            .where((s) => s.name.toLowerCase().contains(query))
+        return TextSearch(textEditingValue.text)
+            .rank(_mapSuggestions, (s) => [s.name])
             .take(5);
       },
       displayStringForOption: (_MapSuggestion s) => s.url,
@@ -1106,14 +1481,23 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
             _areaController.text = textController.text;
           }
         });
-        return TextFormField(
-          controller: textController,
-          focusNode: focusNode,
-          decoration: InputDecoration(
-            labelText: areaLabel,
-            border: const OutlineInputBorder(),
+        // The map names are fetched the first time the field is used, not
+        // whenever the dialog opens.
+        return Focus(
+          canRequestFocus: false,
+          skipTraversal: true,
+          onFocusChange: (hasFocus) {
+            if (hasFocus) unawaited(_loadMapNames());
+          },
+          child: TextFormField(
+            controller: textController,
+            focusNode: focusNode,
+            decoration: InputDecoration(
+              labelText: areaLabel,
+              border: const OutlineInputBorder(),
+            ),
+            onFieldSubmitted: (_) => onFieldSubmitted(),
           ),
-          onFieldSubmitted: (_) => onFieldSubmitted(),
         );
       },
       optionsViewBuilder: (context, onSelected, options) {
@@ -1199,7 +1583,12 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     _scrollController.dispose();
     _invoiceController.dispose();
     _amountController.dispose();
+    _clientClashTimer?.cancel();
+    _clientFocus.dispose();
+    _clientController.removeListener(_onClientTextChanged);
     _clientController.dispose();
+    _contactPersonController.dispose();
+    _contactPhoneController.dispose();
     _areaController.dispose();
     _quantityController.dispose();
     _manDaysController.removeListener(_onManDaysChanged);
@@ -1267,7 +1656,9 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                     children: [
                       Expanded(
                         child: Text(
-                          isEditing ? 'Edit Job' : 'Add New Job',
+                          isEditing
+                              ? 'Edit Job'
+                              : (_isCopy ? 'Copy Job' : 'Add New Job'),
                           style: Theme.of(context)
                               .textTheme
                               .headlineSmall
@@ -1306,47 +1697,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                               // the invoice lines settle the amount, both
                               // written back on link. Client then takes the
                               // full row rather than leaving a gap.
-                              if (_hideInvoiceOwnedFields)
-                                _buildClientField()
-                              else
-                                isMobile
-                                    ? Column(
-                                        children: [
-                                          TextFormField(
-                                            controller: _invoiceController,
-                                            decoration: const InputDecoration(
-                                              labelText: 'Invoice',
-                                              border: OutlineInputBorder(),
-                                            ),
-                                          ),
-                                          const SizedBox(height: 12),
-                                          _buildAmountField(),
-                                          const SizedBox(height: 12),
-                                          _buildClientField(),
-                                        ],
-                                      )
-                                    : Row(
-                                        children: [
-                                          Expanded(
-                                            child: TextFormField(
-                                              controller: _invoiceController,
-                                              decoration: const InputDecoration(
-                                                labelText: 'Invoice',
-                                                border: OutlineInputBorder(),
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 16),
-                                          Expanded(
-                                            child: _buildAmountField(),
-                                          ),
-                                          const SizedBox(width: 16),
-                                          Expanded(
-                                            flex: 2,
-                                            child: _buildClientField(),
-                                          ),
-                                        ],
-                                      ),
+                              _buildClientLine(isMobile),
                               _buildRegularClientRow(),
                               const SizedBox(height: 16),
 
@@ -1448,402 +1799,30 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                     ),
                                   ),
                                   const SizedBox(width: 16),
-                                  Expanded(
-                                    flex: 2,
-                                    child: Builder(
-                                      builder: (context) {
-                                        final collectionProvider = ref
-                                            .watch(collectionScheduleRiverpod);
-                                        // Check if current selection has conflicts
-                                        bool hasConflicts = false;
-                                        String conflictMessage = '';
-
-                                        if (_selectedDate != null &&
-                                            _selectedVehicleTrailerCombo !=
-                                                null &&
-                                            VehicleTrailerCombo
-                                                .isVehicleJobType(
-                                                    _selectedJobType)) {
-                                          final vehicleType =
-                                              _selectedVehicleTrailerCombo!
-                                                  .vehicleType;
-
-                                          final occupiedSlots =
-                                              collectionProvider
-                                                  .getOccupiedTimeSlots(
-                                                      vehicleType,
-                                                      _selectedDate!,
-                                                      excludeJobId:
-                                                          widget.jobToEdit?.id);
-                                          if (occupiedSlots.isNotEmpty) {
-                                            hasConflicts = true;
-                                            final vehicleName =
-                                                vehicleType.name.toUpperCase();
-                                            final slotCount =
-                                                occupiedSlots.length;
-                                            conflictMessage =
-                                                '⚠️ $vehicleName has $slotCount time conflict${slotCount > 1 ? 's' : ''} - can still be booked';
-                                          }
-                                        }
-
-                                        return FormField<DateTime>(
-                                          initialValue: _selectedDate,
-                                          validator: (value) {
-                                            if (value == null) {
-                                              return 'Distribution Date is required';
-                                            }
-                                            return null;
-                                          },
-                                          builder:
-                                              (FormFieldState<DateTime> state) {
-                                            return InkWell(
-                                              onTap: () async {
-                                                final date =
-                                                    await showDatePicker(
-                                                  context: context,
-                                                  initialDate: _selectedDate ??
-                                                      DateTime.now(),
-                                                  firstDate: DateTime(2020),
-                                                  lastDate: DateTime(2030),
-                                                );
-                                                if (date != null) {
-                                                  DateTime finalDate = date;
-
-                                                  // If this job type needs time selection, show time picker
-                                                  if (_needsTimeSelection(
-                                                      _selectedJobType)) {
-                                                    if (!mounted) return;
-                                                    final timeSlots =
-                                                        _getAvailableTimeSlots();
-                                                    final selectedTime =
-                                                        await showDialog<
-                                                            TimeOfDay>(
-                                                      context: context,
-                                                      builder: (context) =>
-                                                          Builder(
-                                                        builder: (context) {
-                                                          final collectionProvider =
-                                                              ref.watch(
-                                                                  collectionScheduleRiverpod);
-                                                          // Get vehicle type and count occupied slots for header info
-                                                          VehicleType?
-                                                              vehicleType;
-                                                          List<String>
-                                                              occupiedSlots =
-                                                              [];
-
-                                                          if (_selectedVehicleTrailerCombo !=
-                                                              null) {
-                                                            vehicleType =
-                                                                _selectedVehicleTrailerCombo!
-                                                                    .vehicleType;
-
-                                                            occupiedSlots =
-                                                                collectionProvider
-                                                                    .getOccupiedTimeSlots(
-                                                              vehicleType,
-                                                              date,
-                                                              excludeJobId:
-                                                                  widget
-                                                                      .jobToEdit
-                                                                      ?.id,
-                                                            );
-                                                          }
-
-                                                          return AlertDialog(
-                                                            title: Column(
-                                                              crossAxisAlignment:
-                                                                  CrossAxisAlignment
-                                                                      .start,
-                                                              mainAxisSize:
-                                                                  MainAxisSize
-                                                                      .min,
-                                                              children: [
-                                                                const Text(
-                                                                    'Select Time'),
-                                                                if (vehicleType !=
-                                                                    null) ...[
-                                                                  const SizedBox(
-                                                                      height:
-                                                                          4),
-                                                                  Text(
-                                                                    '${vehicleType.name.toUpperCase()} - ${DateFormat('dd MMM yyyy').format(date)}',
-                                                                    style: const TextStyle(
-                                                                        fontSize:
-                                                                            14,
-                                                                        fontWeight:
-                                                                            FontWeight.normal),
-                                                                  ),
-                                                                  if (occupiedSlots
-                                                                      .isNotEmpty) ...[
-                                                                    const SizedBox(
-                                                                        height:
-                                                                            2),
-                                                                    Text(
-                                                                      '⚠️ ${occupiedSlots.length} time slot${occupiedSlots.length > 1 ? 's' : ''} have conflicts',
-                                                                      style: const TextStyle(
-                                                                          fontSize:
-                                                                              12,
-                                                                          color:
-                                                                              Colors.orange),
-                                                                    ),
-                                                                  ],
-                                                                ],
-                                                              ],
-                                                            ),
-                                                            content: SizedBox(
-                                                              width: 300,
-                                                              height: 400,
-                                                              child: ListView
-                                                                  .builder(
-                                                                itemCount:
-                                                                    timeSlots
-                                                                        .length,
-                                                                itemBuilder:
-                                                                    (context,
-                                                                        index) {
-                                                                  final time =
-                                                                      timeSlots[
-                                                                          index];
-                                                                  final timeString =
-                                                                      _formatTimeOfDay(
-                                                                          time);
-
-                                                                  // Check if this time slot is occupied for collection jobs
-                                                                  bool
-                                                                      isOccupied =
-                                                                      false;
-                                                                  String
-                                                                      conflictDetails =
-                                                                      '';
-                                                                  Color
-                                                                      conflictColor =
-                                                                      Colors
-                                                                          .red;
-
-                                                                  if (VehicleTrailerCombo
-                                                                      .isVehicleJobType(
-                                                                          _selectedJobType)) {
-                                                                    // Get vehicle type from quantity
-                                                                    if (_selectedVehicleTrailerCombo !=
-                                                                        null) {
-                                                                      final vehicleType =
-                                                                          _selectedVehicleTrailerCombo!
-                                                                              .vehicleType;
-
-                                                                      final occupiedSlots = collectionProvider.getOccupiedTimeSlots(
-                                                                          vehicleType,
-                                                                          date, // Use the newly selected date, not _selectedDate
-                                                                          excludeJobId: widget
-                                                                              .jobToEdit
-                                                                              ?.id);
-                                                                      isOccupied =
-                                                                          occupiedSlots
-                                                                              .contains(timeString);
-
-                                                                      // Get details about the conflicting job
-                                                                      if (isOccupied) {
-                                                                        final conflictingJobs = collectionProvider
-                                                                            .getJobsForDate(
-                                                                                date)
-                                                                            .where((job) =>
-                                                                                job.vehicleType == vehicleType &&
-                                                                                _jobOccupiesTimeSlot(job, timeString))
-                                                                            .toList();
-
-                                                                        if (conflictingJobs
-                                                                            .isNotEmpty) {
-                                                                          final job =
-                                                                              conflictingJobs.first;
-                                                                          final clientName = job.clients.isNotEmpty
-                                                                              ? job.clients.first
-                                                                              : 'Unknown Client';
-                                                                          conflictDetails =
-                                                                              'Booked by $clientName';
-
-                                                                          // Different colors for different job types
-                                                                          switch (
-                                                                              job.jobType) {
-                                                                            case 'junk collection':
-                                                                              conflictColor = Colors.red;
-                                                                              break;
-                                                                            case 'furniture move':
-                                                                              conflictColor = Colors.orange;
-                                                                              break;
-                                                                            case 'trailer towing':
-                                                                              conflictColor = Colors.purple;
-                                                                              break;
-                                                                            default:
-                                                                              conflictColor = Colors.red;
-                                                                          }
-                                                                        }
-                                                                      }
-                                                                    }
-                                                                  }
-
-                                                                  return Container(
-                                                                    decoration:
-                                                                        BoxDecoration(
-                                                                      color: isOccupied
-                                                                          ? conflictColor.withValues(
-                                                                              alpha: 0.1)
-                                                                          : null,
-                                                                      borderRadius:
-                                                                          BorderRadius.circular(
-                                                                              4),
-                                                                      border: isOccupied
-                                                                          ? Border.all(
-                                                                              color: conflictColor.withValues(alpha: 0.3))
-                                                                          : null,
-                                                                    ),
-                                                                    child:
-                                                                        ListTile(
-                                                                      title:
-                                                                          Text(
-                                                                        _formatTimeOfDay(
-                                                                            time),
-                                                                        style:
-                                                                            TextStyle(
-                                                                          color: isOccupied
-                                                                              ? conflictColor
-                                                                              : null,
-                                                                          fontWeight: isOccupied
-                                                                              ? FontWeight.bold
-                                                                              : null,
-                                                                        ),
-                                                                      ),
-                                                                      subtitle: isOccupied
-                                                                          ? Text(
-                                                                              '⚠️ ${conflictDetails.isNotEmpty ? conflictDetails : 'Occupied'} (Click to override)',
-                                                                              style: TextStyle(color: conflictColor, fontSize: 12),
-                                                                            )
-                                                                          : const Text(
-                                                                              'Available',
-                                                                              style: TextStyle(color: Colors.green, fontSize: 12),
-                                                                            ),
-                                                                      leading: isOccupied
-                                                                          ? Icon(
-                                                                              Icons.warning,
-                                                                              color: conflictColor,
-                                                                              size: 16,
-                                                                            )
-                                                                          : const Icon(
-                                                                              Icons.schedule,
-                                                                              color: Colors.green,
-                                                                              size: 16,
-                                                                            ),
-                                                                      onTap: () =>
-                                                                          Navigator.of(context)
-                                                                              .pop(time),
-                                                                    ),
-                                                                  );
-                                                                },
-                                                              ),
-                                                            ),
-                                                            actions: [
-                                                              TextButton(
-                                                                onPressed: () =>
-                                                                    Navigator.of(
-                                                                            context)
-                                                                        .pop(),
-                                                                child: const Text(
-                                                                    'Cancel'),
-                                                              ),
-                                                            ],
-                                                          );
-                                                        },
-                                                      ),
-                                                    );
-
-                                                    if (selectedTime != null) {
-                                                      finalDate = DateTime(
-                                                        date.year,
-                                                        date.month,
-                                                        date.day,
-                                                        selectedTime.hour,
-                                                        selectedTime.minute,
-                                                      );
-                                                    } else {
-                                                      return; // User cancelled time selection
-                                                    }
-                                                  }
-
-                                                  setState(() {
-                                                    _selectedDate = finalDate;
-                                                  });
-                                                  state.didChange(finalDate);
-                                                }
-                                              },
-                                              child: InputDecorator(
-                                                decoration: InputDecoration(
-                                                  labelText: _needsTimeSelection(
-                                                          _selectedJobType)
-                                                      ? 'Appointment Date & Time *'
-                                                      : 'Distribution Date *',
-                                                  border:
-                                                      const OutlineInputBorder(),
-                                                  suffixIcon: Icon(
-                                                      _needsTimeSelection(
-                                                              _selectedJobType)
-                                                          ? Icons.schedule
-                                                          : Icons
-                                                              .calendar_today,
-                                                      color: hasConflicts
-                                                          ? Colors.orange
-                                                          : null),
-                                                  errorText: state.errorText ??
-                                                      (hasConflicts
-                                                          ? conflictMessage
-                                                          : null),
-                                                  helperText: hasConflicts
-                                                      ? 'Click to view times (conflicts can be overridden)'
-                                                      : null,
-                                                  helperStyle: hasConflicts
-                                                      ? const TextStyle(
-                                                          color: Colors.orange)
-                                                      : null,
-                                                ),
-                                                child: Row(
-                                                  children: [
-                                                    Expanded(
-                                                      child: Text(
-                                                        _selectedDate != null
-                                                            ? _needsTimeSelection(
-                                                                    _selectedJobType)
-                                                                ? DateFormat(
-                                                                        'dd MMM, HH:mm')
-                                                                    .format(
-                                                                        _selectedDate!)
-                                                                : DateFormat(
-                                                                        'dd MMM yyyy')
-                                                                    .format(
-                                                                        _selectedDate!)
-                                                            : _needsTimeSelection(
-                                                                    _selectedJobType)
-                                                                ? 'Select Date & Time'
-                                                                : 'Select Distribution Date',
-                                                        style: TextStyle(
-                                                          color: hasConflicts
-                                                              ? Colors.orange
-                                                              : null,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                    if (hasConflicts)
-                                                      const Icon(
-                                                        Icons.warning,
-                                                        color: Colors.orange,
-                                                        size: 16,
-                                                      ),
-                                                  ],
-                                                ),
-                                              ),
-                                            );
-                                          },
-                                        );
-                                      },
+                                  Expanded(flex: 2, child: _buildDateField()),
+                                ],
+                              ),
+                              // An appointment's time slot, picked in one
+                              // drag. Junk & Stuff bookings show on the
+                              // Collection Schedule at this time and length.
+                              if (_needsTimeSelection(_selectedJobType)) ...[
+                                const SizedBox(height: 16),
+                                _buildTimeSlotField(),
+                              ],
+                              const SizedBox(height: 16),
+                              // Row 4: collection — Needs flyer collection
+                              // (Community Life Media only), Collection Date
+                              // and Collection Address on one line.
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (_isClmJob) ...[
+                                    Expanded(
+                                      flex: 2,
+                                      child: _buildFlyerCollectionTick(),
                                     ),
-                                  ),
+                                    const SizedBox(width: 16),
+                                  ],
                                   // Collection Date is redundant for Junk &
                                   // Stuff: leaving it unset stores the
                                   // 2000-01-01 sentinel, and the Collection
@@ -1855,84 +1834,39 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                                   // time slot included, which this no longer
                                   // competes with.
                                   if (!_isJunkAndStuffJob) ...[
-                                  const SizedBox(width: 16),
+                                    Expanded(
+                                      flex: 2,
+                                      child: _buildCollectionDateField(),
+                                    ),
+                                    const SizedBox(width: 16),
+                                  ],
                                   Expanded(
-                                    flex: 2,
-                                    child: FormField<DateTime>(
-                                      initialValue: _selectedCollectionDate,
-                                      validator: (value) {
-                                        // Collection Date is not required
-                                        return null;
-                                      },
-                                      builder:
-                                          (FormFieldState<DateTime> state) {
-                                        return InkWell(
-                                          onTap: () async {
-                                            final date = await showDatePicker(
-                                              context: context,
-                                              initialDate:
-                                                  _selectedCollectionDate ??
-                                                      DateTime.now(),
-                                              firstDate: DateTime(2020),
-                                              lastDate: DateTime(2030),
-                                            );
-                                            if (date != null) {
-                                              setState(() {
-                                                _selectedCollectionDate = date;
-                                              });
-                                              state.didChange(date);
-                                            }
-                                          },
-                                          child: InputDecorator(
-                                            decoration: InputDecoration(
-                                              labelText: 'Collection Date',
-                                              border:
-                                                  const OutlineInputBorder(),
-                                              suffixIcon: const Icon(
-                                                  Icons.calendar_today),
-                                              errorText: state.errorText,
-                                            ),
-                                            child: Text(_selectedCollectionDate !=
-                                                    null
-                                                ? DateFormat('dd MMM yyyy')
-                                                    .format(
-                                                        _selectedCollectionDate!)
-                                                : 'Select Collection Date'),
-                                          ),
-                                        );
-                                      },
+                                    flex: 3,
+                                    child: TextFormField(
+                                      controller: _collectionAddressController,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Collection Address',
+                                        border: OutlineInputBorder(),
+                                      ),
+                                      // One line like its neighbours; grows
+                                      // to two for a long address.
+                                      minLines: 1,
+                                      maxLines: 2,
                                     ),
                                   ),
-                                  ],
                                 ],
                               ),
                               const SizedBox(height: 16),
-                              // Row 5: Collection Address
-                              Row(children: [
-                                Expanded(
-                                  child: TextFormField(
-                                    controller: _collectionAddressController,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Collection Address',
-                                      border: OutlineInputBorder(),
-                                    ),
-                                    maxLines: 2,
-                                  ),
-                                ),
-                                const SizedBox(width: 16),
 
-                                // Row 6: Special Instructions
-                                Expanded(
-                                  child: TextFormField(
-                                    controller: _specialInstructionsController,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Special Instructions',
-                                      border: OutlineInputBorder(),
-                                    ),
-                                    maxLines: 2,
-                                  ),
+                              // Row 5: Special Instructions
+                              TextFormField(
+                                controller: _specialInstructionsController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Special Instructions',
+                                  border: OutlineInputBorder(),
                                 ),
-                              ]),
+                                maxLines: 2,
+                              ),
                               const SizedBox(height: 16),
 
                               // Conditionally show fields based on job type flags.
@@ -2072,6 +2006,12 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                     ),
                   ),
 
+                  // A save still running on a slow connection says so —
+                  // the invoice run has its own panel with the same hint.
+                  SlowActionHint(
+                      busy: _isProcessing && !_sagaActive,
+                      action: 'Saving the job'),
+
                   const SizedBox(height: 16),
 
                   // Action buttons
@@ -2151,7 +2091,10 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                             // once the sequence has started.
                             if (!(_willInvoice && _sagaActive))
                               ElevatedButton(
-                                onPressed: _isProcessing
+                                // Also off once an invoice run has started:
+                                // the job is already written, so saving again
+                                // would add a second copy.
+                                onPressed: (_isProcessing || _sagaActive)
                                     ? null
                                     : (_willInvoice
                                         ? _saveJobWithInvoiceAndAllocation
@@ -2293,7 +2236,10 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
                             // once the sequence has started.
                             if (!(_willInvoice && _sagaActive))
                               ElevatedButton(
-                                onPressed: _isProcessing
+                                // Also off once an invoice run has started:
+                                // the job is already written, so saving again
+                                // would add a second copy.
+                                onPressed: (_isProcessing || _sagaActive)
                                     ? null
                                     : (_willInvoice
                                         ? _saveJobWithInvoiceAndAllocation
@@ -2367,6 +2313,277 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     return current;
   }
 
+  /// The job's date. For an appointment it is the day only — the time is
+  /// picked in the Time slot field beside it.
+  Widget _buildDateField() {
+    final appointment = _needsTimeSelection(_selectedJobType);
+    final job = widget.jobToEdit;
+    // A booking dragged to another day on the Collection Schedule shows
+    // there on that day; say so, until a day is picked here.
+    String? scheduleNote;
+    if (appointment &&
+        !_appointmentDayEdited &&
+        job != null &&
+        job.collectionDate.year != 2000 &&
+        _selectedDate != null &&
+        !DateUtils.isSameDay(job.collectionDate, _selectedDate) &&
+        (JobTypeProvider.instance
+                ?.appearsOnCollectionSchedule(_selectedJobType) ??
+            false)) {
+      scheduleNote = 'On the Collection Schedule: '
+          '${DateFormat('EEE d MMM').format(job.collectionDate)}';
+    }
+    return FormField<DateTime>(
+      initialValue: _selectedDate,
+      validator: (_) {
+        if (_selectedDate == null) {
+          return appointment
+              ? 'Appointment date is required'
+              : 'Distribution Date is required';
+        }
+        // Adding or copying: not in the past. A job copied from May with
+        // its date left alone landed back in May.
+        return _pastDateProblem(_selectedDate);
+      },
+      builder: (FormFieldState<DateTime> state) {
+        return InkWell(
+          onTap: () async {
+            final date = await _pickJobDate(_selectedDate);
+            if (date == null || !mounted) return;
+            setState(() {
+              _selectedDate = date;
+              _appointmentDayEdited = true;
+            });
+            // The clash is per month.
+            _scheduleClientClashCheck();
+            state.didChange(date);
+            if (state.hasError) state.validate();
+          },
+          child: InputDecorator(
+            decoration: InputDecoration(
+              labelText:
+                  appointment ? 'Appointment Date *' : 'Distribution Date *',
+              border: const OutlineInputBorder(),
+              suffixIcon: const Icon(Icons.calendar_today),
+              errorText: state.errorText,
+              errorMaxLines: 2,
+              helperText: scheduleNote,
+              helperMaxLines: 2,
+            ),
+            child: Text(_selectedDate != null
+                ? DateFormat('dd MMM yyyy').format(_selectedDate!)
+                : appointment
+                    ? 'Select Appointment Date'
+                    : 'Select Distribution Date'),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Other bookings of the chosen vehicle on the appointment's day (Junk &
+  /// Stuff vehicle jobs); empty for anything else.
+  List<CollectionJob> _sameVehicleBookings() {
+    final combo = _selectedVehicleTrailerCombo;
+    final date = _selectedDate;
+    if (combo == null ||
+        date == null ||
+        !VehicleTrailerCombo.isVehicleJobType(_selectedJobType)) {
+      return const [];
+    }
+    final ownId = widget.jobToEdit?.id ?? '';
+    return ref
+        .watch(collectionScheduleRiverpod)
+        .getJobsForDate(date)
+        .where((b) =>
+            b.vehicleType == combo.vehicleType &&
+            (ownId.isEmpty || b.id != ownId))
+        .toList();
+  }
+
+  /// The appointment's time slot, picked in one go on the Collection
+  /// Schedule's half-hour rows: drag across the times, or tap one to move
+  /// the booking there. Overlapping another booking of the same vehicle is
+  /// flagged, not refused — as on the Collection Schedule itself.
+  Widget _buildTimeSlotField() {
+    final start = _slotStart;
+    final count = start != null && slotLengthOptions(start).contains(_slotCount)
+        ? _slotCount
+        : null;
+
+    final bookings = _sameVehicleBookings();
+    String who(CollectionJob b) =>
+        b.clients.isNotEmpty ? b.clients.first : 'Another job';
+    final clashes = start == null || count == null
+        ? const <CollectionJob>[]
+        : [
+            for (final b in bookings)
+              if (slotsOverlap(start, count, b.timeSlot, b.timeSlots)) b,
+          ];
+    final vehicle = _selectedVehicleTrailerCombo?.vehicleType.name
+            .toUpperCase() ??
+        'The vehicle';
+    final clashText = clashes.isEmpty
+        ? null
+        : '⚠️ $vehicle is also booked '
+            '${clashes.map((b) => '${slotRange(b.timeSlot, b.timeSlots)} (${who(b)})').join(', ')}'
+            ' — it can still be booked';
+
+    final theme = Theme.of(context);
+    return FormField<String>(
+      validator: (_) {
+        if (!_needsTimeSelection(_selectedJobType)) return null;
+        if (_slotStart == null ||
+            !slotLengthOptions(_slotStart!).contains(_slotCount)) {
+          return 'Drag across the times to pick the time slot';
+        }
+        return null;
+      },
+      builder: (FormFieldState<String> state) {
+        return InputDecorator(
+          isEmpty: false,
+          decoration: InputDecoration(
+            labelText: 'Time slot *',
+            border: const OutlineInputBorder(),
+            contentPadding: const EdgeInsets.fromLTRB(12, 16, 12, 8),
+            errorText: state.errorText,
+            helperText: clashText,
+            helperMaxLines: 3,
+            helperStyle: const TextStyle(color: Colors.orange),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Wrap(
+                spacing: 12,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  if (start != null && count != null)
+                    Text(
+                      '${slotRange(start, count)}  ·  ${slotLength(count)}',
+                      style: theme.textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.bold),
+                    ),
+                  Text(
+                    start != null && count != null
+                        ? 'Drag to change it, or tap a time to move it'
+                        : 'Drag across the times — press on the start, '
+                            'let go on the end',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              TimeSlotStrip(
+                start: start,
+                slots: count,
+                enabled: !_isProcessing,
+                booked: [
+                  for (final b in bookings)
+                    (start: b.timeSlot, slots: b.timeSlots, label: who(b)),
+                ],
+                onChanged: (newStart, slots) {
+                  setState(() {
+                    _slotStart = newStart;
+                    _slotCount = slots;
+                  });
+                  state.didChange('$newStart/$slots');
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// The "Needs flyer collection" tick, boxed like the fields beside it
+  /// (Collection Date, Collection Address) and the same height.
+  Widget _buildFlyerCollectionTick() {
+    final enabled = !_isProcessing;
+    void toggle() =>
+        setState(() => _needsFlyerCollection = !_needsFlyerCollection);
+    return Tooltip(
+      message: 'Tick if the flyers must be collected before they can be '
+          'distributed',
+      child: InkWell(
+        onTap: enabled ? toggle : null,
+        borderRadius: BorderRadius.circular(4),
+        child: InputDecorator(
+          isEmpty: false,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            // 12 + 32 (compact checkbox) + 12 = a standard 56 px field.
+            contentPadding: EdgeInsets.fromLTRB(4, 12, 12, 12),
+          ),
+          child: Row(
+            children: [
+              Checkbox(
+                value: _needsFlyerCollection,
+                onChanged: enabled ? (_) => toggle() : null,
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              const SizedBox(width: 4),
+              const Flexible(
+                child: Text(
+                  'Needs flyer collection',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Collection Date. Optional: left unset it stores the 2000-01-01
+  /// sentinel (see [_buildJobListItem]).
+  Widget _buildCollectionDateField() {
+    return FormField<DateTime>(
+      initialValue: _selectedCollectionDate,
+      validator: (_) => _pastDateProblem(_selectedCollectionDate),
+      builder: (FormFieldState<DateTime> state) {
+        void set(DateTime? date) {
+          setState(() => _selectedCollectionDate = date);
+          state.didChange(date);
+          if (state.hasError) state.validate();
+        }
+
+        return InkWell(
+          onTap: () async {
+            final date = await _pickJobDate(_selectedCollectionDate);
+            if (date != null && mounted) set(date);
+          },
+          child: InputDecorator(
+            decoration: InputDecoration(
+              labelText: 'Collection Date',
+              border: const OutlineInputBorder(),
+              // A copied job can bring the old job's collection date with
+              // it, so the date can be cleared as well as changed.
+              suffixIcon: _selectedCollectionDate == null
+                  ? const Icon(Icons.calendar_today)
+                  : IconButton(
+                      key: const ValueKey('clearCollectionDate'),
+                      tooltip: 'Clear the collection date',
+                      icon: const Icon(Icons.clear),
+                      onPressed: _isProcessing ? null : () => set(null),
+                    ),
+              errorText: state.errorText,
+              errorMaxLines: 2,
+            ),
+            child: Text(_selectedCollectionDate != null
+                ? DateFormat('dd MMM yyyy').format(_selectedCollectionDate!)
+                : 'Select Collection Date'),
+          ),
+        );
+      },
+    );
+  }
+
   JobListItem _buildJobListItem() {
     final bool isNew = widget.jobToEdit == null;
 
@@ -2398,11 +2615,13 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     final exclAmount = enteredAmount;
     final inclAmount = vatProvider.inclFromExcl(enteredAmount);
 
-    return JobListItem(
+    final built = JobListItem(
       id: widget.jobToEdit?.id ?? '',
       invoice: _invoiceController.text.trim(),
       amount: enteredAmount,
       client: _clientController.text.trim(),
+      contactPerson: _contactPersonController.text.trim(),
+      contactPhone: _contactPhoneController.text.trim(),
       jobStatusId: _selectedJobStatusId,
       invoiceStatusId: _resolveInvoiceStatusId(),
       jobTypeId: _selectedJobType,
@@ -2413,6 +2632,9 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       date: _selectedDate ?? DateTime.now(),
       collectionAddress: _collectionAddressController.text.trim(),
       collectionDate: _selectedCollectionDate ?? DateTime(2000, 1, 1),
+      // Only a Community Life Media job can need its flyers collected; a
+      // job moved to another company's type drops the tick.
+      needsFlyerCollection: _isClmJob && _needsFlyerCollection,
       specialInstructions: _specialInstructionsController.text.trim(),
       quantityDistributed:
           int.tryParse(_quantityDistributedController.text) ?? 0,
@@ -2435,6 +2657,27 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     ).withPreservedSystemFields(_invoiceUnlinked
         ? widget.jobToEdit?.withoutInvoiceLink()
         : widget.jobToEdit);
+    return _withAppointmentSlot(built);
+  }
+
+  /// [item] booked for the picked time slot, when its job type takes one:
+  /// the date carries the start time (the Dropsheet and Happy Sun read it),
+  /// and the Collection Schedule's own copy — time slot, length, and a
+  /// collection day set by dragging there — follows.
+  JobListItem _withAppointmentSlot(JobListItem item) {
+    if (!_needsTimeSelection(_selectedJobType)) return item;
+    final start = slotMinutes(_slotStart);
+    final count = _slotCount;
+    if (start == null || count == null) return item; // the form refuses it
+    final day = item.date;
+    return item.withAppointment(
+      DateTime(day.year, day.month, day.day, start ~/ 60, start % 60),
+      slots: count,
+      onCollectionSchedule: JobTypeProvider.instance
+              ?.appearsOnCollectionSchedule(_selectedJobType) ??
+          false,
+      moveCollectionDay: _appointmentDayEdited,
+    );
   }
 
   /// Unlink the job's void invoice and switch the invoicing section over to
@@ -2461,37 +2704,34 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     });
   }
 
-  /// Checks whether [clientName] already exists in the job list for the
-  /// month of [_selectedDate].
-  ///
-  /// • Loaded month  → in-memory set, 0 extra reads.
-  /// • Different month → single Firestore fetch (cached for the session).
-  ///
-  /// Returns an error message to show the user, or null if the name is free.
-  Future<String?> _checkDuplicateClient() async {
-    // Skip check when editing and the client name hasn't changed.
-    final clientName = _clientController.text.trim();
-    final editingOwn = widget.jobToEdit?.client.trim().toLowerCase() ==
-        clientName.toLowerCase();
-    if (editingOwn) return null;
-
-    final jobDate = _selectedDate ?? DateTime.now();
-    try {
-      final existingClients =
-          await ref.read(jobListRiverpod).fetchClientNamesForMonth(jobDate);
-      if (existingClients.contains(clientName.toLowerCase())) {
-        return 'Client "$clientName" already exists for that month — use a different name.';
-      }
-    } catch (e) {
-      // Non-fatal: if the check fails (e.g. offline), let the save proceed.
-      debugPrint('⚠️ Duplicate client check failed: $e');
-    }
-    return null;
-  }
-
   /// True when this dialog is duplicating an existing job. The copy flow
   /// passes the source job with its id cleared.
   bool get _isCopy => widget.jobToEdit != null && widget.jobToEdit!.id.isEmpty;
+
+  /// Adding or copying a job, not editing an existing one. Only then are
+  /// past dates refused (see [pastJobDateProblem]).
+  bool get _isNewOrCopy => widget.jobToEdit == null || _isCopy;
+
+  /// [pastJobDateProblem] for this dialog's job.
+  String? _pastDateProblem(DateTime? picked) => pastJobDateProblem(picked,
+      isNewOrCopy: _isNewOrCopy, today: scheduleToday());
+
+  /// A date picker opened on [current]. When adding or copying a job, past
+  /// days are greyed out.
+  Future<DateTime?> _pickJobDate(DateTime? current) {
+    final today = scheduleToday();
+    final first =
+        earliestPickableJobDate(isNewOrCopy: _isNewOrCopy, today: today);
+    final day = current == null
+        ? null
+        : DateTime(current.year, current.month, current.day);
+    return showDatePicker(
+      context: context,
+      initialDate: day == null || day.isBefore(first) ? today : day,
+      firstDate: first,
+      lastDate: DateTime(2030),
+    );
+  }
 
   /// Pull the source job's invoice across when copying, so a repeat job keeps
   /// its client, line items, descriptions and amounts without retyping.
@@ -3145,6 +3385,8 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       'invoice': _invoiceController.text,
       'amount': _amountController.text,
       'client': _clientController.text,
+      'contactPerson': _contactPersonController.text,
+      'contactPhone': _contactPhoneController.text,
       'area': _areaController.text,
       'quantity': _quantityController.text,
       'manDays': _manDaysController.text,
@@ -3161,6 +3403,10 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         'date': Timestamp.fromDate(_selectedDate!),
       if (_selectedCollectionDate != null)
         'collectionDate': Timestamp.fromDate(_selectedCollectionDate!),
+      'needsFlyerCollection': _needsFlyerCollection,
+      if (_slotStart != null) 'slotStart': _slotStart,
+      if (_slotCount != null) 'slotCount': _slotCount,
+      'appointmentDayEdited': _appointmentDayEdited,
 
       // The chosen customer, by id — both providers create customers up front,
       // so the id is enough to find it again and the rest can be re-read.
@@ -3201,6 +3447,8 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       _invoiceController.text = str('invoice');
       _amountController.text = str('amount');
       _clientController.text = str('client');
+      _contactPersonController.text = str('contactPerson');
+      _contactPhoneController.text = str('contactPhone');
       _areaController.text = str('area');
       _quantityController.text = str('quantity');
       _manDaysController.text = str('manDays');
@@ -3217,7 +3465,20 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         _selectedJobStatusId = str('jobStatusId');
       }
       _selectedDate = date('date') ?? _selectedDate;
-      _selectedCollectionDate = date('collectionDate');
+      _scheduleClientClashCheck();
+      final collection = date('collectionDate');
+      _selectedCollectionDate = collection == null ||
+              (collection.year == 2000 &&
+                  collection.month == 1 &&
+                  collection.day == 1)
+          ? null
+          : collection;
+      // A draft from before the tick existed keeps the dialog's default.
+      _needsFlyerCollection =
+          d['needsFlyerCollection'] as bool? ?? _needsFlyerCollection;
+      if (d['slotStart'] is String) _slotStart = d['slotStart'] as String;
+      if (d['slotCount'] is num) _slotCount = (d['slotCount'] as num).toInt();
+      _appointmentDayEdited = d['appointmentDayEdited'] == true;
 
       _xeroLineItems = ((d['xeroLines'] as List<dynamic>?) ?? const [])
           .map((e) {
@@ -3293,7 +3554,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     if (!mounted) return;
 
     setState(() => _isSavingDraft = false);
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(
         content: Text(saved
             ? 'Draft saved — reopen Add Job to carry on.'
@@ -3309,7 +3570,10 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     if (!_canDraft || _draftPromptShown) return;
     _draftPromptShown = true;
 
-    final draft = await ref.read(jobDraftServiceRiverpod).load();
+    // Prefetched by the Job List, so usually already in hand and the prompt
+    // shows on the dialog's first frame rather than seconds later.
+    final service = ref.read(jobDraftServiceRiverpod);
+    final draft = service.isKnown ? service.cached : await service.load();
     if (draft == null || !mounted) return;
 
     final savedAt = (draft['savedAt'] as Timestamp?)?.toDate();
@@ -3970,8 +4234,14 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   /// [InvoiceSaveSaga] so the ordering, retry and never-bill-twice rules are
   /// one implementation rather than two that would drift.
   Future<void> _saveJobWithXeroInvoice() async {
+    // Never build a second saga — see [_saveJobWithZohoInvoice].
+    final existing = _xeroSaga;
+    if (existing != null) {
+      await existing.run();
+      return;
+    }
     void complain(String message) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(content: Text(message), backgroundColor: Colors.red),
       );
     }
@@ -4006,10 +4276,11 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       return;
     }
 
+    final tl = _startTimeline('Save job + Xero invoice');
+
     // Duplicate-client check, same as every other save path.
-    final dupError = await _checkDuplicateClient();
-    if (dupError != null) {
-      if (mounted) complain(dupError);
+    if (!await tl.step('duplicate-name check', _clientNameIsFree)) {
+      tl.finish();
       return;
     }
     if (!mounted) return;
@@ -4036,6 +4307,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
           if (mounted) setState(() {});
         },
         allocateToSchedule: _allocateAfterInvoice ? _assignToSchedule : null,
+        timeline: tl,
         saveJob: _persistJob,
         // Keyed on the job alone. If an earlier attempt raised the invoice but
         // failed to link it, this replays that invoice rather than raising a
@@ -4075,6 +4347,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     });
 
     await _xeroSaga!.run();
+    tl.finish();
 
     if (mounted) setState(() => _isProcessing = false);
     // Deliberately stays open on success — the user closes it once they have
@@ -4123,27 +4396,27 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   /// Save or print the Xero-rendered PDF.
   Future<void> _printCreatedXeroInvoice({bool download = false}) async {
     final invoice = _xeroSaga?.invoice;
-    if (invoice == null) return;
+    // Two clicks can land before the buttons disable; a second Save dialog
+    // would fail and download a stray copy.
+    if (invoice == null || _isPrinting) return;
 
     setState(() => _isPrinting = true);
     try {
-      final bytes = await ref
-          .read(xeroAccountingServiceRiverpod)
-          .getInvoicePdf(invoice.invoiceId);
-      if (!mounted) return;
-
+      final service = ref.read(xeroAccountingServiceRiverpod);
       final fileName = invoiceFileName(
         InvoiceMessageSubject.fromXero(invoice),
       );
       if (download) {
-        final saved = await saveFileWithPicker(
-          suggestedName: '$fileName.pdf',
-          bytes: bytes,
+        // Save dialog first — it must open straight after the click; the
+        // PDF loads while the user picks a folder.
+        await savePdfWithFeedback(
+          ScaffoldMessenger.of(context),
+          fileName: fileName,
+          load: () => service.getInvoicePdf(invoice.invoiceId),
         );
-        if (!saved) {
-          await Printing.sharePdf(bytes: bytes, filename: '$fileName.pdf');
-        }
       } else {
+        final bytes = await service.getInvoicePdf(invoice.invoiceId);
+        if (!mounted) return;
         await Printing.layoutPdf(
           onLayout: (_) async => bytes,
           name: fileName,
@@ -4151,10 +4424,13 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        final error = describeAccountingError(e,
+            action: download ? 'download the PDF' : 'open the PDF for printing');
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
-            content: Text('Could not load invoice PDF: $e'),
+            content: Text(error.message),
             backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
           ),
         );
       }
@@ -4231,7 +4507,9 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       );
       return draft.copyWith(id: existing.id);
     }
-    return jobListProvider.addJobListItemAndReturn(draft);
+    // Waits for the server: the invoice link that follows is a transaction,
+    // and transactions read the job from the server.
+    return _addNewJob(draft, waitForServer: true);
   }
 
   /// Save the job, then raise its split invoices — for a job whose primary
@@ -4239,15 +4517,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   Future<void> _saveJobThenSplits() async {
     if (!_formKey.currentState!.validate()) return;
 
-    final dupError = await _checkDuplicateClient();
-    if (dupError != null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(dupError), backgroundColor: Colors.red),
-        );
-      }
-      return;
-    }
+    if (!await _clientNameIsFree()) return;
     if (!mounted) return;
 
     if (_splitBaseJob == null) {
@@ -4259,7 +4529,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       } catch (e) {
         if (mounted) {
           setState(() => _isProcessing = false);
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(
               content: Text('Error saving job: $e'),
               backgroundColor: Colors.red,
@@ -4300,7 +4570,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     }
     if (!ok) {
       setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Finish the split invoices before saving.'),
           backgroundColor: Colors.red,
@@ -4310,9 +4580,12 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     return ok;
   }
 
-  /// Raise and link each split invoice in turn, stopping at the first failure
-  /// so its panel can be retried. Completed ones are never repeated — each
-  /// saga keeps its own results across attempts.
+  /// Raise and link the split invoices **together** — they are separate
+  /// invoices with their own idempotency keys, so nothing orders them. Only
+  /// their links take turns ([_linkSplitInTurn]): each is a transaction on
+  /// the same job, and side by side they would only fight over it. A failed
+  /// one keeps its own Retry; completed ones are never repeated — each saga
+  /// keeps its own results across attempts.
   Future<void> _runSplitInvoices(JobListItem savedJob) async {
     if (_splitsRunning) return;
     setState(() {
@@ -4320,14 +4593,14 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       _isProcessing = true;
     });
     try {
-      for (final draft in _activeSplitDrafts) {
-        if (draft.isDone) continue;
-        draft.saga ??= _isXeroJob
-            ? _buildXeroSplitSaga(draft, savedJob)
-            : _buildZohoSplitSaga(draft, savedJob);
-        await draft.saga!.run();
-        if (!draft.isDone) break;
-      }
+      await Future.wait([
+        for (final draft in _activeSplitDrafts)
+          if (!draft.isDone)
+            (draft.saga ??= _isXeroJob
+                    ? _buildXeroSplitSaga(draft, savedJob)
+                    : _buildZohoSplitSaga(draft, savedJob))
+                .run(),
+      ]);
     } finally {
       if (mounted) {
         setState(() {
@@ -4336,6 +4609,16 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         });
       }
     }
+  }
+
+  /// The split links, one after another — see [_runSplitInvoices].
+  Future<void> _splitLinkChain = Future<void>.value();
+
+  Future<void> _linkSplitInTurn(Future<void> Function() link) {
+    final mine = _splitLinkChain.then((_) => link());
+    // The next link waits for this one, whatever its outcome.
+    _splitLinkChain = mine.then((_) {}, onError: (_) {});
+    return mine;
   }
 
   InvoiceSaveSaga<XeroContact, XeroInvoice> _buildXeroSplitSaga(
@@ -4382,8 +4665,8 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
           syncedAt: DateTime.now(),
         );
         draft.linked = link;
-        return jobListService.linkSplitInvoiceTxn(
-            jobId: job.id, date: job.date, link: link);
+        return _linkSplitInTurn(() => jobListService.linkSplitInvoiceTxn(
+            jobId: job.id, date: job.date, link: link));
       },
     );
   }
@@ -4395,6 +4678,8 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     final lines = draft.usableZohoLines;
     final linesTotal = lines.fold<double>(0, (r, li) => r + li.amount);
     final issuedOn = scheduleToday();
+    // One key for this saga's lifetime — see [_saveJobWithZohoInvoice].
+    final createKey = newZohoIdempotencyKey('invoice');
 
     return InvoiceSaveSaga<ZohoCustomer, ZohoInvoice>(
       providerName: 'Zoho',
@@ -4416,6 +4701,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
           notes: _invoiceDetailsController.text.trim(),
           lineItems: lines,
         ),
+        idempotencyKey: createKey,
       ),
       linkToJob: (job, customer, invoice) {
         // No VAT on Zoho, so one figure serves as both totals. Zoho's own
@@ -4433,8 +4719,8 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
           syncedAt: DateTime.now(),
         );
         draft.linked = link;
-        return jobListService.linkSplitInvoiceTxn(
-            jobId: job.id, date: job.date, link: link);
+        return _linkSplitInTurn(() => jobListService.linkSplitInvoiceTxn(
+            jobId: job.id, date: job.date, link: link));
       },
     );
   }
@@ -4696,11 +4982,11 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   /// The main "Add/Update Job + Invoice" button. The saga owns the write and
   /// returns `skipAllocation: true`, so without this flag a new job of an
   /// auto-allocate type was invoiced but never reached the schedule.
-  Future<void> _saveJobWithInvoiceAndAllocation() {
-    final isNew = widget.jobToEdit == null || _isCopy;
-    _allocateAfterInvoice = isNew && _jobTypeAutoAllocates;
-    return _saveJobWithInvoice();
-  }
+  Future<void> _saveJobWithInvoiceAndAllocation() => _submitOnce(() {
+        final isNew = widget.jobToEdit == null || _isCopy;
+        _allocateAfterInvoice = isNew && _jobTypeAutoAllocates;
+        return _saveJobWithInvoice();
+      });
 
   /// Save the job **and** raise its Zoho invoice as one confirmed sequence.
   ///
@@ -4713,13 +4999,20 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   /// This is a saga, not a transaction: Zoho cannot join a Firestore
   /// transaction. See [InvoiceSaveSaga] for the ordering and retry rules.
   Future<void> _saveJobWithZohoInvoice() async {
+    // Never build a second saga for this dialog: a new saga knows nothing of
+    // the invoice the first one raised and would raise another. Resume it.
+    final existing = _saga;
+    if (existing != null) {
+      await existing.run();
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
 
     // Same rule as the Xero path: a real, saved customer or nothing.
     if (_zohoCustomer == null || !_zohoCustomer!.existsInZoho) {
       setState(() => _customerError =
           'Select a valid Zoho customer, or create one with "New".');
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Select a valid Zoho customer before invoicing.'),
           backgroundColor: Colors.red,
@@ -4733,7 +5026,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         .where((li) => li.name.isNotEmpty && li.quantity > 0)
         .toList();
     if (usableLines.isEmpty || usableLines.every((li) => li.amount <= 0)) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Add at least one line item with a name and amount.'),
           backgroundColor: Colors.red,
@@ -4742,14 +5035,12 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       return;
     }
 
+    final tl = _startTimeline(
+        _existingInvoice != null ? 'Update job + Zoho invoice' : 'Save job + Zoho invoice');
+
     // Duplicate-client check, same as every other save path.
-    final dupError = await _checkDuplicateClient();
-    if (dupError != null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(dupError), backgroundColor: Colors.red),
-        );
-      }
+    if (!await tl.step('duplicate-name check', _clientNameIsFree)) {
+      tl.finish();
       return;
     }
     if (!mounted) return;
@@ -4758,6 +5049,10 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
         usableLines.fold<double>(0, (running, li) => running + li.amount);
     final invoicesProvider = ref.read(zohoInvoicesRiverpod(_zohoOrgId));
     final jobListService = ref.read(jobListServiceRiverpod);
+    // One key for this saga's lifetime: when a slow connection loses Zoho's
+    // reply, the retry gets back the invoice already raised instead of
+    // raising a second one (functions/lib/zoho_books.js, runIdempotent).
+    final createKey = newZohoIdempotencyKey('invoice');
 
     setState(() {
       _isProcessing = true;
@@ -4771,6 +5066,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
           if (mounted) setState(() {});
         },
         allocateToSchedule: _allocateAfterInvoice ? _assignToSchedule : null,
+        timeline: tl,
         saveJob: _persistJob,
         createInvoice: (job, customer) {
           final existingInvoice = _existingInvoice;
@@ -4812,6 +5108,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
               notes: _invoiceDetailsController.text.trim(),
               lineItems: usableLines,
             ),
+            idempotencyKey: createKey,
           );
         },
         linkToJob: (job, customer, invoice) {
@@ -4831,6 +5128,7 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     });
 
     await _saga!.run();
+    tl.finish();
 
     if (mounted) setState(() => _isProcessing = false);
     // The dialog deliberately stays open on success too — the user closes it
@@ -4904,31 +5202,32 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   /// the correct filename; otherwise the print dialog opens.
   Future<void> _printCreatedInvoice({bool download = false}) async {
     final invoice = _saga?.invoice;
-    if (invoice == null) return;
+    // Two clicks can land before the buttons disable; a second Save dialog
+    // would fail and download a stray copy.
+    if (invoice == null || _isPrinting) return;
 
     setState(() => _isPrinting = true);
     try {
-      final bytes =
-          await ref.read(zohoInvoicesRiverpod(_zohoOrgId)).getInvoicePdf(invoice.invoiceId);
-      if (!mounted) return;
+      final provider = ref.read(zohoInvoicesRiverpod(_zohoOrgId));
       final fileName =
           invoiceFileName(InvoiceMessageSubject.fromZoho(invoice));
       if (download) {
-        // Prefer the OS Save-As dialog so the file lands in the user's own
-        // folder. Falls back to an ordinary download where the File System
-        // Access API is unavailable (Firefox, Safari).
+        // OS Save-As dialog first (it must open straight after the click),
+        // fetching the PDF while the user picks a folder. Falls back to an
+        // ordinary download where the dialog is unavailable (Firefox,
+        // Safari). Every outcome is shown as a toast.
         //
         // Either way the filename is set explicitly — unlike layoutPdf, which
         // prints a blob in an iframe and lets Chrome name the output after the
         // page title ("CLM Schedule").
-        final saved = await saveFileWithPicker(
-          suggestedName: '$fileName.pdf',
-          bytes: bytes,
+        await savePdfWithFeedback(
+          ScaffoldMessenger.of(context),
+          fileName: fileName,
+          load: () => provider.getInvoicePdf(invoice.invoiceId),
         );
-        if (!saved) {
-          await Printing.sharePdf(bytes: bytes, filename: '$fileName.pdf');
-        }
       } else {
+        final bytes = await provider.getInvoicePdf(invoice.invoiceId);
+        if (!mounted) return;
         await Printing.layoutPdf(
           onLayout: (_) async => bytes,
           name: fileName, // honoured on native; ignored on web
@@ -4936,10 +5235,13 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        final error = describeAccountingError(e,
+            action: download ? 'download the PDF' : 'open the PDF for printing');
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
-            content: Text('Could not load invoice PDF: $e'),
+            content: Text(error.message),
             backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
           ),
         );
       }
@@ -4975,118 +5277,145 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     if (_canDraft) ref.read(jobDraftServiceRiverpod).clear();
   }
 
-  void _saveJob() async {
-    debugPrint('\n💾 AddEditJobDialog._saveJob: Started');
-    debugPrint('   Job Type: $_selectedJobType');
-    debugPrint('   Client: ${_clientController.text.trim()}');
-    debugPrint(
-        '   Tools Needed: ${_toolsNeeded != null ? "Yes (${_toolsNeeded!.totalCount} tools)" : "No"}');
+  Future<void> _saveJob() => _submitOnce(_saveJobBody);
 
-    if (_formKey.currentState!.validate()) {
-      // Async duplicate check — covers months not currently loaded in memory.
-      final dupError = await _checkDuplicateClient();
-      if (dupError != null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(dupError), backgroundColor: Colors.red),
-          );
-        }
-        return;
-      }
+  Future<void> _saveJobBody() async {
+    if (!_formKey.currentState!.validate()) return;
+    final isEdit = widget.jobToEdit != null && widget.jobToEdit!.id.isNotEmpty;
+    final tl = _startTimeline(isEdit ? 'Edit job' : 'Add job');
 
-      setState(() {
-        _isProcessing = true;
-      });
+    // Async duplicate check — covers months not currently loaded in memory.
+    if (!await tl.step('duplicate-name check', _clientNameIsFree)) {
+      tl.finish();
+      return;
+    }
 
-      debugPrint('   Creating JobListItem object...');
-      final jobListItem = _buildJobListItem();
-      debugPrint('   ✅ JobListItem created');
-      debugPrint('   - Job Type: ${jobListItem.jobTypeId}');
-      debugPrint('   - Has Tools: ${jobListItem.toolsNeeded != null}');
+    setState(() {
+      _isProcessing = true;
+    });
 
-      try {
-        // Offer address geocoding for jobs with a usable address.
-        // Priority: `area` field (when it's a free-text address, not a map link)
-        // → `collectionAddress` field. Skip if area is a URL/map-link.
-        JobListItem finalJobListItem = jobListItem;
-        CustomPolygon? addressPoint;
+    final jobListItem = _buildJobListItem();
 
-        final areaText = jobListItem.area.trim();
-        final collectionText = jobListItem.collectionAddress.trim();
-        final areaIsMapLink = _isMapLinkOrUrl(areaText);
+    try {
+      // Offer address geocoding for Junk & Stuff and Happy Sun jobs with a
+      // usable address — CLM distribution and community jobs are worked
+      // over areas, and a pin on every schedule job only clutters the
+      // dropsheet and work areas.
+      // Priority: `area` field (when it's a free-text address, not a map link)
+      // → `collectionAddress` field. Skip if area is a URL/map-link.
+      JobListItem finalJobListItem = jobListItem;
+      CustomPolygon? addressPoint;
 
-        String? addressToSearch;
+      final areaText = jobListItem.area.trim();
+      final collectionText = jobListItem.collectionAddress.trim();
+      final areaIsMapLink = _isMapLinkOrUrl(areaText);
+
+      String? addressToSearch;
+      if (ClientAddressPin.isCallOutJobType(jobListItem.jobTypeId)) {
         if (areaText.isNotEmpty && !areaIsMapLink) {
           addressToSearch = areaText;
         } else if (collectionText.isNotEmpty) {
           addressToSearch = collectionText;
         }
+      }
 
-        if (addressToSearch != null) {
-          addressPoint = await _resolveAddressPoint(
-            addressToSearch,
-            _selectedJobType,
+      if (addressToSearch != null) {
+        final address = addressToSearch;
+        addressPoint = await tl.userStep('address pin',
+            () => _resolveAddressPoint(address, _selectedJobType));
+        if (addressPoint != null) {
+          // Attach the geocoded point to the job list item's custom polygons
+          finalJobListItem = jobListItem.copyWith(
+            customPolygons: [
+              ...jobListItem.customPolygons,
+              addressPoint,
+            ],
           );
-          if (addressPoint != null) {
-            // Attach the geocoded point to the job list item's custom polygons
-            finalJobListItem = jobListItem.copyWith(
-              customPolygons: [
-                ...jobListItem.customPolygons,
-                addressPoint,
-              ],
-            );
-          }
         }
+      }
 
-        // If editing an existing job (not a copy — copies have an empty id).
-        if (widget.jobToEdit != null && widget.jobToEdit!.id.isNotEmpty) {
-          debugPrint(
-              '   📝 Editing existing job - returning JobListItem to caller');
-          debugPrint(
-              '   No direct DB write from dialog - JobList/JobListGrid handles update');
-          // Offer to void the invoice when this edit moves the job into the
-          // nominated cancelled status. Runs before the pop because the
-          // dialog is the only place that knows both the old and new status;
-          // the caller owns the DB write, so a user who confirms the void and
-          // then hits a save failure would have voided early — they confirm
-          // explicitly, and the invoice can be recreated.
-          await _maybeVoidOnCancel(finalJobListItem);
-          if (!mounted) return;
-          _clearDraft();
-          Navigator.of(context).pop(finalJobListItem);
+      // If editing an existing job (not a copy — copies have an empty id).
+      if (isEdit) {
+        // Offer to void the invoice when this edit moves the job into the
+        // nominated cancelled status. Runs before the pop because the
+        // dialog is the only place that knows both the old and new status;
+        // the caller owns the DB write, so a user who confirms the void and
+        // then hits a save failure would have voided early — they confirm
+        // explicitly, and the invoice can be recreated.
+        await tl.userStep(
+            'void-invoice check', () => _maybeVoidOnCancel(finalJobListItem));
+        if (!mounted) return;
+        _clearDraft();
+        Navigator.of(context).pop(finalJobListItem);
+        tl.markClosed();
+        return;
+      }
+
+      // A new or copied job. The dialog saves it itself, without waiting
+      // for the server (see [_addNewJob]), and closes. With an allocation,
+      // the schedule jobs and the Job List job are saved side by side once
+      // the preview is confirmed.
+      String message;
+      if (finalJobListItem.regularClientId.isNotEmpty) {
+        // A regular client's job is allocated from its own copies of the
+        // plan's areas, so they are copied in first. It is saved whether
+        // or not the allocation goes ahead.
+        final withAreas = await tl.step('copy regular client areas',
+            () => _withRegularClientPolygons(finalJobListItem));
+        final allocated = await _allocateToSchedule(withAreas,
+            addressPoint: addressPoint, waitForSave: false);
+        finalJobListItem = withAreas;
+        message = allocated != null
+            ? 'Job added and allocated to the schedule!'
+            : 'Job added — not allocated to the schedule. '
+                'Edit the job and use Automatic Allocation to allocate.';
+      } else if (_jobTypeAutoAllocates) {
+        final allocated = await _allocateToSchedule(finalJobListItem,
+            addressPoint: addressPoint, waitForSave: false);
+        // Declined or impossible: the dialog stays open, as before.
+        if (allocated == null) {
+          tl.finish();
           return;
         }
+        message = 'Job added and allocated to the schedule!';
+      } else {
+        message = 'Job added!';
+      }
 
-        // For new / copied jobs: only show the assignment preview when the
-        // job type has autoAllocatesToSchedule = true. Otherwise pop with the
-        // item directly — the caller (JobListGrid) owns the DB write so we
-        // never double-save.
-        if (_jobTypeAutoAllocates) {
-          debugPrint(
-              '   📅 Auto-allocate job type — showing assignment preview');
-          await _showJobAssignmentPreview(finalJobListItem,
-              addressPoint: addressPoint);
-        } else {
-          debugPrint('   📋 Non-auto-allocate — returning item to caller');
-          _clearDraft();
-          if (mounted) Navigator.of(context).pop(finalJobListItem);
-        }
-      } finally {
-        if (mounted) {
-          setState(() {
-            _isProcessing = false;
-          });
-        }
+      final saved = await tl.step(
+          'add to Job List (on screen)', () => _addNewJob(finalJobListItem));
+      if (!mounted) return;
+      _clearDraft();
+      Navigator.of(context).pop({
+        'job': saved,
+        'skipAllocation': true,
+        'message': message,
+        'saved': _jobSaved,
+      });
+      tl.markClosed();
+    } catch (e) {
+      tl.finish();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showToast(
+          SnackBar(
+            content: Text('Error saving job: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
       }
     }
   }
 
-  void _saveJobWithoutAllocation() async {
-    debugPrint('\n💾 AddEditJobDialog._saveJobWithoutAllocation: Started');
-    debugPrint(
-        '   ⚠️ WARNING: This method calls JobListProvider.addJobListItem directly!');
-    debugPrint('   Job Type: $_selectedJobType');
+  Future<void> _saveJobWithoutAllocation() =>
+      _submitOnce(_saveJobWithoutAllocationBody);
 
+  Future<void> _saveJobWithoutAllocationBody() async {
     // Skipping the schedule allocation must not also skip the invoice —
     // they are unrelated decisions, and a job saved here with invoicing
     // switched on was silently left unbilled. The saga already writes the
@@ -5101,90 +5430,83 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
       return;
     }
 
-    if (_formKey.currentState!.validate()) {
-      // Async duplicate check — covers months not currently loaded in memory.
-      final dupError = await _checkDuplicateClient();
-      if (dupError != null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(dupError), backgroundColor: Colors.red),
-          );
-        }
-        return;
-      }
+    if (!_formKey.currentState!.validate()) return;
+    final tl = _startTimeline('Add job (no allocation)');
 
-      setState(() {
-        _isProcessing = true;
+    // Async duplicate check — covers months not currently loaded in memory.
+    if (!await tl.step('duplicate-name check', _clientNameIsFree)) {
+      tl.finish();
+      return;
+    }
+
+    setState(() {
+      _isProcessing = true;
+    });
+
+    final jobListItem = _buildJobListItem();
+
+    try {
+      // Saved without waiting for the server (see [_addNewJob]); the dialog
+      // returns the saved job — with its id — to the caller. Callers like
+      // the Job List "copy" flow rely on that id to clone the linked map
+      // afterwards, once `saved` says the server has the job.
+      final savedJob = await tl.step(
+          'add to Job List (on screen)', () => _addNewJob(jobListItem));
+      _clearDraft();
+      if (!mounted) return;
+      Navigator.of(context).pop({
+        'job': savedJob,
+        'skipAllocation': true,
+        'saved': _jobSaved,
       });
-
-      final jobListItem = _buildJobListItem();
-
-      try {
-        // Save the job to database but skip automatic schedule allocation.
-        // Use `addJobListItemAndReturn` (instead of the void variant) so
-        // the dialog can return the *saved* job — including its generated
-        // Firestore id — to the caller. Callers like the Job-List "copy"
-        // flow rely on that id to clone the linked map afterwards.
-        debugPrint(
-            '   🔥 Calling JobListProvider.addJobListItemAndReturn (direct DB write)');
-        debugPrint(
-            '   This will trigger Happy Sun sync if window/solar cleaning!');
-        final savedJob = await ref
-            .read(jobListRiverpod)
-            .addJobListItemAndReturn(jobListItem);
-        debugPrint(
-            '   ✅ JobListProvider.addJobListItemAndReturn completed (id=${savedJob.id})');
-
-        // Return the saved job (with id) plus the skip-allocation flag.
-        _clearDraft();
-        Navigator.of(context).pop({'job': savedJob, 'skipAllocation': true});
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Error saving job: $e'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-      } finally {
-        if (mounted) {
-          setState(() {
-            _isProcessing = false;
-          });
-        }
+      tl.markClosed();
+    } catch (e) {
+      tl.finish();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showToast(
+          SnackBar(
+            content: Text('Error saving job: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
       }
     }
   }
 
-  void _saveJobWithAutomaticAllocation() async {
-    if (_formKey.currentState!.validate()) {
-      // Async duplicate check — covers months not currently loaded in memory.
-      final dupError = await _checkDuplicateClient();
-      if (dupError != null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(dupError), backgroundColor: Colors.red),
-          );
-        }
-        return;
-      }
+  Future<void> _saveJobWithAutomaticAllocation() =>
+      _submitOnce(_saveJobWithAutomaticAllocationBody);
 
-      setState(() {
-        _isProcessing = true;
-      });
+  Future<void> _saveJobWithAutomaticAllocationBody() async {
+    if (!_formKey.currentState!.validate()) return;
+    final tl = _startTimeline('Allocate job');
 
-      final jobListItem = _buildJobListItem();
+    // Async duplicate check — covers months not currently loaded in memory.
+    if (!await tl.step('duplicate-name check', _clientNameIsFree)) {
+      tl.finish();
+      return;
+    }
 
-      try {
-        // For editing with automatic allocation, show assignment preview
-        await _showJobAssignmentPreview(jobListItem);
-      } finally {
-        if (mounted) {
-          setState(() {
-            _isProcessing = false;
-          });
-        }
+    setState(() {
+      _isProcessing = true;
+    });
+
+    final jobListItem = _buildJobListItem();
+
+    try {
+      // For editing with automatic allocation, show assignment preview
+      await _showJobAssignmentPreview(jobListItem);
+    } finally {
+      tl.finish();
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
       }
     }
   }
@@ -5237,43 +5559,47 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
 
   Future<void> _showJobAssignmentPreview(JobListItem jobListItem,
       {CustomPolygon? addressPoint}) async {
-    final allocated =
-        await _allocateToSchedule(jobListItem, addressPoint: addressPoint);
-    if (allocated && mounted) {
+    final allocated = await _allocateToSchedule(jobListItem,
+        addressPoint: addressPoint, waitForSave: false);
+    if (allocated != null && mounted) {
       // Return the original job list item
       _clearDraft();
       Navigator.of(context).pop(jobListItem);
+      _timeline?.markClosed();
     }
   }
 
   /// Calculate assignments, show the preview and, on confirm, create the
-  /// schedule jobs. Returns true when the user confirmed. Never pops this
-  /// dialog — callers decide what happens next.
-  Future<bool> _allocateToSchedule(JobListItem jobListItem,
-      {CustomPolygon? addressPoint}) async {
+  /// schedule jobs. Returns the summary when the user confirmed, null when
+  /// they declined or it failed (the failure is shown). Never pops this
+  /// dialog — callers decide what happens next. With [waitForSave] false it
+  /// returns once the jobs are on the grid; the save carries on behind.
+  Future<String?> _allocateToSchedule(JobListItem jobListItem,
+      {CustomPolygon? addressPoint, bool waitForSave = true}) async {
     try {
-      final detail =
-          await _assignToSchedule(jobListItem, addressPoint: addressPoint);
-      return detail != null;
+      return await _assignToSchedule(jobListItem,
+          addressPoint: addressPoint, waitForSave: waitForSave);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text(e is StateError ? e.message : '$e'),
             backgroundColor: Colors.red,
           ),
         );
       }
-      return false;
+      return null;
     }
   }
 
   /// Core of the schedule allocation, shared by the plain save and the
   /// invoicing saga's "Allocate to Schedule" step. Returns a summary when the
   /// schedule jobs were created, null when the user declined the preview, and
-  /// throws when no assignment is possible or the schedule write fails.
+  /// throws when no assignment is possible or — with [waitForSave] — the
+  /// schedule write fails.
   Future<String?> _assignToSchedule(JobListItem jobListItem,
-      {CustomPolygon? addressPoint}) async {
+      {CustomPolygon? addressPoint, bool waitForSave = true}) async {
+    final tl = _timeline;
     final scheduleProvider = ref.read(scheduleRiverpod);
     final assignmentService = JobAssignmentService(
       scheduleProvider,
@@ -5290,15 +5616,18 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     String? note;
     final List<JobAssignment> proposed;
     if (jobListItem.regularClientId.isNotEmpty) {
-      final plan = await _regularClientPlan(jobListItem.regularClientId);
+      final maps = tl == null
+          ? await _regularClientMaps(jobListItem)
+          : await tl.step('read regular client plan',
+              () => _regularClientMaps(jobListItem));
       proposed = assignmentService.calculateRegularClientAssignments(
         client: jobListItem.client,
-        plan: plan.$1,
-        map: plan.$2,
+        plan: maps.plan,
+        map: maps.areas,
         startDate: jobListItem.date,
         allowOccupied: allowOccupied,
       );
-      note = plan.$3;
+      note = maps.note;
     } else {
       proposed = assignmentService.calculateJobAssignments(
         client: jobListItem.client,
@@ -5314,98 +5643,330 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
     }
 
     if (!mounted) return null;
-    final assignments = await showDialog<List<JobAssignment>>(
-      context: context,
-      builder: (context) => JobAssignmentPreviewDialog(
-        assignments: proposed,
-        allowOccupied: allowOccupied,
-        note: note,
-        candidatesFor: (date) =>
-            assignmentService.candidatesFor(date, allowOccupied: allowOccupied),
-        onConfirm: (edited) => Navigator.of(context).pop(edited),
-        onCancel: () => Navigator.of(context).pop(),
-      ),
-    );
+    Future<List<JobAssignment>?> preview() => showDialog<List<JobAssignment>>(
+          context: context,
+          builder: (context) => JobAssignmentPreviewDialog(
+            assignments: proposed,
+            allowOccupied: allowOccupied,
+            note: note,
+            candidatesFor: (date) => assignmentService.candidatesFor(date,
+                allowOccupied: allowOccupied),
+            onConfirm: (edited) => Navigator.of(context).pop(edited),
+            onCancel: () => Navigator.of(context).pop(),
+          ),
+        );
+    final assignments = tl == null
+        ? await preview()
+        : await tl.userStep('allocation preview', preview);
     if (assignments == null || assignments.isEmpty || !mounted) return null;
 
     await _createScheduleJobs(assignmentService, assignments,
-        addressPoint: addressPoint);
+        addressPoint: addressPoint, waitForSave: waitForSave);
     return 'Assigned ${assignments.length} '
         '${assignments.length == 1 ? 'job' : 'jobs'} to distributors';
   }
 
-  /// The regular client plan, its gallery map and a preview note naming the
-  /// plan (and any areas it lists that the map no longer has). Throws a
-  /// [StateError] the caller shows when either is gone or the plan is empty.
-  Future<(RegularClient, ShareableMap, String)> _regularClientPlan(
-      String id) async {
-    final plan = await RegularClientService().get(id);
-    if (plan == null) {
-      throw StateError('The regular client map for this job was deleted.');
-    }
+  /// Everything a regular-client job's allocation needs: the plan and the
+  /// map to take its areas from.
+  ///
+  /// Nothing is linked: the schedule jobs get copies of the areas. They come
+  /// from the job's own copied polygons ([JobListItem.customPolygons], see
+  /// [_withRegularClientPolygons]) — so an area redrawn on this job is worked
+  /// as redrawn — unless the job holds none of the plan's areas, in which
+  /// case they come from the plan's map.
+  ///
+  /// Throws a [StateError] the caller shows when the plan or its map is gone,
+  /// or the plan has no slots.
+  Future<_RegularClientMaps> _regularClientMaps(JobListItem job) async {
+    final plan = await _regularClientWithMap(job.regularClientId);
     if (plan.slots.isEmpty) {
       throw StateError('${plan.name} has no distributor slots yet. Open it '
           'under Apps → Regular Clients and allocate its areas.');
     }
-    final map =
-        await ShareableMapsFirestoreService().getMap(plan.mapMonthKey, plan.mapId);
-    if (map == null) {
-      throw StateError('The map "${plan.mapName}" behind ${plan.name} is no '
-          'longer in the gallery.');
-    }
-    final ids = {
-      for (final l in map.layers)
-        for (final p in l.polygons)
-          if ((p.id ?? '').isNotEmpty) p.id!,
-    };
-    final missing = plan.missingIds(ids).length;
+    final template = plan.map!;
+
+    final own = [
+      for (final p in job.customPolygons)
+        if ((p.id ?? '').isNotEmpty && plan.allocatedIds.contains(p.id)) p,
+    ];
+    final ownIds = {for (final p in own) p.id};
+    final areas = own.isEmpty
+        ? template
+        : template.copyWith(layers: [
+            MapLayer(
+              id: 'job_areas',
+              name: MapLayer.targetAreasName,
+              order: 0,
+              defaultColor: Colors.blue,
+              polygons: own,
+              // Points the job holds no copy of (a job saved before plans
+              // had points) still come from the plan's map.
+              points: [
+                for (final l in template.layers)
+                  for (final pt in l.points)
+                    if (!ownIds.contains(pt.id)) pt,
+              ],
+              createdAt: template.createdAt,
+              updatedAt: template.updatedAt,
+            ),
+          ]);
+
+    final missing = plan.missingIds(_polygonIds(areas)).length;
     final note = 'From regular client map ${plan.name}.'
-        '${missing > 0 ? ' $missing area(s) in the plan are no longer on the '
-            'map and were skipped.' : ''}';
-    return (plan, map, note);
+        '${own.isNotEmpty ? ' Areas from this job\'s copied areas.' : ''}'
+        '${missing > 0 ? ' $missing area(s) in the plan are not on the map '
+            'and were skipped.' : ''}';
+    return _RegularClientMaps(plan: plan, areas: areas, note: note);
   }
 
+  /// Regular client [id] with its own map (copied, read-only, from the
+  /// gallery map it was made from if it predates plans owning one).
+  ///
+  /// Read once per dialog: the save and the allocation both need it.
+  Future<RegularClient> _regularClientWithMap(String id) =>
+      _regularClientCache[id] ??= _readRegularClientWithMap(id).then(
+        (plan) => plan,
+        onError: (Object e, StackTrace st) {
+          _regularClientCache.remove(id); // a retry reads it again
+          Error.throwWithStackTrace(e, st);
+        },
+      );
+
+  Future<RegularClient> _readRegularClientWithMap(String id) async {
+    final service = RegularClientService();
+    final plan = await service.get(id);
+    if (plan == null) {
+      throw StateError('The regular client map for this job was deleted.');
+    }
+    return service.ensureOwnMap(plan);
+  }
+
+  static Set<String> _polygonIds(ShareableMap map) => {
+        for (final l in map.layers) ...[
+          for (final p in l.polygons)
+            if ((p.id ?? '').isNotEmpty) p.id!,
+          for (final pt in l.points)
+            if (pt.id.isNotEmpty) pt.id,
+        ],
+      };
+
+  /// [draft] carrying copies of its regular client's areas in
+  /// `customPolygons`, ids and all, so the plan still matches them. No map
+  /// is made or linked: the plan's map stays in the Regular Clients library
+  /// and the job owns only its copies. A draft that already holds some of
+  /// the plan's areas (a copied job) is returned as it is.
+  ///
+  /// For a job about to be saved, where a failure must not stop the save: it
+  /// is reported and the draft is returned without areas.
+  Future<JobListItem> _withRegularClientPolygons(JobListItem draft) async {
+    if (draft.regularClientId.isEmpty) return draft;
+    try {
+      final plan = await _regularClientWithMap(draft.regularClientId);
+      final held = {for (final p in draft.customPolygons) p.id};
+      if (plan.allocatedIds.any(held.contains)) return draft;
+      return draft.copyWith(customPolygons: [
+        ...draft.customPolygons,
+        for (final l in plan.map!.layers) ...[
+          for (final p in l.polygons)
+            if (p.isPolygon && p.points.length >= 3) p,
+          // Handout and poster spots, as point-type polygons with the
+          // point's id so the plan still matches them.
+          for (final pt in l.points)
+            if (pt.id.isNotEmpty) mapPointAsWorkMap(pt),
+        ],
+      ]);
+    } catch (e) {
+      debugPrint('⚠️ Regular client areas for ${draft.client} failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showToast(SnackBar(
+          content: Text('The job is saved without its areas — they could '
+              'not be copied from the regular client map: $e'),
+          backgroundColor: Colors.orange.shade800,
+        ));
+      }
+      return draft;
+    }
+  }
+
+  /// Save [draft] as a new job (a create or a copy) and return it with its
+  /// id. A regular-client job is saved with copies of its plan's areas and
+  /// then gets its own map made from the plan's map — see
+  /// [_createRegularClientJobMap].
+  ///
+  /// Returns as soon as the job is on the Job List: the id is made on this
+  /// device and Firestore keeps the write queued until the server has it
+  /// (see [JobListProvider.addJobListItemLocal]). That confirmation is kept
+  /// in [_jobSaved]; [waitForServer] waits for it — the invoice saga needs
+  /// the job on the server before its link transaction.
+  Future<JobListItem> _addNewJob(JobListItem draft,
+      {bool waitForServer = false}) async {
+    // Captured up front: the map is made after the dialog may have closed.
+    final provider = ref.read(jobListRiverpod);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final added =
+        provider.addJobListItemLocal(await _withRegularClientPolygons(draft));
+    final saved = added.job;
+    _jobSaved = added.saved;
+    if (!waitForServer) {
+      _timeline?.background('Job List job saved on the server', added.saved);
+      unawaited(added.saved.then((_) {}, onError: (Object e) {
+        messenger?.showToast(SnackBar(
+          content: Text('The job "${saved.client}" could not be saved: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 12),
+        ));
+      }));
+    }
+    if (saved.regularClientId.isNotEmpty) {
+      // Not awaited: the allocation preview, or the dialog closing, need not
+      // wait on it. Made once the server has the job, which the map links to.
+      unawaited(added.saved.then(
+        (_) => _createRegularClientJobMap(saved, provider, messenger),
+        onError: (_) {},
+      ));
+    }
+    if (waitForServer) await added.saved;
+    return saved;
+  }
+
+  /// Give the saved regular-client [job] its own map, like a copied job gets
+  /// a clone of its source's map: a new gallery map holding the plan's map
+  /// layers (ids kept, so the schedule-allocation view still matches the
+  /// job's copied areas), named after the client with the job's month on the
+  /// description's first line, filed in the job's SAST month and linked to
+  /// the job.
+  ///
+  /// Linking writes `shareableMapId`, and the `onJobListItemWritten` trigger
+  /// then files the job's Cloud Files folder onto the map as usual. The
+  /// plan's map itself stays in the Regular Clients library, untouched.
+  ///
+  /// Failures are reported and never thrown: the job is already saved, and a
+  /// map can still be linked from the Area column.
+  static Future<void> _createRegularClientJobMap(
+    JobListItem job,
+    JobListProvider provider,
+    ScaffoldMessengerState? messenger,
+  ) async {
+    try {
+      final service = RegularClientService();
+      final stored = await service.get(job.regularClientId);
+      if (stored == null) {
+        throw StateError('the regular client map for this job was deleted');
+      }
+      final template = (await service.ensureOwnMap(stored)).map!;
+      final layers = [
+        for (final l in template.layers)
+          if (!l.name.toLowerCase().contains('cloud')) l,
+      ];
+
+      final civil = toScheduleCivil(job.date);
+      final monthKey = ShareableMapsFirestoreService.monthKeyFor(civil);
+      final name = job.client.trim();
+      final map = ShareableMap.createWithDefaultLayer(
+        name: name,
+        description: copyDescription(template.description, civil),
+        defaultCenter: template.defaultCenter,
+        jobListItemId: job.id,
+      ).copyWith(
+        layers: layers.isEmpty ? null : layers,
+        defaultZoom: template.defaultZoom,
+      );
+
+      final mapId = await ShareableMapsFirestoreService()
+          .createMap(map, monthKey: monthKey);
+      await provider.linkExistingMapToJob(
+        jobId: job.id,
+        mapId: mapId,
+        monthKey: monthKey,
+        mapName: name,
+        fallbackJob: job,
+      );
+      debugPrint('🗺️ Regular client map $monthKey/$mapId made for '
+          '${job.client} (${job.id})');
+    } catch (e) {
+      debugPrint('⚠️ Regular client map for ${job.client} failed: $e');
+      messenger?.showToast(SnackBar(
+        content: Text('The job is saved, but its map could not be made from '
+            'the regular client map: $e'),
+        backgroundColor: Colors.orange.shade800,
+      ));
+    }
+  }
+
+  /// Puts [assignments] on the schedule as one write ([ScheduleProvider
+  /// .addJobsWithUndo]). They show on the grid at once. With [waitForSave]
+  /// this completes once the server has them and throws if it refuses;
+  /// without, it returns straight away and the write queue saves them
+  /// behind — retrying through dropped connections, with the connection
+  /// banner saying so — and a refusal is reported in a toast.
   Future<void> _createScheduleJobs(
       JobAssignmentService assignmentService, List<JobAssignment> assignments,
-      {CustomPolygon? addressPoint}) async {
-    try {
-      final scheduleProvider = ref.read(scheduleRiverpod);
+      {CustomPolygon? addressPoint, bool waitForSave = true}) async {
+    final scheduleProvider = ref.read(scheduleRiverpod);
+    final messenger = ScaffoldMessenger.maybeOf(context);
 
-      // Convert assignments to Job objects
-      var jobs = assignmentService.createJobsFromAssignments(assignments);
+    // Convert assignments to Job objects
+    var jobs = assignmentService.createJobsFromAssignments(assignments);
 
-      // Inject the geocoded address point into each schedule job's workMaps
-      if (addressPoint != null) {
-        jobs = jobs
-            .map((j) => j.copyWith(workMaps: [...j.workMaps, addressPoint]))
-            .toList();
-      }
+    // Inject the geocoded address point into each schedule job's workMaps,
+    // marked as the client's pin so taking the client off the job later
+    // takes the pin with it.
+    if (addressPoint != null) {
+      jobs = jobs
+          .map((j) => j.copyWith(workMaps: [
+                ...j.workMaps,
+                j.clients.isEmpty
+                    ? addressPoint
+                    : ClientAddressPin.asAutoPin(addressPoint, j.clients.first),
+              ]))
+          .toList();
+    }
 
-      // Add each job to the schedule
-      for (final job in jobs) {
-        await scheduleProvider.addJobWithUndo(job, job.date);
-      }
+    final client = _clientController.text.trim();
+    final what = '${jobs.length} schedule '
+        '${jobs.length == 1 ? 'job' : 'jobs'}';
+    // One transaction for the lot. They used to be saved one transaction
+    // after another, a server round trip or two each.
+    final write = scheduleProvider.addJobsWithUndo(jobs);
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-                'Successfully assigned ${jobs.length} jobs to distributors!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+    if (waitForSave) {
+      try {
+        final tl = _timeline;
+        await (tl == null
+            ? write
+            : tl.step('save $what (1 transaction)', () => write));
+      } catch (e) {
+        messenger?.showToast(
           SnackBar(
             content: Text('Error adding jobs to schedule: $e'),
             backgroundColor: Colors.red,
           ),
         );
+        rethrow; // Re-throw so the calling method can handle it
       }
-      rethrow; // Re-throw so the calling method can handle it
+      messenger?.showToast(
+        SnackBar(
+          content: Text('Successfully assigned ${jobs.length} jobs to '
+              'distributors!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      return;
     }
+
+    _timeline?.background('save $what on the server (1 transaction)', write);
+    unawaited(write.then((_) {}, onError: (Object e) {
+      // The provider has already taken them back off the grid.
+      messenger?.showToast(
+        SnackBar(
+          content: Text('The $what for ${client.isEmpty ? 'this job' : client} '
+              'could not be saved: $e. Open the job and use Automatic '
+              'Allocation to try again.'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 12),
+        ),
+      );
+    }));
   }
 
   // Helper methods for time selection
@@ -5429,82 +5990,14 @@ class _AddEditJobDialogState extends riverpod.ConsumerState<AddEditJobDialog> {
   /// Junk & Stuff and Happy Sun jobs are short call-outs, so one distributor
   /// can take several in a day — the allocation may pick someone who already
   /// has a schedule job that day. CLM distribution stays one job per person.
-  bool _allowsDoubleBooking(String jobTypeId) {
-    final company = JobTypeProvider.instance
-        ?.getJobTypeById(jobTypeId)
-        ?.resolvedCompanyId;
-    return company == Company.junkAndStuffId || company == Company.happySunId;
-  }
+  bool _allowsDoubleBooking(String jobTypeId) =>
+      ClientAddressPin.isCallOutJobType(jobTypeId);
 
   /// True when the selected job type has `hasTwoStops = true`.
   /// Renames the area field to "Loading Address" and shows an additional
   /// "Offloading Address" field below it.
   bool get _jobTypeHasTwoStops =>
       JobTypeProvider.instance?.hasTwoStops(_selectedJobType) ?? false;
-
-  List<TimeOfDay> _getAvailableTimeSlots() {
-    final slots = <TimeOfDay>[];
-    // Start with 07:30
-    slots.add(const TimeOfDay(hour: 7, minute: 30));
-    // Generate 30-minute intervals from 08:00 AM to 20:00 PM (8:00 PM)
-    for (int hour = 8; hour <= 20; hour++) {
-      slots.add(TimeOfDay(hour: hour, minute: 0));
-      if (hour < 20) {
-        slots.add(TimeOfDay(hour: hour, minute: 30));
-      }
-    }
-    return slots;
-  }
-
-  String _formatTimeOfDay(TimeOfDay time) {
-    final now = DateTime.now();
-    final dateTime =
-        DateTime(now.year, now.month, now.day, time.hour, time.minute);
-    return DateFormat('HH:mm').format(dateTime);
-  }
-
-  // Helper method to check if a job occupies a specific time slot
-  bool _jobOccupiesTimeSlot(CollectionJob job, String timeSlot) {
-    const availableTimeSlots = [
-      "07:30",
-      "08:00",
-      "08:30",
-      "09:00",
-      "09:30",
-      "10:00",
-      "10:30",
-      "11:00",
-      "11:30",
-      "12:00",
-      "12:30",
-      "13:00",
-      "13:30",
-      "14:00",
-      "14:30",
-      "15:00",
-      "15:30",
-      "16:00",
-      "16:30",
-      "17:00",
-      "17:30",
-      "18:00",
-      "18:30",
-      "19:00",
-      "19:30",
-      "20:00"
-    ];
-
-    final jobStartIndex = availableTimeSlots.indexOf(job.timeSlot);
-    final checkIndex = availableTimeSlots.indexOf(timeSlot);
-
-    if (jobStartIndex == -1 || checkIndex == -1) {
-      return job.timeSlot == timeSlot; // Fallback to exact match
-    }
-
-    // Check if the timeSlot falls within the job's duration
-    return checkIndex >= jobStartIndex &&
-        checkIndex < (jobStartIndex + job.timeSlots);
-  }
 
   void _showToolsDialog() async {
     debugPrint('\n🔧 AddEditJobDialog._showToolsDialog: Opening tools dialog');
@@ -6105,4 +6598,21 @@ class _FlagChip extends StatelessWidget {
       ),
     );
   }
+}
+
+/// What [_AddEditJobDialogState._regularClientMaps] resolves.
+class _RegularClientMaps {
+  final RegularClient plan;
+
+  /// The map whose polygons the schedule jobs are given.
+  final ShareableMap areas;
+
+  /// Shown in the allocation preview.
+  final String note;
+
+  const _RegularClientMaps({
+    required this.plan,
+    required this.areas,
+    required this.note,
+  });
 }

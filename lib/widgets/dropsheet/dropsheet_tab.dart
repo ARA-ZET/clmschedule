@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
@@ -14,7 +15,11 @@ import '../../utils/dropsheet_pdf.dart';
 import '../day_planner/day_planner_page.dart';
 import 'driver_management_dialog.dart';
 import 'driver_section_widget.dart';
+import 'dropsheet_history_dialog.dart';
 import 'task_manager_dialog.dart';
+import '../../undo/undo_history.dart';
+import '../../undo/undo_redo_buttons.dart';
+import '../../undo/undo_shortcuts.dart';
 
 /// Main Dropsheet screen.
 ///
@@ -38,6 +43,9 @@ class DropsheetTab extends riverpod.ConsumerWidget {
           date: dropsheet.date,
           onDateChanged: dropsheet.setDate,
           onAddDriver: () => _showAddDriverSection(context, ref),
+          onAddOwnTransport: day.sections.any((s) => s.isOwnTransport)
+              ? null
+              : dropsheet.addOwnTransportSection,
           onManageDrivers: () => showDialog(
             context: context,
             builder: (_) => const DriverManagementDialog(),
@@ -46,13 +54,17 @@ class DropsheetTab extends riverpod.ConsumerWidget {
             context: context,
             builder: (_) => const TaskManagerDialog(),
           ),
+          onHistory: () => showDialog(
+            context: context,
+            builder: (_) => DropsheetHistoryDialog(date: dropsheet.date),
+          ),
           onPrint: () async {
             final date = dropsheet.date;
             // Name the street corner at each drop-off point first so the
             // printed Location is readable. Best-effort and capped: a slow
             // map server must never stop the sheet from printing.
             final messenger = ScaffoldMessenger.of(context);
-            messenger.showSnackBar(const SnackBar(
+            messenger.showToast(const SnackBar(
               content: Text('Looking up street names for drop-off points…'),
               duration: Duration(seconds: 30),
             ));
@@ -61,7 +73,7 @@ class DropsheetTab extends riverpod.ConsumerWidget {
                 .timeout(const Duration(seconds: 30),
                     onTimeout: () => dropsheet.day)
                 .catchError((Object _) => dropsheet.day);
-            messenger.hideCurrentSnackBar();
+            messenger.hideCurrentToast();
             await Printing.layoutPdf(
               name: 'Dropsheet ${DateFormat('yyyy-MM-dd').format(date)}',
               onLayout: (_) => generateDropsheetPdf(day, date),
@@ -80,6 +92,11 @@ class DropsheetTab extends riverpod.ConsumerWidget {
           },
           isArchived: dropsheet.isHistoricalDate,
           onSyncFromSchedule: () async {
+            if (!dropsheet.isDayReady) {
+              ScaffoldMessenger.of(context).showToast(const SnackBar(
+                  content: Text(DropsheetProvider.notReadyMessage)));
+              return;
+            }
             // A past dropsheet is an audit record — syncing it re-runs the
             // schedule match and can move allocated stops back to
             // "Unassigned". Make the user opt in explicitly.
@@ -90,7 +107,7 @@ class DropsheetTab extends riverpod.ConsumerWidget {
             final synced = await dropsheet.syncFromSchedule(
                 force: dropsheet.isHistoricalDate);
             if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showToast(
                 SnackBar(
                   content: Text(synced
                       ? 'Synced new stops from schedule.'
@@ -100,6 +117,11 @@ class DropsheetTab extends riverpod.ConsumerWidget {
             }
           },
           onSyncPickups: () async {
+            if (!dropsheet.isDayReady) {
+              ScaffoldMessenger.of(context).showToast(const SnackBar(
+                  content: Text(DropsheetProvider.notReadyMessage)));
+              return;
+            }
             // Ask the user which pickup order to use.
             final reversed = await showDialog<bool>(
               context: context,
@@ -142,26 +164,36 @@ class DropsheetTab extends riverpod.ConsumerWidget {
                   : 'Created ${result.created} pickup tasks at the bottom.',
             };
 
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context).showToast(
               SnackBar(content: Text(message)),
             );
           },
-          driversAvailable: drivers.activeDrivers.length > day.sections.length,
+          // Only real driver sections use up a driver — not Unassigned or
+          // Own transport.
+          driversAvailable: drivers.activeDrivers.length >
+              day.sections
+                  .where((s) =>
+                      s.id != kUnassignedSectionId && !s.isOwnTransport)
+                  .length,
+          undoKey: dropsheet.undoKey,
         ),
         const Divider(height: 1),
         Expanded(
-          child: dropsheet.isLoading && day.sections.isEmpty
-              ? const Center(child: CircularProgressIndicator())
-              : day.sections.isEmpty
-                  ? _EmptyState(
-                      onAddDriver: () => _showAddDriverSection(context, ref),
-                      hasDrivers: drivers.activeDrivers.isNotEmpty,
-                      onManageDrivers: () => showDialog(
-                        context: context,
-                        builder: (_) => const DriverManagementDialog(),
-                      ),
-                    )
-                  : _DropsheetBody(day: day),
+          child: UndoShortcuts(
+            undoKey: dropsheet.undoKey,
+            child: dropsheet.isLoading && day.sections.isEmpty
+                ? const Center(child: CircularProgressIndicator())
+                : day.sections.isEmpty
+                    ? _EmptyState(
+                        onAddDriver: () => _showAddDriverSection(context, ref),
+                        hasDrivers: drivers.activeDrivers.isNotEmpty,
+                        onManageDrivers: () => showDialog(
+                          context: context,
+                          builder: (_) => const DriverManagementDialog(),
+                        ),
+                      )
+                    : _DropsheetBody(day: day),
+          ),
         ),
       ],
     );
@@ -206,7 +238,7 @@ class DropsheetTab extends riverpod.ConsumerWidget {
 
     if (available.isEmpty) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           const SnackBar(
             content: Text(
                 'All active drivers are already on this dropsheet. Add more drivers from "Manage drivers".'),
@@ -294,10 +326,14 @@ class _TopBar extends StatelessWidget {
   final DateTime date;
   final ValueChanged<DateTime> onDateChanged;
   final VoidCallback onAddDriver;
+
+  /// Adds the "Own transport" list; null once the day has one.
+  final VoidCallback? onAddOwnTransport;
   final VoidCallback onManageDrivers;
   final VoidCallback onOpenDayPlanner;
   final VoidCallback onTaskManager;
   final VoidCallback onPrint;
+  final VoidCallback onHistory;
   final VoidCallback onSyncFromSchedule;
   final VoidCallback onSyncPickups;
   final bool driversAvailable;
@@ -306,18 +342,24 @@ class _TopBar extends StatelessWidget {
   /// is no longer kept in step with the schedule automatically.
   final bool isArchived;
 
+  /// The open day's undo history.
+  final UndoKey undoKey;
+
   const _TopBar({
     required this.date,
     required this.onDateChanged,
     required this.onAddDriver,
+    this.onAddOwnTransport,
     required this.onManageDrivers,
     required this.onOpenDayPlanner,
     required this.onTaskManager,
     required this.onPrint,
+    required this.onHistory,
     required this.onSyncFromSchedule,
     required this.onSyncPickups,
     required this.driversAvailable,
     required this.isArchived,
+    required this.undoKey,
   });
 
   @override
@@ -370,6 +412,12 @@ class _TopBar extends StatelessWidget {
             tooltip: 'Pick date',
             onPressed: pickDate,
           ),
+          IconButton(
+            color: Colors.white,
+            icon: const Icon(Icons.history),
+            tooltip: 'Version history — see and restore earlier saves',
+            onPressed: onHistory,
+          ),
           if (isArchived) ...[
             const SizedBox(width: 8),
             Tooltip(
@@ -401,6 +449,8 @@ class _TopBar extends StatelessWidget {
             ),
           ],
           const Spacer(),
+          UndoRedoButtons(undoKey: undoKey, color: Colors.white),
+          const SizedBox(width: 8),
           OutlinedButton.icon(
             style: OutlinedButton.styleFrom(
               foregroundColor: Colors.white,
@@ -459,6 +509,16 @@ class _TopBar extends StatelessWidget {
             onPressed: onPrint,
             icon: const Icon(Icons.print_outlined),
             label: const Text('Print'),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Colors.white54),
+            ),
+            onPressed: onAddOwnTransport,
+            icon: const Icon(Icons.directions_walk),
+            label: const Text(kOwnTransportLabel),
           ),
           const SizedBox(width: 8),
           FilledButton.icon(

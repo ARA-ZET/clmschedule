@@ -2,6 +2,7 @@
 //
 // "Processing" mode left-panel: pick multiple GPX files, auto-match
 // Track/Waypoints pairs, open each pair as a tab, and manually pair leftovers.
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/te_gpx_file_entry.dart';
@@ -87,7 +88,7 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
                                   tabsProvider, scheduleProvider);
                           final total = matchedCount + combinedCount;
                           if (context.mounted && total > 0) {
-                            ScaffoldMessenger.of(context).showSnackBar(
+                            ScaffoldMessenger.of(context).showToast(
                               SnackBar(
                                 content: Text(
                                     'Opened $total tab${total == 1 ? '' : 's'}'),
@@ -127,7 +128,7 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
                         final idx = tabsProvider.currentTab;
                         if (idx < 0 || idx >= tabsProvider.tabs.length) {
                           if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
+                            ScaffoldMessenger.of(context).showToast(
                               const SnackBar(
                                 content: Text('No tab selected'),
                                 duration: Duration(seconds: 2),
@@ -139,7 +140,7 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
                         final ok = await proc.refreshTab(
                             idx, tabsProvider, scheduleProvider);
                         if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
+                          ScaffoldMessenger.of(context).showToast(
                             SnackBar(
                               content: Text(ok
                                   ? 'Refreshed current tab from schedule'
@@ -217,7 +218,7 @@ class TEProcessingPanel extends riverpod.ConsumerWidget {
                   onPressed: () async {
                     await proc.openMatchedTabs(tabsProvider, scheduleProvider);
                     if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
+                      ScaffoldMessenger.of(context).showToast(
                         SnackBar(
                           content: Text(
                               'Opened ${pairs.length} tab${pairs.length == 1 ? '' : 's'}'),

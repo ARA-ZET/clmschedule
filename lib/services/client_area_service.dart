@@ -14,6 +14,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../models/client_area.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 import '../models/custom_polygon.dart';
 
 final clientAreaServiceRiverpod =
@@ -85,9 +87,14 @@ class ClientAreaService {
     await _col.doc(area.id).set(area.toFirestore(), SetOptions(merge: true));
   }
 
+  /// Moves the area to the Recycle Bin.
   Future<void> delete(String id) async {
     if (id.isEmpty) return;
-    await _col.doc(id).delete();
+    await RecycleBinWriter(_db).moveDocToBin(
+      _col.doc(id),
+      type: RecycleBinType.clientArea,
+      label: (d) => '${(d['name'] as String?)?.trim().isNotEmpty == true ? (d['name'] as String).trim() : 'Unnamed'} (client area)',
+    );
   }
 
   /// The area a re-survey of this polygon should refresh, if any.

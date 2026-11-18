@@ -1,11 +1,12 @@
 // services/gpx_storage_service.dart
 //
 // Manages GPX track/waypoint files in Firebase Cloud Storage.
-// Folder structure: Distribution/{year}/{MMM YYYY}/{clientName}/Round {N}/
+// Folder structure: Distribution/{year}/{MMM YYYY}/{clientName}/
 import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:archive/archive.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
@@ -14,6 +15,8 @@ import 'package:intl/intl.dart';
 
 import '../shareable_maps/services/shareable_maps_firestore_service.dart';
 import 'storage_upload.dart';
+import '../recycle_bin/recycle_bin_entry.dart';
+import '../recycle_bin/recycle_bin_writer.dart';
 import '../utils/text_encoding.dart';
 
 class GpxStorageService {
@@ -25,6 +28,10 @@ class GpxStorageService {
 
   /// Root prefix for all distribution files.
   static const String _root = 'Distribution';
+
+  /// `getData()` defaults to a 10 MB cap and fails on anything larger —
+  /// photos and long tracks routinely are.
+  static const int _maxDownloadBytes = 512 * 1024 * 1024;
 
   /// Upload bytes to [ref] using a WASM-safe code path on web.
   /// Delegates to [StorageUpload.safePutData].
@@ -44,38 +51,6 @@ class GpxStorageService {
     final monthLabel = DateFormat('MMM yyyy').format(date); // "Apr 2026"
     final safeName = _sanitize(clientName);
     return '$_root/$year/$monthLabel/$safeName';
-  }
-
-  /// Build a round folder path.
-  /// Example: Distribution/2026/Apr 2026/Seeff/Round 1
-  String roundFolderPath(DateTime date, String clientName, int round) {
-    return '${clientFolderPath(date, clientName)}/Round $round';
-  }
-
-  // ── Round management ──────────────────────────────────────────────────────
-
-  /// Determine the next round number for a client by checking existing folders.
-  /// Returns 1 if no rounds exist yet.
-  Future<int> nextRoundNumber(DateTime date, String clientName) async {
-    final basePath = clientFolderPath(date, clientName);
-    try {
-      final result = await _storage.ref(basePath).listAll();
-      // Count prefixes matching "Round N"
-      int maxRound = 0;
-      for (final prefix in result.prefixes) {
-        final name = prefix.name; // "Round 1", "Round 2", etc.
-        final match = RegExp(r'^Round (\d+)$').firstMatch(name);
-        if (match != null) {
-          final n = int.parse(match.group(1)!);
-          if (n > maxRound) maxRound = n;
-        }
-      }
-      return maxRound + 1;
-    } catch (e) {
-      // Folder doesn't exist yet → first round
-      debugPrint('nextRoundNumber: $e');
-      return 1;
-    }
   }
 
   /// Returns `true` if a client folder already exists under the month folder
@@ -104,7 +79,13 @@ class GpxStorageService {
         DateTime.now().difference(cached.at) < _folderCacheTtl) {
       return cached.names;
     }
-    final names = _storage.ref(monthPath).listAll().then(
+    // Bounded: a hung listing would otherwise sit in the cache, stalling every
+    // caller (and every retry) for the cache's lifetime.
+    final names = _storage
+        .ref(monthPath)
+        .listAll()
+        .timeout(const Duration(seconds: 10))
+        .then(
       (r) => {for (final p in r.prefixes) p.name.toLowerCase()},
       onError: (Object e) {
         debugPrint('clientFoldersIn($monthPath): $e');
@@ -124,9 +105,13 @@ class GpxStorageService {
 
   // ── Upload ────────────────────────────────────────────────────────────────
 
-  /// Upload a GPX file (as string) to the given storage folder path.
-  /// Returns the download URL.
-  Future<String> uploadGpxFile(
+  /// Upload a GPX file (as string) to the given storage folder path,
+  /// replacing any file of the same name.
+  ///
+  /// Completes when the file is stored. It does not fetch a download URL
+  /// afterwards — no caller used it, and on a slow connection that extra
+  /// round trip was a noticeable part of every save.
+  Future<void> uploadGpxFile(
       String folderPath, String fileName, String gpxContent) async {
     _dropFolderCache();
     // Sanitize the file name so callers can't accidentally smuggle path
@@ -136,13 +121,36 @@ class GpxStorageService {
     final safeName = _sanitizeFileName(fileName);
     final cleanFolder = folderPath.replaceAll(RegExp(r'/+$'), '');
     final ref = _storage.ref('$cleanFolder/$safeName');
-    final bytes = Uint8List.fromList(utf8.encode(gpxContent));
     await _safePutData(
       ref,
-      bytes,
+      utf8.encode(gpxContent),
       metadata: SettableMetadata(contentType: 'application/gpx+xml'),
     );
-    return ref.getDownloadURL();
+  }
+
+  /// Uploads the GPX that [build] makes as [fileName] in [folderPath] —
+  /// unless a file of that name is already there, in which case nothing is
+  /// uploaded and this returns false.
+  ///
+  /// The folder is listed by name only (one request — not a metadata request
+  /// per file it holds), and that request is already on its way while the
+  /// GPX is being built, so the two overlap. If the listing fails the file
+  /// is uploaded anyway: the worst case is replacing an identical copy.
+  Future<bool> uploadGpxUnlessPresent(
+    String folderPath,
+    String fileName,
+    Future<String> Function() build,
+  ) async {
+    final safeName = _sanitizeFileName(fileName);
+    final present = listAllFiles(folderPath)
+        .then((files) => files.any((f) => f.name == safeName));
+    // Building a long track's GPX runs without a break; one event-loop turn
+    // first lets the listing request actually leave.
+    await Future<void>.delayed(Duration.zero);
+    final content = await build();
+    if (await present) return false;
+    await uploadGpxFile(folderPath, safeName, content);
+    return true;
   }
 
   /// Replace characters that Firebase Storage (or common OSes) treat as
@@ -197,17 +205,63 @@ class GpxStorageService {
     }
   }
 
+  /// Size + updated time per file name from the folder's `fileFolders` index
+  /// doc (kept current by the indexFileOnUpload/Delete triggers). One read
+  /// instead of one metadata request per file; empty on any failure.
+  Future<Map<String, ({int? size, DateTime? updated})>> _indexedMetadata(
+      String folderPath) async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('fileFolders')
+          .where('folderPath', isEqualTo: folderPath)
+          .limit(1)
+          .get();
+      if (snap.docs.isEmpty) return const {};
+      final files = snap.docs.first.data()['files'];
+      if (files is! Map) return const {};
+      final out = <String, ({int? size, DateTime? updated})>{};
+      files.forEach((name, v) {
+        if (v is! Map) return;
+        final size = (v['sizeBytes'] as num?)?.toInt();
+        final ts = v['updatedAt'];
+        final updated = ts is Timestamp ? ts.toDate() : null;
+        if (size != null && updated != null) {
+          out['$name'] = (size: size, updated: updated);
+        }
+      });
+      return out;
+    } catch (e) {
+      debugPrint('indexedMetadata($folderPath): $e');
+      return const {};
+    }
+  }
+
   /// List both subfolders and files in a storage folder.
   Future<({List<StorageFolderItem> folders, List<StorageFileItem> files})>
       listFolderContents(String folderPath) async {
     try {
-      final result = await _storage.ref(folderPath).listAll();
+      final listed = await Future.wait([
+        _storage.ref(folderPath).listAll(),
+        _indexedMetadata(folderPath),
+      ]);
+      final result = listed[0] as ListResult;
+      final indexed =
+          listed[1] as Map<String, ({int? size, DateTime? updated})>;
       final folders = result.prefixes
           .map((p) => StorageFolderItem(name: p.name, fullPath: p.fullPath))
           .toList()
         ..sort((a, b) => a.name.compareTo(b.name));
       final fileItems = await Future.wait(
         result.items.map((item) async {
+          final known = indexed[item.name];
+          if (known != null) {
+            return StorageFileItem(
+              name: item.name,
+              fullPath: item.fullPath,
+              lastModified: known.updated,
+              sizeBytes: known.size,
+            );
+          }
           try {
             final meta = await item.getMetadata();
             return StorageFileItem(
@@ -230,6 +284,44 @@ class GpxStorageService {
       debugPrint('listFolderContents error ($folderPath): $e');
       return (folders: <StorageFolderItem>[], files: <StorageFileItem>[]);
     }
+  }
+
+  /// Folder and file names only — one listing call, no per-file metadata and
+  /// no file contents. Sizes/dates come later from [fileDetails]. Throws on
+  /// failure so a browser can show an error rather than an empty folder.
+  Future<({List<StorageFolderItem> folders, List<StorageFileItem> files})>
+      listFolderEntries(String folderPath) async {
+    final result = await _storage.ref(folderPath).listAll();
+    final folders = result.prefixes
+        .map((p) => StorageFolderItem(name: p.name, fullPath: p.fullPath))
+        .toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+    final files = result.items
+        .map((i) => StorageFileItem(name: i.name, fullPath: i.fullPath))
+        .toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+    return (folders: folders, files: files);
+  }
+
+  /// Size and modified date for [files] in [folderPath]: one `fileFolders`
+  /// index read, then a metadata request only for files the index lacks
+  /// (a few at a time). Files whose details can't be read are left out.
+  Future<Map<String, ({int? size, DateTime? updated})>> fileDetails(
+      String folderPath, List<StorageFileItem> files) async {
+    final out = Map<String, ({int? size, DateTime? updated})>.of(
+        await _indexedMetadata(folderPath));
+    final missing = files.where((f) => !out.containsKey(f.name)).toList();
+    const batch = 6;
+    for (var i = 0; i < missing.length; i += batch) {
+      final chunk = missing.skip(i).take(batch);
+      await Future.wait(chunk.map((f) async {
+        try {
+          final meta = await _storage.ref(f.fullPath).getMetadata();
+          out[f.name] = (size: meta.size, updated: meta.updated ?? meta.timeCreated);
+        } catch (_) {}
+      }));
+    }
+    return out;
   }
 
   /// Subfolder names and a GPX count for one folder — no per-file metadata
@@ -256,7 +348,7 @@ class GpxStorageService {
   /// Download any file as bytes.
   Future<Uint8List?> downloadFileBytes(String fullPath) async {
     try {
-      return await _storage.ref(fullPath).getData();
+      return await _storage.ref(fullPath).getData(_maxDownloadBytes);
     } catch (e) {
       debugPrint('downloadFileBytes error ($fullPath): $e');
       return null;
@@ -313,29 +405,13 @@ class GpxStorageService {
     }
   }
 
-  /// List all rounds for a client folder.
-  Future<List<String>> listRounds(DateTime date, String clientName) async {
-    final basePath = clientFolderPath(date, clientName);
-    try {
-      final result = await _storage.ref(basePath).listAll();
-      return result.prefixes
-          .map((p) => p.name)
-          .where((n) => RegExp(r'^Round \d+$').hasMatch(n))
-          .toList()
-        ..sort();
-    } catch (e) {
-      debugPrint('listRounds error: $e');
-      return [];
-    }
-  }
-
   // ── Download ──────────────────────────────────────────────────────────────
 
   /// Download a GPX file as string content.
   Future<String?> downloadGpxFile(String fullPath) async {
     try {
       final ref = _storage.ref(fullPath);
-      final data = await ref.getData();
+      final data = await ref.getData(_maxDownloadBytes);
       if (data != null) return decodeTextBytes(data);
     } catch (e) {
       debugPrint('downloadGpxFile error ($fullPath): $e');
@@ -351,6 +427,124 @@ class GpxStorageService {
     await _storage.ref(fullPath).delete();
   }
 
+  // ── Recycle Bin ───────────────────────────────────────────────────────────
+  //
+  // Deleting moves the files to `recycleBin/files/{entryId}/<original path>`
+  // and records one bin entry per deleted file or folder. Restoring copies
+  // them back (metadata first, like a folder rename) and never overwrites:
+  // a path taken meanwhile gets " (restored)" in its name. The copies stay
+  // until the daily sweep purges the entry.
+
+  static String _binPrefix(String entryId) =>
+      '${kRecycleBinStoragePrefix}files/$entryId/';
+
+  /// Moves one file to the Recycle Bin; returns the bin entry id.
+  Future<String> moveFileToBin(String fullPath) async {
+    _dropFolderCache();
+    final writer = RecycleBinWriter();
+    final entryRef = writer.newEntryRef();
+    await copyFile(fullPath, '${_binPrefix(entryRef.id)}$fullPath');
+    final slash = fullPath.lastIndexOf('/');
+    await writer.add(
+      RecycleBinRecord(
+        type: RecycleBinType.cloudFile,
+        label: slash < 0
+            ? fullPath
+            : '${fullPath.substring(slash + 1)} · '
+                '${fullPath.substring(0, slash)}',
+        originalPath: fullPath,
+      ),
+      ref: entryRef,
+    );
+    await _storage.ref(fullPath).delete();
+    return entryRef.id;
+  }
+
+  /// Moves a folder and everything under it to the Recycle Bin; returns the
+  /// bin entry id and how many files moved.
+  Future<(String, int)> moveFolderToBin(String folderPath) async {
+    _dropFolderCache();
+    final files = <String>[];
+    Future<void> walk(String path) async {
+      final result = await _storage.ref(path).listAll();
+      files.addAll(result.items.map((i) => i.fullPath));
+      for (final prefix in result.prefixes) {
+        await walk(prefix.fullPath);
+      }
+    }
+
+    await walk(folderPath);
+    final writer = RecycleBinWriter();
+    final entryRef = writer.newEntryRef();
+    final prefix = _binPrefix(entryRef.id);
+    await Future.wait(files.map((f) => copyFile(f, '$prefix$f')));
+    await writer.add(
+      RecycleBinRecord(
+        type: RecycleBinType.cloudFolder,
+        label: '$folderPath (${files.length} '
+            'file${files.length == 1 ? '' : 's'})',
+        originalPath: folderPath,
+      ),
+      ref: entryRef,
+    );
+    final removed = await deleteFolderRecursive(folderPath);
+    return (entryRef.id, removed);
+  }
+
+  /// Copies a bin entry's files back where they were. Returns how many were
+  /// put back under another name because their path was taken.
+  Future<int> restoreFromBin(String entryId) async {
+    _dropFolderCache();
+    final prefix = _binPrefix(entryId);
+    final files = <String>[];
+    Future<void> walk(String path) async {
+      final result = await _storage.ref(path).listAll();
+      files.addAll(result.items.map((i) => i.fullPath));
+      for (final p in result.prefixes) {
+        await walk(p.fullPath);
+      }
+    }
+
+    await walk(prefix.substring(0, prefix.length - 1));
+    if (files.isEmpty) {
+      throw const RestoreConflict('its files are no longer in the bin');
+    }
+    var renamed = 0;
+    Future<void> put(String binPath) async {
+      var target = binPath.substring(prefix.length);
+      if (await _exists(target)) {
+        target = _restoredName(target);
+        renamed++;
+      }
+      await copyFile(binPath, target);
+    }
+
+    // Compiled JSON and the archive manifest first, as in [renameFolder].
+    bool isMeta(String p) => p.split('/').last.startsWith('_');
+    await Future.wait(files.where(isMeta).map(put));
+    await Future.wait(files.where((f) => !isMeta(f)).map(put));
+    return renamed;
+  }
+
+  Future<bool> _exists(String fullPath) async {
+    try {
+      await _storage.ref(fullPath).getMetadata();
+      return true;
+    } on FirebaseException catch (e) {
+      if (e.code == 'object-not-found') return false;
+      rethrow;
+    }
+  }
+
+  /// "a/b/track.gpx" → "a/b/track (restored).gpx".
+  static String _restoredName(String fullPath) {
+    final slash = fullPath.lastIndexOf('/');
+    final dot = fullPath.lastIndexOf('.');
+    return dot > slash + 1
+        ? '${fullPath.substring(0, dot)} (restored)${fullPath.substring(dot)}'
+        : '$fullPath (restored)';
+  }
+
   // ── Rename / Copy / Move ──────────────────────────────────────────────────
 
   /// Copy a file to another location by streaming its bytes.
@@ -360,7 +554,7 @@ class GpxStorageService {
   Future<String> copyFile(String fromFullPath, String toFullPath) async {
     _dropFolderCache();
     final srcRef = _storage.ref(fromFullPath);
-    final bytes = await srcRef.getData();
+    final bytes = await srcRef.getData(_maxDownloadBytes);
     if (bytes == null) {
       throw StateError('copyFile: source returned no data ($fromFullPath)');
     }
@@ -432,8 +626,16 @@ class GpxStorageService {
 
     await walkCopy(oldFolderPath, newFolderPath);
 
-    // Copy all files in parallel.
-    await Future.wait(entries.map((e) => copyFile(e.oldPath, e.newPath)));
+    // Compiled JSON and the archive manifest land first: in a folder whose
+    // GPX were archived to Drive, the compile each GPX copy triggers reads
+    // them to keep the archived tracks.
+    bool isMeta(String p) => p.split('/').last.startsWith('_');
+    await Future.wait(entries
+        .where((e) => isMeta(e.oldPath))
+        .map((e) => copyFile(e.oldPath, e.newPath)));
+    await Future.wait(entries
+        .where((e) => !isMeta(e.oldPath))
+        .map((e) => copyFile(e.oldPath, e.newPath)));
 
     // Delete the original tree.
     await deleteFolderRecursive(oldFolderPath);
@@ -487,7 +689,7 @@ class GpxStorageService {
           final idx = next++;
           if (idx >= total) return;
           try {
-            results[idx] = await entries[idx].ref.getData();
+            results[idx] = await entries[idx].ref.getData(_maxDownloadBytes);
           } catch (e) {
             debugPrint(
                 'downloadFolderAsZip: failed ${entries[idx].ref.fullPath}: $e');

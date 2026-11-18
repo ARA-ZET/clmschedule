@@ -174,7 +174,7 @@ class DriverManagementDialog extends riverpod.ConsumerWidget {
       builder: (ctx) => AlertDialog(
         title: const Text('Delete driver?'),
         content: Text(
-            'Delete ${d.name}? Past dropsheets keep their record. This cannot be undone.'),
+            'Delete ${d.name}? Past dropsheets keep their record. They go to the Recycle Bin for 30 days.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),

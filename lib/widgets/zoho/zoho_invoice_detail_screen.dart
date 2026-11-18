@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:intl/intl.dart';
@@ -7,12 +8,14 @@ import '../../models/invoice_message_subject.dart';
 import '../../models/zoho_invoice.dart';
 import '../../providers/zoho_customers_provider.dart';
 import '../../providers/zoho_invoices_provider.dart';
-import '../../utils/save_file.dart'
-    if (dart.library.io) '../../utils/save_file_stub.dart';
+import '../../utils/accounting_error.dart';
+import '../../utils/save_with_picker.dart';
+import '../xero/xero_ui.dart' show XeroNotice;
 import 'edit_invoice_dialog.dart';
 import 'invoice_share.dart';
 import 'zoho_status_chip.dart';
 import 'zoho_table.dart';
+import '../slow_action_hint.dart';
 
 /// Invoice detail with the three write actions: mark sent, void, record
 /// payment. Each re-reads the invoice from Zoho afterwards rather than
@@ -34,7 +37,7 @@ class ZohoInvoiceDetailScreen extends riverpod.ConsumerStatefulWidget {
 class _ZohoInvoiceDetailScreenState
     extends riverpod.ConsumerState<ZohoInvoiceDetailScreen> {
   bool _isBusy = false;
-  String? _actionError;
+  FriendlyError? _actionError;
 
   /// The one-off fetch used when this screen is opened without the invoice list
   /// having been loaded — from the Job List, say.
@@ -70,8 +73,12 @@ class _ZohoInvoiceDetailScreenState
   }
 
   /// Run a write action, surfacing both progress and failure.
-  Future<void> _run(
-      Future<void> Function() action, String successMessage) async {
+  /// [what] completes "Couldn't …" when the action fails.
+  Future<void> _run(Future<void> Function() action, String successMessage,
+      {required String what}) async {
+    // The buttons disable while busy, but two clicks can land before that
+    // repaint.
+    if (_isBusy) return;
     setState(() {
       _isBusy = true;
       _actionError = null;
@@ -80,7 +87,7 @@ class _ZohoInvoiceDetailScreenState
     try {
       await action();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text(successMessage),
             backgroundColor: Colors.green,
@@ -88,7 +95,9 @@ class _ZohoInvoiceDetailScreenState
         );
       }
     } catch (e) {
-      if (mounted) setState(() => _actionError = e.toString());
+      if (mounted) {
+        setState(() => _actionError = describeAccountingError(e, action: what));
+      }
     } finally {
       if (mounted) setState(() => _isBusy = false);
     }
@@ -101,38 +110,44 @@ class _ZohoInvoiceDetailScreenState
   /// print dialog opens.
   Future<void> _printInvoice(ZohoInvoice invoice,
       {bool download = false}) async {
+    // The buttons disable while busy, but two clicks can land before that
+    // repaint — and a second Save dialog would fail and download a stray
+    // copy.
+    if (_isBusy) return;
     setState(() {
       _isBusy = true;
       _actionError = null;
     });
     try {
       final provider = ref.read(zohoInvoicesRiverpod(widget.orgId));
-      final bytes = await provider.getInvoicePdf(invoice.invoiceId);
-      if (!mounted) return;
       final fileName = invoiceFileName(InvoiceMessageSubject.fromZoho(invoice));
       if (download) {
-        // Prefer the OS Save-As dialog so the file lands in the user's own
-        // folder. Falls back to an ordinary download where the File System
-        // Access API is unavailable (Firefox, Safari).
+        // OS Save-As dialog first (it must open straight after the click),
+        // fetching the PDF while the user picks a folder. Falls back to an
+        // ordinary download where the dialog is unavailable (Firefox,
+        // Safari). Every outcome is shown as a toast.
         //
         // Either way the filename is set explicitly — unlike layoutPdf, which
         // prints a blob in an iframe and lets Chrome name the output after the
         // page title ("CLM Schedule").
-        final saved = await saveFileWithPicker(
-          suggestedName: '$fileName.pdf',
-          bytes: bytes,
+        await savePdfWithFeedback(
+          ScaffoldMessenger.of(context),
+          fileName: fileName,
+          load: () => provider.getInvoicePdf(invoice.invoiceId),
         );
-        if (!saved) {
-          await Printing.sharePdf(bytes: bytes, filename: '$fileName.pdf');
-        }
       } else {
+        final bytes = await provider.getInvoicePdf(invoice.invoiceId);
+        if (!mounted) return;
         await Printing.layoutPdf(
           onLayout: (_) async => bytes,
           name: fileName, // honoured on native; ignored on web
         );
       }
     } catch (e) {
-      if (mounted) setState(() => _actionError = 'Could not load PDF: $e');
+      if (mounted) {
+        setState(() => _actionError = describeAccountingError(e,
+            action: download ? 'download the PDF' : 'open the PDF for printing'));
+      }
     } finally {
       if (mounted) setState(() => _isBusy = false);
     }
@@ -154,7 +169,8 @@ class _ZohoInvoiceDetailScreenState
       if (mounted) {
         setState(() {
           _isBusy = false;
-          _actionError = 'Could not load invoice for editing: $e';
+          _actionError = describeAccountingError(e,
+              action: 'open the invoice for editing');
         });
       }
       return;
@@ -167,7 +183,7 @@ class _ZohoInvoiceDetailScreenState
       builder: (_) => EditInvoiceDialog(orgId: widget.orgId, invoice: fresh),
     );
     if (saved == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Invoice updated'),
           backgroundColor: Colors.green,
@@ -206,6 +222,7 @@ class _ZohoInvoiceDetailScreenState
           .read(zohoInvoicesRiverpod(widget.orgId))
           .voidInvoice(invoice.invoiceId),
       'Invoice voided',
+      what: 'void the invoice',
     );
   }
 
@@ -221,8 +238,17 @@ class _ZohoInvoiceDetailScreenState
             invoiceId: invoice.invoiceId,
             customerId: invoice.customerId,
             amount: amount,
+            // Same money against the same outstanding balance is one payment:
+            // a retry after a lost reply replays it instead of recording it
+            // twice, while a real second payment (balance already reduced)
+            // gets a new key.
+            idempotencyKey: 'clm-payment-${invoice.invoiceId}-'
+                '${ZohoInvoice.formatDate(DateTime.now())}-'
+                '${amount.toStringAsFixed(2)}-'
+                'bal${invoice.balance.toStringAsFixed(2)}',
           ),
       'Payment recorded',
+      what: 'record the payment',
     );
   }
 
@@ -313,6 +339,7 @@ class _ZohoInvoiceDetailScreenState
                 : () => _run(
                       () => provider.reloadInvoice(invoice.invoiceId),
                       'Invoice reloaded',
+                      what: 'reload the invoice',
                     ),
           ),
         ],
@@ -418,25 +445,13 @@ class _ZohoInvoiceDetailScreenState
 
               if (_actionError != null) ...[
                 const SizedBox(height: 16),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.red.withValues(alpha: 0.08),
-                    border: Border.all(color: Colors.red.shade200),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.error_outline, color: Colors.red),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(_actionError!,
-                            style: const TextStyle(color: Colors.red)),
-                      ),
-                    ],
-                  ),
+                XeroNotice.error(
+                  _actionError!,
+                  onDismiss: () => setState(() => _actionError = null),
                 ),
               ],
+
+              SlowActionHint(busy: _isBusy, action: 'Working with Zoho'),
 
               const SizedBox(height: 24),
               Wrap(
@@ -508,6 +523,7 @@ class _ZohoInvoiceDetailScreenState
                         : () => _run(
                               () => provider.markSent(invoice.invoiceId),
                               'Invoice marked as sent',
+                              what: 'mark the invoice as sent',
                             ),
                     icon: const Icon(Icons.send, size: 16),
                     label: const Text('Mark as Sent'),

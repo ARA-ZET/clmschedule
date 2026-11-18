@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../models/custom_job_status.dart';
@@ -142,7 +143,7 @@ class _JobStatusManagementDialogState
         title: const Text('Delete Status'),
         content: Text(
           'Are you sure you want to delete the "${status.label}" status?\n\n'
-          'This action cannot be undone. Jobs using this status will need to be updated.',
+          'It goes to the Recycle Bin for 30 days. Jobs using this status will need to be updated.',
         ),
         actions: [
           TextButton(
@@ -357,7 +358,7 @@ class _StatusFormDialogState extends riverpod.ConsumerState<_StatusFormDialog> {
 
       Navigator.of(context).pop();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text('Error saving status: $e'),
           backgroundColor: Colors.red,

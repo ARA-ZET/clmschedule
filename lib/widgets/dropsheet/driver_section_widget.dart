@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 
@@ -6,12 +7,17 @@ import '../../models/collection_job.dart';
 import '../../models/dropsheet_day.dart';
 import '../../models/dropsheet_task.dart';
 import '../../models/dropsheet_task_type_config.dart';
+import '../../models/vehicle_inspection.dart';
 import '../../providers/dropsheet_provider.dart';
 import '../../providers/dropsheet_task_config_provider.dart';
+import '../../providers/vehicle_inspection_provider.dart';
 import '../../services/dropsheet_route_planner.dart';
+import '../../utils/dropsheet_layout.dart';
+import '../../utils/shared_drop_points.dart';
 import 'dropsheet_tab.dart' show TaskDragPayload;
 import 'dropsheet_task_editor_dialog.dart';
 import 'dropsheet_task_row.dart';
+import 'inspection_status_line.dart';
 
 /// One driver's section: header (name + vehicle/trailer) and a reorderable
 /// list of tasks. Tasks may be reordered within the section; cross-section
@@ -67,7 +73,7 @@ class _DriverSectionWidgetState
       setState(() => _calculating = false);
     }
     if (!config.depot.hasCoordinates) {
-      messenger.showSnackBar(
+      messenger.showToast(
         SnackBar(
           content: Text(config.depot.address.trim().isEmpty
               ? 'No office address set. Add one in Task manager.'
@@ -98,7 +104,7 @@ class _DriverSectionWidgetState
 
       if (!mounted) return;
       if (route == null) {
-        messenger.showSnackBar(
+        messenger.showToast(
           const SnackBar(
             content: Text(
                 'No routable stops in this section (need geocoded addresses).'),
@@ -123,10 +129,12 @@ class _DriverSectionWidgetState
         polyline: route.fullPolyline,
         totalDistanceMeters: route.totalDistanceMeters,
         totalDurationSeconds: route.totalDurationSeconds,
+        waitByTaskKey: route.waitMinutes,
+        lateByTaskKey: route.lateMinutes,
       );
 
       if (!mounted) return;
-      messenger.showSnackBar(
+      messenger.showToast(
         SnackBar(
           content: Text(
             'ETAs calculated: ${route.taskOrder.length} stops · '
@@ -139,7 +147,7 @@ class _DriverSectionWidgetState
     } catch (e, st) {
       debugPrint('[Dropsheet] ETA calculation FAILED: $e\n$st');
       if (mounted) {
-        messenger.showSnackBar(
+        messenger.showToast(
           SnackBar(content: Text('ETA calculation failed: $e')),
         );
       }
@@ -231,8 +239,19 @@ class _DriverSectionWidgetState
     final otherSections = _otherSections();
     final hasOtherSections = otherSections.isNotEmpty;
     final isUnassigned = widget.section.id == kUnassignedSectionId;
+    final sharedStops = sharedStopsInSection(widget.section);
+    // Junk & Stuff / Happy Sun jobs and the crew dropped at them.
+    final jobSites = jobSitesInSection(widget.section);
+    // Same numbers as the map pins and the printed sheet.
+    final stopNumbers = dropsheetRowNumbers(widget.section);
     final nonMandatoryCount =
         widget.section.tasks.where((t) => !t.isMandatory).length;
+    final inspections = isUnassigned
+        ? const <VehicleInspection>[]
+        : ref
+                .watch(vehicleInspectionsForDayRiverpod(dropsheet.date))
+                .valueOrNull ??
+            const <VehicleInspection>[];
 
     return DragTarget<TaskDragPayload>(
       onWillAcceptWithDetails: (details) =>
@@ -265,7 +284,9 @@ class _DriverSectionWidgetState
                 isCalculating: _calculating,
                 onToggleCollapse: () =>
                     setState(() => _collapsed = !_collapsed),
-                onCalculate: isUnassigned || nonMandatoryCount == 0
+                onCalculate: isUnassigned ||
+                        widget.section.isOwnTransport ||
+                        nonMandatoryCount == 0
                     ? null
                     : _calculateETAs,
               ),
@@ -291,9 +312,19 @@ class _DriverSectionWidgetState
                   itemBuilder: (context, index) {
                     final task = widget.section.tasks[index];
                     return DropsheetTaskRow(
+                      sharedNote: jobSiteNote(task, jobSites) ??
+                          sharedStopNote(task, sharedStops),
+                      inspectionLine: isUnassigned
+                          ? null
+                          : InspectionStatusLine.forTask(
+                              task: task,
+                              section: widget.section,
+                              date: dropsheet.date,
+                              inspections: inspections,
+                            ),
                       key: ValueKey(task.id),
                       task: task,
-                      taskNumber: index + 1,
+                      stopNumber: stopNumbers[task.id],
                       dragIndex: index,
                       sectionId: widget.section.id,
                       onEdit: () => _editTask(context, task),
@@ -362,8 +393,13 @@ class _Header extends riverpod.ConsumerWidget {
   @override
   Widget build(BuildContext context, riverpod.WidgetRef ref) {
     final isUnassigned = section.id == kUnassignedSectionId;
+    final isOwnTransport = section.isOwnTransport;
     return Container(
-      color: isUnassigned ? Colors.orange.shade50 : Colors.grey.shade200,
+      color: isUnassigned
+          ? Colors.orange.shade50
+          : isOwnTransport
+              ? Colors.teal.shade50
+              : Colors.grey.shade200,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Row(
         children: [
@@ -385,6 +421,11 @@ class _Header extends riverpod.ConsumerWidget {
             const Padding(
               padding: EdgeInsets.only(right: 8),
               child: Icon(Icons.inbox, color: Colors.orange),
+            ),
+          if (isOwnTransport)
+            const Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: Icon(Icons.directions_walk, color: Colors.teal),
             ),
           Text(
             section.driverName,
@@ -412,6 +453,20 @@ class _Header extends riverpod.ConsumerWidget {
                     fontStyle: FontStyle.italic),
               ),
             ),
+          if (isOwnTransport)
+            const Flexible(
+              child: Padding(
+                padding: EdgeInsets.only(left: 8),
+                child: Text(
+                  'Walking, train, bus or taxi from the office — no driver',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: Colors.teal,
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic),
+                ),
+              ),
+            ),
           const Spacer(),
           // Calculate ETAs button (not shown for Unassigned)
           if (onCalculate != null)
@@ -435,10 +490,12 @@ class _Header extends riverpod.ConsumerWidget {
           if (!isUnassigned)
             PopupMenuButton<String>(
               icon: const Icon(Icons.more_vert),
-              itemBuilder: (_) => const [
-                PopupMenuItem(
-                    value: 'edit', child: Text('Edit driver / vehicle')),
-                PopupMenuItem(value: 'remove', child: Text('Remove section')),
+              itemBuilder: (_) => [
+                if (!isOwnTransport)
+                  const PopupMenuItem(
+                      value: 'edit', child: Text('Edit driver / vehicle')),
+                const PopupMenuItem(
+                    value: 'remove', child: Text('Remove section')),
               ],
               onSelected: (v) async {
                 final dropsheet = ref.read(dropsheetRiverpod);
@@ -534,27 +591,31 @@ class _ColumnHeaders extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const style = TextStyle(fontWeight: FontWeight.bold, fontSize: 12);
+    // Same columns, names and widths as the rows (and the printed sheet:
+    // DropsheetColumn), so each title sits over its column.
+    Widget title(DropsheetColumn c) => Text(c.title, style: style);
+    final cells = <Widget>[const SizedBox(width: kRowHandleWidth)];
+    for (final c in DropsheetColumn.values) {
+      final flex = c.flex;
+      if (c != DropsheetColumn.number) cells.add(const SizedBox(width: kRowGap));
+      cells.add(flex != null
+          ? Expanded(flex: flex, child: title(c))
+          : SizedBox(
+              width: c == DropsheetColumn.number
+                  ? kRowNumberWidth
+                  : kRowStartWidth,
+              child: title(c)));
+    }
+    cells.add(const SizedBox(width: kRowMenuWidth));
     return Container(
       color: Colors.grey.shade100,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: const Row(
-        children: [
-          SizedBox(width: 32), // drag handle space
-          SizedBox(width: 64, child: Text('Task', style: style)),
-          SizedBox(width: 12),
-          Expanded(flex: 2, child: Text('Job', style: style)),
-          SizedBox(width: 12),
-          Expanded(flex: 3, child: Text('Details', style: style)),
-          SizedBox(width: 12),
-          SizedBox(width: 70, child: Text('Start', style: style)),
-          SizedBox(width: 12),
-          Expanded(flex: 3, child: Text('Location', style: style)),
-          SizedBox(width: 12),
-          Expanded(flex: 2, child: Text('Contact', style: style)),
-          SizedBox(width: 12),
-          Expanded(flex: 2, child: Text('Tel', style: style)),
-          SizedBox(width: 40), // actions
-        ],
+      padding:
+          const EdgeInsets.symmetric(horizontal: kRowPaddingH, vertical: 6),
+      child: LayoutBuilder(
+        // The rows switch to a stacked layout below 700 px; so do these.
+        builder: (context, box) => box.maxWidth >= 700
+            ? Row(children: cells)
+            : const SizedBox.shrink(),
       ),
     );
   }
@@ -574,6 +635,8 @@ class _Footer extends riverpod.ConsumerWidget {
             t.typeData['isPickupDivider'] == true) ??
         false;
     final isUnassigned = section.driverName.isEmpty;
+    // No run, so no morning/afternoon split.
+    final canSeparate = !isUnassigned && !section.isOwnTransport;
 
     return Padding(
       padding: const EdgeInsets.all(8),
@@ -622,7 +685,7 @@ class _Footer extends riverpod.ConsumerWidget {
             icon: const Icon(Icons.add),
             label: const Text('Add task'),
           ),
-          if (!hasSeparator && !isUnassigned)
+          if (!hasSeparator && canSeparate)
             TextButton.icon(
               onPressed: () async {
                 final separator = DropsheetTask(

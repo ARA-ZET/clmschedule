@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cloud_functions/cloud_functions.dart';
@@ -60,6 +61,18 @@ class ZohoPage<T> {
 ///
 /// Bound to one organisation: [organizationId] rides along on every call, and
 /// the proxy checks it is an org the Zoho login can actually reach.
+/// A key for one create action — one save flow, one dialog. Every retry
+/// and repeated click within that action sends the same key, and the proxy
+/// returns the record the first call created instead of making another
+/// (functions/lib/zoho_books.js, `runIdempotent`). A new action gets a new
+/// key, so deliberately raising a second invoice still works.
+String newZohoIdempotencyKey(String kind) {
+  final random = Random.secure();
+  final suffix = List.generate(
+      16, (_) => random.nextInt(36).toRadixString(36)).join();
+  return 'clm-$kind-${DateTime.now().millisecondsSinceEpoch}-$suffix';
+}
+
 class ZohoBooksService {
   final FirebaseFunctions _functions;
   final String organizationId;
@@ -108,9 +121,12 @@ class ZohoBooksService {
 
   // ── Customers ──────────────────────────────────────────────────────────────
 
-  Future<ZohoCustomer> createCustomer(ZohoCustomer customer) async {
+  /// [idempotencyKey]: see [newZohoIdempotencyKey].
+  Future<ZohoCustomer> createCustomer(ZohoCustomer customer,
+      {String? idempotencyKey}) async {
     final data = await _call('createCustomer', {
       'contact': customer.toCreateJson(),
+      if (idempotencyKey != null) 'idempotencyKey': idempotencyKey,
     });
     return ZohoCustomer.fromJson(
         Map<String, dynamic>.from(data['contact'] as Map));
@@ -215,9 +231,12 @@ class ZohoBooksService {
 
   /// Create an invoice. A non-empty [ZohoInvoice.invoiceNumber] is kept as-is
   /// even when Zoho auto-numbering is switched on.
-  Future<ZohoInvoice> createInvoice(ZohoInvoice invoice) async {
+  /// [idempotencyKey]: see [newZohoIdempotencyKey].
+  Future<ZohoInvoice> createInvoice(ZohoInvoice invoice,
+      {String? idempotencyKey}) async {
     final data = await _call('createInvoice', {
       'invoice': invoice.toCreateJson(),
+      if (idempotencyKey != null) 'idempotencyKey': idempotencyKey,
     });
     return ZohoInvoice.fromJson(
         Map<String, dynamic>.from(data['invoice'] as Map));
@@ -322,8 +341,10 @@ class ZohoBooksService {
     DateTime? date,
     String paymentMode = 'cash',
     String reference = '',
+    String? idempotencyKey,
   }) {
     return _call('recordPayment', {
+      if (idempotencyKey != null) 'idempotencyKey': idempotencyKey,
       'payment': {
         'customer_id': customerId,
         'amount': amount,

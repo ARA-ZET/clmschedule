@@ -17,7 +17,9 @@
  */
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { requireStaff } = require("./require_staff");
 const { defineSecret } = require("firebase-functions/params");
+const admin = require("firebase-admin");
 
 const ZOHO_CLIENT_ID = defineSecret("ZOHO_CLIENT_ID");
 const ZOHO_CLIENT_SECRET = defineSecret("ZOHO_CLIENT_SECRET");
@@ -387,15 +389,78 @@ const OPS = {
   },
 };
 
+// ── Idempotency ──────────────────────────────────────────────────────────────
+// Operations that create something in the books. On a slow connection the
+// app can time out while Zoho has already created the invoice; the retry
+// that follows (or an impatient second click) then raised it again. The app
+// sends one `idempotencyKey` per save flow: the first call runs and its
+// result is kept here, any later call with the same key gets that result back
+// instead of creating another record.
+const IDEMPOTENT_OPS = new Set(["createInvoice", "createCustomer", "recordPayment"]);
+const IDEMPOTENCY_COLLECTION = "zohoIdempotency";
+// A claim older than this is treated as abandoned (the instance died
+// mid-call) and may be taken over.
+const PENDING_STALE_MS = 3 * 60 * 1000;
+const IDEMPOTENCY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function runIdempotent({ key, op, orgId, uid }, run, db = admin.firestore()) {
+  const docId = `${orgId || "none"}__${String(key).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 200)}`;
+  const ref = db.collection(IDEMPOTENCY_COLLECTION).doc(docId);
+  const expiresAt = admin.firestore.Timestamp.fromMillis(Date.now() + IDEMPOTENCY_TTL_MS);
+
+  const claim = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.exists) {
+      const d = snap.data();
+      if (d.op !== op) {
+        throw new HttpsError("invalid-argument",
+          `Idempotency key already used for "${d.op}".`);
+      }
+      if (d.status === "done") return { replay: d.resultJson };
+      if (d.status === "pending" && Date.now() - (d.startedAtMs || 0) < PENDING_STALE_MS) {
+        return { busy: true };
+      }
+    }
+    tx.set(ref, { op, orgId: orgId || null, uid, status: "pending", startedAtMs: Date.now(), expiresAt });
+    return {};
+  });
+
+  if (claim.replay !== undefined) {
+    console.log(`[zohoBooks] ${op}: replayed result for key ${docId}`);
+    return JSON.parse(claim.replay);
+  }
+  if (claim.busy) {
+    throw new HttpsError("aborted",
+      "This is already being saved in Zoho Books. Wait a moment, then try " +
+      "again — it will not be created twice.");
+  }
+
+  let result;
+  try {
+    result = await run();
+  } catch (e) {
+    // Nothing was created, so release the key for a genuine retry.
+    await ref.delete().catch(() => {});
+    throw e;
+  }
+  // Stored as JSON text: Zoho payloads can hold shapes Firestore rejects.
+  await ref.set({
+    op, orgId: orgId || null, uid, status: "done",
+    startedAtMs: Date.now(), resultJson: JSON.stringify(result), expiresAt,
+  }).catch((e) => console.error(`[zohoBooks] ${op}: could not record result: ${e.message}`));
+  return result;
+}
+
+// Exposed for functions/test/zoho_idempotency.test.js.
+exports._runIdempotent = runIdempotent;
+
 exports.zohoBooks = onCall(
   {
     region: "us-central1",
     secrets: [ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN],
   },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
 
     const { op, ...data } = request.data || {};
     if (!str(op) || !Object.prototype.hasOwnProperty.call(OPS, op)) {
@@ -405,8 +470,14 @@ exports.zohoBooks = onCall(
       );
     }
 
-    const { organizationId, ...args } = data;
+    const { organizationId, idempotencyKey, ...args } = data;
     const orgId = op === "listOrganizations" ? null : await resolveOrgId(organizationId);
+    if (IDEMPOTENT_OPS.has(op) && str(idempotencyKey)) {
+      return runIdempotent(
+        { key: idempotencyKey, op, orgId, uid: request.auth.uid },
+        () => OPS[op](args, orgId),
+      );
+    }
     return OPS[op](args, orgId);
   },
 );

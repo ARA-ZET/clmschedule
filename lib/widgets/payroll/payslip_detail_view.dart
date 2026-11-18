@@ -37,17 +37,36 @@ String _codeWithLabel(String code, Map<String, String> bonusCodeLabels) {
 /// day-by-day table, totals, signature lines — with the admin-only advance
 /// controls kept in a clearly separate section below (they aren't part of
 /// the printed slip).
-class PayslipDetailView extends riverpod.ConsumerWidget {
+class PayslipDetailView extends riverpod.ConsumerStatefulWidget {
   final String distributorId;
 
   const PayslipDetailView({super.key, required this.distributorId});
 
   @override
-  Widget build(BuildContext context, riverpod.WidgetRef ref) {
+  riverpod.ConsumerState<PayslipDetailView> createState() =>
+      _PayslipDetailViewState();
+}
+
+class _PayslipDetailViewState extends riverpod.ConsumerState<PayslipDetailView> {
+  String get distributorId => widget.distributorId;
+
+  // Held across rebuilds: created inline in build, every payroll or schedule
+  // notification handed the StreamBuilders new streams, which re-subscribed
+  // all four Firestore listeners and blanked their data meanwhile. Created on
+  // first use and dropped while there is no payslip, so a StreamBuilder that
+  // mounts again always gets a stream nobody has listened to yet.
+  Stream<List<Advance>>? _advances;
+  Stream<List<AdvanceRepayment>>? _repayments;
+  Stream<List<SavingsDeposit>>? _deposits;
+  Stream<List<SavingsWithdrawal>>? _withdrawals;
+
+  @override
+  Widget build(BuildContext context) {
     final payroll = ref.watch(payrollRiverpod);
     final payslip = payroll.week.payslips[distributorId];
     final editable = isPayrollWeekEditable(payroll.weekStart);
-    final distributors = ref.watch(scheduleRiverpod).distributors;
+    final distributors =
+        ref.watch(scheduleRiverpod.select((p) => p.distributors));
     Distributor? distributor;
     for (final d in distributors) {
       if (d.id == distributorId) {
@@ -57,6 +76,7 @@ class PayslipDetailView extends riverpod.ConsumerWidget {
     }
 
     if (payslip == null) {
+      _advances = _repayments = _deposits = _withdrawals = null;
       return Scaffold(
         backgroundColor: Colors.grey.shade200,
         appBar: AppBar(
@@ -74,21 +94,21 @@ class PayslipDetailView extends riverpod.ConsumerWidget {
     // rather than each independently re-subscribing to the same Firestore
     // collections or the print button re-fetching them one-shot.
     return StreamBuilder<List<Advance>>(
-      stream:
+      stream: _advances ??=
           ref.read(payrollServiceRiverpod).streamAdvances(distributorId),
       builder: (context, advSnapshot) {
         final advances = advSnapshot.data ?? const <Advance>[];
         final outstandingDeductionBalance =
             advances.fold<double>(0, (t, a) => t + a.balance);
         return StreamBuilder<List<AdvanceRepayment>>(
-          stream: ref
+          stream: _repayments ??= ref
               .read(payrollServiceRiverpod)
               .streamRepayments(distributorId),
           builder: (context, repSnapshot) {
             final repayments =
                 repSnapshot.data ?? const <AdvanceRepayment>[];
             return StreamBuilder<List<SavingsDeposit>>(
-              stream: ref
+              stream: _deposits ??= ref
                   .read(payrollServiceRiverpod)
                   .streamSavingsDeposits(distributorId),
               builder: (context, savSnapshot) {
@@ -97,7 +117,7 @@ class PayslipDetailView extends riverpod.ConsumerWidget {
                 final savingsBalanceHeld =
                     deposits.fold<double>(0, (t, d) => t + d.balance);
                 return StreamBuilder<List<SavingsWithdrawal>>(
-                  stream: ref
+                  stream: _withdrawals ??= ref
                       .read(payrollServiceRiverpod)
                       .streamSavingsWithdrawals(distributorId),
                   builder: (context, withSnapshot) {

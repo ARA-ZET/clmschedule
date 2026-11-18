@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,6 +12,11 @@ import '../providers/shareable_map_provider.dart';
 import 'cloud_track_rename_dialog.dart';
 import '../utils/gpx_track_rename.dart';
 import '../adapters/firestore_adapter.dart';
+import '../adapters/schedule_job_adapter.dart' show kUnfinishedAreasLayerId;
+import '../models/shareable_map.dart';
+import '../providers/schedule_allocation_controller.dart';
+import '../services/shareable_maps_firestore_service.dart';
+import '../utils/map_copy_description.dart';
 import '../services/map_link_service.dart';
 import '../models/map_layer.dart';
 import '../../letterbox/services/letterbox_count_service.dart';
@@ -20,6 +26,7 @@ import '../models/map_polyline.dart';
 import 'map_import_dialog.dart';
 import 'unverified_letterbox_dialog.dart';
 import 'map_overlay.dart';
+import 'map_busy_dialog.dart';
 
 /// Sidebar widget for managing map layers - Google My Maps style
 class MapLayersSidebar extends riverpod.ConsumerWidget {
@@ -90,10 +97,17 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                     value: 'statistics',
                     child: Text('Map statistics'),
                   ),
+                  if (provider.adapter is FirestoreMapAdapter)
+                    const PopupMenuItem(
+                      value: 'duplicate',
+                      child: Text('Duplicate map'),
+                    ),
                 ],
                 onSelected: (value) {
                   if (value == 'rename') {
                     _showRenameMapDialog(context, provider);
+                  } else if (value == 'duplicate') {
+                    _duplicateMap(context, provider);
                   } else if (value == 'settings' && showMapSettings) {
                     _showMapSettingsDialog(context, provider);
                   } else if (value == 'statistics') {
@@ -103,6 +117,16 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
               ),
             ],
           ),
+          if (map != null && map.description.trim().isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, right: 40),
+              child: Text(
+                map.description.trim(),
+                style: const TextStyle(fontSize: 13, color: Color(0xFF5F6368)),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
         ],
       ),
     );
@@ -271,7 +295,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
             onPressed: () {
               final removed = provider.removeEmptyLayers();
               Navigator.pop(dialogContext);
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              ScaffoldMessenger.of(context).showToast(SnackBar(
                 content: Text('Removed $removed empty '
                     'layer${removed == 1 ? '' : 's'}'),
               ));
@@ -1171,7 +1195,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
       final monthKey = adapter.monthKey;
       if (docId == null) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             const SnackBar(content: Text('Save the map first before sharing')),
           );
         }
@@ -1188,7 +1212,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
 
       await Clipboard.setData(ClipboardData(text: url));
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Row(
               children: [
@@ -1203,7 +1227,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Failed to create share link: $e')),
         );
       }
@@ -1259,6 +1283,120 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
         ],
       ),
     );
+  }
+
+  /// Copy the open map, as it stands on screen, into a new gallery map and
+  /// open the copy. The copy is the map's own drawing only: it is linked to no
+  /// Job List job and no cloud folder, and generated layers (cloud tracks,
+  /// unfinished areas) are left behind — they are rebuilt from their sources,
+  /// not stored.
+  Future<void> _duplicateMap(
+      BuildContext context, ShareableMapProvider provider) async {
+    final original = provider.currentMap;
+    if (original == null) return;
+
+    final nameController = TextEditingController(text: original.name);
+    final descController = TextEditingController(
+        text: copyDescription(original.description, DateTime.now()));
+    final result = await showDialog<({String name, String description})>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Duplicate Map'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'Map name',
+                border: OutlineInputBorder(),
+              ),
+              autofocus: true,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: descController,
+              decoration: const InputDecoration(
+                labelText: 'Description (optional)',
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 2,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, (
+              name: nameController.text.trim(),
+              description: descController.text.trim(),
+            )),
+            child: const Text('Duplicate'),
+          ),
+        ],
+      ),
+    );
+    if (result == null || !context.mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      // Until the copy is loaded the original is still on screen; the busy
+      // dialog keeps the user from editing it thinking it's the copy.
+      final copy = await runWithMapBusyDialog(
+        context,
+        title: 'Duplicating map',
+        initialStep: 'Saving your latest edits to "${original.name}"…',
+        task: (step) async {
+          // Loading the copy cancels the pending auto-save, so land the
+          // original's last edits first.
+          if (provider.hasUnsavedChanges) await provider.saveToAdapter();
+
+          final layers = original.layers
+              .where((l) =>
+                  !l.id.startsWith('cloud_') &&
+                  l.id != kUnfinishedAreasLayerId)
+              .map((l) => l.copyWith())
+              .toList();
+          final copy = ShareableMap.createWithDefaultLayer(
+            name: result.name.isEmpty ? 'Untitled Map' : result.name,
+            description: result.description,
+            defaultCenter: original.defaultCenter,
+          ).copyWith(
+            layers: layers.isNotEmpty ? layers : null,
+            defaultZoom: original.defaultZoom,
+          );
+
+          step('Creating the copy "${copy.name}"…');
+          final service = ShareableMapsFirestoreService();
+          final monthKey =
+              ShareableMapsFirestoreService.monthKeyFor(DateTime.now());
+          final docId = await service.createMap(copy, monthKey: monthKey);
+
+          step('Opening the copy "${copy.name}"…');
+          // The allocation view belongs to the original's Job List job.
+          closeScheduleAllocation();
+          await provider.loadFromAdapter(FirestoreMapAdapter.existing(
+            docId: docId,
+            monthKey: monthKey,
+            service: service,
+          ));
+          return copy;
+        },
+      );
+      messenger.showToast(
+        SnackBar(content: Text('Opened copy "${copy.name}"')),
+      );
+    } catch (e) {
+      messenger.showToast(
+        SnackBar(
+          content: Text('Failed to duplicate map: $e'),
+          backgroundColor: Colors.red.shade800,
+        ),
+      );
+    }
   }
 
   void _showRenameMapDialog(
@@ -1725,7 +1863,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
                 // not only logged.
                 debugPrint('[LetterBoxEstimates] calculate row $i failed: $e');
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  ScaffoldMessenger.of(context).showToast(
                     SnackBar(content: Text('Could not calculate: $e')),
                   );
                 }
@@ -1754,7 +1892,7 @@ class MapLayersSidebar extends riverpod.ConsumerWidget {
               } catch (e) {
                 debugPrint('[LetterBoxEstimates] calculate all failed: $e');
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  ScaffoldMessenger.of(context).showToast(
                     SnackBar(content: Text('Could not calculate all: $e')),
                   );
                 }

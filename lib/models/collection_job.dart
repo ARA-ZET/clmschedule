@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../providers/job_type_provider.dart';
 import '../utils/schedule_time.dart';
+import 'job_list_item.dart';
 
 enum VehicleType {
   hyundai,
@@ -205,6 +206,51 @@ class CollectionJob {
     this.jobListItemId = '',
     this.offloadLocation = '',
   }) : timeSlots = (timeSlots != null && timeSlots >= 1) ? timeSlots : 1;
+
+  /// The Collection Schedule's view of a Job List job. A collection job has
+  /// no storage of its own: the id is the item's id, and every field comes
+  /// from the item. The Collection Schedule and the main Schedule's booking
+  /// strips both project through here, so they always agree.
+  factory CollectionJob.fromJobListItem(JobListItem jobListItem) {
+    // Parse vehicle/trailer from new enum field, with legacy fallback
+    final combo =
+        VehicleTrailerCombo.tryParse(jobListItem.vehicleTrailerCombo) ??
+            VehicleTrailerCombo.fromLegacyQuantity(jobListItem.quantity,
+                jobTypeId: jobListItem.jobTypeId);
+
+    // Duration, start time and staffing now have dedicated fields on
+    // JobListItem. The resolved* getters fall back to the legacy derivations
+    // (quantityDistributed / date's time component / manDays.ceil()) so
+    // records written before those fields existed still render identically.
+    final timeSlots = jobListItem.resolvedTimeSlots;
+    final timeSlot = jobListItem.resolvedTimeSlot;
+
+    // A real collection date is the booking's day; 1 Jan 2000 means none.
+    // (This used to also skip every real date on the 1st or in January.)
+    final effectiveDate = jobListItem.hasCollectionDate
+        ? jobListItem.collectionDate
+        : jobListItem.date;
+
+    return CollectionJob(
+      id: jobListItem.id,
+      location: jobListItem.collectionAddress.isNotEmpty
+          ? jobListItem.collectionAddress
+          : jobListItem.area,
+      vehicleType: combo?.vehicleType ?? VehicleType.hyundai,
+      trailerType: combo?.trailerType ?? TrailerType.noTrailer,
+      date: effectiveDate,
+      timeSlot: timeSlot,
+      timeSlots: timeSlots,
+      assignedStaff: jobListItem.assignedStaff,
+      staffCount: jobListItem.resolvedStaffCount,
+      jobType: jobListItem.jobTypeId,
+      statusId: jobListItem.jobStatusId,
+      clients: [jobListItem.client],
+      notes: jobListItem.specialInstructions,
+      jobListItemId: jobListItem.id,
+      offloadLocation: jobListItem.offloadingAddress,
+    );
+  }
 
   // Create from Firestore
   factory CollectionJob.fromMap(String id, Map<String, dynamic> data) {

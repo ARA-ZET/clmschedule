@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import '../providers/invoice_status_provider.dart';
@@ -52,7 +53,7 @@ class _InvoiceStatusManagementDialogState
 
   Future<void> _saveStatus() async {
     if (_labelController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(content: Text('Please enter a label')),
       );
       return;
@@ -74,7 +75,7 @@ class _InvoiceStatusManagementDialogState
       _cancelEdit();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(content: Text('Error saving status: $e')),
         );
       }
@@ -106,7 +107,7 @@ class _InvoiceStatusManagementDialogState
         await provider.deleteStatus(id);
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(content: Text('Error deleting status: $e')),
           );
         }

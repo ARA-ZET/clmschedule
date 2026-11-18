@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import '../models/happy_sun_shared.dart';
 import '../models/inventory_tool.dart';
@@ -375,7 +376,7 @@ class _ProjectToolsDialogState extends State<ProjectToolsDialog>
         .toList();
 
     if (selectableBaseNames.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         SnackBar(
           content: Text(
               'No ${toolType.displayName.toLowerCase()} available in inventory'),

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:flutter/material.dart';
 import 'dart:io';
@@ -259,7 +260,7 @@ class _HappySunInventoryViewState extends riverpod.ConsumerState<HappySunInvento
                                         await inventoryProvider.resetAllInUse();
                                     if (context.mounted) {
                                       ScaffoldMessenger.of(context)
-                                          .showSnackBar(
+                                          .showToast(
                                         SnackBar(
                                           content: Text(
                                               '$count tool(s) reset to available'),

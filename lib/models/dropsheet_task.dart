@@ -320,6 +320,75 @@ class DropsheetTask {
   /// re-sync must keep their text instead of regenerating it.
   bool get hasUserEdits => typeData[kUserEditedKey] == true;
 
+  /// typeData key listing the fields the user reworded in the editor —
+  /// `job`, `details`, `location`, `contact`, `tel`, `address`,
+  /// `loadingAddress`, `offloadAddress` — written beside [kUserEditedKey].
+  /// Only those fields keep the user's text; the rest still follow the Job
+  /// List job / schedule. Builds that predate the list keep the flag but drop
+  /// the list when they rebuild a task, which reads as "every field".
+  static const String kUserEditedFieldsKey = '_userEditedFields';
+
+  /// Text fields the editor tracks in [kUserEditedFieldsKey].
+  static const List<String> userEditableFields = [
+    'job',
+    'details',
+    'location',
+    'contact',
+    'tel',
+    'address',
+    'loadingAddress',
+    'offloadAddress',
+  ];
+
+  /// Whether the user reworded [field], so a sync keeps their text. A task
+  /// flagged before fields were tracked one by one counts every field.
+  bool userEditedField(String field) {
+    if (!hasUserEdits) return false;
+    final fields = typeData[kUserEditedFieldsKey];
+    if (fields is! List) return true;
+    return fields.contains(field);
+  }
+
+  /// typeData marking that the user reworded [touched], on top of whatever
+  /// they reworded before. Null when nothing was touched (the task stays as
+  /// it was — opening and closing the editor must not detach it from sync).
+  static Map<String, dynamic>? markUserEdited(
+      Map<String, dynamic> typeData, Set<String> touched,
+      {required bool wasEdited}) {
+    if (touched.isEmpty) return null;
+    final out = Map<String, dynamic>.from(typeData);
+    out[kUserEditedKey] = true;
+    final before = typeData[kUserEditedFieldsKey];
+    if (wasEdited && before is! List) {
+      // Flagged by an older build: which fields were the user's is unknown,
+      // so they all stay the user's.
+      out.remove(kUserEditedFieldsKey);
+      return out;
+    }
+    out[kUserEditedFieldsKey] = <String>{
+      if (before is List) ...before.whereType<String>(),
+      ...touched,
+    }.toList()
+      ..sort();
+    return out;
+  }
+
+  /// typeData: who the schedule sends to this Junk & Stuff / Happy Sun job's
+  /// client on the day — the names of the distributors whose schedule job
+  /// lists the client. Written by the dropsheet's syncs; shown as
+  /// "Team: …" in Details ([withLine]).
+  static const String kWithKey = 'withNames';
+
+  /// The distributors working this job with the driver ([kWithKey]).
+  List<String> get withNames => [
+        for (final n in (typeData[kWithKey] as List?) ?? const [])
+          if (n is String && n.trim().isNotEmpty) n.trim(),
+      ];
+
+  /// "Team: Sipho, Thabo", or '' when nobody is allocated.
+  String get withLine =>
+      withNames.isEmpty ? '' : 'Team: ${withNames.join(', ')}';
+
   bool get isDistributorTask =>
       type == DropsheetTaskType.dropOff ||
       type == DropsheetTaskType.pickUp ||
@@ -352,6 +421,27 @@ class DropsheetTask {
   /// The schedule's "not named yet" working-area text.
   static bool isPlaceholderArea(String area) =>
       area.trim().toLowerCase() == 'to be assigned';
+
+  /// Work areas shown before the rest are cut to "...".
+  static const int kMaxShownAreas = 3;
+
+  /// [areas] (the comma-joined `workArea` text) cut to its first
+  /// [kMaxShownAreas] names plus "..." — a job with many linked client-map
+  /// areas otherwise fills the row and the printed sheet. Display only: the
+  /// stored `workArea` stays whole, since the sync matches on it.
+  static String shortAreaList(String areas) {
+    final parts = areas
+        .split(',')
+        .map((a) => a.trim())
+        .where((a) => a.isNotEmpty)
+        .toList();
+    if (parts.length <= kMaxShownAreas) return areas.trim();
+    return '${parts.take(kMaxShownAreas).join(', ')} ...';
+  }
+
+  /// This task's `workArea`, shortened by [shortAreaList].
+  String get shortWorkArea =>
+      shortAreaList((typeData['workArea'] as String?) ?? '');
 
   /// Whether a [Job] has no work-area polygons, i.e. it is "just a point".
   /// Point markers (a tapped or searched drop-off / address point) don't
@@ -394,26 +484,184 @@ class DropsheetTask {
 
   /// Label shown for the task. A Distribute task relabelled "Drop off: …" by
   /// an older build is shown as "Distribute: …".
+  static final RegExp _bookedAtPattern = RegExp(r'\s*@\s*\d{1,2}:\d{2}');
+
+  /// [label] as an appointment reads: "Collection @10:00: Mrs Smith,
+  /// 12 Main Rd" — booked time after the type, then client and address — so
+  /// the driver sees when and where at a glance. Built for display, so it
+  /// holds for labels the user reworded too; a stale "@time" is replaced
+  /// and an address already in the label isn't repeated.
+  static String withBookedTime(String label, String appointment,
+      {String address = ''}) {
+    final plain = label.replaceAll(_bookedAtPattern, '').trim();
+    final colon = plain.indexOf(':');
+    final head = (colon == -1 ? plain : plain.substring(0, colon)).trim();
+    var tail = colon == -1 ? '' : plain.substring(colon + 1).trim();
+    final where = address.trim();
+    if (where.isNotEmpty &&
+        !tail.toLowerCase().contains(where.toLowerCase())) {
+      tail = tail.isEmpty ? where : '$tail, $where';
+    }
+    final at = '$head @${appointment.trim()}';
+    return tail.isEmpty ? at : '$at: $tail';
+  }
+
+  /// Where an appointment happens, for its label: a move's loading address,
+  /// else the job-list address, else the Location.
+  String get _bookedAddress {
+    String text(String key) => (typeData[key] as String?)?.trim() ?? '';
+    if (type == DropsheetTaskType.furnitureMove) return text('loadingAddress');
+    final address = text('address');
+    return address.isNotEmpty ? address : location.trim();
+  }
+
   String get displayJob {
+    final label = _baseDisplayJob;
+    final booked = appointmentTime;
+    if (booked.isEmpty) return label;
+    return withBookedTime(label, booked, address: _bookedAddress);
+  }
+
+  /// A two-address job (furniture move, transport of goods, trailer
+  /// towing…). The dropsheet and PDF show it as two lines — "Furniture
+  /// Move: Loading" then "Furniture Move: Offloading" — each with its own time and
+  /// address, in the order the route does them.
+  bool get isTwoStop => type == DropsheetTaskType.furnitureMove;
+
+  /// The job type part of the label ("Transport of Goods" from
+  /// "Transport of Goods: Mrs Smith"), for the two-stop lines.
+  String get twoStopTypeLabel {
+    final plain = job.replaceAll(_bookedAtPattern, '').trim();
+    final colon = plain.indexOf(':');
+    final head = (colon == -1 ? plain : plain.substring(0, colon)).trim();
+    if (head.isNotEmpty) return head;
+    final label = (typeData['jobTypeLabel'] as String?)?.trim() ?? '';
+    return label.isNotEmpty ? label : type.displayName;
+  }
+
+  /// "Furniture Move @10:00: Loading" — a booked move starts with loading.
+  String get loadingLineLabel {
+    final booked = appointmentTime;
+    return booked.isEmpty
+        ? '$twoStopTypeLabel: Loading'
+        : '$twoStopTypeLabel @$booked: Loading';
+  }
+
+  String get offloadingLineLabel => '$twoStopTypeLabel: Offloading';
+
+  String get loadingAddress =>
+      (typeData['loadingAddress'] as String?)?.trim() ?? '';
+
+  String get offloadAddress =>
+      (typeData['offloadAddress'] as String?)?.trim() ?? '';
+
+  /// When the offloading starts — the route's offload arrival. The loading
+  /// time is [startTime].
+  String get offloadTime => (typeData['offloadEta'] as String?)?.trim() ?? '';
+
+  /// The map pin numbers of the two lines, given the task's first stop
+  /// number: the map numbers each address that has a point, loading first
+  /// (see taskStopCount), so the Offloading line is usually [first] + 1.
+  ({int? loading, int? offload}) twoStopNumbers(int? first) {
+    if (first == null) return (loading: null, offload: null);
+    final hasLoad =
+        typeData['loadingLat'] != null && typeData['loadingLng'] != null;
+    final hasOff =
+        typeData['offloadLat'] != null && typeData['offloadLng'] != null;
+    return (
+      loading: hasLoad ? first : null,
+      offload: hasOff ? first + (hasLoad ? 1 : 0) : null,
+    );
+  }
+
+  String get _baseDisplayJob {
     if (job.isEmpty) return type.displayName;
+    var label = job;
     if (type == DropsheetTaskType.distribute) {
       final prefix = RegExp(r'^drop[-\s]*off', caseSensitive: false);
-      if (prefix.hasMatch(job)) return job.replaceFirst(prefix, 'Distribute');
+      if (prefix.hasMatch(label)) {
+        label = label.replaceFirst(prefix, 'Distribute');
+      }
     }
-    return job;
+    // "Drop off: A, B, C, D, E" → "Drop off: A, B, C ...".
+    if (isDistributorTask) {
+      final area = (typeData['workArea'] as String?)?.trim() ?? '';
+      if (area.isNotEmpty && label.contains(area)) {
+        label = label.replaceFirst(area, shortAreaList(area));
+      }
+    }
+    return label;
+  }
+
+  /// The notes shown in Details. A furniture move built in the editor before
+  /// its Notes box wrote [details] kept them only in `typeData['notes']`,
+  /// where nothing showed them.
+  String get _shownNotes {
+    final n = notes.trim();
+    if (n.isNotEmpty || type != DropsheetTaskType.furnitureMove) return n;
+    return (typeData['notes'] as String?)?.trim() ?? '';
   }
 
   /// Text for the Details column (dropsheet rows + PDF). Drop-offs and
   /// pick-ups lead with the distributor's name — always the current one from
   /// `typeData`, never stored in [details] — followed by the user's notes.
+  /// Junk & Stuff / Happy Sun jobs lead with who works them ("Team: Sipho,
+  /// Thabo · notes").
   String get detailsText {
+    if (type == DropsheetTaskType.arrive) {
+      // Start shows the target (17:30 unless changed); the route's
+      // calculated return goes here when it differs.
+      final eta = (typeData['eta'] as String?)?.trim() ?? '';
+      final back = eta.isNotEmpty && eta != startTime.trim()
+          ? 'Back ~$eta'
+          : '';
+      final n = notes.trim();
+      return [back, n].where((p) => p.isNotEmpty).join(' · ');
+    }
     if (type != DropsheetTaskType.dropOff && type != DropsheetTaskType.pickUp) {
-      return notes;
+      return [withLine, _shownNotes].where((p) => p.isNotEmpty).join(' · ');
     }
     final name = (typeData['distributorName'] as String?)?.trim() ?? '';
     final n = notes.trim();
     if (name.isEmpty) return n;
     return n.isEmpty ? name : '$name · $n';
+  }
+
+  /// typeData: the booked appointment time ("10:00") of a time-slot job-list
+  /// job (collections, window cleaning…). Kept apart from [startTime], which
+  /// route calculation overwrites with the arrival estimate — the booking
+  /// used to be lost the first time the route was calculated.
+  static const String kAppointmentTimeKey = 'appointmentTime';
+
+  /// The booked appointment time, or '' — shown in the label
+  /// ([displayJob]: "Collection @10:00: Mrs Smith, 12 Main Rd").
+  String get appointmentTime =>
+      (typeData[kAppointmentTimeKey] as String?)?.trim() ?? '';
+
+  /// typeData: minutes the driver waits at this stop for its booked time
+  /// (route timing — see services/appointment_timing.dart).
+  static const String kAppointmentWaitKey = 'apptWaitMin';
+
+  /// typeData: minutes the driver reaches this stop after its booked time.
+  static const String kAppointmentLateKey = 'apptLateMin';
+
+  int get appointmentWaitMinutes =>
+      (typeData[kAppointmentWaitKey] as num?)?.toInt() ?? 0;
+
+  int get appointmentLateMinutes =>
+      (typeData[kAppointmentLateKey] as num?)?.toInt() ?? 0;
+
+  /// "18 min early for the 10:00 booking — wait" / "12 min late for the
+  /// 10:00 booking", or null when on time or not booked. Same words on the
+  /// dropsheet, planner panel, map card and PDF.
+  String? get bookingTimingNote {
+    final late = appointmentLateMinutes;
+    if (late > 0) return '$late min late for the $appointmentTime booking';
+    final early = appointmentWaitMinutes;
+    if (early > 0) {
+      return '$early min early for the $appointmentTime booking — wait';
+    }
+    return null;
   }
 
   /// Details text for the Inspect task: the vehicle, plus the trailer when

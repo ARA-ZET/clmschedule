@@ -1,6 +1,6 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
-import 'package:printing/printing.dart';
 
 import '../models/company.dart';
 import '../models/invoice_message_subject.dart';
@@ -11,8 +11,8 @@ import '../models/zoho_invoice.dart';
 import '../providers/zoho_invoices_provider.dart';
 import '../services/xero_accounting_service.dart';
 import '../utils/zoho_org.dart';
-import '../utils/save_file.dart'
-    if (dart.library.io) '../utils/save_file_stub.dart';
+import '../utils/accounting_error.dart';
+import '../utils/save_with_picker.dart';
 import 'zoho/invoice_share.dart';
 import 'xero/xero_invoice_detail_screen.dart';
 import 'xero/xero_status_chip.dart';
@@ -82,36 +82,34 @@ class _JobInvoiceLinkActionsState
 
   bool get _isXero => widget.invoice.providerId == AccountingProvider.xero.name;
 
-  /// "Client - INV-0001", like every other invoice download. Taken from the
-  /// link; the invoice is only fetched when the link has no client name.
-  Future<String> _fileName() async {
+  /// "Client - INV-0001", like every other invoice download, taken from the
+  /// link alone. It is never fetched: the Save dialog that shows it must
+  /// open straight after the click. A link without a client name gives just
+  /// the invoice number, which the user can edit in the dialog.
+  String get _fileName {
     final link = widget.invoice;
-    if (link.contactName.isNotEmpty) {
-      return invoiceFileName(InvoiceMessageSubject(
-        clientName: link.contactName,
-        invoiceNumber: link.invoiceNumber,
-        total: link.total,
-        amountDue: link.total,
-      ));
-    }
-    return invoiceFileName(_isXero
-        ? InvoiceMessageSubject.fromXero(await ref
-            .read(xeroAccountingServiceRiverpod)
-            .getInvoice(link.invoiceId))
-        : InvoiceMessageSubject.fromZoho(await ref
-            .read(zohoInvoicesRiverpod(widget.orgId))
-            .getInvoiceForCopy(link.invoiceId)));
+    return invoiceFileName(InvoiceMessageSubject(
+      clientName: link.contactName,
+      invoiceNumber: link.invoiceNumber,
+      total: link.total,
+      amountDue: link.total,
+    ));
   }
 
-  Future<void> _run(Future<void> Function() action, String failure) async {
+  /// [what] completes "Couldn't …" when the action fails.
+  Future<void> _run(Future<void> Function() action, String what) async {
     if (_busy) return;
     setState(() => _busy = true);
     try {
       await action();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$failure: $e'), backgroundColor: Colors.red),
+        ScaffoldMessenger.of(context).showToast(
+          SnackBar(
+            content: Text(describeAccountingError(e, action: what).message),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
+          ),
         );
       }
     } finally {
@@ -119,23 +117,18 @@ class _JobInvoiceLinkActionsState
     }
   }
 
+  /// The Save dialog opens straight after the click (Chrome refuses it a few
+  /// seconds later) and the PDF loads while the user picks a folder.
   Future<void> _download() => _run(() async {
         final id = widget.invoice.invoiceId;
-        final bytes = _isXero
-            ? await ref.read(xeroAccountingServiceRiverpod).getInvoicePdf(id)
-            : await ref
-                .read(zohoInvoicesRiverpod(widget.orgId))
-                .getInvoicePdf(id);
-        final fileName = await _fileName();
-        if (!mounted) return;
-        final saved = await saveFileWithPicker(
-          suggestedName: '$fileName.pdf',
-          bytes: bytes,
+        final xero = ref.read(xeroAccountingServiceRiverpod);
+        final zoho = ref.read(zohoInvoicesRiverpod(widget.orgId));
+        await savePdfWithFeedback(
+          ScaffoldMessenger.of(context),
+          fileName: _fileName,
+          load: () => _isXero ? xero.getInvoicePdf(id) : zoho.getInvoicePdf(id),
         );
-        if (!saved) {
-          await Printing.sharePdf(bytes: bytes, filename: '$fileName.pdf');
-        }
-      }, 'Could not load invoice PDF');
+      }, 'download the PDF');
 
   /// The share sheet renders `{pay_link}` when it builds, so the invoice and
   /// its pay link are fetched before it opens.
@@ -171,7 +164,7 @@ class _JobInvoiceLinkActionsState
         }
         if (!mounted) return;
         await showInvoiceShareSheet(context, subject, customerEmail: email);
-      }, 'Could not load invoice');
+      }, 'get the invoice ready to share');
 
   @override
   Widget build(BuildContext context) {

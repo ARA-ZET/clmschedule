@@ -11,9 +11,14 @@
 // [CustomJobType.createsCloudFolder] set; anything else records no waypoints.
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+
 import '../../models/custom_job_type.dart';
+import '../../models/job.dart';
 import '../../models/job_list_item.dart';
 import '../../providers/job_list_provider.dart';
+import '../../services/job_list_service.dart';
+import '../../utils/distribution_lag.dart';
 
 /// The subset of [clients] whose Job List entries are all for work that
 /// records no waypoints. Matching is by client name, ignoring case and
@@ -81,4 +86,68 @@ Future<List<JobListItem>> loadedJobListItems(
     await Future<void>.delayed(const Duration(milliseconds: 100));
   }
   return provider.allJobListItems;
+}
+
+/// The Job List item behind each client on a distributor's [dayJobs], keyed
+/// by [jobListClientKey] — through the same pairing as the schedule's lag
+/// borders, so a client map allocated to the day ties it to that item.
+///
+/// [otherJobs] are the rest of the schedule held in memory: they let the
+/// other days of the same client claim their own items, so a second round
+/// in the same month is not mistaken for this one.
+Map<String, JobListItem> jobListItemsForDayJobs({
+  required List<Job> dayJobs,
+  required Iterable<Job> otherJobs,
+  required Iterable<JobListItem> items,
+}) {
+  final pairing = pairJobsWithJobListItems(
+    jobs: [...dayJobs, ...otherJobs],
+    items: items,
+  );
+  final result = <String, JobListItem>{};
+  for (final job in dayJobs) {
+    pairing[job.id]
+        ?.forEach((key, item) => result.putIfAbsent(key, () => item));
+  }
+  return result;
+}
+
+/// The folder [item]'s tracks are filed in, or null when it has none yet.
+///
+/// The Job List item owns this path: the server creates it, moves it when
+/// the client or month changes, and Cloud Files renames re-point it — so it
+/// stays right where a path rebuilt from the client name would not (a
+/// `Round N` folder, a renamed folder, a job listed in the previous month).
+String? jobListTrackFolder(JobListItem? item) {
+  final path = item?.storageFolderPath.trim() ?? '';
+  return path.isEmpty ? null : path;
+}
+
+/// Job List items for [clients] around [date]: what [provider] holds, plus
+/// those listed in the months either side, which it does not load. A day's
+/// work can belong to an item listed last month (late) or next month (early).
+/// Best effort — a failed fetch leaves just the items in memory.
+Future<List<JobListItem>> jobListItemsNear({
+  required JobListProvider provider,
+  required JobListService service,
+  required Iterable<String> clients,
+  required DateTime date,
+}) async {
+  final inMemory = await loadedJobListItems(provider);
+  var fetched = const <JobListItem>[];
+  try {
+    fetched = await service.getJobListItemsForClients(clients, [
+      DateTime(date.year, date.month - 1),
+      date,
+      DateTime(date.year, date.month + 1),
+    ]).timeout(const Duration(seconds: 10));
+  } catch (e) {
+    debugPrint('[TETrackClients] Job List lookup failed: $e');
+  }
+  // In memory wins: it carries edits not yet written.
+  final byId = {for (final i in fetched) i.id: i};
+  for (final i in inMemory) {
+    byId[i.id] = i;
+  }
+  return byId.values.toList();
 }

@@ -23,6 +23,7 @@
 //
 // The map's client (from the job-list item it was made for) is added to the
 // job's clients at the same time, so the schedule says who the ground is for.
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
@@ -55,7 +56,7 @@ Future<void> linkExistingMapToScheduleJob(
   if (_fresh(scheduleProvider, job)
       .effectiveLinkedMaps
       .any((m) => m.mapId == result.mapId)) {
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(content: Text('"${result.mapName}" is already linked')),
     );
     return;
@@ -84,7 +85,7 @@ Future<void> linkExistingMapToScheduleJob(
   await scheduleProvider.updateJobWithUndo(freshJob, updatedJob, freshJob.date);
   if (!context.mounted) return;
 
-  ScaffoldMessenger.of(context).showSnackBar(
+  ScaffoldMessenger.of(context).showToast(
     SnackBar(
       content: Text(
           'Map "${result.mapName}" linked${_changeSummary(freshJob, updatedJob)}'),
@@ -141,7 +142,7 @@ Future<void> addLinkedMapPolygonsToScheduleJob(
   await scheduleProvider.updateJobWithUndo(freshJob, updatedJob, freshJob.date);
   if (!context.mounted) return;
 
-  ScaffoldMessenger.of(context).showSnackBar(
+  ScaffoldMessenger.of(context).showToast(
     SnackBar(
       content: Text('Job updated${_changeSummary(freshJob, updatedJob)}'),
       backgroundColor: Colors.green,
@@ -382,14 +383,49 @@ Future<ShareableMap?> _loadMap(
   String monthKey,
   String mapId,
 ) async {
+  // The full map (every polygon) is the one heavy read in linking — show
+  // that something is happening. Closed via the dialog's own context: these
+  // screens sit under a nested navigator, so Navigator.pop(context) would
+  // pop the page instead.
+  BuildContext? spinnerContext;
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) {
+      spinnerContext = dialogContext;
+      return const PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              SizedBox(width: 16),
+              Text('Opening map…'),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+
   ShareableMap? map;
   try {
     map = await ShareableMapsFirestoreService().getMap(monthKey, mapId);
   } catch (e) {
     debugPrint('[job_map_link] failed to load map $monthKey/$mapId: $e');
   }
+  // The builder runs on the next frame; wait for it if the read was faster.
+  while (spinnerContext == null && context.mounted) {
+    await Future<void>.delayed(const Duration(milliseconds: 16));
+  }
+  final sc = spinnerContext;
+  if (sc != null && sc.mounted) Navigator.of(sc).pop();
   if (map == null && context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       const SnackBar(content: Text('Could not load the linked map')),
     );
   }
@@ -405,7 +441,7 @@ Future<List<CustomPolygon>?> _pickPolygonsFromMap(
 ) async {
   final groups = linkedMapPolygonGroups(map);
   if (groups.isEmpty) {
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showToast(
       SnackBar(content: Text('"${map.name}" has no polygons to add')),
     );
     return null;

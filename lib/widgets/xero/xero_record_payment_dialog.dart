@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
-import 'package:intl/intl.dart';
 
 import '../../models/xero_invoice.dart';
 import '../../models/xero_org.dart';
 import '../../services/xero_accounting_service.dart';
+import '../../utils/accounting_error.dart';
 import '../../utils/schedule_time.dart';
+import '../zoho/zoho_table.dart';
+import 'xero_ui.dart';
 
 /// Record a payment against a Xero invoice.
 ///
@@ -33,7 +35,11 @@ class _XeroRecordPaymentDialogState
   String? _accountCode;
   bool _isLoading = true;
   bool _isSaving = false;
+  /// A form problem the user can fix here ("Enter an amount …").
   String? _error;
+
+  /// A Xero call that failed, explained.
+  FriendlyError? _failure;
 
   @override
   void initState() {
@@ -62,10 +68,11 @@ class _XeroRecordPaymentDialogState
         _accountCode = accounts.isNotEmpty ? accounts.first.code : null;
         _isLoading = false;
       });
-    } on XeroException catch (e) {
+    } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.message;
+        _failure = describeAccountingError(e,
+            action: "load the organisation's bank accounts");
         _isLoading = false;
       });
     }
@@ -80,7 +87,7 @@ class _XeroRecordPaymentDialogState
     }
     if (_amount > widget.invoice.amountDue) {
       setState(() => _error =
-          'That is more than the ${widget.invoice.amountDue.toStringAsFixed(2)} '
+          'That is more than the ${xeroCurrency.format(widget.invoice.amountDue)} '
               'still owing on this invoice.');
       return;
     }
@@ -92,6 +99,7 @@ class _XeroRecordPaymentDialogState
     setState(() {
       _isSaving = true;
       _error = null;
+      _failure = null;
     });
 
     try {
@@ -109,127 +117,179 @@ class _XeroRecordPaymentDialogState
           );
       if (!mounted) return;
       Navigator.of(context).pop(true);
-    } on XeroException catch (e) {
+    } catch (e) {
       if (mounted) {
         setState(() {
-          _error = e.message;
+          _failure = describeAccountingError(e, action: 'record the payment');
           _isSaving = false;
         });
       }
     }
   }
 
+  /// Checked as the amount is typed, so a mistake shows on the field itself
+  /// rather than only after pressing Record.
+  String? get _amountProblem {
+    if (_amountController.text.trim().isEmpty) return null;
+    if (_amount <= 0) return 'Enter an amount greater than zero';
+    if (_amount > widget.invoice.amountDue + 0.005) {
+      return 'More than the ${xeroCurrency.format(widget.invoice.amountDue)} '
+          'owing';
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final currency = NumberFormat.currency(symbol: 'R ', decimalDigits: 2);
-    final dateFormat = DateFormat('d MMM y');
+    final invoice = widget.invoice;
+    final owing = invoice.amountDue;
+    final remaining = owing - _amount;
+    final settles = _amount > 0 && remaining.abs() < 0.005;
 
     return AlertDialog(
-      title: const Text('Record payment'),
+      insetPadding: xeroDialogInset(context),
+      titlePadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+      contentPadding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+      actionsPadding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Record payment'),
+          const SizedBox(height: 2),
+          Text(
+            '${invoice.invoiceNumber} · ${invoice.contactName}',
+            style: const TextStyle(fontSize: 12, color: ZohoPalette.textMuted),
+          ),
+        ],
+      ),
       content: SizedBox(
-        width: 420,
+        width: 440,
         child: _isLoading
             ? const Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
+                padding: EdgeInsets.symmetric(vertical: 32),
                 child: Center(child: CircularProgressIndicator()),
               )
-            : Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '${widget.invoice.invoiceNumber} · '
-                    '${widget.invoice.contactName}',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  Text('${currency.format(widget.invoice.amountDue)} owing',
-                      style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                  const SizedBox(height: 14),
-                  TextField(
-                    controller: _amountController,
-                    keyboardType:
-                        const TextInputType.numberWithOptions(decimal: true),
-                    onChanged: (_) => setState(() {}),
-                    decoration: const InputDecoration(
-                      labelText: 'Amount',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  if (_bankAccounts.isEmpty)
-                    const Text(
-                      'This Xero organisation has no bank accounts, so a '
-                      'payment cannot be recorded. Add one in Xero first.',
-                      style: TextStyle(fontSize: 12, color: Colors.orange),
-                    )
-                  else
-                    DropdownButtonFormField<String>(
-                      initialValue: _accountCode,
-                      isExpanded: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Paid into',
-                        helperText: 'The bank account the money arrived in',
-                        border: OutlineInputBorder(),
-                        isDense: true,
+            : SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: ZohoPalette.headerBackground,
+                        border: Border.all(color: ZohoPalette.border),
+                        borderRadius: BorderRadius.circular(6),
                       ),
-                      items: _bankAccounts
-                          .map((a) => DropdownMenuItem(
-                                value: a.code,
-                                child: Text(a.displayLabel,
-                                    overflow: TextOverflow.ellipsis),
-                              ))
-                          .toList(),
-                      onChanged: (v) => setState(() => _accountCode = v),
-                    ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        flex: 2,
-                        child: TextField(
-                          controller: _referenceController,
-                          decoration: const InputDecoration(
-                            labelText: 'Reference',
-                            border: OutlineInputBorder(),
-                            isDense: true,
+                      child: Row(
+                        children: [
+                          const Expanded(
+                            child: Text('Owing',
+                                style: TextStyle(
+                                    fontSize: 13,
+                                    color: ZohoPalette.textMuted)),
                           ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: InkWell(
-                          onTap: () async {
-                            final picked = await showDatePicker(
-                              context: context,
-                              initialDate: _paidOn,
-                              firstDate: DateTime(_paidOn.year - 2),
-                              lastDate: DateTime(_paidOn.year + 1),
-                            );
-                            if (picked != null) {
-                              setState(() => _paidOn = picked);
-                            }
-                          },
-                          child: InputDecorator(
-                            decoration: const InputDecoration(
-                              labelText: 'Date',
-                              border: OutlineInputBorder(),
-                              isDense: true,
+                          Text(
+                            xeroCurrency.format(owing),
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
+                              color: ZohoPalette.textPrimary,
+                              fontFeatures: xeroTabular,
                             ),
-                            child: Text(dateFormat.format(_paidOn)),
                           ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    TextField(
+                      controller: _amountController,
+                      autofocus: true,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: (_) => setState(() => _error = null),
+                      style: const TextStyle(fontFeatures: xeroTabular),
+                      decoration: InputDecoration(
+                        labelText: 'Amount received',
+                        prefixText: 'R ',
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                        errorText: _amountProblem,
+                        helperText: _amountProblem != null || _amount <= 0
+                            ? null
+                            : settles
+                                ? 'Settles the invoice in full'
+                                : '${xeroCurrency.format(remaining)} will '
+                                    'still be owing',
+                        suffixIcon: settles
+                            ? null
+                            : TextButton(
+                                onPressed: () => setState(() {
+                                  _amountController.text =
+                                      owing.toStringAsFixed(2);
+                                  _error = null;
+                                }),
+                                child: const Text('Full amount'),
+                              ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    if (_bankAccounts.isEmpty)
+                      const XeroNotice(
+                        tone: XeroNoticeTone.warning,
+                        message: 'This Xero organisation has no bank '
+                            'accounts, so a payment cannot be recorded. Add '
+                            'one in Xero first.',
+                      )
+                    else
+                      DropdownButtonFormField<String>(
+                        initialValue: _accountCode,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Paid into',
+                          helperText: 'The bank account the money arrived in',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        items: _bankAccounts
+                            .map((a) => DropdownMenuItem(
+                                  value: a.code,
+                                  child: Text(a.displayLabel,
+                                      overflow: TextOverflow.ellipsis),
+                                ))
+                            .toList(),
+                        onChanged: (v) => setState(() => _accountCode = v),
+                      ),
+                    const SizedBox(height: 14),
+                    XeroFieldPair(
+                      first: XeroDateField(
+                        label: 'Date received',
+                        value: _paidOn,
+                        // Money cannot arrive tomorrow.
+                        lastDate: scheduleToday(),
+                        onChanged: (d) => setState(() => _paidOn = d),
+                      ),
+                      second: TextField(
+                        controller: _referenceController,
+                        decoration: const InputDecoration(
+                          labelText: 'Reference',
+                          hintText: 'e.g. EFT ref',
+                          border: OutlineInputBorder(),
+                          isDense: true,
                         ),
                       ),
-                    ],
-                  ),
-                  if (_error != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 12),
-                      child: Text(_error!,
-                          style:
-                              const TextStyle(color: Colors.red, fontSize: 12)),
                     ),
-                ],
+                    if (_error != null) ...[
+                      const SizedBox(height: 14),
+                      XeroNotice(tone: XeroNoticeTone.error, message: _error!),
+                    ],
+                    if (_failure != null) ...[
+                      const SizedBox(height: 14),
+                      XeroNotice.error(_failure!),
+                    ],
+                  ],
+                ),
               ),
       ),
       actions: [
@@ -238,14 +298,24 @@ class _XeroRecordPaymentDialogState
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed:
-              _isSaving || _isLoading || _bankAccounts.isEmpty ? null : _save,
+          style:
+              FilledButton.styleFrom(backgroundColor: const Color(0xFF2E9E4F)),
+          onPressed: _isSaving ||
+                  _isLoading ||
+                  _bankAccounts.isEmpty ||
+                  _amount <= 0 ||
+                  _amountProblem != null
+              ? null
+              : _save,
           child: _isSaving
               ? const SizedBox(
                   width: 16,
                   height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2))
-              : const Text('Record payment'),
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white))
+              : Text(_amount > 0 && _amountProblem == null
+                  ? 'Record ${xeroCurrency.format(_amount)}'
+                  : 'Record payment'),
         ),
       ],
     );

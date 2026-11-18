@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../models/inventory_tool.dart';
@@ -643,7 +644,7 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
 
   Future<void> _generatePdf() async {
     if (_selectedToolIds.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context).showToast(
         const SnackBar(
           content: Text('Please select at least one tool to print'),
           backgroundColor: Colors.orange,
@@ -663,7 +664,7 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
       );
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text(
                 'PDF generated successfully with ${_selectedToolIds.length} QR codes!'),
@@ -675,7 +676,7 @@ class _QrCodePrintPreviewDialogState extends State<QrCodePrintPreviewDialog> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showToast(
           SnackBar(
             content: Text('Error generating PDF: $e'),
             backgroundColor: Colors.red,

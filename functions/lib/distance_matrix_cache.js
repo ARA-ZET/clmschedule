@@ -15,6 +15,7 @@
  * cached or freshly fetched segment in one round-trip.
  */
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { requireStaff } = require("./require_staff");
 const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 
@@ -131,9 +132,7 @@ async function lookupRouteSegment({ fromLat, fromLng, toLat, toLng, departureTim
 const getRouteSegment = onCall(
   { secrets: [GOOGLE_MAPS_API_KEY], timeoutSeconds: 30, memory: "256MiB" },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Must be signed in.");
-    }
+    requireStaff(request.auth);
     const apiKey = GOOGLE_MAPS_API_KEY.value();
     if (!apiKey) {
       throw new HttpsError("failed-precondition", "GOOGLE_MAPS_API_KEY secret not set");

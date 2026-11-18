@@ -4,6 +4,13 @@ import 'collection_job.dart';
 import 'dropsheet_task.dart';
 import 'dropsheet_task_type_config.dart';
 
+/// Section id of the "Own transport" list: distributors who walk to their
+/// area or take a train, bus or taxi from the office. Not a driver's run —
+/// no fixed Inspect / Pack / Leave / Arrive rows, no vehicle, no route and
+/// no stop numbers.
+const String kOwnTransportSectionId = '_ownTransport';
+const String kOwnTransportLabel = 'Own transport';
+
 /// One driver's section inside a daily dropsheet:
 ///   - which driver
 ///   - which vehicle + trailer they're using that day
@@ -71,7 +78,8 @@ class DropsheetDriverSection {
     // read so every section always has it pinned at the bottom.
     final hasArrive = rawTasks.any((t) => t.type == DropsheetTaskType.arrive);
     final id = data['id'] as String;
-    final withArrive = hasArrive
+    // Own transport has no fixed rows — nobody drives back to the office.
+    final withArrive = hasArrive || id == kOwnTransportSectionId
         ? rawTasks
         : [
             ...rawTasks,
@@ -224,6 +232,17 @@ class DropsheetDriverSection {
         routePolyline: routePolyline ?? this.routePolyline,
         routeDistanceMeters: routeDistanceMeters ?? this.routeDistanceMeters,
         routeDurationSeconds: routeDurationSeconds ?? this.routeDurationSeconds,
+      );
+
+  /// True for the "Own transport" list (see [kOwnTransportSectionId]).
+  bool get isOwnTransport => id == kOwnTransportSectionId;
+
+  /// An empty "Own transport" list — no fixed rows, no vehicle.
+  factory DropsheetDriverSection.ownTransport() =>
+      const DropsheetDriverSection(
+        id: kOwnTransportSectionId,
+        driverId: kOwnTransportSectionId,
+        driverName: kOwnTransportLabel,
       );
 
   /// Build a fresh section seeded with the 3 mandatory tasks.

@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'dart:typed_data';
 
 import 'package:firebase_storage/firebase_storage.dart';
@@ -162,7 +163,7 @@ class _PayrollSettingsDialogState
       } catch (e) {
         setState(() => _saving = false);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showToast(
             SnackBar(
                 content: Text('Logo upload failed: $e'),
                 backgroundColor: Colors.red),

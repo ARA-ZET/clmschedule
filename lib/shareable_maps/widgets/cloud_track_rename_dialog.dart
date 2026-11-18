@@ -1,3 +1,4 @@
+import 'package:clmschedule/widgets/app_toast.dart';
 import 'package:flutter/material.dart';
 
 import '../../services/gpx_storage_service.dart';
@@ -97,7 +98,7 @@ class _CloudTrackRenameDialogState extends State<_CloudTrackRenameDialog> {
       final renamedNote = result.filesRenamed > 0
           ? ', ${result.filesRenamed} file name(s) fixed'
           : '';
-      widget.messenger?.showSnackBar(SnackBar(
+      widget.messenger?.showToast(SnackBar(
         content: Text(result.files == 0
             ? 'No track called "$_oldBase" found in the cloud files'
             : 'Renamed to "$newBase" in ${result.files} file(s)$renamedNote'),
@@ -128,7 +129,7 @@ class _CloudTrackRenameDialogState extends State<_CloudTrackRenameDialog> {
           .loadCloudFolderTracks(folderPath: folder, force: true);
       if (!mounted) return;
       Navigator.pop(context);
-      widget.messenger?.showSnackBar(const SnackBar(
+      widget.messenger?.showToast(const SnackBar(
         content: Text('Folder refreshed — tap the track again to rename it'),
       ));
     } catch (e) {
